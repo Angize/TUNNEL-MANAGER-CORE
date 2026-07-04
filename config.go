@@ -24,6 +24,11 @@ type Config struct {
 	Mode    string `json:"mode"`    // "packet" (only mode implemented in this slice)
 	Profile string `json:"profile"` // "bip" (only profile implemented in this slice)
 
+	// Transport selects the carrier for bip frames: "udp" (default,
+	// NAT-friendly datagrams) or "tcp" (stream, length-prefixed frames,
+	// survives raw-IP/UDP filtering and rides existing TCP-friendly paths).
+	Transport string `json:"transport"`
+
 	Listen string `json:"listen"` // server: bind address, e.g. "0.0.0.0:9000"
 	Peer   string `json:"peer"`   // client: server address, e.g. "1.2.3.4:9000"
 
@@ -62,6 +67,9 @@ func (c *Config) applyDefaults() {
 	if c.Crypto.Cipher == "" {
 		c.Crypto.Cipher = "aes-256-gcm"
 	}
+	if c.Transport == "" {
+		c.Transport = "udp"
+	}
 }
 
 func (c *Config) validate() error {
@@ -82,6 +90,12 @@ func (c *Config) validate() error {
 		}
 	default:
 		return errors.New("role must be \"server\" or \"client\"")
+	}
+	switch c.Transport {
+	case "", "udp", "tcp":
+		// ok ("" defaults to udp in applyDefaults)
+	default:
+		return errors.New("transport must be \"udp\" or \"tcp\"")
 	}
 	if c.TunAddr == "" {
 		return errors.New("tun_addr is required")
