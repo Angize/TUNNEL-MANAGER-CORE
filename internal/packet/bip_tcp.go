@@ -1,24 +1,32 @@
 // This file implements the "bip" carrier over TCP. It mirrors bip.go (same
-// magic/type frame and Sealer contract) but adapts to a byte stream:
+// type frame and Sealer contract) but adapts to a byte stream.
 //
-// Wire format (length-prefixed so the reader can reframe the stream):
+// Legacy framing (obfs off) — length-prefixed so the reader can reframe:
 //
 //	[0:2] uint16 big-endian N = length of the frame that follows (magic+type+payload)
 //	[2]   magic = 0xB1
 //	[3]   type  = 0 data | 1 ping | 2 pong
 //	[4:]  payload (sealed(nonce||ct) for data when crypto is on)
 //
-// Roles: the "server" listens and accepts connections; the "client" dials and
-// reconnects automatically with a short backoff. Because a bip tunnel is a
-// single point-to-point link, only one connection is active at a time — a new
-// accepted connection replaces (and closes) the previous one. A single TUN
-// reader feeds whichever connection is currently live via an atomic pointer,
-// so no L3 packet is bound to a connection that may have dropped.
+// Obfs framing (obfs on) — no constant bytes on the wire:
+//
+//	handshake: each side writes a 24-byte random salt, then reads the peer's.
+//	per frame: [0:2] uint16 length XOR ChaCha20-keystream(PSK,salt)
+//	           [2:]  AEAD-sealed [type][realLen][payload][random-pad]
+//
+// Roles: the "server" listens and accepts; the "client" dials and reconnects
+// automatically with a short backoff. Because a bip tunnel is a single
+// point-to-point link, only one connection is active at a time — a new accepted
+// connection replaces (and closes) the previous one. A single TUN reader feeds
+// whichever connection is currently live via an atomic pointer, so no L3 packet
+// is bound to a connection that may have dropped.
 package packet
 
 import (
 	"bufio"
+	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -26,32 +34,172 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/crypto/chacha20"
+
 	"github.com/Angize/TUNNEL-MANAGER-ENGINE/internal/tun"
 )
 
 const maxFrame = 65535 // uint16 length prefix ceiling (payload fits far under this)
 
-// connFramer wraps a stream connection with a write lock so the TUN reader and
-// the keepalive loop can both emit frames without interleaving bytes.
+var errDesync = errors.New("bip/tcp: stream desync")
+
+// connFramer wraps a stream connection and owns the seal<->frame transform in
+// both directions. A write lock lets the TUN reader and the keepalive loop emit
+// frames without interleaving bytes (and, in obfs mode, without racing the
+// stateful length keystream).
 type connFramer struct {
-	conn net.Conn
-	mu   sync.Mutex
+	conn   net.Conn
+	r      *bufio.Reader
+	mu     sync.Mutex
+	sealer Sealer
+	obfs   bool
+	psk    string
+
+	// obfs length-prefix keystreams (nil until established). writeKS is keyed by
+	// the salt we sent, readKS by the salt the peer sent (read lazily on the
+	// first frame). saltSent guards the one-time salt emission.
+	writeKS  *chacha20.Cipher
+	readKS   *chacha20.Cipher
+	saltSent bool
 }
 
-func (c *connFramer) writeFrame(typ byte, payload []byte) error {
-	n := 2 + len(payload) // magic + type + payload
+// sendSalt emits our per-connection salt once and arms the write keystream.
+// The server calls it only AFTER it has authenticated the client's first frame,
+// so a peer that does not know the PSK gets zero bytes back (probe resistance).
+func (cf *connFramer) sendSalt() error {
+	if cf.saltSent {
+		return nil
+	}
+	salt := make([]byte, obfsSaltLen)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return err
+	}
+	ws, err := newObfsStream(cf.psk, salt)
+	if err != nil {
+		return err
+	}
+	cf.mu.Lock()
+	_, werr := cf.conn.Write(salt)
+	if werr == nil {
+		cf.writeKS = ws
+		cf.saltSent = true
+	}
+	cf.mu.Unlock()
+	return werr
+}
+
+// ensureReadKS reads the peer's salt (once) and arms the read keystream.
+func (cf *connFramer) ensureReadKS() error {
+	if cf.readKS != nil {
+		return nil
+	}
+	peer := make([]byte, obfsSaltLen)
+	if _, err := io.ReadFull(cf.r, peer); err != nil {
+		return err
+	}
+	rs, err := newObfsStream(cf.psk, peer)
+	if err != nil {
+		return err
+	}
+	cf.readKS = rs
+	return nil
+}
+
+// writeFrame seals payload and writes one framed message.
+func (cf *connFramer) writeFrame(typ byte, payload []byte) error {
+	if cf.obfs {
+		sealed, err := obfsSeal(cf.sealer, typ, payload, padMaxFor(typ))
+		if err != nil {
+			return err
+		}
+		if len(sealed) > maxFrame {
+			return io.ErrShortWrite
+		}
+		out := make([]byte, 2+len(sealed))
+		var lb [2]byte
+		binary.BigEndian.PutUint16(lb[:], uint16(len(sealed)))
+		copy(out[2:], sealed)
+		cf.mu.Lock()
+		cf.writeKS.XORKeyStream(out[0:2], lb[:]) // mask length; advances keystream
+		_, err = cf.conn.Write(out)
+		cf.mu.Unlock()
+		return err
+	}
+
+	// Legacy: [len][magic][type][sealed]
+	sealed := payload
+	if typ == typeData && cf.sealer != nil {
+		s, err := cf.sealer.Seal(payload)
+		if err != nil {
+			return err
+		}
+		sealed = s
+	}
+	n := 2 + len(sealed)
 	if n > maxFrame {
 		return io.ErrShortWrite
 	}
-	frame := make([]byte, 2+n)
-	binary.BigEndian.PutUint16(frame[0:2], uint16(n))
-	frame[2] = magic
-	frame[3] = typ
-	copy(frame[4:], payload)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	_, err := c.conn.Write(frame)
+	out := make([]byte, 2+n)
+	binary.BigEndian.PutUint16(out[0:2], uint16(n))
+	out[2] = magic
+	out[3] = typ
+	copy(out[4:], sealed)
+	cf.mu.Lock()
+	_, err := cf.conn.Write(out)
+	cf.mu.Unlock()
 	return err
+}
+
+// readFrame reads one framed message and returns its type and real payload
+// (padding stripped, data unsealed). ping/pong carry a nil payload.
+func (cf *connFramer) readFrame() (byte, []byte, error) {
+	if cf.obfs {
+		if err := cf.ensureReadKS(); err != nil { // peer salt precedes its frames
+			return 0, nil, err
+		}
+	}
+	var hdr [2]byte
+	if _, err := io.ReadFull(cf.r, hdr[:]); err != nil {
+		return 0, nil, err
+	}
+	if cf.obfs {
+		var lb [2]byte
+		cf.readKS.XORKeyStream(lb[:], hdr[:]) // unmask length; advances keystream
+		n := int(binary.BigEndian.Uint16(lb[:]))
+		if n < 1 || n > maxFrame {
+			return 0, nil, errDesync
+		}
+		buf := make([]byte, n)
+		if _, err := io.ReadFull(cf.r, buf); err != nil {
+			return 0, nil, err
+		}
+		return obfsOpen(cf.sealer, buf)
+	}
+
+	n := int(binary.BigEndian.Uint16(hdr[:]))
+	if n < 2 {
+		return 0, nil, errDesync
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(cf.r, buf); err != nil {
+		return 0, nil, err
+	}
+	if buf[0] != magic {
+		return 0, nil, errDesync
+	}
+	typ := buf[1]
+	if typ == typeData {
+		sealed := buf[2:n]
+		if cf.sealer != nil {
+			opened, err := cf.sealer.Open(sealed)
+			if err != nil {
+				return 0, nil, err
+			}
+			return typ, opened, nil
+		}
+		return typ, sealed, nil
+	}
+	return typ, nil, nil
 }
 
 // BipTCP carries L3 packets between a TUN device and a TCP peer.
@@ -59,6 +207,9 @@ type BipTCP struct {
 	dev       *tun.Device
 	sealer    Sealer
 	keepalive time.Duration
+	obfs      bool
+	psk       string
+	idle      time.Duration // read deadline; reaps dead/probe connections
 
 	isClient bool
 	addr     string // server: listen addr; client: peer addr
@@ -69,18 +220,28 @@ type BipTCP struct {
 	closeCh chan struct{}
 }
 
+func idleFor(keepalive time.Duration) time.Duration {
+	d := 4 * keepalive
+	if d < 60*time.Second {
+		d = 60 * time.Second
+	}
+	return d
+}
+
 // DialTCP (client role) targets peerAddr and reconnects on drop.
-func DialTCP(peerAddr string, dev *tun.Device, sealer Sealer, keepalive time.Duration) (*BipTCP, error) {
-	return &BipTCP{dev: dev, sealer: sealer, keepalive: keepalive, isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
+func DialTCP(peerAddr string, dev *tun.Device, sealer Sealer, keepalive time.Duration, obfs bool, psk string) (*BipTCP, error) {
+	return &BipTCP{dev: dev, sealer: sealer, keepalive: keepalive, obfs: obfs, psk: psk,
+		idle: idleFor(keepalive), isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
 }
 
 // ListenTCP (server role) binds listenAddr and accepts connections.
-func ListenTCP(listenAddr string, dev *tun.Device, sealer Sealer, keepalive time.Duration) (*BipTCP, error) {
+func ListenTCP(listenAddr string, dev *tun.Device, sealer Sealer, keepalive time.Duration, obfs bool, psk string) (*BipTCP, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, err
 	}
-	return &BipTCP{dev: dev, sealer: sealer, keepalive: keepalive, addr: listenAddr, ln: ln, closeCh: make(chan struct{})}, nil
+	return &BipTCP{dev: dev, sealer: sealer, keepalive: keepalive, obfs: obfs, psk: psk,
+		idle: idleFor(keepalive), addr: listenAddr, ln: ln, closeCh: make(chan struct{})}, nil
 }
 
 // Run blocks until Close is called. The TUN reader runs for the whole lifetime;
@@ -111,8 +272,11 @@ func (b *BipTCP) Close() error {
 	return nil
 }
 
-// acceptLoop (server) takes each new connection as the live one, closing any
-// predecessor so a stale half-open link cannot keep receiving TUN traffic.
+func (b *BipTCP) newFramer(conn net.Conn) *connFramer {
+	return &connFramer{conn: conn, r: bufio.NewReaderSize(conn, maxFrame+2), sealer: b.sealer, obfs: b.obfs, psk: b.psk}
+}
+
+// acceptLoop (server) hands each new connection to a per-connection goroutine.
 func (b *BipTCP) acceptLoop() {
 	for {
 		conn, err := b.ln.Accept()
@@ -123,13 +287,41 @@ func (b *BipTCP) acceptLoop() {
 			log.Printf("bip/tcp: accept error: %v", err)
 			continue
 		}
+		go b.handleServerConn(conn)
+	}
+}
+
+// handleServerConn serves one accepted connection. In obfs mode the connection
+// is published as live (and our salt sent) ONLY after the client's first frame
+// authenticates — a peer that cannot prove the PSK receives zero bytes, so the
+// server is invisible to an active probe. In legacy mode it publishes at once.
+func (b *BipTCP) handleServerConn(conn net.Conn) {
+	cf := b.newFramer(conn)
+	if !b.obfs {
 		log.Printf("bip/tcp: peer connected from %s", conn.RemoteAddr())
-		cf := &connFramer{conn: conn}
 		if old := b.cur.Swap(cf); old != nil {
 			old.conn.Close()
 		}
-		go b.serve(cf)
+		b.serve(cf)
+		return
 	}
+	// obfs: read+authenticate the first frame silently before revealing anything.
+	conn.SetReadDeadline(time.Now().Add(b.idle))
+	typ, payload, err := cf.readFrame()
+	if err != nil {
+		conn.Close() // probe / wrong PSK: no reply, no log noise
+		return
+	}
+	if err := cf.sendSalt(); err != nil { // authenticated — now answer
+		conn.Close()
+		return
+	}
+	log.Printf("bip/tcp: peer connected from %s", conn.RemoteAddr())
+	if old := b.cur.Swap(cf); old != nil {
+		old.conn.Close()
+	}
+	b.handleFrame(cf, typ, payload)
+	b.serve(cf)
 }
 
 // dialLoop (client) keeps a connection to the server alive, retrying on drop.
@@ -146,12 +338,21 @@ func (b *BipTCP) dialLoop() {
 			}
 			continue
 		}
+		cf := b.newFramer(conn)
+		if b.obfs {
+			conn.SetReadDeadline(time.Now().Add(b.idle))
+			if err := cf.sendSalt(); err != nil { // client speaks first
+				conn.Close()
+				if b.sleep(1 * time.Second) {
+					return
+				}
+				continue
+			}
+		}
 		log.Printf("bip/tcp: connected to %s", b.addr)
-		cf := &connFramer{conn: conn}
 		b.cur.Store(cf)
-		// prime the server with a ping so it has a frame to react to
-		_ = cf.writeFrame(typePing, nil)
-		b.serve(cf) // blocks until this connection dies
+		_ = cf.writeFrame(typePing, nil) // prime + authenticate us to the server
+		b.serve(cf)                // blocks until this connection dies
 		b.cur.CompareAndSwap(cf, nil)
 		if b.sleep(1 * time.Second) {
 			return
@@ -159,47 +360,34 @@ func (b *BipTCP) dialLoop() {
 	}
 }
 
+// handleFrame dispatches a single decoded frame.
+func (b *BipTCP) handleFrame(cf *connFramer, typ byte, payload []byte) {
+	switch typ {
+	case typePing:
+		_ = cf.writeFrame(typePong, nil)
+	case typePong:
+		// keepalive ack
+	case typeData:
+		if _, err := b.dev.Write(payload); err != nil {
+			log.Printf("bip/tcp: tun write error: %v", err)
+		}
+	}
+}
+
 // serve reads framed messages from one connection until it errors or closes.
+// onConnErr clears the live pointer on exit, so both the client (which redials)
+// and the server converge on "no live connection" without extra bookkeeping.
 func (b *BipTCP) serve(cf *connFramer) {
-	r := bufio.NewReaderSize(cf.conn, maxFrame+2)
-	var hdr [2]byte
-	buf := make([]byte, maxFrame)
 	for {
-		if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		if b.obfs {
+			cf.conn.SetReadDeadline(time.Now().Add(b.idle))
+		}
+		typ, payload, err := cf.readFrame()
+		if err != nil {
 			b.onConnErr(cf, err)
 			return
 		}
-		n := int(binary.BigEndian.Uint16(hdr[:]))
-		if n < 2 {
-			b.onConnErr(cf, io.ErrUnexpectedEOF)
-			return
-		}
-		if _, err := io.ReadFull(r, buf[:n]); err != nil {
-			b.onConnErr(cf, err)
-			return
-		}
-		if buf[0] != magic {
-			continue // desync guard; skip this frame
-		}
-		switch buf[1] {
-		case typePing:
-			_ = cf.writeFrame(typePong, nil)
-		case typePong:
-			// keepalive ack
-		case typeData:
-			payload := buf[2:n]
-			if b.sealer != nil {
-				opened, err := b.sealer.Open(payload)
-				if err != nil {
-					log.Printf("bip/tcp: open error (auth fail?): %v", err)
-					continue
-				}
-				payload = opened
-			}
-			if _, err := b.dev.Write(payload); err != nil {
-				log.Printf("bip/tcp: tun write error: %v", err)
-			}
-		}
+		b.handleFrame(cf, typ, payload)
 	}
 }
 
@@ -212,8 +400,8 @@ func (b *BipTCP) onConnErr(cf *connFramer, err error) {
 }
 
 // tunLoop reads L3 packets from TUN and writes them to whichever connection is
-// currently live, sealing first when crypto is on. Packets that arrive while no
-// connection is up are dropped (the peer will retransmit at the L4 layer).
+// currently live. Packets that arrive while no connection is up are dropped
+// (the peer retransmits at the L4 layer).
 func (b *BipTCP) tunLoop() {
 	buf := make([]byte, maxDatagram)
 	for {
@@ -228,31 +416,25 @@ func (b *BipTCP) tunLoop() {
 		if cf == nil {
 			continue // no live peer connection yet
 		}
-		payload := buf[:n]
-		if b.sealer != nil {
-			sealed, err := b.sealer.Seal(payload)
-			if err != nil {
-				log.Printf("bip/tcp: seal error: %v", err)
-				continue
-			}
-			payload = sealed
-		}
-		if err := cf.writeFrame(typeData, payload); err != nil {
+		if err := cf.writeFrame(typeData, buf[:n]); err != nil {
 			b.onConnErr(cf, err)
 		}
 	}
 }
 
 // keepaliveLoop (client) pings the server over the live connection so idle
-// tunnels do not get reaped by stateful middleboxes.
+// tunnels do not get reaped by stateful middleboxes. In obfs mode the period is
+// jittered so it does not emit on a fixed clock.
 func (b *BipTCP) keepaliveLoop() {
-	t := time.NewTicker(b.keepalive)
-	defer t.Stop()
 	for {
+		d := b.keepalive
+		if b.obfs {
+			d = jitter(d)
+		}
 		select {
 		case <-b.closeCh:
 			return
-		case <-t.C:
+		case <-time.After(d):
 			if cf := b.cur.Load(); cf != nil {
 				if err := cf.writeFrame(typePing, nil); err != nil {
 					b.onConnErr(cf, err)

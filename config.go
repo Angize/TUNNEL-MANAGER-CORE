@@ -39,6 +39,13 @@ type Config struct {
 
 	Keepalive int       `json:"keepalive"` // client ping interval in seconds (default 15)
 	Crypto    CryptoCfg `json:"crypto"`
+
+	// Obfs turns on anti-DPI framing: the constant magic byte is dropped, the
+	// frame type is folded into the AEAD-sealed plaintext, random padding and
+	// keepalive jitter break size/timing fingerprints, and (TCP) the length
+	// prefix is masked with a PSK-derived keystream. It requires crypto because
+	// the obfuscation and probe resistance both rely on the AEAD key.
+	Obfs bool `json:"obfs"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -102,6 +109,9 @@ func (c *Config) validate() error {
 	}
 	if c.Crypto.Enabled && c.Crypto.PSK == "" {
 		return errors.New("crypto enabled but psk is empty")
+	}
+	if c.Obfs && !c.Crypto.Enabled {
+		return errors.New("obfs requires crypto enabled")
 	}
 	return nil
 }
