@@ -47,10 +47,13 @@ type Config struct {
 	// the obfuscation and probe resistance both rely on the AEAD key.
 	Obfs bool `json:"obfs"`
 
-	// Cover wraps the (TCP) transport in a real TLS session that fingerprints as
-	// Chrome, so the wire looks like ordinary HTTPS instead of "fully-encrypted"
-	// random bytes. CoverSNI is the server name the client presents (a plausible
-	// host). TCP only; the bip/PSK handshake still runs inside the TLS tunnel.
+	// Cover wraps the (TCP) transport in a REALITY-style TLS session that
+	// fingerprints as Chrome, so the wire looks like ordinary HTTPS. Our client
+	// hides a PSK-authenticated token in its ClientHello; the server terminates
+	// TLS for us but transparently proxies every OTHER connection (probes, the
+	// censor) to CoverSNI:443, so active probing sees that site's genuine cert.
+	// CoverSNI must therefore be a REAL, reachable, unblocked HTTPS site — it is
+	// the cover the server borrows. TCP only; bip/PSK runs inside the TLS tunnel.
 	Cover    bool   `json:"cover"`
 	CoverSNI string `json:"cover_sni"`
 }
