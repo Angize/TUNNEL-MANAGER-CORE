@@ -27,7 +27,6 @@ package packet
 import (
 	"bufio"
 	"crypto/rand"
-	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -243,9 +242,9 @@ type BipTCP struct {
 	psk       string
 	idle      time.Duration // read deadline; reaps dead/probe connections
 
-	cover    bool             // wrap the connection in a TLS session (looks like HTTPS)
-	coverSNI string           // SNI the client presents
-	cert     *tls.Certificate // server's self-signed cover certificate
+	cover    bool             // wrap the connection in a REALITY-style TLS cover
+	coverSNI string           // client: SNI to present; server: real dest to borrow
+	coverSrv *tlscover.Server // server-side REALITY responder (nil on the client)
 
 	isClient bool
 	addr     string // server: listen addr; client: peer addr
@@ -276,8 +275,10 @@ func DialTCP(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cr
 }
 
 // ListenTCP (server role) binds listenAddr and accepts connections. When cover is
-// set it generates a self-signed certificate and completes a TLS handshake before
-// the bip protocol runs inside it.
+// set it builds a REALITY responder that authenticates our clients by a token in
+// their ClientHello and transparently proxies every other connection (probes,
+// scanners, the censor) to the real coverSNI:443, so active probing sees that
+// site's genuine certificate.
 func ListenTCP(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string) (*BipTCP, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
@@ -288,8 +289,9 @@ func ListenTCP(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs
 		idle: idleFor(keepalive), addr: listenAddr, ln: ln, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns)}
 	if cover {
-		// coverSNI is required (validated in config); no imposed default.
-		b.cert, err = tlscover.SelfSignedCert(coverSNI)
+		// coverSNI is required (validated in config); it is the real site the
+		// server borrows and proxies non-authenticated connections to.
+		b.coverSrv, err = tlscover.NewServer(psk, coverSNI)
 		if err != nil {
 			ln.Close()
 			return nil, err
@@ -437,10 +439,14 @@ func (b *BipTCP) handleServerConn(conn net.Conn) {
 	}
 	defer release()
 
-	if b.cover { // complete the TLS cover handshake before anything bip-specific
-		tconn, err := tlscover.ServerConn(conn, b.cert, time.Now().Add(handshakeTimeout))
+	if b.cover { // REALITY cover: authenticate by ClientHello token, else proxy to dest
+		tconn, err := b.coverSrv.Handle(conn, time.Now().Add(handshakeTimeout))
 		if err != nil {
-			conn.Close()
+			// ErrProbe: the relay goroutine now owns conn (proxying it to the
+			// real site) — must NOT close it here. Any other error is fatal.
+			if err != tlscover.ErrProbe {
+				conn.Close()
+			}
 			return
 		}
 		conn = tconn
@@ -498,8 +504,8 @@ func (b *BipTCP) dialLoop() {
 			}
 			continue
 		}
-		if b.cover { // wrap in a Chrome-fingerprinted TLS session first
-			tconn, cerr := tlscover.ClientConn(conn, b.coverSNI, time.Now().Add(handshakeTimeout))
+		if b.cover { // wrap in a Chrome-fingerprinted TLS session carrying the auth token
+			tconn, cerr := tlscover.ClientConn(conn, b.coverSNI, b.psk, time.Now().Add(handshakeTimeout))
 			if cerr != nil {
 				conn.Close()
 				log.Printf("bip/tcp: tls cover to %s failed: %v", b.addr, cerr)
