@@ -85,6 +85,16 @@ type Config struct {
 	Cover    bool   `json:"cover"`
 	CoverSNI string `json:"cover_sni"`
 
+	// WebSocket carrier (Transport=="ws"): the bip stream rides RFC 6455 binary
+	// frames after an HTTP Upgrade, so it can be fronted through a CDN. WSHost is the
+	// Host header (and TLS SNI) — the fronting/origin domain; WSPath the request path
+	// ("/" default); WSTLS makes the client speak wss:// (standard TLS to the CDN edge)
+	// before the upgrade. The server stays plain (the CDN terminates TLS and forwards
+	// the WebSocket to the origin). TCP-family; obfs/crypto apply as with tcp.
+	WSHost string `json:"ws_host"`
+	WSPath string `json:"ws_path"`
+	WSTLS  bool   `json:"ws_tls"`
+
 	// FluxCarrier selects how "flux" frames ride the wire: "udp" (default) sends
 	// real UDP datagrams on protocol 17 whose ports rotate each epoch among common
 	// QUIC/STUN/WebRTC ports — internet-safe, since transit forwards UDP; "stun"
@@ -163,6 +173,9 @@ func (c *Config) applyDefaults() {
 			c.FluxCarrier = "udp"
 		}
 	}
+	if c.Transport == "ws" && c.WSPath == "" {
+		c.WSPath = "/"
+	}
 }
 
 // rawProfiles is the set of valid raw-transport encapsulation profiles. It
@@ -239,8 +252,14 @@ func (c *Config) validate() error {
 		default:
 			return errors.New("flux_shape must be \"random\", \"quic\", \"video\", or \"webrtc\"")
 		}
+	case "ws":
+		// WebSocket carrier. Client-side TLS to a CDN edge needs an SNI/Host, so
+		// ws_tls requires ws_host; the server side (plain, behind the CDN) needs neither.
+		if c.WSTLS && c.Role == "client" && c.WSHost == "" {
+			return errors.New("ws_tls requires ws_host (the TLS SNI / fronting domain)")
+		}
 	default:
-		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", or \"flux\"")
+		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", \"flux\", or \"ws\"")
 	}
 	if c.TunAddr == "" {
 		return errors.New("tun_addr is required")
