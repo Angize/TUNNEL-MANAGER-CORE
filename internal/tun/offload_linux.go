@@ -57,12 +57,19 @@ func segment(pkt []byte, gsoSize int, isTCP bool) [][]byte {
 	} else {
 		ipHdrLen = int(pkt[0]&0x0f) * 4
 	}
-	if len(pkt) < ipHdrLen+8 {
+	minL4 := 8 // UDP: the fixed 8-byte header
+	if isTCP {
+		minL4 = 20 // TCP: data-offset (ipHdrLen+12), flags (ipHdrLen+13) and seq all live within the fixed 20 bytes
+	}
+	if len(pkt) < ipHdrLen+minL4 {
 		return [][]byte{pkt}
 	}
 	l4Hdr := 8 // UDP
 	if isTCP {
 		l4Hdr = int(pkt[ipHdrLen+12]>>4) * 4
+		if l4Hdr < 20 {
+			return [][]byte{pkt} // malformed/short TCP data-offset
+		}
 	}
 	hdrLen := ipHdrLen + l4Hdr
 	if len(pkt) <= hdrLen || gsoSize <= 0 {
