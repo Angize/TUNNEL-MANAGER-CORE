@@ -15,6 +15,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -198,8 +199,13 @@ func wsClientHandshake(conn net.Conn, host, path string, deadline time.Time) (*b
 		return nil, err
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusSwitchingProtocols ||
-		!strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") ||
+	// Surface the status when the edge/CDN answers with something other than 101 (a 403/503
+	// challenge, a 522 origin-unreachable, a 200 error page) so the log names the actual cause
+	// instead of a vague "not a websocket upgrade".
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		return nil, fmt.Errorf("ws: upgrade got HTTP %d (want 101 Switching Protocols)", resp.StatusCode)
+	}
+	if !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") ||
 		resp.Header.Get("Sec-WebSocket-Accept") != wsAccept(key) {
 		return nil, errNotWS
 	}
