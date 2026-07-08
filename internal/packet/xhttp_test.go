@@ -2,8 +2,10 @@ package packet
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 // echoXHTTP is a minimal packet-up server: it reassembles the client's seq-tagged upstream POSTs
@@ -209,6 +213,101 @@ func TestTunnelXHTTPStreamOne(t *testing.T) {
 	t.Cleanup(func() { cli.Close() })
 	time.Sleep(600 * time.Millisecond)
 	xhttpInject(t, cliCtrl, srvCtrl)
+}
+
+// TestGrpcFraming round-trips payloads through the gRPC message framing (writer -> reader) with a
+// small read buffer, so it exercises the deframer's leftover-buffer path (a message split across
+// several Reads) and the Hunk wrap/unwrap.
+func TestGrpcFraming(t *testing.T) {
+	var buf bytes.Buffer
+	w := &grpcFramingWriter{w: &buf}
+	msgs := [][]byte{[]byte("hello grpc"), []byte("second frame"), bytes.Repeat([]byte{0xAB}, 5000)}
+	var want []byte
+	for _, m := range msgs {
+		if _, err := w.Write(m); err != nil {
+			t.Fatalf("frame write: %v", err)
+		}
+		want = append(want, m...)
+	}
+	r := &grpcDeframingReader{r: &buf}
+	got := make([]byte, 0, len(want))
+	tmp := make([]byte, 128) // small on purpose: forces a 5000-byte payload across many reads
+	for len(got) < len(want) {
+		n, err := r.Read(tmp)
+		got = append(got, tmp[:n]...)
+		if err != nil {
+			t.Fatalf("deframe read after %d bytes: %v", len(got), err)
+		}
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("grpc framing round-trip mismatch: got %d bytes, want %d", len(got), len(want))
+	}
+}
+
+// TestTunnelXHTTPGrpc runs a full tunnel in grpc mode: one full-duplex request presenting as a
+// gRPC call (Content-Type application/grpc + gRPC framing) over an HTTP/2 TLS edge. Proves the
+// gRPC-framed stream round-trips a packet each way.
+func TestTunnelXHTTPGrpc(t *testing.T) {
+	const psk = "e2e-shared-pre-shared-key-1234567890"
+	const cipher = "aes-256-gcm"
+	srvDev, srvCtrl := tunPair(t, "xhgsrv")
+	cliDev, cliCtrl := tunPair(t, "xhgcli")
+	ka := 1 * time.Second
+
+	srv, err := ListenXHTTP("127.0.0.1:0", srvDev, ka, false, true, psk, cipher)
+	if err != nil {
+		t.Fatalf("ListenXHTTP: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", srv.xhttpHandler)
+	ts := httptest.NewUnstartedServer(mux)
+	ts.EnableHTTP2 = true
+	ts.StartTLS()
+	go srv.Run()
+	t.Cleanup(func() { ts.Close(); srv.Close() })
+
+	cli, err := DialXHTTP(ts.Listener.Addr().String(), cliDev, ka, false, true, psk, cipher, "", "/", true, nil, "grpc")
+	if err != nil {
+		t.Fatalf("DialXHTTP: %v", err)
+	}
+	cli.xhTLS = &tls.Config{InsecureSkipVerify: true}
+	go cli.Run()
+	t.Cleanup(func() { cli.Close() })
+	time.Sleep(600 * time.Millisecond)
+	xhttpInject(t, cliCtrl, srvCtrl)
+}
+
+// TestXHTTPServerH2C verifies the xhttp server accepts an HTTP/2 cleartext (h2c) connection — the
+// leg a CDN uses to reach the origin for gRPC. A prior-knowledge h2c client sends a probe (bad
+// sid) and must get an HTTP/2 404 back, proving h2c is served on the plain listener.
+func TestXHTTPServerH2C(t *testing.T) {
+	const psk = "e2e-shared-pre-shared-key-1234567890"
+	srvDev, _ := tunPair(t, "h2csrv")
+	srv, err := ListenXHTTP("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
+	if err != nil {
+		t.Fatalf("ListenXHTTP: %v", err)
+	}
+	go srv.Run()
+	t.Cleanup(func() { srv.Close() })
+	time.Sleep(150 * time.Millisecond)
+
+	hc := &http.Client{Transport: &http2.Transport{
+		AllowHTTP: true, // permit http:// (cleartext) with prior-knowledge h2c
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr) // plaintext, no TLS
+		},
+	}}
+	resp, err := hc.Get("http://" + srv.ln.Addr().String() + "/?s=notavalidsessionid")
+	if err != nil {
+		t.Fatalf("h2c GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.ProtoMajor != 2 {
+		t.Fatalf("expected HTTP/2 (h2c), got %s", resp.Proto)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for a bad sid, got %d", resp.StatusCode)
+	}
 }
 
 func TestXHTTPConnReadDeadline(t *testing.T) {

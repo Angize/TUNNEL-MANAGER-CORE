@@ -111,8 +111,12 @@ type Config struct {
 	// write is a short discrete POST — the most CDN-compatible, since a CDN that buffers
 	// request bodies still forwards short complete POSTs at once. "stream" is stream-one:
 	// a single full-duplex request (request body up, response body down concurrently),
-	// which needs HTTP/2 to the edge, so it must be paired with ws_tls. Only meaningful
-	// when ws_xhttp is set; the server auto-detects the client's style per request.
+	// which needs HTTP/2 to the edge, so it must be paired with ws_tls. "grpc" is stream-one
+	// wrapped as a real gRPC stream (Content-Type application/grpc + gRPC message framing):
+	// a CDN like Cloudflare connects to the origin with h2c and streams a gRPC call instead
+	// of buffering it, which is what makes a full-duplex stream survive the CDN->origin leg
+	// (also needs ws_tls). Only meaningful when ws_xhttp is set; the server auto-detects the
+	// client's style per request (and serves h2c so the CDN can reach it over HTTP/2).
 	WSXHTTPMode string `json:"ws_xhttp_mode"`
 	// WSECH is a base64 ECHConfigList (draft-ietf-tls-esni / RFC 9460 HTTPS-record
 	// "ech="). On a wss client it encrypts the real SNI (WSHost) inside the ClientHello,
@@ -341,12 +345,12 @@ func (c *Config) validate() error {
 		// full-duplex request and needs HTTP/2 to the edge, so on a single-edge client it
 		// requires ws_tls (a pool is always wss; the server auto-detects and needs neither).
 		switch c.WSXHTTPMode {
-		case "", "packet", "stream":
+		case "", "packet", "stream", "grpc":
 		default:
-			return errors.New("ws_xhttp_mode must be \"packet\" or \"stream\"")
+			return errors.New("ws_xhttp_mode must be \"packet\", \"stream\", or \"grpc\"")
 		}
-		if c.WSXHTTPMode == "stream" && c.Role == "client" && !c.WSTLS && len(c.WSEdgeIPs) == 0 {
-			return errors.New("ws_xhttp_mode \"stream\" requires ws_tls (stream-one needs HTTP/2 to the edge)")
+		if (c.WSXHTTPMode == "stream" || c.WSXHTTPMode == "grpc") && c.Role == "client" && !c.WSTLS && len(c.WSEdgeIPs) == 0 {
+			return errors.New("ws_xhttp_mode \"" + c.WSXHTTPMode + "\" requires ws_tls (needs HTTP/2 to the edge)")
 		}
 		// Edge pool: a client+wss rotation set; every SNI's ECH must decode.
 		if len(c.WSEdgeIPs) > 0 || len(c.WSEdgeSNIs) > 0 {
