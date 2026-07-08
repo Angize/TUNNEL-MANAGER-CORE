@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -33,6 +34,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 const xhttpUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -266,16 +270,16 @@ func (b *BipTCP) establishXHTTP() (net.Conn, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	stream := b.xhMode == "stream"
+	single := b.xhMode == "stream" || b.xhMode == "grpc" // one full-duplex request (both need h2)
 	tr := &http.Transport{
 		// Always dial the fixed edge, regardless of the request URL host, so the Host/SNI stays
 		// the fronting domain while we connect to a specific (clean) CDN IP.
 		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", dialAddr)
 		},
-		// packet-up rides HTTP/1.1 (each POST is a complete request); stream-one is full-duplex
-		// and needs HTTP/2 to the edge so upstream frames flush per-write instead of buffering.
-		ForceAttemptHTTP2:   stream && b.wsTLS,
+		// packet-up rides HTTP/1.1 (each POST is a complete request); stream-one and grpc are
+		// full-duplex and need HTTP/2 to the edge so upstream frames flush per-write, not buffer.
+		ForceAttemptHTTP2:   single && b.wsTLS,
 		MaxIdleConns:        16,
 		MaxIdleConnsPerHost: 8, // the streaming GET holds one conn; the packet-up POSTs reuse the rest
 		IdleConnTimeout:     90 * time.Second,
@@ -296,10 +300,14 @@ func (b *BipTCP) establishXHTTP() (net.Conn, string, error) {
 		r.Header.Set("Accept-Language", "en-US,en;q=0.9")
 		r.Header.Set("Cache-Control", "no-store")
 	}
-	if stream {
+	switch b.xhMode {
+	case "grpc":
+		return b.dialXHTTPGrpc(hc, tr, ctx, cancel, base, sid, dialAddr, host, setHdr)
+	case "stream":
 		return b.dialXHTTPStream(hc, tr, ctx, cancel, base, sid, dialAddr, host, setHdr)
+	default:
+		return b.dialXHTTPPacket(hc, tr, ctx, cancel, base, sid, dialAddr, host, setHdr)
 	}
-	return b.dialXHTTPPacket(hc, tr, ctx, cancel, base, sid, dialAddr, host, setHdr)
 }
 
 // dialXHTTPStream (stream-one) opens ONE full-duplex request: the request body — a pipe we feed
@@ -337,6 +345,135 @@ func (b *BipTCP) dialXHTTPStream(hc *http.Client, tr *http.Transport, ctx contex
 	}
 	conn := &xhttpConn{
 		r: resp.Body, w: pw, // Write -> pipe -> request body (upstream); Read <- response body (downstream)
+		ra: strAddr(dialAddr), la: strAddr("xhttp-client"),
+	}
+	conn.closeFn = func() { cancel(); pw.Close(); resp.Body.Close(); tr.CloseIdleConnections() }
+	return conn, dialAddr, nil
+}
+
+// --- gRPC framing (mode "grpc") ---------------------------------------------------------------
+//
+// gRPC rides the same single full-duplex request as stream-one, but presents as a real gRPC call
+// so a CDN treats it as gRPC and connects to the ORIGIN over h2c — streaming the call both ways
+// instead of buffering the request body (which is what stalls a plain stream over a CDN->origin
+// HTTP/1.1 leg). On the wire: Content-Type application/grpc, and each frame is a gRPC length-
+// prefixed message [0][uint32 len][msg] where msg is a minimal protobuf Hunk {bytes data = 1}
+// carrying the payload — so a gRPC-aware proxy sees valid gRPC.
+
+const grpcMaxMsg = 1 << 20 // reject an oversized length prefix (hostile/broken peer)
+
+// grpcFrame wraps one payload as a gRPC message: [0][uint32 msgLen] + protobuf(field 1 = payload).
+func grpcFrame(p []byte) []byte {
+	hunk := make([]byte, 0, 1+binary.MaxVarintLen64)
+	hunk = append(hunk, 0x0a) // field 1, wire type 2 (length-delimited)
+	hunk = binary.AppendUvarint(hunk, uint64(len(p)))
+	msgLen := len(hunk) + len(p)
+	buf := make([]byte, 5+msgLen)
+	buf[0] = 0 // not compressed
+	binary.BigEndian.PutUint32(buf[1:5], uint32(msgLen))
+	n := copy(buf[5:], hunk)
+	copy(buf[5+n:], p)
+	return buf
+}
+
+// grpcUnhunk extracts the payload from a Hunk message (field 1). A message we don't recognise as
+// a Hunk is returned verbatim (defensive — both ends are our own code).
+func grpcUnhunk(msg []byte) []byte {
+	if len(msg) >= 1 && msg[0] == 0x0a {
+		if n, adv := binary.Uvarint(msg[1:]); adv > 0 && n <= uint64(len(msg)) {
+			if start, end := 1+adv, 1+adv+int(n); end <= len(msg) {
+				return msg[start:end]
+			}
+		}
+	}
+	return msg
+}
+
+// grpcFramingWriter wraps each Write as one gRPC message on the underlying stream.
+type grpcFramingWriter struct{ w io.Writer }
+
+func (g *grpcFramingWriter) Write(p []byte) (int, error) {
+	if _, err := g.w.Write(grpcFrame(p)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// grpcDeframingReader reassembles gRPC messages from the underlying stream and yields their
+// unwrapped payloads. A message can span several underlying reads; leftover payload is buffered.
+type grpcDeframingReader struct {
+	r   io.Reader
+	buf []byte
+}
+
+func (g *grpcDeframingReader) Read(p []byte) (int, error) {
+	for len(g.buf) == 0 {
+		var hdr [5]byte
+		if _, err := io.ReadFull(g.r, hdr[:]); err != nil {
+			return 0, err
+		}
+		msgLen := binary.BigEndian.Uint32(hdr[1:5])
+		if msgLen > grpcMaxMsg {
+			return 0, fmt.Errorf("xhttp/grpc: message too large (%d)", msgLen)
+		}
+		if msgLen == 0 {
+			continue
+		}
+		msg := make([]byte, msgLen)
+		if _, err := io.ReadFull(g.r, msg); err != nil {
+			return 0, err
+		}
+		g.buf = grpcUnhunk(msg)
+	}
+	n := copy(p, g.buf)
+	g.buf = g.buf[n:]
+	return n, nil
+}
+
+// Close unblocks a Read parked in io.ReadFull by closing the underlying reader.
+func (g *grpcDeframingReader) Close() error {
+	if c, ok := g.r.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
+}
+
+// dialXHTTPGrpc (grpc) is stream-one dressed as a gRPC call: one full-duplex POST with
+// Content-Type application/grpc and gRPC message framing on both directions.
+func (b *BipTCP) dialXHTTPGrpc(hc *http.Client, tr *http.Transport, ctx context.Context, cancel func(), base, sid, dialAddr, host string, setHdr func(*http.Request)) (net.Conn, string, error) {
+	pr, pw := io.Pipe()
+	req, err := http.NewRequestWithContext(ctx, "POST", base+"?s="+sid, pr)
+	if err != nil {
+		cancel()
+		pw.Close()
+		return nil, dialAddr, err
+	}
+	setHdr(req)
+	req.Header.Set("Content-Type", "application/grpc")
+	req.Header.Set("TE", "trailers")
+	req.Header.Set("grpc-encoding", "identity")
+	req.ContentLength = -1
+	resp, err := hc.Do(req)
+	if err != nil {
+		cancel()
+		pw.Close()
+		if b.pool != nil { // a transport failure (dial/TLS) points at the IP
+			b.pool.burnIP(dialAddr)
+		}
+		return nil, dialAddr, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		cancel()
+		pw.Close()
+		if b.pool != nil { // the edge answered but rejected this domain/path — burn the SNI
+			b.pool.burnSNI(host)
+		}
+		return nil, dialAddr, fmt.Errorf("xhttp/grpc: got HTTP %d (want 200)", resp.StatusCode)
+	}
+	conn := &xhttpConn{
+		r:  &grpcDeframingReader{r: resp.Body}, // Read <- deframed downstream
+		w:  &grpcFramingWriter{w: pw},          // Write -> framed -> pipe -> request body (upstream)
 		ra: strAddr(dialAddr), la: strAddr("xhttp-client"),
 	}
 	conn.closeFn = func() { cancel(); pw.Close(); resp.Body.Close(); tr.CloseIdleConnections() }
@@ -473,6 +610,32 @@ func (b *BipTCP) serveXHTTPStream(w http.ResponseWriter, r *http.Request) {
 	b.handleServerConn(conn) // the request lifetime IS the session; blocks until it ends
 }
 
+// serveXHTTPGrpc handles a gRPC-framed stream-one request: like serveXHTTPStream, the single
+// full-duplex request IS the session, but the body carries gRPC message framing and the response
+// presents as gRPC (Content-Type application/grpc + a grpc-status trailer on clean close), so a
+// CDN proxies it as a gRPC call (h2c to the origin, streamed, not buffered).
+func (b *BipTCP) serveXHTTPGrpc(w http.ResponseWriter, r *http.Request) {
+	fl, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/grpc")
+	w.Header().Set("grpc-encoding", "identity")
+	w.Header().Set("Trailer", "grpc-status") // announced now, set after the body on clean close
+	w.WriteHeader(http.StatusOK)
+	fl.Flush() // send the response head now so the client's request returns and the duplex opens
+	conn := &xhttpConn{
+		r:     &grpcDeframingReader{r: r.Body},
+		w:     &grpcFramingWriter{w: w},
+		flush: fl.Flush,
+		ra:    strAddr(r.RemoteAddr), la: strAddr("xhttp-server"),
+	}
+	b.handleServerConn(conn) // the request lifetime IS the session; blocks until it ends
+	conn.Close()
+	w.Header().Set("grpc-status", "0") // OK (trailer)
+}
+
 // xhttpHandler routes a session's requests. stream-one is a single full-duplex POST (no seq).
 // packet-up uses a GET (downstream body, drives handleServerConn once) plus seq-tagged POSTs
 // (?seq=N) fed into the upstream. The server auto-detects the style per request, so a stream
@@ -481,6 +644,12 @@ func (b *BipTCP) xhttpHandler(w http.ResponseWriter, r *http.Request) {
 	sid := r.URL.Query().Get("s")
 	if len(sid) != 32 || strings.Trim(sid, "0123456789abcdef") != "" {
 		http.Error(w, "Not Found", http.StatusNotFound) // a probe/scanner sees a plain 404
+		return
+	}
+	// grpc: a single full-duplex POST presenting as a gRPC call (Content-Type application/grpc).
+	// Checked first because it is the most specific shape.
+	if r.Method == http.MethodPost && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
+		b.serveXHTTPGrpc(w, r)
 		return
 	}
 	// stream-one: a single full-duplex POST with no seq. Route it before touching the packet-up
@@ -530,7 +699,11 @@ func (b *BipTCP) xhttpHandler(w http.ResponseWriter, r *http.Request) {
 func (b *BipTCP) runXHTTPServer() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", b.xhttpHandler)
-	b.httpSrv = &http.Server{Handler: mux}
+	// Wrap in an h2c handler so a CDN can reach us over HTTP/2 cleartext. Cloudflare connects to
+	// the origin with h2c when gRPC is enabled — that is the leg that STREAMS a full-duplex call
+	// instead of buffering the request body (which stalls stream-one over a plain HTTP/1.1 origin).
+	// h2c falls through to HTTP/1.1 for packet-up, so every mode shares this one plaintext listener.
+	b.httpSrv = &http.Server{Handler: h2c.NewHandler(mux, &http2.Server{})}
 	if err := b.httpSrv.Serve(b.ln); err != nil && !b.closed.Load() {
 		log.Printf("bip/xhttp: server: %v", err)
 	}
