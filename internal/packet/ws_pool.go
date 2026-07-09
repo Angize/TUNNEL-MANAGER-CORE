@@ -109,11 +109,13 @@ type wsPool struct {
 	now        func() int64   // injectable clock (unix seconds); overridden in tests
 }
 
-// pinTTL is how long a manual pin FORCES the exact chosen edge. It only needs to outlast the
-// jump + settle, not lock forever: once the edge is active it simply stays (no self-triggered
-// re-dial) until the next proactive rotation, so the pin is a one-shot "jump exactly here now",
-// not a permanent lock — and a dead pinned edge can't strand the tunnel past this window.
-const pinTTL int64 = 20
+// pinTTL bounds how long a manual pin keeps FORCING the exact chosen edge while it has NOT yet
+// connected. It must outlast a transient origin blip — so a pin placed while the tunnel is down
+// still lands the moment its edge recovers, instead of expiring after a few seconds and letting
+// rotation drift off it — yet still self-release so a permanently-dead pinned edge can't strand the
+// tunnel forever. On a SUCCESSFUL land the pin is cleared immediately (pinApplied), so on success it
+// behaves as a one-shot "jump exactly here now" and never freezes auto-rotation for the whole window.
+const pinTTL int64 = 300
 
 // coreEvent is one core-observed occurrence surfaced to the panel's system log: the CORE knows the
 // real reason a carrier dropped or an edge was burned (it saw the actual error), so instead of the
@@ -595,13 +597,37 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 		}
 	}
 	if ok {
-		p.pinUntil = p.now() + pinTTL // force the exact edge for the jump window, then resume rotation
+		p.pinUntil = p.now() + pinTTL // force the exact edge until it lands (pinApplied) or the window lapses
 	}
 	p.mu.Unlock()
 	if ok {
 		p.writeStatus()
 	}
 	return ok
+}
+
+// pinApplied clears a manual pin once the carrier has ACTUALLY landed on the pinned edge, so a pin
+// behaves as "jump there and keep retrying until connected" (surviving a transient outage — see
+// pinTTL) yet releases the instant it succeeds instead of freezing rotation for the whole window.
+// Each axis is cleared independently: an IP-only pin releases when the live IP matches, likewise SNI.
+func (p *wsPool) pinApplied(ip, host string) {
+	p.mu.Lock()
+	changed := false
+	if p.pinIP != "" && p.pinIP == ip {
+		p.pinIP = ""
+		changed = true
+	}
+	if p.pinSNI != "" && p.pinSNI == host {
+		p.pinSNI = ""
+		changed = true
+	}
+	if p.pinIP == "" && p.pinSNI == "" {
+		p.pinUntil = 0
+	}
+	p.mu.Unlock()
+	if changed {
+		p.writeStatus()
+	}
 }
 
 // cmdPath is the sidecar file the node writes a "select edge" request into (JSON {kind,key}).

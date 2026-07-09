@@ -1208,13 +1208,16 @@ type warmConn struct {
 // On the active's failure or a proactive rotation the standby is promoted atomically — a single
 // b.cur swap; the next TUN packet flips the server's downstream via downstream-follows-data — and
 // a fresh standby is then built in the background, so the TUN never waits on a cold dial. If no
-// standby is ready when the active dies it falls back to a blocking fresh dial (never worse than
-// the plain dialLoop). ALL pointer transitions happen in THIS goroutine; network dials run in
+// standby is ready when the active dies it falls back to a fresh dial that runs in the BACKGROUND
+// (dialActiveAsync -> activeReady) so the select loop stays responsive to rotation/pins during a
+// full outage — the startup dial is the only blocking one. ALL pointer transitions happen in THIS
+// goroutine; network dials run in
 // workers that hand their result back over buffered channels, so b.cur/b.standby are mutated from
 // exactly one place — no data races.
 func (b *TCP) dialLoopWarm() {
-	exits := make(chan *connFramer, 8) // a per-conn reader finished (its conn died)
-	ready := make(chan warmConn, 2)    // a background standby dial completed
+	exits := make(chan *connFramer, 8)    // a per-conn reader finished (its conn died)
+	ready := make(chan warmConn, 2)       // a background standby dial completed
+	activeReady := make(chan warmConn, 2) // a background ACTIVE (re)dial completed (outage/failover path)
 	var active, standby *connFramer
 	// Track the active carrier's edge + when it started carrying data, so a promoted-then-quickly-
 	// dead edge is attributed to the right IP for data-plane throttle detection (C1).
@@ -1225,6 +1228,7 @@ func (b *TCP) dialLoopWarm() {
 	var activeCombo, standbyCombo string
 	var activeSince time.Time
 	standbyBuilding := false
+	activeBuilding := false // an async fresh-active dial is in flight (outage/failover) — keeps the select loop responsive
 
 	// startReader runs a connection's read loop; on exit it reports the framer so the manager
 	// can react (promote / rebuild). The report is abandoned if Close fired.
@@ -1247,7 +1251,8 @@ func (b *TCP) dialLoopWarm() {
 		cc := conn
 		b.curConn.Store(&cc)
 		if b.pool != nil {
-			b.pool.setActive(combo) // publish the live active edge + flush the status file
+			b.pool.setActive(combo)                                 // publish the live active edge + flush the status file
+			b.pool.pinApplied(label, strings.TrimPrefix(combo, label+" · ")) // a pin that targeted this edge is now satisfied
 		}
 		startReader(cf)
 	}
@@ -1308,6 +1313,7 @@ func (b *TCP) dialLoopWarm() {
 		b.standbyConn.Store(nil)
 		if b.pool != nil {
 			b.pool.setActive(activeCombo) // the promoted standby is now the live edge — publish + flush
+			b.pool.pinApplied(activeLabel, strings.TrimPrefix(activeCombo, activeLabel+" · "))
 		}
 		if old != nil {
 			old.conn.Close() // retire the old edge; its reader reports an (ignored) exit
@@ -1333,6 +1339,37 @@ func (b *TCP) dialLoopWarm() {
 			setActive(cf, conn, label, combo)
 			return true
 		}
+	}
+	// dialActiveAsync (re)establishes a fresh active in the BACKGROUND — the outage/failover
+	// counterpart to dialActiveBlocking. It keeps the manager's select loop live so proactive
+	// rotation ticks, standby-ready reports and (crucially) operator pins keep being serviced while
+	// every edge is unreachable: each retry re-reads current(), so a pin placed mid-outage is honored
+	// the moment its edge recovers. The result arrives on activeReady; at most one runs at a time.
+	dialActiveAsync := func() {
+		if activeBuilding || b.closed.Load() {
+			return
+		}
+		activeBuilding = true
+		go func() {
+			for {
+				if b.closed.Load() {
+					return
+				}
+				cf, conn, label, combo, err := b.warmEstablish(false)
+				if err != nil {
+					if b.sleep(1 * time.Second) {
+						return
+					}
+					continue
+				}
+				select {
+				case activeReady <- warmConn{cf, conn, label, combo}:
+				case <-b.closeCh:
+					conn.Close()
+				}
+				return
+			}
+		}()
 	}
 
 	if !dialActiveBlocking() {
@@ -1384,19 +1421,13 @@ func (b *TCP) dialLoopWarm() {
 						standbyBuilding = false
 					}
 					log.Printf("core/tcp: manual pin/rotate — re-dialing active on the selected edge")
-					if !dialActiveBlocking() { // warmEstablish(false) -> current() -> the pinned edge
-						return
-					}
-					requestStandby()
+					dialActiveAsync() // warmEstablish(false) -> current() -> the pinned edge; non-blocking, requestStandby fires on activeReady
 				} else if promote() {
 					log.Printf("core/tcp: active carrier failed — promoted warm standby")
 					requestStandby()
 				} else {
-					log.Printf("core/tcp: active carrier failed with no warm standby — dialing fresh")
-					if !dialActiveBlocking() {
-						return
-					}
-					requestStandby()
+					log.Printf("core/tcp: active carrier failed with no warm standby — dialing fresh (background)")
+					dialActiveAsync() // non-blocking so the loop keeps servicing rotation/pins during the outage
 				}
 			case standby:
 				// Standby died before promotion: drop and rebuild.
@@ -1421,6 +1452,17 @@ func (b *TCP) dialLoopWarm() {
 			sc := wc.conn
 			b.standbyConn.Store(&sc)
 			startReader(wc.cf)
+		case wc := <-activeReady:
+			// A background outage/failover active dial finished. Adopt it as the live active (unless we
+			// somehow already have one, or we're closing) and start warming a standby again.
+			activeBuilding = false
+			if active != nil || b.closed.Load() {
+				wc.conn.Close()
+				continue
+			}
+			log.Printf("core/tcp: connected to %s", wc.label)
+			setActive(wc.cf, wc.conn, wc.label, wc.combo)
+			requestStandby()
 		case <-rotateC:
 			// Proactive make-before-break rotation: promote the warm standby and retire the old
 			// active, then build a fresh standby. If none is ready yet, skip this tick — the next
