@@ -295,3 +295,63 @@ func TestAdvanceIPAndSNIIndependently(t *testing.T) {
 		t.Fatalf("after wrap = %s, want a", ip3)
 	}
 }
+
+// TestDifferentialProbeVerdicts locks down the REPRODUCE-FIRST prober: a working combo is a
+// transient blip (blame nothing), and a confirmed-down combo is attributed to the axis that
+// still works in isolation — deterministically, with no dependence on goroutine scheduling
+// (the old racing version could blame a random axis when every edge was reachable).
+func TestDifferentialProbeVerdicts(t *testing.T) {
+	// reach is the set of "ip|sni" combos the fake oracle reports as reachable.
+	mk := func(ips []string, hosts []string, reach map[string]bool) *TCP {
+		p := newWSPool(ips, snis(hosts...), true, "")
+		b := &TCP{pool: p}
+		b.probeFn = func(ip string, sni wsSNIEntry) bool { return reach[ip+"|"+sni.host] }
+		return b
+	}
+	all := func(ips, hosts []string, except ...string) map[string]bool {
+		skip := map[string]bool{}
+		for _, s := range except {
+			skip[s] = true
+		}
+		m := map[string]bool{}
+		for _, ip := range ips {
+			for _, h := range hosts {
+				k := ip + "|" + h
+				m[k] = !skip[k] && !skip[ip] && !skip[h]
+			}
+		}
+		return m
+	}
+	ips := []string{"ip1", "ip2"}
+	hosts := []string{"s1", "s2"}
+	fail := wsSNIEntry{host: "s1", path: "/"}
+
+	// transient: the failing combo works on re-probe -> blame nothing.
+	if v := mk(ips, hosts, all(ips, hosts)).differentialProbe("ip1", fail); v != verdictTransient {
+		t.Fatalf("reachable combo: got %v, want transient", v)
+	}
+	// IP guilty: ip1 is dead everywhere; s1 works on ip2.
+	if v := mk(ips, hosts, all(ips, hosts, "ip1")).differentialProbe("ip1", fail); v != verdictIPGuilty {
+		t.Fatalf("dead ip: got %v, want IP-guilty", v)
+	}
+	// SNI guilty: s1 is dead everywhere; ip1 works with s2.
+	if v := mk(ips, hosts, all(ips, hosts, "s1")).differentialProbe("ip1", fail); v != verdictSNIGuilty {
+		t.Fatalf("dead sni: got %v, want SNI-guilty", v)
+	}
+	// both dead but the client uplink is fine (altIP+altSNI works): pin the IP (SNI heals on retest).
+	if v := mk(ips, hosts, all(ips, hosts, "ip1", "s1")).differentialProbe("ip1", fail); v != verdictIPGuilty {
+		t.Fatalf("both dead: got %v, want IP-guilty", v)
+	}
+	// local/broad outage: NOTHING is reachable (client uplink down) -> blame nothing, never burn a clean edge.
+	if v := mk(ips, hosts, map[string]bool{}).differentialProbe("ip1", fail); v != verdictUnknown {
+		t.Fatalf("local outage: got %v, want unknown (no false burn)", v)
+	}
+	// single SNI, dead IP (the screenshot case: 2 IPs, 1 SNI) -> IP guilty, never blames the lone SNI.
+	if v := mk(ips, []string{"s1"}, all(ips, []string{"s1"}, "ip1")).differentialProbe("ip1", fail); v != verdictIPGuilty {
+		t.Fatalf("single-sni dead ip: got %v, want IP-guilty", v)
+	}
+	// single edge (1 IP, 1 SNI) down -> nothing to compare -> unknown.
+	if v := mk([]string{"ip1"}, []string{"s1"}, map[string]bool{}).differentialProbe("ip1", fail); v != verdictUnknown {
+		t.Fatalf("single edge down: got %v, want unknown", v)
+	}
+}

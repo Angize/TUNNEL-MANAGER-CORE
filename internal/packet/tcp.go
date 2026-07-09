@@ -296,6 +296,10 @@ type TCP struct {
 	pool   *wsPool       // client: rotating edge pool (nil = single fixed edge above)
 	rotate time.Duration // client: proactive pool-rotation interval (0 = failover-only)
 
+	// probeFn lets tests substitute a deterministic reachability oracle for probeEdge (which
+	// does a real TCP+TLS dial). nil in production -> the differential prober uses probeEdge.
+	probeFn func(ip string, sni wsSNIEntry) bool
+
 	// warmStandby (client + pool) keeps a SECOND, fully-handshaked carrier connection to another
 	// pool edge warm in the background. On the active carrier's failure OR a proactive rotation
 	// the standby is promoted instantly (an atomic b.cur swap) instead of dialing fresh, so the
@@ -827,41 +831,62 @@ func (b *TCP) probeEdge(ip string, sni wsSNIEntry) bool {
 	return true
 }
 
-// differentialProbe attributes a failed (ip, sni) connect to a specific axis by changing ONE
-// variable at a time against OTHER healthy pool entries, racing the arms and taking the first
-// definitive success:
+// differentialProbe attributes a failed (ip, sni) connect to a specific axis. It is
+// REPRODUCE-FIRST and deterministic (no race), because the old racing version blamed a
+// random axis whenever every edge was actually reachable — a transient blip could sideline
+// a perfectly good IP purely on goroutine scheduling. The steps:
 //
-//	same IP + a different healthy SNI succeeds -> the IP is fine, the SNI is guilty
-//	a different healthy IP + same SNI succeeds -> the SNI is fine, the IP is guilty
-//	the same (IP, SNI) succeeds on retry       -> the failure was transient, blame nothing
+//  1. Re-probe the EXACT failing combo. If it works now, the failure was a transient blip
+//     (or an origin/ws-upgrade issue that TLS-probing can't see) -> blame nothing.
+//  2. The combo is confirmed down. Change ONE variable against a KNOWN-HEALTHY partner:
+//     - healthy IP + failSNI still works  -> the SNI is fine, so the IP is guilty
+//     - healthy IP + failSNI also fails    -> the SNI itself is blocked -> SNI guilty
+//     (and symmetrically via a healthy SNI when no alternate IP exists).
+//  3. If both isolated probes fail though both partners are healthy, the IP and SNI are both
+//     down: pin the IP (the coarser axis); the SNI heals on its own retest.
 //
-// When no healthy alternative of the needed axis exists (single edge, or everything already
-// suspect) that arm is skipped; if nothing answers the verdict is UNKNOWN (blame nothing —
-// there is nowhere better to move, and the retest scheduler / current() fallback cope).
+// With no healthy alternative on either axis (a single edge) there is nowhere to move and
+// nothing to compare, so the verdict is UNKNOWN — blame nothing.
 func (b *TCP) differentialProbe(failIP string, failSNI wsSNIEntry) probeVerdict {
-	type res struct {
-		v  probeVerdict
-		ok bool
+	probe := b.probeEdge
+	if b.probeFn != nil {
+		probe = b.probeFn
 	}
-	var arms []func() res
-	if altSNI, ok := b.pool.altHealthySNI(failSNI.host); ok {
-		arms = append(arms, func() res { return res{verdictSNIGuilty, b.probeEdge(failIP, altSNI)} })
+	// 1. Reproduce. A working combo means the original failure was transient — do NOT blame
+	// an axis (this is what stops good edges from flapping into "suspect").
+	if probe(failIP, failSNI) {
+		return verdictTransient
 	}
-	if altIP, ok := b.pool.altHealthyIP(failIP); ok {
-		arms = append(arms, func() res { return res{verdictIPGuilty, b.probeEdge(altIP, failSNI)} })
+	// 2. Isolate: does the IP work with a known-good SNI? does the SNI work on a known-good IP?
+	// A reachability is only KNOWN when a healthy partner exists to test it against.
+	altIP, hasAltIP := b.pool.altHealthyIP(failIP)
+	altSNI, hasAltSNI := b.pool.altHealthySNI(failSNI.host)
+	ipOK, ipKnown := false, hasAltSNI
+	if hasAltSNI {
+		ipOK = probe(failIP, altSNI) // failIP with a healthy SNI
 	}
-	arms = append(arms, func() res { return res{verdictTransient, b.probeEdge(failIP, failSNI)} }) // retry
-	ch := make(chan res, len(arms))                                                                // buffered so late arms never block after we return
-	for _, arm := range arms {
-		arm := arm
-		go func() { ch <- arm() }()
+	sniOK, sniKnown := false, hasAltIP
+	if hasAltIP {
+		sniOK = probe(altIP, failSNI) // failSNI on a healthy IP
 	}
-	for range arms {
-		if r := <-ch; r.ok {
-			return r.v // first definitive answer wins
+	// 3. Decide by which isolated variable still works. Only POSITIVE evidence pins a verdict.
+	switch {
+	case sniKnown && sniOK && !(ipKnown && ipOK):
+		return verdictIPGuilty // the SNI works elsewhere but the IP doesn't -> IP is the culprit
+	case ipKnown && ipOK && !(sniKnown && sniOK):
+		return verdictSNIGuilty // the IP works elsewhere but the SNI doesn't -> SNI is the culprit
+	case ipKnown && !ipOK && sniKnown && !sniOK:
+		// Both isolated probes failed though both partners are FSM-healthy: either both edges
+		// are genuinely blocked, OR the client's own uplink just dropped. Confirm with a
+		// KNOWN-GOOD combo before blaming, so a local/broad outage never falsely burns a clean
+		// edge (which is exactly the false-positive this whole rewrite exists to prevent).
+		if probe(altIP, altSNI) {
+			return verdictIPGuilty // uplink is fine -> both edges really are down; pin the IP (SNI heals on retest)
 		}
+		return verdictUnknown // even a known-good combo fails -> local/broad outage; blame nothing
+	default:
+		return verdictUnknown // both work in isolation (ambiguous/origin), or nothing to compare
 	}
-	return verdictUnknown
 }
 
 // attributeFailure runs the differential probe for a failed pool combo and moves the guilty
