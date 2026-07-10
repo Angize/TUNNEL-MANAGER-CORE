@@ -1164,7 +1164,7 @@ func (b *TCP) dialLoop() {
 			if b.manualSwitch.Swap(false) || rotated.Load() {
 				b.pool.dataSuccess(label) // deliberate, healthy switch — confirm the edge was fine
 			} else {
-				b.pool.event("down", classifyErr(cause), label)
+				b.pool.down(classifyErr(cause), label) // arms the paired "up" the next reconnect emits
 				if time.Since(connectedAt) < minLiveness {
 					b.pool.dataFailure(label)
 					b.pool.advance() // don't re-stick on the bad edge
@@ -1485,7 +1485,7 @@ func (b *TCP) dialLoopWarm() {
 				if !manual && activeLabel != "" {
 					// Genuine failure: log a precise core-observed "down" reason and attribute
 					// data-plane health (short-lived -> throttle fault; sustained -> confirm healthy).
-					b.pool.event("down", classifyErr(cause), activeLabel)
+					b.pool.down(classifyErr(cause), activeLabel) // arms the paired "up" the next reconnect emits
 					if time.Since(activeSince) < minLiveness {
 						b.pool.dataFailure(activeLabel)
 					} else {

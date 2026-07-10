@@ -105,6 +105,7 @@ type wsPool struct {
 	lastGood   int64          // unix time of the last SUSTAINED session on any edge (outage guard)
 	events     []coreEvent    // rolling ring of core-observed events (down/burn) for the panel log
 	evSeq      int64          // monotonic sequence so the panel can consume each event exactly once
+	wasDown    bool           // a genuine carrier down is pending its matching "up" (down/reconnect pairing)
 	pinIP      string         // operator-pinned IP: current() forces it until pinUntil (one-shot jump)
 	pinSNI     string         // operator-pinned SNI: current() forces it until pinUntil
 	pinUntil   int64          // unix time the pin is honoured until; after it, normal rotation resumes
@@ -143,6 +144,16 @@ func (p *wsPool) event(kind, code, detail string) {
 	}
 	p.mu.Unlock()
 	p.writeStatus()
+}
+
+// down records a genuine carrier drop (NOT an operator pin / proactive rotation) and arms the next
+// successful (re)connect — via setActive — to emit a matching "up", so a pool down is always paired
+// in the ring like the datagram coreStatus. Callers still classify the reason (code/detail).
+func (p *wsPool) down(code, detail string) {
+	p.mu.Lock()
+	p.wasDown = true
+	p.mu.Unlock()
+	p.event("down", code, detail)
 }
 
 func newWSPool(ips []string, snis []wsSNIEntry, autoBurn bool, statusPath string) *wsPool {
@@ -281,8 +292,12 @@ func (p *wsPool) setActive(combo string) {
 	p.mu.Lock()
 	changed := p.active != combo
 	p.active = combo
+	pending := p.wasDown // a genuine down is awaiting its matching recovery
+	p.wasDown = false
 	p.mu.Unlock()
-	if changed {
+	if pending {
+		p.event("up", "reconnect", combo) // recovered after a real drop; event() flushes the status file
+	} else if changed {
 		p.writeStatus()
 	}
 }
