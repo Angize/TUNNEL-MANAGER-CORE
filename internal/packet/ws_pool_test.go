@@ -72,6 +72,35 @@ func TestPoolUpdateECHTransitionGate(t *testing.T) {
 	}
 }
 
+// A genuine pool down must be balanced by exactly one paired "up"/reconnect on the next
+// successful (re)connect, while the initial connect and plain rotations stay silent — so the panel
+// never shows an unbalanced "disconnected" for a tunnel that recovered.
+func TestPoolDownReconnectPairing(t *testing.T) {
+	p := newWSPool([]string{"a", "b"}, snis("x"), true, "")
+
+	p.setActive("a · x") // initial connect: no prior down -> silent
+	if len(p.events) != 0 {
+		t.Fatalf("initial connect must emit no event, got %+v", p.events)
+	}
+
+	p.down("reset", "a · x") // genuine drop
+	p.setActive("b · x")     // reconnect on a new edge -> paired up
+	if len(p.events) != 2 || p.events[0].Kind != "down" || p.events[1].Kind != "up" || p.events[1].Code != "reconnect" {
+		t.Fatalf("want down then up/reconnect, got %+v", p.events)
+	}
+
+	p.setActive("a · x") // a plain rotation (no pending down) must NOT emit an up
+	if len(p.events) != 2 {
+		t.Fatalf("rotation without a pending down must be silent, got %d events", len(p.events))
+	}
+
+	p.down("throttle", "a · x") // a second drop
+	p.setActive("a · x")        // reconnect on the SAME edge still pairs
+	if len(p.events) != 4 || p.events[3].Kind != "up" {
+		t.Fatalf("a same-edge reconnect after a down must still emit up, got %+v", p.events)
+	}
+}
+
 // A verdict of IP_GUILTY (applied via markSuspect) moves a healthy IP into suspect, and
 // current() then skips it while a healthy alternative remains.
 func TestMarkSuspectPullsFromRotation(t *testing.T) {
