@@ -28,6 +28,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -785,6 +786,8 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte) (net.C
 		var echErr *tls.ECHRejectionError
 		if attempt == 0 && errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
 			ech = echErr.RetryConfigList // stale ECH key: redial and retry with the fresh one
+			log.Printf("core/ws: ECH self-heal for %s (%s) — stale key rejected, retrying with fresh key %s",
+				host, dialAddr, base64.StdEncoding.EncodeToString(ech))
 			if conn, err = b.dialer(10 * time.Second).Dial("tcp", dialAddr); err != nil {
 				return nil, err
 			}

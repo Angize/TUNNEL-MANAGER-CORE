@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -288,6 +289,8 @@ func (b *TCP) establishXHTTP() (net.Conn, string, string, error) {
 		var echErr *tls.ECHRejectionError
 		if errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
 			ech = echErr.RetryConfigList
+			log.Printf("core/xhttp: ECH self-heal for %s (%s) — stale key rejected, retrying with fresh key %s",
+				host, dialAddr, base64.StdEncoding.EncodeToString(ech))
 			conn, err = b.dialXHTTPOnce(dialAddr, host, ech, path)
 		}
 	}
