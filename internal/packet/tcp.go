@@ -376,7 +376,8 @@ type TCP struct {
 	dsMode     string
 	dsFailOnce sync.Once // logs an AF_PACKET/capability failure at most once (fired per connect)
 
-	ln      net.Listener
+	ln      net.Listener               // server: primary/first listener (ws/xhttp use only this)
+	lns     []net.Listener             // server: ALL bound listeners; a pooled direct-TCP server binds one per selected IP so it accepts on exactly the IPs the client rotates through (lns[0]==ln)
 	cur     atomic.Pointer[connFramer] // currently live connection / server downstream target (nil when none)
 	curConn atomic.Pointer[net.Conn]   // client+pool: the live carrier conn, closed to force a re-dial on rotation
 	closed  atomic.Bool
@@ -579,7 +580,7 @@ func ListenXHTTP(listenAddr string, dev *tun.Device, keepalive time.Duration, ob
 		return nil, err
 	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
-		ws: true, xhttp: true, idle: idleFor(keepalive), addr: listenAddr, ln: ln, closeCh: make(chan struct{}),
+		ws: true, xhttp: true, idle: idleFor(keepalive), addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns), xhSessions: make(map[string]*xhttpSession)}, nil
 }
 
@@ -592,32 +593,47 @@ func ListenWS(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs,
 		return nil, err
 	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
-		ws: true, idle: idleFor(keepalive), addr: listenAddr, ln: ln, closeCh: make(chan struct{}),
+		ws: true, idle: idleFor(keepalive), addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns)}, nil
 }
 
-// ListenTCP (server role) binds listenAddr and accepts connections. When cover is
-// set it builds a REALITY responder that authenticates our clients by a token in
-// their ClientHello and transparently proxies every other connection (probes,
-// scanners, the censor) to the real coverSNI:443, so active probing sees that
-// site's genuine certificate.
-func ListenTCP(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string) (*TCP, error) {
-	ln, err := net.Listen("tcp", listenAddr)
-	if err != nil {
-		return nil, err
+// ListenTCP (server role) binds each addr in listenAddrs and accepts connections on all of them.
+// A single-IP server passes one addr; a server under a destination rotation pool passes each of its
+// selected IPs, so it accepts on exactly the IPs the client dials across (and each accepted TCP
+// connection's local address — hence its reply source — is the IP that client dialed). When cover is
+// set it builds a REALITY responder that authenticates our clients by a token in their ClientHello and
+// transparently proxies every other connection (probes, scanners, the censor) to the real coverSNI:443,
+// so active probing sees that site's genuine certificate.
+func ListenTCP(listenAddrs []string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string) (*TCP, error) {
+	if len(listenAddrs) == 0 {
+		return nil, errors.New("tcp listen: no listen address")
+	}
+	var lns []net.Listener
+	for _, addr := range listenAddrs {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			for _, l := range lns { // release the ones we already bound
+				l.Close()
+			}
+			return nil, err
+		}
+		lns = append(lns, ln)
 	}
 	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
 		cover: cover, coverSNI: coverSNI,
-		idle: idleFor(keepalive), addr: listenAddr, ln: ln, closeCh: make(chan struct{}),
+		idle: idleFor(keepalive), addr: listenAddrs[0], ln: lns[0], lns: lns, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns)}
 	if cover {
 		// coverSNI is required (validated in config); it is the real site the
 		// server borrows and proxies non-authenticated connections to.
-		b.coverSrv, err = tlscover.NewServer(psk, coverSNI)
+		cs, err := tlscover.NewServer(psk, coverSNI)
 		if err != nil {
-			ln.Close()
+			for _, l := range lns {
+				l.Close()
+			}
 			return nil, err
 		}
+		b.coverSrv = cs
 	}
 	return b, nil
 }
@@ -641,7 +657,13 @@ func (b *TCP) Run() error {
 	} else if b.xhttp {
 		b.runXHTTPServer()
 	} else {
-		b.acceptLoop()
+		// One accept loop per bound listener. A pooled direct-TCP server binds several of its own IPs
+		// (one listener each), so the extra listeners run in background goroutines and the first runs
+		// inline to keep Run blocking. ws/cover bind a single listener → this is a 1-element loop.
+		for i := 1; i < len(b.lns); i++ {
+			go b.acceptLoopOn(b.lns[i])
+		}
+		b.acceptLoopOn(b.lns[0])
 	}
 	return nil
 }
@@ -655,8 +677,8 @@ func (b *TCP) Close() error {
 	if s := b.httpSrv.Load(); s != nil {
 		s.Close()
 	}
-	if b.ln != nil {
-		b.ln.Close()
+	for _, l := range b.lns { // close every bound listener (a pooled server has several)
+		l.Close()
 	}
 	if c := b.cur.Load(); c != nil {
 		c.conn.Close()
@@ -727,10 +749,10 @@ func (b *TCP) serverHandshake(cf *connFramer) error {
 // acceptLoop (server) hands each new connection to a per-connection goroutine.
 // On a transient Accept error (e.g. EMFILE from an fd flood) it backs off briefly
 // instead of busy-spinning the CPU and flooding the log.
-func (b *TCP) acceptLoop() {
+func (b *TCP) acceptLoopOn(ln net.Listener) {
 	var backoff time.Duration
 	for {
-		conn, err := b.ln.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
 			if b.closed.Load() {
 				return

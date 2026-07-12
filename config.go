@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -54,7 +55,7 @@ type Config struct {
 	// is the client's REAL IP: with a forged source the server cannot learn where to
 	// reply, so it is told here (the AEAD still authenticates every frame). Raw + bip +
 	// crypto only; needs CAP_NET_RAW. Both empty = no spoofing.
-	SpoofSrc  string `json:"spoof_src_ip"`
+	SpoofSrc string `json:"spoof_src_ip"`
 	RealPeer string `json:"real_peer_ip"`
 
 	// SpoofDst forges the outer IPv4 DESTINATION to a decoy IP (e.g. a reachable,
@@ -68,7 +69,11 @@ type Config struct {
 	SpoofDst string `json:"spoof_dst_ip"`
 
 	Listen string `json:"listen"` // server: bind address, e.g. "0.0.0.0:9000"
-	Peer   string `json:"peer"`   // client: server address, e.g. "1.2.3.4:9000"
+	// ListenIPs is the server-side rotation-pool bind list: one "ip:port" per SELECTED pool IP. When set
+	// (a pooled udp/tcp server), the server binds each of these instead of the single Listen/0.0.0.0, so
+	// only the pool IPs listen and each reply leaves from the IP the client dialed. Empty = use Listen.
+	ListenIPs []string `json:"listen_ips"`
+	Peer      string   `json:"peer"` // client: server address, e.g. "1.2.3.4:9000"
 	// PeerIPs is a rotation pool of DESTINATION endpoints for the direct transports (tcp/udp/raw/
 	// flux): the client cycles them and burns a blocked one, so a single blocked server IP doesn't
 	// kill the tunnel (the direct-transport analogue of the ws edge pool). When it has >1 entry it
@@ -381,6 +386,11 @@ func (c *Config) validate() error {
 	case "server":
 		if c.Listen == "" {
 			return errors.New("server role requires \"listen\"")
+		}
+		for _, la := range c.ListenIPs { // pooled server: each bind must be a valid host:port
+			if _, _, err := net.SplitHostPort(la); err != nil {
+				return fmt.Errorf("listen_ips entry %q must be host:port: %w", la, err)
+			}
 		}
 	case "client":
 		if c.Peer == "" && len(c.PeerIPs) == 0 {

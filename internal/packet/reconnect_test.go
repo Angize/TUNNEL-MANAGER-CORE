@@ -14,7 +14,7 @@ func TestUDPReHandshakeOnReconnect(t *testing.T) {
 	const cipher = "chacha20-poly1305"
 	srvDev, srvCtrl := tunPair(t, "rsrv")
 	addr := freeUDPPort(t)
-	srv, err := Listen(addr, srvDev, time.Second, true, true, psk, cipher, false, 0, 0)
+	srv, err := Listen([]string{addr}, srvDev, time.Second, true, true, psk, cipher, false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
