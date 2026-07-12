@@ -775,7 +775,13 @@ func (b *UDP) clientLoop() {
 			}
 		} else {
 			if failN > 0 {
-				rc.success() // the active endpoints handshaked — clear any transient burns
+				dh, sh := rc.success() // the active endpoints handshaked — clear any transient burns
+				if dh != "" {
+					b.st.event("heal", "peer-retest", dh) // burned destination IP recovered
+				}
+				if sh != "" {
+					b.st.event("heal", "src-retest", sh) // burned source IP recovered
+				}
 			}
 			failN = 0
 			b.send(typePing, nil, b.peer.Load())

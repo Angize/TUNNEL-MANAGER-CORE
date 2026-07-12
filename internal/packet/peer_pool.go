@@ -262,7 +262,10 @@ func (p *PeerPool) rotateOnce() (addr string, moved bool) {
 
 // succeeded clears the active endpoint's burn after it connects — a live success proves it healthy right
 // now, so a transient block heals. Only writes the status file if something changed.
-func (p *PeerPool) succeeded() {
+// succeeded clears any health record on the CURRENT endpoint (it just proved good on the data plane).
+// Returns the recovered address when it actually cleared a burn/suspect mark (a heal transition), else ""
+// — so the carrier can emit a discrete heal event, otherwise a no-op.
+func (p *PeerPool) succeeded() string {
 	p.mu.Lock()
 	a := p.addrs[p.cur]
 	changed := p.health[a] != nil
@@ -270,7 +273,9 @@ func (p *PeerPool) succeeded() {
 	p.mu.Unlock()
 	if changed {
 		p.writeStatus()
+		return a
 	}
+	return ""
 }
 
 // probeAllNow pulls EVERY suspect/dead endpoint's retest forward to now, so the next rotation (or the
@@ -431,20 +436,23 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 
 // success clears any transient burns after the carrier handshakes, resets the dest-cycle counter, and
 // releases a manual pin that has now landed (the carrier is live on the pinned endpoint).
-func (c *rotationController) success() {
+// success marks both pools good and returns the dst/src addresses that RECOVERED from a burn this call
+// (empty when nothing healed), so the carrier can surface a discrete heal event.
+func (c *rotationController) success() (dstHealed, srcHealed string) {
 	c.destRot = 0
 	if c.dst != nil {
-		c.dst.succeeded()
+		dstHealed = c.dst.succeeded()
 		if c.dst.isPinned() { // current() returns the pinned endpoint (no cur movement) only while pinned
 			c.dst.pinApplied(c.dst.current())
 		}
 	}
 	if c.src != nil {
-		c.src.succeeded()
+		srcHealed = c.src.succeeded()
 		if c.src.isPinned() {
 			c.src.pinApplied(c.src.current())
 		}
 	}
+	return
 }
 
 // proactive fires the timed rotation of BOTH pools when due (a signal-free moving target on each side).
