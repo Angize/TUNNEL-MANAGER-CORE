@@ -289,7 +289,7 @@ func main() {
 	// source pool doesn't own a status file (the destination pool writes the panel-facing status).
 	if cfg.Role == "client" && len(cfg.SrcIPs) >= 2 {
 		if s, ok := b.(interface{ SetSourcePool(*packet.PeerPool) }); ok {
-			sp := packet.NewPeerPool(cfg.SrcIPs, cfg.PeerAutoBurn, time.Duration(cfg.PeerRotateSecs)*time.Second, "")
+			sp := packet.NewPeerPool(cfg.SrcIPs, cfg.PeerAutoBurn, time.Duration(cfg.PeerRotateSecs)*time.Second, cfg.SrcStatusPath)
 			s.SetSourcePool(sp)
 			log.Printf("tnl-core: source pool: %d source IPs rotate=%ds auto_burn=%v", len(cfg.SrcIPs), cfg.PeerRotateSecs, cfg.PeerAutoBurn)
 		}
@@ -330,6 +330,18 @@ func main() {
 					log.Print("tnl-core: probe-now (retest all suspect/dead edges)")
 					r.ProbeAllNow()
 				}
+			}
+		}()
+	} else if r, ok := b.(interface{ ProbeAllNow() }); ok {
+		// Direct-transport peer/source pool (udp/tcp/raw/flux): SIGHUP retests every suspect/dead
+		// endpoint immediately (the "probe now" control). These carriers have no ws edge dimensions to
+		// rotate, so only SIGHUP is wired; the else-if avoids double-registering it for the ws path.
+		rsig := make(chan os.Signal, 1)
+		signal.Notify(rsig, syscall.SIGHUP)
+		go func() {
+			for range rsig {
+				log.Print("tnl-core: probe-now (retest all suspect/dead peer/source endpoints)")
+				r.ProbeAllNow()
 			}
 		}()
 	}

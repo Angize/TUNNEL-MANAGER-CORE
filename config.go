@@ -88,6 +88,10 @@ type Config struct {
 	// spoof_src (a forged source is a deliberate decoy). raw/flux stamp the source per packet; udp
 	// rebinds its socket; tcp re-dials with a new LocalAddr. When set it supersedes the single BindIP.
 	SrcIPs []string `json:"src_ips"`
+	// SrcStatusPath is the status file the SOURCE pool writes (its own live state + the pin cmd file),
+	// separate from PeerStatusPath so the panel can show and drive both the source and destination pools.
+	// Empty = the source pool has no panel-facing status / manual pin (it still rotates and self-heals).
+	SrcStatusPath string `json:"src_status_path"`
 	// BindIP is the source IP the client dials FROM (its own node IP). On a host with
 	// several IPs the kernel would otherwise egress from the primary IP; binding pins the
 	// outbound socket to this node's registered IP so the peer/CDN sees the expected source.

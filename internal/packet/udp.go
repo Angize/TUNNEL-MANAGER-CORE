@@ -63,6 +63,7 @@ type UDP struct {
 	// rotation-induced ReadFromUDP error (reload the new conn and keep going) from a real socket death.
 	conn      atomic.Pointer[net.UDPConn]
 	rebindGen atomic.Int64
+	rebindMu  sync.Mutex // serializes rebindSourceTo so a proactive rotation and a pin-poll adopt can't race the swap (double-close / socket leak)
 	dev       *tun.Device
 	keepalive time.Duration
 	obfs      bool
@@ -184,18 +185,30 @@ func (b *UDP) rotateSourceUDP(proactive bool) {
 	if !moved {
 		return
 	}
+	if host, ok := b.rebindSourceTo(addr); ok {
+		log.Printf("core/udp: rotated source to %s", host)
+		b.st.down("src-rotate", "udp")
+	}
+}
+
+// rebindSourceTo opens a fresh socket on the given source IP (bare or ip:port) and swaps it in for the
+// live one, returning the bound host and whether it happened. Shared by proactive/failover rotation and
+// the operator source pin. No-op / false when the IP can't be parsed or bound (the old socket stays live).
+func (b *UDP) rebindSourceTo(addr string) (string, bool) {
 	host := addr
 	if h, _, e := net.SplitHostPort(addr); e == nil { // tolerate an accidental ip:port
 		host = h
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		return
+		return "", false
 	}
+	b.rebindMu.Lock() // serialize the load/store/gen-bump/close so a concurrent rebind can't leak or double-close
+	defer b.rebindMu.Unlock()
 	nc, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip}) // fresh socket on the new source (ephemeral port)
 	if err != nil {
 		log.Printf("core/udp: source rebind to %s failed: %v", host, err)
-		return
+		return "", false
 	}
 	old := b.conn.Load()
 	// Order matters (netToTun loads gen THEN conn): store the new conn BEFORE bumping the gen. Then any
@@ -205,8 +218,64 @@ func (b *UDP) rotateSourceUDP(proactive bool) {
 	b.conn.Store(nc)
 	b.rebindGen.Add(1)
 	_ = old.Close() // unblocks netToTun's ReadFromUDP; it reloads nc via rebindGen and continues
-	log.Printf("core/udp: rotated source to %s", host)
-	b.st.down("src-rotate", "udp")
+	return host, true
+}
+
+// adoptPeerUDP re-points the client at the pool's CURRENT destination — used when an operator pin has
+// just jumped the pool to a chosen endpoint — and clears the session so the next loop re-handshakes there.
+func (b *UDP) adoptPeerUDP() {
+	if b.pp == nil {
+		return
+	}
+	addr := b.pp.current()
+	ua, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil || ua == nil {
+		return
+	}
+	b.peer.Store(ua)
+	b.session.Store(nil)
+	b.ci.Store(nil)
+	log.Printf("core/udp: pinned destination to %s", addr)
+	b.st.down("peer-pin", "udp")
+}
+
+// adoptSourceUDP rebinds the socket onto the pool's CURRENT source (an operator source pin). Safe from
+// the pin-poll goroutine: a pin freezes rotation (rotationController.pinned), so rotateSourceUDP cannot
+// be rebinding concurrently.
+func (b *UDP) adoptSourceUDP() {
+	if b.sp == nil {
+		return
+	}
+	addr := b.sp.current()
+	if host, ok := b.rebindSourceTo(addr); ok {
+		log.Printf("core/udp: pinned source to %s", host)
+		b.st.down("src-pin", "udp")
+	}
+}
+
+// ProbeAllNow retests every suspect/dead endpoint on both pools at once (the panel "probe now" control,
+// delivered as SIGHUP). No-op unless pooled.
+func (b *UDP) ProbeAllNow() {
+	if b.pp != nil {
+		b.pp.probeAllNow()
+	}
+	if b.sp != nil {
+		b.sp.probeAllNow()
+	}
+}
+
+// pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin. Runs until Close.
+func (b *UDP) pinPollLoop(rc *rotationController) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-b.closeCh:
+			return
+		case <-t.C:
+			rc.pollPins(b.adoptPeerUDP, b.adoptSourceUDP)
+		}
+	}
 }
 
 // SetStatusPath (client, optional) wires a status-file event ring so self-heal re-handshakes and
@@ -562,6 +631,9 @@ func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {
 func (b *UDP) clientLoop() {
 	failN := 0 // consecutive handshake retransmits with no session -> the peer may be dead
 	rc := newRotationController(b.pp, b.sp)
+	if rc.active() {
+		go b.pinPollLoop(rc)
+	}
 	for {
 		if b.cryptoOn && b.sealer() != nil && b.sessionStale() {
 			b.session.Store(nil) // server likely restarted — drop the dead session so we re-handshake

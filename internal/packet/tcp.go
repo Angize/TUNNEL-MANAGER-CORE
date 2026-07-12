@@ -630,6 +630,8 @@ func (b *TCP) Run() error {
 		go b.keepaliveLoop()
 		if b.pool != nil {
 			go b.retestLoop() // background health retests with exponential backoff
+		} else if b.pp != nil || b.sp != nil {
+			go b.peerPinPollLoop() // direct pp/sp pools: apply operator pins from the node's cmd file
 		}
 		if b.warmStandby && b.pool != nil {
 			b.dialLoopWarm() // make-before-break: active + warm standby
@@ -1259,6 +1261,9 @@ func (b *TCP) dialLoop() {
 	// datagram carriers' rotationController). succeedBoth clears transient burns after a healthy session.
 	destRot := 0
 	burnDest := func() {
+		if (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned()) {
+			return // an operator pin freezes failover: current()/sourceIP() force the pinned endpoint
+		}
 		if b.pp != nil {
 			b.pp.fail()
 			if destRot++; b.sp != nil && b.pp.size() > 0 && destRot >= b.pp.size() {
@@ -1313,6 +1318,17 @@ func (b *TCP) dialLoop() {
 			// field and logs the auto-switch off its change). setActive is the single writer of the
 			// active edge — current() no longer touches it, so a standby dial can't corrupt it.
 			b.pool.setActive(combo)
+		} else {
+			// Direct pp/sp: we just connected on the current endpoints, so release any operator pin that
+			// has now landed (a pin behaves as "jump here and keep trying until connected"). Guard on
+			// isPinned so current() is consulted only while a pin forces it (it then returns the pinned
+			// endpoint with no cur movement); in the no-pin steady state this is a cheap skip.
+			if b.pp != nil && b.pp.isPinned() {
+				b.pp.pinApplied(b.pp.current())
+			}
+			if b.sp != nil && b.sp.isPinned() {
+				b.sp.pinApplied(b.sp.current())
+			}
 		}
 		// Proactive rotation: after b.rotate, advance the pool and drop this connection
 		// so dialLoop reconnects on the next edge. A connection that dies on its own
@@ -1335,6 +1351,9 @@ func (b *TCP) dialLoop() {
 			// is burned (the common "one IP got filtered" steady state) rotateOnce() can't move; closing
 			// anyway would drop a healthy connection every interval for nothing (cf. the datagram guard).
 			rot = time.AfterFunc(iv, func() {
+				if (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned()) {
+					return // an operator pin freezes proactive rotation until it lands or its TTL lapses
+				}
 				moved := false
 				if b.pp != nil {
 					if _, m := b.pp.rotateOnce(); m {
@@ -1818,6 +1837,46 @@ func (b *TCP) ProbeNow(kind, key string) {
 func (b *TCP) ProbeAllNow() {
 	if b.pool != nil {
 		b.pool.probeAllNow()
+	}
+	if b.pp != nil {
+		b.pp.probeAllNow()
+	}
+	if b.sp != nil {
+		b.sp.probeAllNow()
+	}
+}
+
+// peerPinPollLoop polls the direct destination/source pools' cmd files on a 1s ticker; a pending pin
+// pins the requested endpoint and drops the live carrier so dialLoop immediately re-dials onto it
+// (dialTarget()/sourceIP() read the pinned endpoint via the pool's current()). No rebuild — the TUN
+// stays up. Runs until Close. The ws edge pool uses retestLoop for the same job on its own axes.
+func (b *TCP) peerPinPollLoop() {
+	drop := func() {
+		b.manualSwitch.Store(true) // operator-initiated: skip fault accounting on the induced drop
+		if c := b.curConn.Load(); c != nil {
+			(*c).Close() // unblocks serve(); dialLoop re-dials on the pinned endpoint
+		}
+	}
+	t := time.NewTicker(1 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-b.closeCh:
+			return
+		case <-t.C:
+			if b.pp != nil {
+				if key, ok := b.pp.readSelectCmd(); ok && b.pp.selectEntry(key) {
+					log.Printf("core/tcp: pin destination %s (panel select)", key)
+					drop()
+				}
+			}
+			if b.sp != nil {
+				if key, ok := b.sp.readSelectCmd(); ok && b.sp.selectEntry(key) {
+					log.Printf("core/tcp: pin source %s (panel select)", key)
+					drop()
+				}
+			}
+		}
 	}
 }
 
