@@ -60,23 +60,8 @@ const (
 	stateDead    = "dead"    // failed enough retests; retested only on the slow interval
 )
 
-// suspectBackoff is the retest schedule (seconds) for a SUSPECT entry: it enters suspect
-// scheduled +30s out, and each FAILED retest walks one step further down the list. Running
-// off the end (the 5th failed retest) drops the entry to DEAD.
-var suspectBackoff = []int64{30, 60, 120, 300, 600}
-
-// deadRetest is the slow interval (seconds) a DEAD entry is retested on.
-const deadRetest int64 = 1800
-
-// Data-plane fault tuning. A pool carrier that completes its handshake but then dies quickly is
-// the throttle / blackhole-after-handshake signature the connect-time (TLS/upgrade) prober can
-// NOT see. We attribute such short-lived sessions to the active IP and, after a few in a row,
-// pull it from rotation — but only when a healthy alternative exists and a good session happened
-// recently, so a whole-server or local outage (where EVERY edge dies fast) never burns the pool.
-const (
-	dataFailThreshold = 2   // consecutive short-lived sessions on an IP before it is suspected
-	dataGoodWindow    = 120 // sec: only blame the edge if some edge sustained a session this recently
-)
+// suspectBackoff, deadRetest, dataFailThreshold and dataGoodWindow are the pool health-FSM timings —
+// now operator-tunable package vars, defined with their defaults in tuning.go.
 
 // healthRec tracks one non-healthy pool entry. fails counts failed retests since it entered
 // suspect; nextRetest is the unix time the scheduler may probe it again.
@@ -112,13 +97,8 @@ type wsPool struct {
 	now        func() int64   // injectable clock (unix seconds); overridden in tests
 }
 
-// pinTTL bounds how long a manual pin keeps FORCING the exact chosen edge while it has NOT yet
-// connected. It only ever matters when the pinned edge is DEAD: a healthy pin lands within one
-// handshake and clears itself immediately (pinApplied), behaving as a one-shot "jump exactly here
-// now" that never freezes auto-rotation. So this window is the worst-case time a pin onto a *dead*
-// edge can stall rotation — kept short (30s) so a bad manual pick self-releases fast and rotation
-// resumes, while still comfortably outlasting a real handshake so a slow-but-healthy edge still lands.
-const pinTTL int64 = 30
+// pinTTL (manual-pin force window, dead-pin self-release cap) is an operator-tunable package var,
+// defined with its default in tuning.go.
 
 // coreEvent is one core-observed occurrence surfaced to the panel's system log: the CORE knows the
 // real reason a carrier dropped or an edge was burned (it saw the actual error), so instead of the
