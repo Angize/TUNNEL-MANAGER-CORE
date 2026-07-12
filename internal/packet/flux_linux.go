@@ -852,9 +852,70 @@ func (f *Flux) rotatePeerFlux(proactive bool) {
 	f.st.down("peer-rotate", "flux")
 }
 
+// adoptPeerFlux re-points the client at the pool's CURRENT destination — used when an operator pin has
+// just jumped the pool to a chosen endpoint — and clears the session so the next loop re-handshakes there.
+func (f *Flux) adoptPeerFlux() {
+	if f.pp == nil {
+		return
+	}
+	ip := parseIP4(hostOnly(f.pp.current()))
+	if ip == nil {
+		return
+	}
+	f.peer.Store(&net.IPAddr{IP: ip})
+	f.session.Store(nil)
+	f.ci.Store(nil)
+	log.Printf("flux: pinned destination to %s", ip)
+	f.st.down("peer-pin", "flux")
+}
+
+// adoptSourceFlux swaps the crafted-header source to the pool's CURRENT source (an operator source pin).
+// Like rotateSourceFlux it leaves the AEAD session intact — the source is stamped per packet.
+func (f *Flux) adoptSourceFlux() {
+	if f.sp == nil {
+		return
+	}
+	ip := parseIP4(hostOnly(f.sp.current()))
+	if ip == nil {
+		return
+	}
+	f.localIP.Store(&net.IPAddr{IP: ip})
+	log.Printf("flux: pinned source to %s", ip)
+	f.st.down("src-pin", "flux")
+}
+
+// ProbeAllNow retests every suspect/dead endpoint on both pools at once (the panel "probe now" control,
+// delivered as SIGHUP). No-op unless pooled.
+func (f *Flux) ProbeAllNow() {
+	if f.pp != nil {
+		f.pp.probeAllNow()
+	}
+	if f.sp != nil {
+		f.sp.probeAllNow()
+	}
+}
+
+// pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin (re-pointing the
+// live dataplane at the pinned endpoint via pollPins). Runs until Close.
+func (f *Flux) pinPollLoop(rc *rotationController) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-f.closeCh:
+			return
+		case <-t.C:
+			rc.pollPins(f.adoptPeerFlux, f.adoptSourceFlux)
+		}
+	}
+}
+
 func (f *Flux) clientLoop() {
 	failN := 0
 	rc := newRotationController(f.pp, f.sp)
+	if rc.active() {
+		go f.pinPollLoop(rc)
+	}
 	for {
 		if f.cryptoOn && f.sealer() != nil && f.sessionStale() {
 			f.session.Store(nil)

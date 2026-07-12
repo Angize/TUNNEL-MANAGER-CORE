@@ -1,7 +1,9 @@
 package packet
 
 import (
+	"encoding/json"
 	"net"
+	"os"
 	"testing"
 )
 
@@ -43,20 +45,21 @@ func TestPeerPoolBurnSkipsAndAdvances(t *testing.T) {
 	}
 }
 
-func TestPeerPoolRevivesWhenAllBurned(t *testing.T) {
+func TestPeerPoolNeverDeadEndsWhenAllBurned(t *testing.T) {
 	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
 	p.fail() // burn a -> advance to b
-	// burning the last live endpoint must revive all AND still move (never dead-end, never re-stick)
-	a, moved := p.fail() // burn b -> revive all, advance off b back to a
-	// after revival nothing is burned; both are candidates again
-	p.mu.Lock()
-	nb := len(p.burned)
-	p.mu.Unlock()
-	if nb != 0 {
-		t.Fatalf("all-burned should revive to 0 burned, got %d", nb)
-	}
+	// Burning the last live endpoint must still MOVE (never dead-end, never re-stick on the endpoint we
+	// just failed). Unlike the old revive-all, the burns are KEPT (suspect, on backoff) — the pool falls
+	// back to the least-bad OTHER endpoint so the tunnel keeps trying while the retests work.
+	a, moved := p.fail() // burn b -> advance off b back to a (a is the least-bad other)
 	if !moved || a != "a" {
-		t.Fatalf("after all-burned revive: got %q moved=%v, want a true (advance off the failed endpoint)", a, moved)
+		t.Fatalf("after all-burned: got %q moved=%v, want a true (advance off the failed endpoint)", a, moved)
+	}
+	p.mu.Lock()
+	na, nb := p.health["a"] != nil, p.health["b"] != nil
+	p.mu.Unlock()
+	if !na || !nb {
+		t.Fatalf("both endpoints should stay burned (suspect) after all-burned, got a=%v b=%v", na, nb)
 	}
 }
 
@@ -64,7 +67,7 @@ func TestPeerPoolAutoBurnOffJustRotates(t *testing.T) {
 	p := NewPeerPool([]string{"a", "b"}, false, 0, "") // auto-burn OFF
 	p.fail()
 	p.mu.Lock()
-	nb := len(p.burned)
+	nb := len(p.health)
 	p.mu.Unlock()
 	if nb != 0 {
 		t.Fatalf("auto-burn off must not burn, got %d burned", nb)
@@ -80,10 +83,164 @@ func TestPeerPoolSucceededClearsBurn(t *testing.T) {
 	p.mu.Unlock()
 	p.succeeded()
 	p.mu.Lock()
-	burnedA := p.burned["a"]
+	burnedA := p.health["a"] != nil
 	p.mu.Unlock()
 	if burnedA {
 		t.Fatal("succeeded() must clear the active endpoint's burn")
+	}
+}
+
+// TestPeerPoolSuspectToDeadBackoff walks a single endpoint through the whole health FSM: a fresh failure
+// makes it suspect (+30s), each failed live retest steps the backoff, and running off the end drops it to
+// dead on the slow interval — exactly the ws edge pool's schedule.
+func TestPeerPoolSuspectToDeadBackoff(t *testing.T) {
+	clk := int64(1000)
+	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
+	p.now = func() int64 { return clk }
+	// a fails -> suspect, nextRetest = now + suspectBackoff[0]
+	p.fail()
+	rec := p.health["a"]
+	if rec == nil || rec.state != stateSuspect || rec.fails != 0 || rec.nextRetest != clk+suspectBackoff[0] {
+		t.Fatalf("first fail should make a suspect at +%ds, got %+v", suspectBackoff[0], rec)
+	}
+	// Walk every backoff step by re-failing a due retry; after len(suspectBackoff) failures it is dead.
+	for i := 1; i < len(suspectBackoff); i++ {
+		clk = rec.nextRetest // make a due
+		p.mu.Lock()
+		p.cur = 0 // pretend the live retry landed back on a
+		p.mu.Unlock()
+		p.fail()
+		if rec.state != stateSuspect || rec.fails != i {
+			t.Fatalf("after %d retest fails a should be suspect fails=%d, got %+v", i, i, rec)
+		}
+	}
+	clk = rec.nextRetest
+	p.mu.Lock()
+	p.cur = 0
+	p.mu.Unlock()
+	p.fail() // the final failed retest drops it to dead
+	if rec.state != stateDead || rec.nextRetest != clk+deadRetest {
+		t.Fatalf("running off the backoff should mark a dead at +%ds, got %+v", deadRetest, rec)
+	}
+}
+
+// TestPeerPoolDueEndpointReadmitted checks the "data plane is the probe" recovery: a burned endpoint is
+// skipped by current() while its backoff is pending, then re-admitted for a live retry once it is due.
+func TestPeerPoolDueEndpointReadmitted(t *testing.T) {
+	clk := int64(1000)
+	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
+	p.now = func() int64 { return clk }
+	p.fail() // burn a (suspect), now on b
+	if got := p.current(); got != "b" {
+		t.Fatalf("while a is suspect current should stay on the healthy b, got %q", got)
+	}
+	// Burn b too so nothing is healthy; a is still pending (not due) -> current falls back to least-bad.
+	p.fail()
+	// Advance the clock past a's retest: a becomes DUE and current() must re-admit it for a live retry.
+	clk += suspectBackoff[len(suspectBackoff)-1] + deadRetest + 1
+	got := p.current()
+	if got != "a" && got != "b" {
+		t.Fatalf("a due endpoint should be re-admitted, got %q", got)
+	}
+	// A success on the re-admitted endpoint heals it.
+	p.succeeded()
+	p.mu.Lock()
+	healed := p.health[p.addrs[p.cur]] == nil
+	p.mu.Unlock()
+	if !healed {
+		t.Fatal("succeeded() on a re-admitted endpoint should heal it back to healthy")
+	}
+}
+
+// TestPeerPoolSelectPin verifies the manual pin: current() forces the pinned endpoint, isPinned holds it,
+// a landing (pinApplied) releases it, and an unknown key is rejected.
+func TestPeerPoolSelectPin(t *testing.T) {
+	clk := int64(1000)
+	p := NewPeerPool([]string{"a", "b", "c"}, true, 0, "")
+	p.now = func() int64 { return clk }
+	if p.selectEntry("zzz") {
+		t.Fatal("selectEntry must reject an unknown key")
+	}
+	if !p.selectEntry("c") {
+		t.Fatal("selectEntry should find c")
+	}
+	if !p.isPinned() {
+		t.Fatal("pool should report pinned right after selectEntry")
+	}
+	if got := p.current(); got != "c" {
+		t.Fatalf("current() must force the pinned c, got %q", got)
+	}
+	// Even a fresh failure does not move off the pin (the controller freezes rotation; current forces c).
+	if got := p.current(); got != "c" {
+		t.Fatalf("pin must keep forcing c, got %q", got)
+	}
+	p.pinApplied("c") // the carrier landed on c -> pin releases
+	if p.isPinned() {
+		t.Fatal("pinApplied on the pinned endpoint must release the pin")
+	}
+	// After the TTL a stale pin self-releases even without a land.
+	p.selectEntry("a")
+	clk += pinTTL + 1
+	if p.isPinned() {
+		t.Fatal("a pin past its TTL must self-release")
+	}
+}
+
+// TestPeerPoolProbeAllNow checks that probe-now pulls every burned endpoint's retest forward so it is
+// immediately due.
+func TestPeerPoolProbeAllNow(t *testing.T) {
+	clk := int64(1000)
+	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
+	p.now = func() int64 { return clk }
+	p.fail() // burn a, +30s
+	if r := p.health["a"]; r == nil || r.nextRetest <= clk {
+		t.Fatalf("a should be burned with a future retest, got %+v", r)
+	}
+	p.probeAllNow()
+	if r := p.health["a"]; r == nil || r.nextRetest != clk {
+		t.Fatalf("probeAllNow should pull a's retest to now, got %+v", r)
+	}
+}
+
+// TestPeerPoolStatusFileFSM checks the richer status file: active, the health array with per-endpoint
+// state, the flat burned list, and the pin all round-trip through the JSON the panel reads.
+func TestPeerPoolStatusFileFSM(t *testing.T) {
+	dir := t.TempDir()
+	sp := dir + "/core-x.peerpool"
+	p := NewPeerPool([]string{"a", "b", "c"}, true, 0, sp)
+	p.fail()          // burn a, active -> b
+	p.selectEntry("c") // pin c
+	data, err := os.ReadFile(sp)
+	if err != nil {
+		t.Fatalf("status file not written: %v", err)
+	}
+	var st struct {
+		Active string   `json:"active"`
+		Addrs  []string `json:"addrs"`
+		Burned []string `json:"burned"`
+		Pin    string   `json:"pin"`
+		Health []struct {
+			Key, State string
+		} `json:"health"`
+	}
+	if json.Unmarshal(data, &st) != nil {
+		t.Fatalf("status file is not valid JSON: %s", data)
+	}
+	if st.Active != "c" || st.Pin != "c" {
+		t.Fatalf("after pinning c: active=%q pin=%q, want c/c", st.Active, st.Pin)
+	}
+	if len(st.Addrs) != 3 || len(st.Health) != 3 {
+		t.Fatalf("status should list all 3 endpoints, got addrs=%v health=%d", st.Addrs, len(st.Health))
+	}
+	// a was burned; pinning c cleared c's (never-set) mark. Exactly a should be suspect in the health map.
+	suspect := map[string]bool{}
+	for _, h := range st.Health {
+		if h.State == stateSuspect {
+			suspect[h.Key] = true
+		}
+	}
+	if !suspect["a"] {
+		t.Fatalf("a should be reported suspect in health, got %v", suspect)
 	}
 }
 

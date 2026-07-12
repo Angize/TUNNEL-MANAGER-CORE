@@ -965,9 +965,69 @@ func (r *Raw) rotatePeerRaw(proactive bool) {
 	r.st.down("peer-rotate", "raw")
 }
 
+// adoptPeerRaw re-points the client at the pool's CURRENT destination — used when an operator pin has
+// just jumped the pool to a chosen endpoint — and clears the session so the next loop re-handshakes there.
+func (r *Raw) adoptPeerRaw() {
+	if r.pp == nil {
+		return
+	}
+	ip := parseIP4(hostOnly(r.pp.current()))
+	if ip == nil {
+		return
+	}
+	r.peer.Store(&net.IPAddr{IP: ip})
+	r.session.Store(nil)
+	r.ci.Store(nil)
+	log.Printf("raw: pinned destination to %s", ip)
+	r.st.down("peer-pin", "raw")
+}
+
+// adoptSourceRaw swaps the crafted-header source to the pool's CURRENT source (an operator source pin).
+// Ignored under spoofSrc (a forged source is a deliberate decoy, like rotateSourceRaw); no session reset.
+func (r *Raw) adoptSourceRaw() {
+	if r.sp == nil || r.spoofSrc != nil {
+		return
+	}
+	ip := parseIP4(hostOnly(r.sp.current()))
+	if ip == nil {
+		return
+	}
+	r.localIP.Store(&net.IPAddr{IP: ip})
+	log.Printf("raw: pinned source to %s", ip)
+	r.st.down("src-pin", "raw")
+}
+
+// ProbeAllNow retests every suspect/dead endpoint on both pools at once (the panel "probe now" control,
+// delivered as SIGHUP). No-op unless pooled.
+func (r *Raw) ProbeAllNow() {
+	if r.pp != nil {
+		r.pp.probeAllNow()
+	}
+	if r.sp != nil {
+		r.sp.probeAllNow()
+	}
+}
+
+// pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin. Runs until Close.
+func (r *Raw) pinPollLoop(rc *rotationController) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-r.closeCh:
+			return
+		case <-t.C:
+			rc.pollPins(r.adoptPeerRaw, r.adoptSourceRaw)
+		}
+	}
+}
+
 func (r *Raw) clientLoop() {
 	failN := 0
 	rc := newRotationController(r.pp, r.sp)
+	if rc.active() {
+		go r.pinPollLoop(rc)
+	}
 	for {
 		if r.cryptoOn && r.sealer() != nil && r.sessionStale() {
 			r.session.Store(nil) // server likely restarted — drop the dead session so we re-handshake
