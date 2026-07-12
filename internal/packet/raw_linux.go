@@ -94,6 +94,8 @@ type Raw struct {
 	closeOnce sync.Once
 
 	st *coreStatus // client-only: precise self-heal event ring written to the status file (nil = off)
+	pp *PeerPool   // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
+	sp *PeerPool   // client-only: source-IP rotation pool (nil = fixed source; ignored under spoofSrc)
 }
 
 // SetStatusPath (client, optional) wires a status-file event ring so self-heal re-handshakes and
@@ -762,7 +764,10 @@ func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr) {
 // learnPeer records the peer address (and, on the server, the local source IP
 // toward it, needed for the tcp profile's checksum) once a frame authenticates.
 func (r *Raw) learnPeer(addr *net.IPAddr) {
-	if !r.pinnedPeer() { // with a forged source/decoy the address is not the real peer — keep the configured one
+	// Keep the configured/rotated peer when: a forged source/decoy means the reply address isn't the
+	// real peer (pinnedPeer), OR a destination pool owns the peer (r.pp) — a pool server can answer
+	// from a different IP than the client dialed, and adopting it would pull the client off the pool.
+	if !r.pinnedPeer() && r.pp == nil {
 		r.peer.Store(addr)
 	}
 	if r.localIP.Load() == nil {
@@ -877,7 +882,92 @@ func (r *Raw) sessionStale() bool {
 	return time.Since(time.Unix(0, last)) > w
 }
 
+// SetPeerPool (client) wires a destination-IP rotation pool: a peer whose handshake never completes
+// is burned and the client re-points at the next live endpoint (a proactive timer also rotates).
+// nil / single-endpoint = no rotation. Rotates only the DESTINATION; a spoofed source (bip) is
+// unaffected. main wires it via the shared SetPeerPool type assertion.
+func (r *Raw) SetPeerPool(pp *PeerPool) {
+	if r.isClient {
+		r.pp = pp
+	}
+}
+
+// SetSourcePool (client) wires a source-IP rotation pool: the crafted-header source the client sends
+// FROM is cycled/burned alongside the destination. raw stamps the source per packet, so a rotation is
+// an atomic swap (no socket rebind); the server follows the new source. IGNORED when spoofSrc is set —
+// a forged source is a deliberate decoy that must not be rotated away. Call before Run().
+func (r *Raw) SetSourcePool(sp *PeerPool) {
+	if !r.isClient || r.spoofSrc != nil {
+		return
+	}
+	r.sp = sp
+	// Seed the initial source so the client stamps SrcIPs[0] from the first packet (matching the pool's
+	// cur=0), instead of the route-derived default until the first rotation. Called before Run(), so
+	// openRawSockets' `if localIP==nil` guard then leaves this in place.
+	if sp != nil {
+		if ip := parseIP4(hostOnly(sp.current())); ip != nil {
+			r.localIP.Store(&net.IPAddr{IP: ip})
+		}
+	}
+}
+
+// rotateSourceRaw points the client at the next source-pool IP and swaps the crafted-header source.
+// No session reset (the source is independent of the AEAD session). No-op when the pool did not move,
+// the IP is not v4, or a spoofed source is in force.
+func (r *Raw) rotateSourceRaw(proactive bool) {
+	if r.sp == nil || r.spoofSrc != nil {
+		return
+	}
+	var addr string
+	var moved bool
+	if proactive {
+		addr, moved = r.sp.rotateOnce()
+	} else {
+		addr, moved = r.sp.fail()
+	}
+	if !moved {
+		return
+	}
+	ip := parseIP4(hostOnly(addr))
+	if ip == nil {
+		return
+	}
+	r.localIP.Store(&net.IPAddr{IP: ip})
+	log.Printf("raw: rotated source to %s", addr)
+	r.st.down("src-rotate", "raw")
+}
+
+// rotatePeerRaw points the client at the next pool endpoint and clears the session so the next loop
+// re-handshakes against the new destination. No-op when the pool did not move or the endpoint is not
+// valid IPv4 (raw is IPv4-only).
+func (r *Raw) rotatePeerRaw(proactive bool) {
+	if r.pp == nil {
+		return
+	}
+	var addr string
+	var moved bool
+	if proactive {
+		addr, moved = r.pp.rotateOnce()
+	} else {
+		addr, moved = r.pp.fail()
+	}
+	if !moved {
+		return
+	}
+	ip := parseIP4(hostOnly(addr))
+	if ip == nil {
+		return
+	}
+	r.peer.Store(&net.IPAddr{IP: ip})
+	r.session.Store(nil)
+	r.ci.Store(nil)
+	log.Printf("raw: rotated destination to %s", addr)
+	r.st.down("peer-rotate", "raw")
+}
+
 func (r *Raw) clientLoop() {
+	failN := 0
+	rc := newRotationController(r.pp, r.sp)
 	for {
 		if r.cryptoOn && r.sealer() != nil && r.sessionStale() {
 			r.session.Store(nil) // server likely restarted — drop the dead session so we re-handshake
@@ -887,8 +977,17 @@ func (r *Raw) clientLoop() {
 		}
 		if r.cryptoOn && r.sealer() == nil {
 			r.sendInit()
+			if failN++; rc.active() && failN >= peerFailThreshold {
+				rc.fail(r.rotatePeerRaw, r.rotateSourceRaw)
+				failN = 0
+			}
 		} else {
+			if failN > 0 {
+				rc.success()
+			}
+			failN = 0
 			r.send(typePing, nil, r.peer.Load())
+			rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
 		}
 		wait := jitter(r.keepalive)
 		if r.cryptoOn && r.sealer() == nil {
