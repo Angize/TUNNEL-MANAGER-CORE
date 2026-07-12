@@ -81,12 +81,18 @@ func TestPeerPoolSucceededClearsBurn(t *testing.T) {
 	p.mu.Lock()
 	p.cur = 0 // force active = a (still burned)
 	p.mu.Unlock()
-	p.succeeded()
+	if healed := p.succeeded(); healed != "a" {
+		t.Fatalf("succeeded() must return the recovered addr %q, got %q", "a", healed)
+	}
 	p.mu.Lock()
 	burnedA := p.health["a"] != nil
 	p.mu.Unlock()
 	if burnedA {
 		t.Fatal("succeeded() must clear the active endpoint's burn")
+	}
+	// A second success on the now-healthy endpoint is a no-op — returns "" so no duplicate heal event.
+	if healed := p.succeeded(); healed != "" {
+		t.Fatalf("succeeded() on a healthy endpoint must return \"\", got %q", healed)
 	}
 }
 
@@ -218,7 +224,7 @@ func TestPeerPoolStatusFileFSM(t *testing.T) {
 	dir := t.TempDir()
 	sp := dir + "/core-x.peerpool"
 	p := NewPeerPool([]string{"a", "b", "c"}, true, 0, sp)
-	p.fail()          // burn a, active -> b
+	p.fail()           // burn a, active -> b
 	p.selectEntry("c") // pin c
 	data, err := os.ReadFile(sp)
 	if err != nil {

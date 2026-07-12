@@ -941,7 +941,13 @@ func (f *Flux) clientLoop() {
 			}
 		} else {
 			if failN > 0 {
-				rc.success()
+				dh, sh := rc.success()
+				if dh != "" {
+					f.st.event("heal", "peer-retest", dh) // burned destination IP recovered
+				}
+				if sh != "" {
+					f.st.event("heal", "src-retest", sh) // burned source IP recovered
+				}
 			}
 			failN = 0
 			f.send(typePing, nil, f.peer.Load())
