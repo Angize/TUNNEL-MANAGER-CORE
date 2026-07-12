@@ -313,6 +313,10 @@ type TCP struct {
 	// rotation. Unlike the datagram carriers' atomic peer swap, TCP rotates by re-dialing: dialTarget
 	// reads the pool's current endpoint and dialLoop burns/advances it on a dead/blocked dial.
 	pp *PeerPool
+	// sp is the SOURCE rotation pool: the local IP the client dials FROM. TCP applies it via the
+	// dialer's LocalAddr, so a rotation is picked up on the next re-dial (sourceIP reads sp.current()).
+	// nil = fixed bindIP. Direct-tcp client only.
+	sp *PeerPool
 
 	sniSplit bool   // client ws/xhttp: split the ClientHello so the cleartext SNI crosses a TCP segment boundary
 	splitPos int    // explicit split offset into the ClientHello (0 = auto: middle of the hostname)
@@ -411,6 +415,46 @@ func (b *TCP) dialTarget() string {
 	return b.addr
 }
 
+// SetSourcePool (client, direct tcp/cover only) wires a source-IP rotation pool: the local IP the
+// client dials FROM is cycled/burned alongside the destination. Refused on the ws path (its edge pool
+// owns rotation). nil / single-endpoint = the fixed bindIP. Call before Run().
+func (b *TCP) SetSourcePool(sp *PeerPool) {
+	if b.isClient && !b.ws {
+		b.sp = sp
+	}
+}
+
+// sourceIP is the local IP the next dial binds to: the source pool's current entry when wired, else
+// the fixed bindIP. Like dialTarget, b.bindIP is never mutated — the pool holds the moving state — so
+// this is safe to read from the dial goroutine while a timer rotates the pool.
+func (b *TCP) sourceIP() string {
+	if b.sp != nil {
+		return b.sp.current()
+	}
+	return b.bindIP
+}
+
+// rotateSourceTCP advances the source pool so the NEXT dial binds to a new local IP, returning whether
+// it actually moved (the proactive timer uses that to decide whether to force a re-dial). It performs
+// no teardown itself — the caller (a dead dial, or the proactive timer that closes the conn) drives
+// the re-dial that picks up sourceIP(). No-op / false without a source pool.
+func (b *TCP) rotateSourceTCP(proactive bool) bool {
+	if b.sp == nil {
+		return false
+	}
+	var addr string
+	var moved bool
+	if proactive {
+		addr, moved = b.sp.rotateOnce()
+	} else {
+		addr, moved = b.sp.fail()
+	}
+	if moved {
+		log.Printf("core/tcp: rotated source to %s", addr)
+	}
+	return moved
+}
+
 // SetDesync (client, optional) turns on TCP-segment injection desync for the tcp/cover/ws
 // carriers: after each connect, sendTCPFakes injects `count` decoy segments on the real
 // 4-tuple to mis-sync a stateful DPI. Stores the config; the actual injection is Linux-only
@@ -464,8 +508,8 @@ func (b *TCP) SetStatusPath(path string) {
 // it (LocalAddr). A malformed or non-local IP is ignored (falls back to the kernel default).
 func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 	d := &net.Dialer{Timeout: timeout}
-	if b.bindIP != "" {
-		if ip := net.ParseIP(b.bindIP); ip != nil {
+	if src := b.sourceIP(); src != "" { // rotation pool's current source, or the fixed bindIP
+		if ip := net.ParseIP(src); ip != nil {
 			d.LocalAddr = &net.TCPAddr{IP: ip}
 		}
 	}
@@ -1210,6 +1254,30 @@ func (b *TCP) retestLoop() {
 // failure burns the offending IP/SNI (establishWS), and a proactive timer tears the
 // connection down after b.rotate so the client moves before the edge is fingerprinted.
 func (b *TCP) dialLoop() {
+	// direct-tcp peer/source pools: burnDest burns+advances the destination and, once the dest pool has
+	// cycled through every endpoint against the current source, walks the source too (same policy as the
+	// datagram carriers' rotationController). succeedBoth clears transient burns after a healthy session.
+	destRot := 0
+	burnDest := func() {
+		if b.pp != nil {
+			b.pp.fail()
+			if destRot++; b.sp != nil && b.pp.size() > 0 && destRot >= b.pp.size() {
+				b.rotateSourceTCP(false)
+				destRot = 0
+			}
+		} else if b.sp != nil {
+			b.rotateSourceTCP(false)
+		}
+	}
+	succeedBoth := func() {
+		destRot = 0
+		if b.pp != nil {
+			b.pp.succeeded()
+		}
+		if b.sp != nil {
+			b.sp.succeeded()
+		}
+	}
 	for {
 		if b.closed.Load() {
 			return
@@ -1218,8 +1286,8 @@ func (b *TCP) dialLoop() {
 		if err != nil {
 			if b.pool != nil {
 				b.pool.advance() // rotate to the next combo for the retry
-			} else if b.pp != nil {
-				b.pp.fail() // this endpoint won't connect (refused/timeout) -> burn + advance to the next
+			} else {
+				burnDest() // direct-tcp: this endpoint won't connect -> burn + advance (dest, then source)
 			}
 			if b.sleep(1 * time.Second) {
 				return
@@ -1254,14 +1322,29 @@ func (b *TCP) dialLoop() {
 		if b.pool != nil && b.rotate > 0 && !b.pool.isPinned() { // a pin freezes the edge: no auto-rotation
 			c := conn
 			rot = time.AfterFunc(b.rotate, func() { rotated.Store(true); b.pool.advance(); c.Close() })
-		} else if b.pp != nil && b.pp.rotate > 0 { // direct-tcp peer pool: proactively move the destination
+		} else if (b.pp != nil && b.pp.rotate > 0) || (b.sp != nil && b.sp.rotate > 0) {
 			c := conn
-			// Only tear the live connection down if the pool ACTUALLY advanced. When every other
-			// endpoint is burned (the common "one server IP got filtered" steady state) rotateOnce()
-			// can't move and returns moved=false; closing anyway would drop a healthy connection every
-			// interval for nothing. The datagram carriers guard the same way (rotatePeer* `if !moved`).
-			rot = time.AfterFunc(b.pp.rotate, func() {
-				if _, moved := b.pp.rotateOnce(); moved {
+			iv := time.Duration(0) // fire on whichever pool has the (longer) rotate interval set
+			if b.pp != nil {
+				iv = b.pp.rotate
+			}
+			if b.sp != nil && b.sp.rotate > iv {
+				iv = b.sp.rotate
+			}
+			// Only tear the live connection down if a pool ACTUALLY advanced. When every other endpoint
+			// is burned (the common "one IP got filtered" steady state) rotateOnce() can't move; closing
+			// anyway would drop a healthy connection every interval for nothing (cf. the datagram guard).
+			rot = time.AfterFunc(iv, func() {
+				moved := false
+				if b.pp != nil {
+					if _, m := b.pp.rotateOnce(); m {
+						moved = true
+					}
+				}
+				if b.rotateSourceTCP(true) { // advances the source pool; re-dial applies the new LocalAddr
+					moved = true
+				}
+				if moved {
 					rotated.Store(true)
 					c.Close()
 				}
@@ -1290,18 +1373,18 @@ func (b *TCP) dialLoop() {
 					b.pool.dataSuccess(label)
 				}
 			}
-		} else if b.pp != nil && !b.closed.Load() {
-			// Direct-tcp peer pool: a scheduled proactive rotation is deliberate (clear any transient
-			// burn on the endpoint we just left); a genuine death that came too soon means the endpoint
-			// connected but couldn't carry data (throttle/blackhole) — burn + advance off it. A death
-			// after a healthy lifetime is an ordinary drop (server restart, transient loss): re-dial the
-			// SAME endpoint, so succeeded() clears any stale burn on it.
+		} else if (b.pp != nil || b.sp != nil) && !b.closed.Load() {
+			// Direct-tcp peer/source pool: a scheduled proactive rotation is deliberate (clear any
+			// transient burns); a genuine death that came too soon means the endpoint connected but
+			// couldn't carry data (throttle/blackhole) — burn + advance off it (and walk the source once
+			// dests cycle). A death after a healthy lifetime is an ordinary drop (server restart): keep
+			// the endpoints and clear stale burns.
 			if rotated.Load() {
-				b.pp.succeeded()
+				succeedBoth()
 			} else if time.Since(connectedAt) < minLiveness {
-				b.pp.fail()
+				burnDest()
 			} else {
-				b.pp.succeeded()
+				succeedBoth()
 			}
 		}
 		if b.sleep(1 * time.Second) {

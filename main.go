@@ -283,6 +283,17 @@ func main() {
 			log.Printf("tnl-core: destination pool: %d peers rotate=%ds auto_burn=%v", len(cfg.PeerIPs), cfg.PeerRotateSecs, cfg.PeerAutoBurn)
 		}
 	}
+	// Source rotation pool (client, direct transports): cycle the client's OWN source IPs alongside the
+	// destination pool (same rotate/auto-burn settings). raw/flux swap the crafted-header source, udp
+	// rebinds its socket, tcp re-dials with a new LocalAddr. Only the direct carriers implement it. The
+	// source pool doesn't own a status file (the destination pool writes the panel-facing status).
+	if cfg.Role == "client" && len(cfg.SrcIPs) >= 2 {
+		if s, ok := b.(interface{ SetSourcePool(*packet.PeerPool) }); ok {
+			sp := packet.NewPeerPool(cfg.SrcIPs, cfg.PeerAutoBurn, time.Duration(cfg.PeerRotateSecs)*time.Second, "")
+			s.SetSourcePool(sp)
+			log.Printf("tnl-core: source pool: %d source IPs rotate=%ds auto_burn=%v", len(cfg.SrcIPs), cfg.PeerRotateSecs, cfg.PeerAutoBurn)
+		}
+	}
 	defer b.Close()
 
 	// Clean shutdown removes the TUN (via defers) on SIGINT/SIGTERM.

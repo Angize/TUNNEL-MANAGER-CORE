@@ -79,6 +79,7 @@ type Flux struct {
 
 	st *coreStatus // client-only: precise self-heal event ring written to the status file (nil = off)
 	pp *PeerPool   // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
+	sp *PeerPool   // client-only: source-IP rotation pool (nil = single fixed source; swaps the crafted header src)
 }
 
 // SetStatusPath (client, optional) wires a status-file event ring so self-heal re-handshakes and
@@ -773,6 +774,42 @@ func (f *Flux) SetPeerPool(pp *PeerPool) {
 	}
 }
 
+// SetSourcePool (client) wires a source-IP rotation pool: the crafted-header source IP the client
+// sends FROM is cycled/burned alongside the destination. flux stamps the source per packet, so a
+// rotation is just an atomic swap — no socket rebind; the server follows the new source (it learns
+// the peer from received frames). nil / single-endpoint = fixed source. Call before Run().
+func (f *Flux) SetSourcePool(sp *PeerPool) {
+	if f.isClient {
+		f.sp = sp
+	}
+}
+
+// rotateSourceFlux points the client at the next source-pool IP and swaps the crafted-header source.
+// No session reset is needed (the source is independent of the AEAD session); the server rebinds to
+// the new source on the next authenticated frame. No-op when the pool did not move or the IP is not v4.
+func (f *Flux) rotateSourceFlux(proactive bool) {
+	if f.sp == nil {
+		return
+	}
+	var addr string
+	var moved bool
+	if proactive {
+		addr, moved = f.sp.rotateOnce()
+	} else {
+		addr, moved = f.sp.fail()
+	}
+	if !moved {
+		return
+	}
+	ip := parseIP4(hostOnly(addr))
+	if ip == nil {
+		return
+	}
+	f.localIP.Store(&net.IPAddr{IP: ip})
+	log.Printf("flux: rotated source to %s", addr)
+	f.st.down("src-rotate", "flux")
+}
+
 // rotatePeerFlux points the client at the next pool endpoint (burn+advance, or a timed rotate) and
 // clears the session so the next loop re-handshakes against the new destination. No-op when the pool
 // did not move or the endpoint is not a valid IPv4 (flux is IPv4-only).
@@ -803,10 +840,7 @@ func (f *Flux) rotatePeerFlux(proactive bool) {
 
 func (f *Flux) clientLoop() {
 	failN := 0
-	var rotateAt time.Time
-	if f.pp != nil && f.pp.rotate > 0 {
-		rotateAt = time.Now().Add(f.pp.rotate)
-	}
+	rc := newRotationController(f.pp, f.sp)
 	for {
 		if f.cryptoOn && f.sealer() != nil && f.sessionStale() {
 			f.session.Store(nil)
@@ -816,20 +850,17 @@ func (f *Flux) clientLoop() {
 		}
 		if f.cryptoOn && f.sealer() == nil {
 			f.sendInit()
-			if failN++; f.pp != nil && failN >= peerFailThreshold {
-				f.rotatePeerFlux(false)
+			if failN++; rc.active() && failN >= peerFailThreshold {
+				rc.fail(f.rotatePeerFlux, f.rotateSourceFlux) // burn+advance dest; walk source once dests cycle
 				failN = 0
 			}
 		} else {
-			if failN > 0 && f.pp != nil {
-				f.pp.succeeded()
+			if failN > 0 {
+				rc.success()
 			}
 			failN = 0
 			f.send(typePing, nil, f.peer.Load())
-			if f.pp != nil && !rotateAt.IsZero() && time.Now().After(rotateAt) {
-				f.rotatePeerFlux(true)
-				rotateAt = time.Now().Add(f.pp.rotate)
-			}
+			rc.proactive(f.rotatePeerFlux, f.rotateSourceFlux, time.Now())
 		}
 		wait := jitter(f.keepalive)
 		if f.cryptoOn && f.sealer() == nil {

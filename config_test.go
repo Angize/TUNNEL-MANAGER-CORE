@@ -229,3 +229,36 @@ func TestPeerRotateSecsNonNegative(t *testing.T) {
 		t.Error("negative peer_rotate_secs was accepted")
 	}
 }
+
+func TestSrcIPsValidation(t *testing.T) {
+	// Valid source pool (bare IPv4) on a direct client — accepted alongside a dest pool.
+	c := validUDP()
+	c.PeerIPs = []string{"203.0.113.9:9000", "198.51.100.7:9000"}
+	c.SrcIPs = []string{"192.0.2.10", "192.0.2.11"}
+	if err := c.validate(); err != nil {
+		t.Fatalf("valid src_ips pool rejected: %v", err)
+	}
+	// A source is a bare IPv4 regardless of carrier — "ip:port" host must still be an IP, v6 rejected.
+	c = validUDP()
+	c.SrcIPs = []string{"2001:db8::1"}
+	if err := c.validate(); err == nil {
+		t.Error("src_ips with an IPv6 address was accepted")
+	}
+	// Meaningless on ws (own edge pool) and on a server (it does not dial).
+	c = &Config{
+		Role: "client", Mode: "packet", Profile: "core", Transport: "ws",
+		Peer: "203.0.113.9", TunAddr: "10.200.0.2/24", WSTLS: true, WSHost: "cdn.example.com",
+		Crypto: CryptoCfg{Enabled: true, PSK: "a-sufficiently-long-preshared-key"},
+		SrcIPs: []string{"192.0.2.10", "192.0.2.11"},
+	}
+	if err := c.validate(); err == nil {
+		t.Error("src_ips on the ws transport was accepted")
+	}
+	c = validUDP()
+	c.Role = "server"
+	c.Listen = "0.0.0.0:9000"
+	c.SrcIPs = []string{"192.0.2.10", "192.0.2.11"}
+	if err := c.validate(); err == nil {
+		t.Error("src_ips on a server was accepted")
+	}
+}

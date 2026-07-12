@@ -43,6 +43,9 @@ func (p *PeerPool) current() string {
 	return p.addrs[p.cur]
 }
 
+// size is the number of endpoints in the pool. It is fixed at construction, so no lock is needed.
+func (p *PeerPool) size() int { return len(p.addrs) }
+
 // nextLive advances cur to the next endpoint that is not burned, reviving all endpoints first if
 // every one is burned (never dead-end). Caller holds the lock.
 func (p *PeerPool) nextLive() {
@@ -106,6 +109,81 @@ func (p *PeerPool) succeeded() {
 		delete(p.burned, p.addrs[p.cur])
 		p.writeStatusLocked()
 	}
+}
+
+// rotationController couples a client carrier's DESTINATION pool with an optional SOURCE pool and
+// centralizes the failover/proactive policy, so every carrier (udp/tcp/raw/flux) drives rotation
+// identically instead of re-deriving it. The carrier supplies its own rotate funcs (which actually
+// swap the peer / the source IP); the controller only decides WHEN to call them.
+//
+// Policy: on a dead peer, burn+advance the destination; once the destination pool has cycled through
+// every endpoint against the current source (destRot reaches the pool size — i.e. all were burned and
+// revived), advance the source too, so a blocked source IP is walked off after its destinations are
+// exhausted. A source-only pool (no dest pool) just advances the source. The proactive timer moves
+// both pools together (a moving target on each side).
+type rotationController struct {
+	dst, src *PeerPool
+	destRot  int
+	rotate   time.Duration
+	rotateAt time.Time
+}
+
+func newRotationController(dst, src *PeerPool) *rotationController {
+	c := &rotationController{dst: dst, src: src}
+	if dst != nil {
+		c.rotate = dst.rotate
+	}
+	if src != nil && src.rotate > c.rotate {
+		c.rotate = src.rotate
+	}
+	if c.rotate > 0 {
+		c.rotateAt = time.Now().Add(c.rotate)
+	}
+	return c
+}
+
+// active reports whether any rotation is wired (either pool present).
+func (c *rotationController) active() bool { return c != nil && (c.dst != nil || c.src != nil) }
+
+// fail is called when the current peer looks dead. rotDst/rotSrc are the carrier's swap funcs.
+func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
+	if c.dst != nil {
+		rotDst(false)
+		c.destRot++
+		if c.src != nil && c.dst.size() > 0 && c.destRot >= c.dst.size() {
+			rotSrc(false) // every destination tried against this source — move the source
+			c.destRot = 0
+		}
+		return
+	}
+	if c.src != nil {
+		rotSrc(false)
+	}
+}
+
+// success clears any transient burns after the carrier handshakes, and resets the dest-cycle counter.
+func (c *rotationController) success() {
+	c.destRot = 0
+	if c.dst != nil {
+		c.dst.succeeded()
+	}
+	if c.src != nil {
+		c.src.succeeded()
+	}
+}
+
+// proactive fires the timed rotation of BOTH pools when due (a signal-free moving target on each side).
+func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now time.Time) {
+	if c.rotate <= 0 || c.rotateAt.IsZero() || !now.After(c.rotateAt) {
+		return
+	}
+	if c.dst != nil {
+		rotDst(true)
+	}
+	if c.src != nil {
+		rotSrc(true)
+	}
+	c.rotateAt = now.Add(c.rotate)
 }
 
 type peerPoolStatus struct {

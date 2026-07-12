@@ -57,7 +57,12 @@ type sealerBox struct{ s Sealer }
 
 // UDP carries L3 packets between a TUN device and a UDP peer.
 type UDP struct {
-	conn      *net.UDPConn
+	// conn is the live socket. It is an atomic pointer (not a plain *net.UDPConn) because a source-IP
+	// rotation rebinds it: rotateSourceUDP opens a fresh socket on the new source IP, swaps it in, and
+	// closes the old one. rebindGen is bumped on every deliberate rebind so the receive loop can tell a
+	// rotation-induced ReadFromUDP error (reload the new conn and keep going) from a real socket death.
+	conn      atomic.Pointer[net.UDPConn]
+	rebindGen atomic.Int64
 	dev       *tun.Device
 	keepalive time.Duration
 	obfs      bool
@@ -84,6 +89,7 @@ type UDP struct {
 
 	st *coreStatus // client-only: precise self-heal event ring written to the status file (nil = off)
 	pp *PeerPool   // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
+	sp *PeerPool   // client-only: source-IP rotation pool (nil = fixed source; rebinds the socket on rotate)
 }
 
 // SetPeerPool (client, direct transports) wires a destination-IP rotation pool: when the current
@@ -129,6 +135,56 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 	b.st.down("peer-rotate", "udp")
 }
 
+// SetSourcePool (client) wires a source-IP rotation pool: the client cycles the local IP it sends
+// FROM. Unlike raw/flux (which stamp the source per packet), udp owns a kernel socket, so a rotation
+// REBINDS it — a fresh socket on the new source IP replaces the old one (see rotateSourceUDP). The
+// AEAD session is independent of the address, so the session survives; the server just relearns the
+// peer from the next authenticated frame. nil / single-endpoint = fixed source. Call before Run().
+func (b *UDP) SetSourcePool(sp *PeerPool) {
+	if b.isClient {
+		b.sp = sp
+	}
+}
+
+// rotateSourceUDP rebinds the socket onto the next source-pool IP. It does NOT touch the session (the
+// source is independent of the AEAD keys), so no re-handshake: the client keeps sending under the same
+// session from the new local address and the server follows. No-op when the pool did not move or the
+// new socket can't bind (e.g. the IP isn't local) — the old socket stays live.
+func (b *UDP) rotateSourceUDP(proactive bool) {
+	if b.sp == nil {
+		return
+	}
+	var addr string
+	var moved bool
+	if proactive {
+		addr, moved = b.sp.rotateOnce()
+	} else {
+		addr, moved = b.sp.fail()
+	}
+	if !moved {
+		return
+	}
+	host := addr
+	if h, _, e := net.SplitHostPort(addr); e == nil { // tolerate an accidental ip:port
+		host = h
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return
+	}
+	nc, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip}) // fresh socket on the new source (ephemeral port)
+	if err != nil {
+		log.Printf("core/udp: source rebind to %s failed: %v", host, err)
+		return
+	}
+	old := b.conn.Load()
+	b.rebindGen.Add(1) // mark the imminent read error on `old` as a deliberate swap, not a death
+	b.conn.Store(nc)
+	_ = old.Close() // unblocks netToTun's ReadFromUDP; it reloads nc via rebindGen and continues
+	log.Printf("core/udp: rotated source to %s", host)
+	b.st.down("src-rotate", "udp")
+}
+
 // SetStatusPath (client, optional) wires a status-file event ring so self-heal re-handshakes and
 // recoveries surface in the panel's system log. Call before Run(). No-op path leaves it off.
 func (b *UDP) SetStatusPath(path string) {
@@ -170,7 +226,8 @@ func Dial(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, crypt
 	if err != nil {
 		return nil, err
 	}
-	b := &UDP{conn: conn, dev: dev, keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, isClient: true, closeCh: make(chan struct{})}
+	b := &UDP{dev: dev, keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, isClient: true, closeCh: make(chan struct{})}
+	b.conn.Store(conn)
 	b.peer.Store(ra)
 	b.initFec(fec, fecData, fecParity)
 	return b, nil
@@ -186,7 +243,8 @@ func Listen(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs, c
 	if err != nil {
 		return nil, err
 	}
-	b := &UDP{conn: conn, dev: dev, keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, closeCh: make(chan struct{})}
+	b := &UDP{dev: dev, keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, closeCh: make(chan struct{})}
+	b.conn.Store(conn)
 	b.initFec(fec, fecData, fecParity)
 	return b, nil
 }
@@ -198,7 +256,7 @@ func (b *UDP) initFec(fec bool, fecData, fecParity int) {
 	b.fecEnc, b.fecDec = newFecPair(fec, fecData, fecParity, "udp",
 		func(pkt []byte) {
 			if p := b.peer.Load(); p != nil {
-				_, _ = b.conn.WriteToUDP(pkt, p)
+				_, _ = b.conn.Load().WriteToUDP(pkt, p)
 			}
 		},
 		func(frame []byte) { b.deliver(frame, b.rxAddr.Load()) })
@@ -222,7 +280,7 @@ func (b *UDP) Close() error {
 	if b.fecEnc != nil {
 		b.fecEnc.Close() // stop the FEC flush timer before the socket goes away
 	}
-	return b.conn.Close()
+	return b.conn.Load().Close()
 }
 
 func (b *UDP) sealer() Sealer {
@@ -281,7 +339,7 @@ func (b *UDP) tunToNet() error {
 			b.fecEnc.addData(frame) // buffered into an RS block; shards go out via the emit callback
 			continue
 		}
-		if _, err := b.conn.WriteToUDP(frame, peer); err != nil {
+		if _, err := b.conn.Load().WriteToUDP(frame, peer); err != nil {
 			log.Printf("core: write error: %v", err)
 		}
 	}
@@ -293,8 +351,15 @@ func (b *UDP) tunToNet() error {
 func (b *UDP) netToTun() error {
 	buf := make([]byte, maxDatagram)
 	for {
-		n, addr, err := b.conn.ReadFromUDP(buf)
+		gen := b.rebindGen.Load()
+		n, addr, err := b.conn.Load().ReadFromUDP(buf)
 		if err != nil {
+			// A source rotation closes the old socket out from under this read. Distinguish that
+			// deliberate swap (gen advanced) — reload the new socket and keep going — from a genuine
+			// socket death (gen unchanged), which ends the loop as before.
+			if b.rebindGen.Load() != gen {
+				continue
+			}
 			return err
 		}
 		if b.fecDec != nil {
@@ -442,7 +507,7 @@ func (b *UDP) writeCtrl(pkt []byte, to *net.UDPAddr) {
 	if to == nil {
 		return
 	}
-	_, _ = b.conn.WriteToUDP(fecTag(b.fecEnc, pkt), to)
+	_, _ = b.conn.Load().WriteToUDP(fecTag(b.fecEnc, pkt), to)
 }
 
 func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {
@@ -463,10 +528,7 @@ func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {
 // lost it starts a new handshake.
 func (b *UDP) clientLoop() {
 	failN := 0 // consecutive handshake retransmits with no session -> the peer may be dead
-	var rotateAt time.Time
-	if b.pp != nil && b.pp.rotate > 0 {
-		rotateAt = time.Now().Add(b.pp.rotate)
-	}
+	rc := newRotationController(b.pp, b.sp)
 	for {
 		if b.cryptoOn && b.sealer() != nil && b.sessionStale() {
 			b.session.Store(nil) // server likely restarted — drop the dead session so we re-handshake
@@ -476,20 +538,17 @@ func (b *UDP) clientLoop() {
 		}
 		if b.sealer() == nil && b.cryptoOn {
 			b.sendInit()
-			if failN++; b.pp != nil && failN >= peerFailThreshold {
-				b.rotatePeerUDP(false) // current destination won't handshake -> burn + rotate to the next IP
+			if failN++; rc.active() && failN >= peerFailThreshold {
+				rc.fail(b.rotatePeerUDP, b.rotateSourceUDP) // burn+advance dest; walk source once dests cycle
 				failN = 0
 			}
 		} else {
-			if failN > 0 && b.pp != nil {
-				b.pp.succeeded() // the active endpoint handshaked — clear any transient burn on it
+			if failN > 0 {
+				rc.success() // the active endpoints handshaked — clear any transient burns
 			}
 			failN = 0
 			b.send(typePing, nil, b.peer.Load())
-			if b.pp != nil && !rotateAt.IsZero() && time.Now().After(rotateAt) {
-				b.rotatePeerUDP(true) // proactive rotation (moving target)
-				rotateAt = time.Now().Add(b.pp.rotate)
-			}
+			rc.proactive(b.rotatePeerUDP, b.rotateSourceUDP, time.Now()) // moving target on both sides
 		}
 		wait := b.keepalive
 		if b.sealer() == nil && b.cryptoOn {

@@ -82,6 +82,12 @@ type Config struct {
 	PeerRotateSecs int      `json:"peer_rotate_secs"`
 	PeerAutoBurn   bool     `json:"peer_auto_burn"`
 	PeerStatusPath string   `json:"peer_status_path"`
+	// SrcIPs is the SOURCE rotation pool: the client's OWN IPs that it sends FROM, cycled alongside
+	// PeerIPs (same PeerRotateSecs / PeerAutoBurn) so a blocked source IP is walked off too. Each is a
+	// bare IPv4 (this node's own address). Client + direct transports only; on raw it is ignored under
+	// spoof_src (a forged source is a deliberate decoy). raw/flux stamp the source per packet; udp
+	// rebinds its socket; tcp re-dials with a new LocalAddr. When set it supersedes the single BindIP.
+	SrcIPs []string `json:"src_ips"`
 	// BindIP is the source IP the client dials FROM (its own node IP). On a host with
 	// several IPs the kernel would otherwise egress from the primary IP; binding pins the
 	// outbound socket to this node's registered IP so the peer/CDN sees the expected source.
@@ -332,31 +338,30 @@ var rawProfiles = map[string]bool{
 	"bip": true, "ipip": true, "gre": true, "icmp": true, "udp": true, "tcp": true,
 }
 
-// validatePeerEndpoint checks one rotation-pool entry. The pool swaps the destination with no DNS
-// step, so every entry must be a literal IP. The stream/datagram carriers (udp/tcp) dial "ip:port"
-// (needPort), so the host must be an IP and the port a valid number; the raw/flux carriers address a
-// bare IPv4 (the core builds the IP header and resolves via parseIP4, which rejects IPv6 and names),
-// so those entries must be IPv4 — an accidental ":port" there is tolerated and dropped at dial.
-func validatePeerEndpoint(e string, needPort bool) error {
+// validatePoolEndpoint checks one rotation-pool entry (field names it for the error). The pool swaps
+// the endpoint with no DNS step, so every entry must be a literal IP. With needPort (the udp/tcp
+// DESTINATION) it is "ip:port" — the host must be an IP and the port valid; otherwise (raw/flux
+// destinations, and every SOURCE IP) it is a bare IPv4 — an accidental ":port" is tolerated/dropped.
+func validatePoolEndpoint(field, e string, needPort bool) error {
 	if needPort {
 		host, port, err := net.SplitHostPort(e)
 		if err != nil {
-			return errors.New("peer_ips entry " + strconv.Quote(e) + " must be \"ip:port\"")
+			return errors.New(field + " entry " + strconv.Quote(e) + " must be \"ip:port\"")
 		}
 		if net.ParseIP(host) == nil {
-			return errors.New("peer_ips entry " + strconv.Quote(e) + " has a non-IP host (the pool dials IPs directly, no DNS)")
+			return errors.New(field + " entry " + strconv.Quote(e) + " has a non-IP host (the pool dials IPs directly, no DNS)")
 		}
 		if p, err := strconv.Atoi(port); err != nil || p < 1 || p > 65535 {
-			return errors.New("peer_ips entry " + strconv.Quote(e) + " has an invalid port")
+			return errors.New(field + " entry " + strconv.Quote(e) + " has an invalid port")
 		}
 		return nil
 	}
 	host := e
-	if h, _, err := net.SplitHostPort(e); err == nil { // tolerate an accidental ip:port on raw/flux
+	if h, _, err := net.SplitHostPort(e); err == nil { // tolerate an accidental ip:port
 		host = h
 	}
 	if ip := net.ParseIP(host); ip == nil || ip.To4() == nil {
-		return errors.New("peer_ips entry " + strconv.Quote(e) + " must be an IPv4 address (raw/flux are IPv4-only)")
+		return errors.New(field + " entry " + strconv.Quote(e) + " must be an IPv4 address")
 	}
 	return nil
 }
@@ -520,7 +525,24 @@ func (c *Config) validate() error {
 		// udp/tcp dial "ip:port"; raw/flux address a bare IPv4 (parseIP4 rejects v6 and a hostname).
 		needPort := c.Transport != "raw" && c.Transport != "flux"
 		for _, e := range c.PeerIPs {
-			if err := validatePeerEndpoint(e, needPort); err != nil {
+			if err := validatePoolEndpoint("peer_ips", e, needPort); err != nil {
+				return err
+			}
+		}
+	}
+	// SrcIPs is the client-side SOURCE rotation pool (the node's own IPs). Same scoping as PeerIPs, but
+	// every entry is a bare IPv4 regardless of carrier (a source is never "ip:port").
+	if len(c.SrcIPs) > 0 {
+		if c.Role != "client" {
+			return errors.New("src_ips is a client source rotation pool (a server does not dial)")
+		}
+		switch c.Transport {
+		case "", "udp", "tcp", "raw", "flux":
+		default:
+			return errors.New("src_ips is only for the direct transports (udp, tcp, raw, flux) — ws has its own edge pool")
+		}
+		for _, e := range c.SrcIPs {
+			if err := validatePoolEndpoint("src_ips", e, false); err != nil {
 				return err
 			}
 		}
