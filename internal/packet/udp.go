@@ -64,6 +64,17 @@ type UDP struct {
 	conn      atomic.Pointer[net.UDPConn]
 	rebindGen atomic.Int64
 	rebindMu  sync.Mutex // serializes rebindSourceTo so a proactive rotation and a pin-poll adopt can't race the swap (double-close / socket leak)
+	// Server-side listen sockets. A pooled server binds ONE socket per selected pool IP (not 0.0.0.0), so
+	// only those IPs listen and the reply leaves from the SAME IP the client dialed (source-correct for a
+	// NAT'd client). replyConn is the socket an AUTHENTICATED frame was last received on; tunToNet/writeCtrl
+	// reply on it. It is committed only where the peer address is learned (post-auth), so a stray or hostile
+	// datagram to another pool IP cannot hijack the reply source. rxConn stashes the current read loop's
+	// socket as a candidate (under rxMu) until that authenticated commit. rxMu serializes the N read loops
+	// into the single-receiver contract the crypto/replay/FEC path assumes.
+	srvConns  []*net.UDPConn
+	replyConn atomic.Pointer[net.UDPConn]
+	rxConn    atomic.Pointer[net.UDPConn]
+	rxMu      sync.Mutex
 	dev       *tun.Device
 	keepalive time.Duration
 	obfs      bool
@@ -326,20 +337,99 @@ func Dial(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, crypt
 	return b, nil
 }
 
-// Listen (server role) binds listenAddr and waits to learn the peer.
-func Listen(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, fec bool, fecData, fecParity int) (*UDP, error) {
-	la, err := net.ResolveUDPAddr("udp", listenAddr)
-	if err != nil {
-		return nil, err
-	}
-	conn, err := net.ListenUDP("udp", la)
-	if err != nil {
-		return nil, err
-	}
+// Listen (server role) binds one socket per listen address and waits to learn the peer. A non-pooled
+// server passes a single address; a pooled server passes one "ip:port" per selected pool IP, so only
+// those IPs listen (not 0.0.0.0) and each reply leaves from the IP the client actually dialed.
+func Listen(listenAddrs []string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, fec bool, fecData, fecParity int) (*UDP, error) {
 	b := &UDP{dev: dev, keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, closeCh: make(chan struct{})}
-	b.conn.Store(conn)
+	for _, listenAddr := range listenAddrs {
+		la, err := net.ResolveUDPAddr("udp", listenAddr)
+		if err == nil {
+			var conn *net.UDPConn
+			conn, err = net.ListenUDP("udp", la)
+			if err == nil {
+				b.srvConns = append(b.srvConns, conn)
+				continue
+			}
+		}
+		for _, c := range b.srvConns { // a later bind failed — release the ones already bound
+			_ = c.Close()
+		}
+		return nil, err
+	}
+	if len(b.srvConns) == 0 {
+		return nil, errors.New("udp listen: no listen address")
+	}
+	b.replyConn.Store(b.srvConns[0]) // default reply socket until the client is first heard
 	b.initFec(fec, fecData, fecParity)
 	return b, nil
+}
+
+// serverReadLoop reads one server listen socket. All listen sockets funnel through rxMu into the single
+// receiver contract the crypto/replay/handshake-cache/FEC path assumes; a point-to-point tunnel only
+// receives on one server IP at a time, so it is effectively uncontended. The socket is stashed as the
+// reply CANDIDATE (rxConn); it is promoted to the actual reply socket only when a frame AUTHENTICATES and
+// the peer is (re)learned — so an unauthenticated datagram to another pool IP can't hijack the reply source.
+func (b *UDP) serverReadLoop(c *net.UDPConn) error {
+	buf := make([]byte, maxDatagram)
+	for {
+		n, addr, err := c.ReadFromUDP(buf)
+		if err != nil {
+			return err
+		}
+		b.rxMu.Lock()
+		b.rxConn.Store(c) // candidate; learnPeer promotes it to replyConn after the frame authenticates
+		if b.fecDec != nil {
+			b.rxAddr.Store(addr)
+			b.fecDec.input(buf[:n])
+		} else {
+			b.deliver(buf[:n], addr)
+		}
+		b.rxMu.Unlock()
+	}
+}
+
+// learnPeer records the authenticated client's source address and, on a server, promotes the socket the
+// frame arrived on (rxConn) to the reply socket, so a pooled server replies from the exact IP the client
+// dialed. Called ONLY after a frame authenticates (crypto) or in clear mode — never for an unauthenticated
+// datagram — so a stray/hostile packet to another pool IP can't move the reply source. On the client the
+// reply socket is the single dial socket, so replyConn is left untouched.
+func (b *UDP) learnPeer(addr *net.UDPAddr) {
+	// Commit the reply socket BEFORE publishing the peer: tunToNet gates its downstream send on
+	// peer!=nil and then reads replyConn, so ordering the (sequentially-consistent) atomic stores this
+	// way guarantees a sender that sees the new peer also sees the matching reply socket — never a stale
+	// srvConns[0] for one packet on the very first authenticated frame.
+	if !b.isClient {
+		if c := b.rxConn.Load(); c != nil {
+			b.replyConn.Store(c)
+		}
+	}
+	b.peer.Store(addr)
+}
+
+// sendConn is the socket for an UNSOLICITED send (downstream data from tunToNet, FEC flush): the client's
+// single socket, or (server) replyConn — the socket an authenticated frame was last received on, so a
+// pooled server's downstream leaves from the exact IP the client dialed.
+func (b *UDP) sendConn() *net.UDPConn {
+	if b.isClient {
+		return b.conn.Load()
+	}
+	return b.replyConn.Load()
+}
+
+// replySock is the socket for a SOLICITED reply (a handshake response or a pong, sent while processing an
+// inbound packet under rxMu): the client's single socket, or (server) rxConn — the socket THIS inbound
+// packet arrived on. Using rxConn (not replyConn) means a handshake response egresses from the exact IP
+// the client dialed even before any data frame has authenticated, while a hostile/replayed init only ever
+// echoes back on its own socket and never perturbs the persistent replyConn (which moves only on auth).
+func (b *UDP) replySock() *net.UDPConn {
+	if b.isClient {
+		return b.conn.Load()
+	}
+	if c := b.rxConn.Load(); c != nil {
+		return c
+	}
+	return b.replyConn.Load()
 }
 
 // initFec wires the FEC encoder/decoder (no-op when fec is off). Data shards emit to
@@ -349,31 +439,51 @@ func (b *UDP) initFec(fec bool, fecData, fecParity int) {
 	b.fecEnc, b.fecDec = newFecPair(fec, fecData, fecParity, "udp",
 		func(pkt []byte) {
 			if p := b.peer.Load(); p != nil {
-				_, _ = b.conn.Load().WriteToUDP(pkt, p)
+				if c := b.sendConn(); c != nil {
+					_, _ = c.WriteToUDP(pkt, p)
+				}
 			}
 		},
 		func(frame []byte) { b.deliver(frame, b.rxAddr.Load()) })
 }
 
-// Run blocks until one of the loops fails (e.g. the socket or device closes).
+// Run blocks until one of the loops fails (e.g. a socket or the device closes). The client reads its one
+// socket; a server reads each of its listen sockets (one per pool IP) in its own loop.
 func (b *UDP) Run() error {
-	errc := make(chan error, 2)
+	errc := make(chan error, 2+len(b.srvConns))
 	go func() { errc <- b.tunToNet() }()
-	go func() { errc <- b.netToTun() }()
 	if b.isClient {
+		go func() { errc <- b.netToTun() }()
 		go b.clientLoop()
+	} else {
+		for _, c := range b.srvConns {
+			c := c
+			go func() { errc <- b.serverReadLoop(c) }()
+		}
 	}
 	return <-errc
 }
 
-// Close tears down the socket (which unblocks both loops) and stops the client
-// loop. Safe to call more than once.
+// Close tears down the socket(s) (which unblocks the loops) and stops the client loop. Safe to call more
+// than once.
 func (b *UDP) Close() error {
 	b.closeOnce.Do(func() { close(b.closeCh) })
 	if b.fecEnc != nil {
 		b.fecEnc.Close() // stop the FEC flush timer before the socket goes away
 	}
-	return b.conn.Load().Close()
+	if b.isClient {
+		if c := b.conn.Load(); c != nil {
+			return c.Close()
+		}
+		return nil
+	}
+	var err error
+	for _, c := range b.srvConns {
+		if e := c.Close(); e != nil {
+			err = e
+		}
+	}
+	return err
 }
 
 func (b *UDP) sealer() Sealer {
@@ -432,8 +542,10 @@ func (b *UDP) tunToNet() error {
 			b.fecEnc.addData(frame) // buffered into an RS block; shards go out via the emit callback
 			continue
 		}
-		if _, err := b.conn.Load().WriteToUDP(frame, peer); err != nil {
-			log.Printf("core: write error: %v", err)
+		if c := b.sendConn(); c != nil {
+			if _, err := c.WriteToUDP(frame, peer); err != nil {
+				log.Printf("core: write error: %v", err)
+			}
 		}
 	}
 }
@@ -480,7 +592,7 @@ func (b *UDP) deliver(pkt []byte, addr *net.UDPAddr) {
 		return
 	}
 	if b.pp == nil { // a pooled client owns its peer (mirror the crypto path); a server always learns it
-		b.peer.Store(addr)
+		b.learnPeer(addr)
 	}
 	b.dispatch(pkt[1], iff(pkt[1] == typeData, pkt[2:], nil), addr)
 }
@@ -508,13 +620,12 @@ func (b *UDP) handleCrypto(pkt []byte, addr *net.UDPAddr) {
 		if typ, session, seq, payload, oerr := b.openWith(s, pkt); oerr == nil && b.rp.ok(session, seq) {
 			// authenticated, fresh frame -> now safe to (re)learn the peer address
 			b.lastRx.Store(time.Now().UnixNano()) // liveness: the session is answering
-			// The DESTINATION pool owns the client's peer: don't rebind it from a reply's source. A
-			// pool server may listen on 0.0.0.0 and answer from its default egress IP (≠ the IP the
-			// client dialed); adopting that would silently pull the client off the endpoint the pool
-			// is rotating. Servers (pp==nil) still learn the client here — which is what lets them
-			// follow a client's SOURCE rotation.
+			// The DESTINATION pool owns the client's peer: don't rebind it from a reply's source, so a
+			// client's own rotation isn't silently pulled off the endpoint its pool is driving. Servers
+			// (pp==nil) learn the client here — which lets them follow a client's SOURCE rotation and, on
+			// a pooled server, promote this socket as the reply source (the IP the client actually dialed).
 			if b.pp == nil {
-				b.peer.Store(addr)
+				b.learnPeer(addr)
 			}
 			b.dispatch(typ, payload, addr)
 			return
@@ -530,7 +641,7 @@ func (b *UDP) handleCrypto(pkt []byte, addr *net.UDPAddr) {
 			b.rp = b.pendRp
 			b.pend = nil
 			b.lastRx.Store(time.Now().UnixNano())
-			b.peer.Store(addr)
+			b.learnPeer(addr)
 			b.dispatch(typ, payload, addr)
 			return
 		}
@@ -604,12 +715,17 @@ func (b *UDP) tryHandshake(pkt []byte, addr *net.UDPAddr) {
 
 // writeCtrl sends a control/handshake datagram, tagging it passthrough under FEC so
 // the peer's decoder forwards it straight through (never held in a block or parsed as
-// a shard). to may differ from the learned peer (a server's handshake reply).
+// a shard). to may differ from the learned peer (a server's handshake reply). It goes out
+// replySock — on a server, the socket THIS inbound packet arrived on — so a handshake reply
+// or pong egresses from the exact IP the client dialed (writeCtrl is only ever called while
+// processing that inbound packet, under rxMu, so rxConn is the right socket).
 func (b *UDP) writeCtrl(pkt []byte, to *net.UDPAddr) {
 	if to == nil {
 		return
 	}
-	_, _ = b.conn.Load().WriteToUDP(fecTag(b.fecEnc, pkt), to)
+	if c := b.replySock(); c != nil {
+		_, _ = c.WriteToUDP(fecTag(b.fecEnc, pkt), to)
+	}
 }
 
 func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {

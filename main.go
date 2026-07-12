@@ -111,9 +111,13 @@ func main() {
 	case "tcp":
 		switch cfg.Role {
 		case "server":
-			b, err = packet.ListenTCP(cfg.Listen, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Cover, cfg.CoverSNI)
+			la := cfg.ListenIPs // pooled server: bind each selected pool IP; else the single Listen addr
+			if len(la) == 0 {
+				la = []string{cfg.Listen}
+			}
+			b, err = packet.ListenTCP(la, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Cover, cfg.CoverSNI)
 			if err == nil {
-				log.Printf("tnl-core: listening (core/tcp%s%s) on %s", obfsTag, coverTag(cfg.Cover), cfg.Listen)
+				log.Printf("tnl-core: listening (core/tcp%s%s) on %v", obfsTag, coverTag(cfg.Cover), la)
 			}
 		case "client":
 			b, err = packet.DialTCP(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Cover, cfg.CoverSNI)
@@ -214,9 +218,13 @@ func main() {
 	default: // "udp"
 		switch cfg.Role {
 		case "server":
-			b, err = packet.Listen(cfg.Listen, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Fec, cfg.FecData, cfg.FecParity)
+			la := cfg.ListenIPs // pooled server: bind each selected pool IP; else the single Listen addr
+			if len(la) == 0 {
+				la = []string{cfg.Listen}
+			}
+			b, err = packet.Listen(la, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Fec, cfg.FecData, cfg.FecParity)
 			if err == nil {
-				log.Printf("tnl-core: listening (core/udp%s%s) on %s", obfsTag, fecTag, cfg.Listen)
+				log.Printf("tnl-core: listening (core/udp%s%s) on %v", obfsTag, fecTag, la)
 			}
 		case "client":
 			b, err = packet.Dial(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Fec, cfg.FecData, cfg.FecParity)
