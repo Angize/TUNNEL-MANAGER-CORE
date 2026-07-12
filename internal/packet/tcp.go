@@ -71,19 +71,9 @@ const (
 	// a connection flood cannot exhaust goroutines/fds/memory before auth.
 	maxPreAuthConns = 128
 
-	// pingLossThreshold closes a CLIENT connection after this many consecutive keepalive
-	// pings go unanswered (no inbound frame of ANY type in between). It is a faster liveness
-	// signal than the b.idle read deadline for a silently black-holed carrier: at ~3×keepalive
-	// it trips well before idle (≥60s), so dialLoop re-dials sooner. b.idle stays as a backstop.
-	pingLossThreshold = 3
-
-	// probeTimeout bounds a single differential/retest edge probe (TCP dial + TLS, no WS, no data).
-	probeTimeout = 5 * time.Second
-
-	// minLiveness (pool client) is the shortest a carrier may live and still count as a healthy
-	// session. A connection that handshakes then dies sooner than this is treated as a data-plane
-	// fault (throttle / blackhole-after-handshake) against its edge, not a healthy session.
-	minLiveness = 20 * time.Second
+	// pingLossThreshold (consecutive unanswered keepalives before a client closes), probeTimeout (edge
+	// probe budget) and minLiveness (shortest healthy session) are operator-tunable package vars now,
+	// defined with their defaults in tuning.go.
 
 	// maxAuthConns bounds concurrent AUTHENTICATED server connections. A warm-standby client
 	// keeps a second live carrier up (make-before-break), so the server must NOT evict the
@@ -518,9 +508,9 @@ func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 }
 
 func idleFor(keepalive time.Duration) time.Duration {
-	d := 4 * keepalive
-	if d < 60*time.Second {
-		d = 60 * time.Second
+	d := time.Duration(idleMult) * keepalive
+	if floor := time.Duration(idleMinSecs) * time.Second; d < floor {
+		d = floor
 	}
 	return d
 }

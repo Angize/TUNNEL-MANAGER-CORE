@@ -884,9 +884,9 @@ func (r *Raw) sessionStale() bool {
 	if last == 0 {
 		return false
 	}
-	def := 3 * r.keepalive
-	if def < 10*time.Second {
-		def = 10 * time.Second
+	def := time.Duration(sessionStaleMult) * r.keepalive
+	if floor := time.Duration(sessionStaleMinSecs) * time.Second; def < floor {
+		def = floor
 	}
 	w := deadWindow(r.keepalive, r.deadAfterSecs, def) // per-tunnel override tightens the self-heal deadline
 	return time.Since(time.Unix(0, last)) > w

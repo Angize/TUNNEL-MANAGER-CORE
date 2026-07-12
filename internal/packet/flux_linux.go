@@ -772,9 +772,9 @@ func (f *Flux) sessionStale() bool {
 	if last == 0 {
 		return false
 	}
-	def := 3 * f.keepalive
-	if def < 10*time.Second {
-		def = 10 * time.Second
+	def := time.Duration(sessionStaleMult) * f.keepalive
+	if floor := time.Duration(sessionStaleMinSecs) * time.Second; def < floor {
+		def = floor
 	}
 	w := deadWindow(f.keepalive, f.deadAfterSecs, def) // per-tunnel override tightens the self-heal deadline
 	return time.Since(time.Unix(0, last)) > w

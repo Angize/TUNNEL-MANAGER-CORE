@@ -58,10 +58,9 @@ var fluxDportPool = []uint16{443, 3478, 19302, 5349, 8801}
 // Binding header so the flow parses as WebRTC signalling, not just generic UDP.
 var fluxStunDports = []uint16{3478, 19302, 5349}
 
-// defaultFluxRotate is the epoch length when the config leaves flux_rotate_secs
-// unset. Ten minutes trades rotation agility against how often the (cheap)
+// defaultFluxRotate (default in tuning.go): the epoch length when the config leaves
+// flux_rotate_secs unset. Ten minutes trades rotation agility against how often the (cheap)
 // statistical shape churns; "rotate now" from the panel bumps the epoch out of band.
-const defaultFluxRotate = 600 * time.Second
 
 // fluxShape is the per-epoch carrier descriptor. It is a pure function of
 // (PSK, epoch, shapeProfile): both ends derive the same one from the clock alone.

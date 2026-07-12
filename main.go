@@ -52,6 +52,19 @@ func main() {
 		log.Fatalf("tnl-core: config: %v", err)
 	}
 
+	// Apply any operator-tuned operational timing BEFORE building carriers/pools (they read these
+	// package vars at construction). One process = one tunnel, so this is safe process-global state.
+	if t := cfg.Tuning; t != nil {
+		packet.ApplyTuning(packet.TuningInput{
+			SuspectBackoff: t.SuspectBackoff, DeadRetestSecs: t.DeadRetestSecs, PinTTLSecs: t.PinTTLSecs,
+			DataFailThreshold: t.DataFailThreshold, DataGoodWindowSecs: t.DataGoodWindowSecs,
+			IdleMult: t.IdleMult, IdleMinSecs: t.IdleMinSecs,
+			SessionStaleMult: t.SessionStaleMult, SessionStaleMinSecs: t.SessionStaleMinSecs,
+			PingLossThreshold: t.PingLossThreshold, MinLivenessSecs: t.MinLivenessSecs,
+			ProbeTimeoutSecs: t.ProbeTimeoutSecs, FluxRotateDefSecs: t.FluxRotateDefSecs,
+		})
+	}
+
 	// Open the TUN device BEFORE building the sealer. The sealer's constructor may
 	// draw from crypto/rand; on hosts without getrandom(2) that opens /dev/urandom
 	// and registers it with the runtime netpoller, which can leave a subsequently
