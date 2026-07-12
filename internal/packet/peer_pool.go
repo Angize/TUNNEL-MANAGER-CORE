@@ -183,6 +183,7 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 	if c.src != nil {
 		rotSrc(true)
 	}
+	c.destRot = 0 // a timed source move restarts the dest cycle (the "all dests tried" count is per-source)
 	c.rotateAt = now.Add(c.rotate)
 }
 

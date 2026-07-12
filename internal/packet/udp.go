@@ -141,8 +141,28 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 // AEAD session is independent of the address, so the session survives; the server just relearns the
 // peer from the next authenticated frame. nil / single-endpoint = fixed source. Call before Run().
 func (b *UDP) SetSourcePool(sp *PeerPool) {
-	if b.isClient {
-		b.sp = sp
+	if !b.isClient {
+		return
+	}
+	b.sp = sp
+	// Bind the initial socket to the pool's first source so the client egresses from SrcIPs[0]
+	// immediately (matching the pool's cur=0), instead of the OS-default source until the first
+	// rotation — which on a failover-only pool (rotate=0) would otherwise never happen. Called before
+	// Run(), so there is no receive loop yet: a plain swap (no rebindGen dance) is safe here.
+	if sp != nil {
+		host := sp.current()
+		if h, _, e := net.SplitHostPort(host); e == nil {
+			host = h
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if nc, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip}); err == nil {
+				old := b.conn.Load()
+				b.conn.Store(nc)
+				if old != nil {
+					_ = old.Close()
+				}
+			}
+		}
 	}
 }
 
@@ -178,8 +198,12 @@ func (b *UDP) rotateSourceUDP(proactive bool) {
 		return
 	}
 	old := b.conn.Load()
-	b.rebindGen.Add(1) // mark the imminent read error on `old` as a deliberate swap, not a death
+	// Order matters (netToTun loads gen THEN conn): store the new conn BEFORE bumping the gen. Then any
+	// reader that still loaded the OLD conn must have sampled its gen BEFORE this bump (Go atomics are
+	// sequentially consistent), so its post-error re-check sees the bumped gen and continues instead of
+	// misreading the deliberate swap as a socket death. Bumping before the store reopens that race.
 	b.conn.Store(nc)
+	b.rebindGen.Add(1)
 	_ = old.Close() // unblocks netToTun's ReadFromUDP; it reloads nc via rebindGen and continues
 	log.Printf("core/udp: rotated source to %s", host)
 	b.st.down("src-rotate", "udp")
@@ -386,7 +410,9 @@ func (b *UDP) deliver(pkt []byte, addr *net.UDPAddr) {
 	if len(pkt) < 2 || pkt[0] != magic {
 		return
 	}
-	b.peer.Store(addr)
+	if b.pp == nil { // a pooled client owns its peer (mirror the crypto path); a server always learns it
+		b.peer.Store(addr)
+	}
 	b.dispatch(pkt[1], iff(pkt[1] == typeData, pkt[2:], nil), addr)
 }
 

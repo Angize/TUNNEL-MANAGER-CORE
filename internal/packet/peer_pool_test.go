@@ -182,6 +182,24 @@ func TestUDPSourceRebindSwapsConn(t *testing.T) {
 	nc.Close() // c0 was already closed by rotateSourceUDP
 }
 
+// TestUDPSourcePoolBindsInitialSource checks that wiring a source pool rebinds the socket to SrcIPs[0]
+// at setup, so the client egresses from the pool's first source immediately (not the OS default until
+// the first rotation — which on a failover-only pool never happens).
+func TestUDPSourcePoolBindsInitialSource(t *testing.T) {
+	c0, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("initial ListenUDP: %v", err)
+	}
+	b := &UDP{isClient: true}
+	b.conn.Store(c0)
+	b.SetSourcePool(NewPeerPool([]string{"127.0.0.2", "127.0.0.3"}, true, 0, "")) // first entry != initial bind
+	got := b.conn.Load().LocalAddr().(*net.UDPAddr).IP
+	if !got.Equal(net.IPv4(127, 0, 0, 2)) {
+		t.Fatalf("SetSourcePool should bind the initial source to SrcIPs[0]=127.0.0.2, got %v", got)
+	}
+	b.conn.Load().Close()
+}
+
 // TestRotationControllerCouplesSource verifies the failover policy: burning destinations advances the
 // source only once every destination has been tried against the current source.
 func TestRotationControllerCouplesSource(t *testing.T) {

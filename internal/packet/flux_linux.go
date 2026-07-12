@@ -784,8 +784,17 @@ func (f *Flux) SetPeerPool(pp *PeerPool) {
 // rotation is just an atomic swap — no socket rebind; the server follows the new source (it learns
 // the peer from received frames). nil / single-endpoint = fixed source. Call before Run().
 func (f *Flux) SetSourcePool(sp *PeerPool) {
-	if f.isClient {
-		f.sp = sp
+	if !f.isClient {
+		return
+	}
+	f.sp = sp
+	// Seed the initial source so the client stamps SrcIPs[0] from the first packet (matching the pool's
+	// cur=0), instead of the route-derived default until the first rotation. Called before Run(), so
+	// openFluxSockets' `if localIP==nil` guard then leaves this in place.
+	if sp != nil {
+		if ip := parseIP4(hostOnly(sp.current())); ip != nil {
+			f.localIP.Store(&net.IPAddr{IP: ip})
+		}
 	}
 }
 

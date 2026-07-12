@@ -897,8 +897,17 @@ func (r *Raw) SetPeerPool(pp *PeerPool) {
 // an atomic swap (no socket rebind); the server follows the new source. IGNORED when spoofSrc is set —
 // a forged source is a deliberate decoy that must not be rotated away. Call before Run().
 func (r *Raw) SetSourcePool(sp *PeerPool) {
-	if r.isClient && r.spoofSrc == nil {
-		r.sp = sp
+	if !r.isClient || r.spoofSrc != nil {
+		return
+	}
+	r.sp = sp
+	// Seed the initial source so the client stamps SrcIPs[0] from the first packet (matching the pool's
+	// cur=0), instead of the route-derived default until the first rotation. Called before Run(), so
+	// openRawSockets' `if localIP==nil` guard then leaves this in place.
+	if sp != nil {
+		if ip := parseIP4(hostOnly(sp.current())); ip != nil {
+			r.localIP.Store(&net.IPAddr{IP: ip})
+		}
 	}
 }
 
