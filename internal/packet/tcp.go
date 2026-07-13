@@ -1781,10 +1781,17 @@ func (b *TCP) dialLoopWarm() {
 						standby.conn.Close()
 						standby = nil
 						standbyLabel = ""
+						standbyCombo = ""
 						b.standby.Store(nil)
 						b.standbyConn.Store(nil)
-						standbyBuilding = false
 					}
+					// Clear standbyBuilding UNCONDITIONALLY — including when standby==nil but a build is
+					// still IN FLIGHT (the exact state after a failover left us on the last healthy edge
+					// with the next standby still dialing). Leaving it set made every later requestStandby()
+					// a permanent no-op, so the warm standby never rebuilt and proactive rotation — which
+					// works by promoting a READY standby — stopped for good until a manual rebuild. That is
+					// the "rotation just stopped and pinning couldn't fix it" report.
+					standbyBuilding = false
 					log.Printf("core/tcp: manual pin/rotate — re-dialing active on the selected edge")
 					dialActiveAsync() // warmEstablish(false) -> current() -> the pinned edge; non-blocking, requestStandby fires on activeReady
 				} else if promote() {
@@ -1810,10 +1817,16 @@ func (b *TCP) dialLoopWarm() {
 				wc.conn.Close()
 				continue
 			}
-			if active == nil {
+			if active == nil && (b.pool == nil || !b.pool.isPinned()) {
 				// Mid-outage this standby is already up while the async active dial is still retrying —
 				// adopt it as the ACTIVE now instead of discarding it and waiting; the in-flight async
 				// dial is harmlessly dropped when it lands (activeReady guards on active!=nil).
+				//
+				// EXCEPT under an operator pin: this carrier was dialed for the STANDBY slot, i.e. a
+				// DIFFERENT edge than the active, so it may not be the pinned edge — while dialActiveAsync
+				// is already re-dialing the active onto current()'s PINNED edge. Adopting it as active
+				// would land the operator on the wrong edge ("I pinned it but it didn't switch"). Hold it
+				// as the standby instead and let the pinned active land; rotation promotes it later.
 				log.Printf("core/tcp: adopting ready standby as active during outage")
 				setActive(wc.cf, wc.conn, wc.label, wc.combo)
 				requestStandby()
