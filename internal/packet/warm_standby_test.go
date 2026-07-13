@@ -160,6 +160,58 @@ func TestServerDownstreamFollowsData(t *testing.T) {
 	}
 }
 
+// poolActive reads the pool's published live-active combo under its lock.
+func poolActive(p *wsPool) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.active
+}
+
+// TestWarmStandbyManualPinRebuildsStandby exercises the manual-pin branch of the warm-standby loop:
+// after an operator pins an edge, the ACTIVE must re-land on exactly that edge AND a fresh warm
+// standby must be rebuilt afterwards. The rebuild is the observable guard for the standbyBuilding
+// leak fix — the branch must always clear standbyBuilding (even when the pin fires while the standby
+// is still mid-build) so requestStandby() is not left a permanent no-op, which would silently stop
+// proactive rotation (it promotes a READY standby) until a manual rebuild.
+func TestWarmStandbyManualPinRebuildsStandby(t *testing.T) {
+	const psk = "warm-pin-rebuild-psk-abcdefghijkl"
+	const cipher = "aes-256-gcm"
+	srvDev, _ := tunPair(t, "wpsrv")
+	cliDev, _ := tunPair(t, "wpcli")
+	ka := time.Second
+	addr := freeTCPPort(t)
+	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher)
+	if err != nil {
+		t.Fatalf("ListenWS: %v", err)
+	}
+	go srv.Run()
+	t.Cleanup(func() { srv.Close() })
+
+	pool := newWSPool([]string{addr}, snis("front-a", "front-b"), true, "")
+	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, keepalive: ka, psk: psk,
+		ws: true, wsTLS: false, pool: pool, warmStandby: true,
+		idle: idleFor(ka), isClient: true, addr: "pool", closeCh: make(chan struct{})}
+	go cli.Run()
+	t.Cleanup(func() { cli.Close() })
+
+	waitFor(t, 5*time.Second, "active up", func() bool { return cli.cur.Load() != nil })
+	waitFor(t, 5*time.Second, "warm standby up", func() bool { return cli.standby.Load() != nil })
+
+	// Pin the SNI that is NOT currently active, so the pin has to actually move the active carrier.
+	target := "front-b"
+	if poolActive(pool) == addr+" · front-b" {
+		target = "front-a"
+	}
+	cli.SelectEdge("sni", target)
+
+	// The active must re-land on exactly the pinned edge...
+	waitFor(t, 5*time.Second, "active re-landed on the pinned edge", func() bool {
+		return poolActive(pool) == addr+" · "+target
+	})
+	// ...and a fresh warm standby must be rebuilt afterwards (proves standbyBuilding was cleared).
+	waitFor(t, 5*time.Second, "standby rebuilt after the pin", func() bool { return cli.standby.Load() != nil })
+}
+
 // TestWarmStandbyFailover drives the full make-before-break client against a real in-process
 // ListenWS server over a two-edge pool (two SNIs fronting one origin). It asserts that the client
 // warms a standby, that traffic flows both ways over the active, and that killing the active
