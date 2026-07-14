@@ -262,7 +262,7 @@ func (b *TCP) xhttpEdge() (dialAddr, host string, ech []byte, path string, err e
 //	                     short complete POSTs at once.
 //	grpc (b.xhMode=="grpc", or the legacy "stream" alias): one full-duplex request presented as a
 //	                     real gRPC call — needs HTTP/2 to the edge (ws_tls) so a CDN streams it.
-func (b *TCP) establishXHTTP() (net.Conn, string, string, error) {
+func (b *TCP) establishXHTTP(attribute bool) (net.Conn, string, string, error) {
 	dialAddr, host, ech, path, err := b.xhttpEdge()
 	if err != nil {
 		return nil, "", "", err
@@ -288,9 +288,17 @@ func (b *TCP) establishXHTTP() (net.Conn, string, string, error) {
 	}
 	// Attribute the outcome to the health FSM here (one place for both modes): a failure runs
 	// the differential probe to decide IP vs SNI vs transient; a success clears both axes.
+	// attribute is FALSE on the warm-standby build path: that differential probe fires several full
+	// establishes (each bounded by xhttpEstablishTimeout), and running it in the single standby-build
+	// goroutine blocks it for that whole time with standbyBuilding still set — so requestStandby()
+	// no-ops, the standby never becomes ready, and proactive rotation silently freezes while the open
+	// active keeps the tunnel up (the exact "rotation stopped after hours, tunnel still up" report).
+	// The warm standby just retries cheaply; the retest loop attributes/heals edge health on its own.
 	if b.pool != nil {
 		if err != nil {
-			b.attributeFailure(dialAddr, wsSNIEntry{host: host, ech: ech, path: path})
+			if attribute {
+				b.attributeFailure(dialAddr, wsSNIEntry{host: host, ech: ech, path: path})
+			}
 		} else {
 			b.pool.succeeded(dialAddr, host)
 		}

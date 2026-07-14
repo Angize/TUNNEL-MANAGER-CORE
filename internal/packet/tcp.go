@@ -1040,7 +1040,9 @@ func chromeSpec(alpn []string) (utls.ClientHelloSpec, error) {
 // In pool mode ANY failure is handed to attributeFailure, which runs a differential probe
 // to decide by TRUTH — not a guess — whether the IP, the SNI, or neither is at fault, and
 // pulls the guilty axis into the health FSM. A successful connect clears both axes.
-func (b *TCP) establishWS() (net.Conn, string, string, error) {
+// attribute is FALSE on the warm-standby build path — see establishXHTTP for why the differential
+// probe must not run there (it blocks the standby-build goroutine and silently freezes rotation).
+func (b *TCP) establishWS(attribute bool) (net.Conn, string, string, error) {
 	dialAddr, host, ech, path := b.addr, b.wsHost, b.wsECH, b.wsPath
 	if b.pool != nil {
 		ip, sni, ok := b.pool.current()
@@ -1053,15 +1055,20 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 		host = dialAddr
 	}
 	sniEnt := wsSNIEntry{host: host, ech: ech, path: path} // for failure attribution / probes
+	attrib := func() {
+		if attribute {
+			b.attributeFailure(dialAddr, sniEnt) // differential probe: IP vs SNI vs transient
+		}
+	}
 	conn, err := b.dialer(10*time.Second).Dial("tcp", dialAddr)
 	if err != nil {
-		b.attributeFailure(dialAddr, sniEnt) // differential probe: IP vs SNI vs transient
+		attrib()
 		return nil, dialAddr, "", err
 	}
 	if b.wsTLS {
 		tc, terr := b.tlsToEdge(conn, dialAddr, host, ech, true) // live carrier: a self-heal is panel-worthy
 		if terr != nil {
-			b.attributeFailure(dialAddr, sniEnt)
+			attrib()
 			return nil, dialAddr, "", terr
 		}
 		conn = tc
@@ -1069,7 +1076,7 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 	r, werr := wsClientHandshake(conn, host, path, time.Now().Add(handshakeTimeout))
 	if werr != nil {
 		conn.Close()
-		b.attributeFailure(dialAddr, sniEnt)
+		attrib()
 		return nil, dialAddr, "", werr
 	}
 	if b.pool != nil {
@@ -1325,7 +1332,7 @@ func (b *TCP) dialLoop() {
 		if b.closed.Load() {
 			return
 		}
-		conn, label, combo, err := b.dialCarrier() // logs the specific transport failure itself
+		conn, label, combo, err := b.dialCarrier(true) // primary dial: attribute failures. logs the transport failure itself
 		if err != nil {
 			if b.pool != nil {
 				b.pool.advance() // rotate to the next combo for the retry
@@ -1507,15 +1514,17 @@ func (b *TCP) dialLoop() {
 // edge (with failure attribution inside establishWS/establishXHTTP), or a plain/cover TCP dial.
 // It returns the live conn and a label for logging, and logs the specific transport-level
 // failure itself so callers only decide retry/rotation policy. It does NOT frame or handshake.
-func (b *TCP) dialCarrier() (net.Conn, string, string, error) {
+// attribute gates the differential-probe failure attribution: true on the primary/active dial,
+// false on the warm-standby build (whose goroutine must not block in the probe — see establishXHTTP).
+func (b *TCP) dialCarrier(attribute bool) (net.Conn, string, string, error) {
 	if b.ws { // pool or single edge: dial + wss(+ECH) + upgrade, burning on failure
 		var c net.Conn
 		var edge, combo string
 		var err error
 		if b.xhttp {
-			c, edge, combo, err = b.establishXHTTP()
+			c, edge, combo, err = b.establishXHTTP(attribute)
 		} else {
-			c, edge, combo, err = b.establishWS()
+			c, edge, combo, err = b.establishWS(attribute)
 		}
 		if err != nil {
 			log.Printf("core/ws: connect via %s failed: %v", edge, err)
@@ -1576,7 +1585,13 @@ func (b *TCP) warmEstablish(standby bool) (*connFramer, net.Conn, string, string
 		// rotation into a silent no-op switch onto the same edge and loses edge diversity.
 		b.pool.aimStandby()
 	}
-	conn, label, combo, err := b.dialCarrier()
+	// A STANDBY build must NOT run the differential-probe attribution: it fires several full
+	// establishes and would block this single standby-build goroutine for that whole time with
+	// standbyBuilding still set — starving requestStandby() and silently freezing proactive rotation
+	// (goroutine dump: the builder parked in attributeFailure->differentialProbe->probeEdgeFull while
+	// the manager waited on a standby that never arrived). It just retries; the retest loop attributes
+	// edge health independently. The warm ACTIVE dial still attributes (attribute = !standby).
+	conn, label, combo, err := b.dialCarrier(!standby)
 	if err != nil {
 		if b.pool != nil {
 			b.pool.advance() // move off the failing edge for the next attempt

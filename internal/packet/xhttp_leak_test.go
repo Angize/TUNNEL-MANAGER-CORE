@@ -58,7 +58,7 @@ func TestXHTTPGrpcNoConnLeakOnRotation(t *testing.T) {
 		wsPath: "/", wsTLS: true, xhTLS: &tls.Config{InsecureSkipVerify: true}}
 
 	establishAndRetire := func() {
-		conn, _, _, err := b.establishXHTTP()
+		conn, _, _, err := b.establishXHTTP(true)
 		if err != nil {
 			t.Fatalf("establishXHTTP: %v", err)
 		}
