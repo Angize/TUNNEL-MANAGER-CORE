@@ -44,3 +44,38 @@ func TestWSPoolReadECHCmd(t *testing.T) {
 		t.Fatalf("re-pushing the SAME key reported %v changed, want none (transition-gated)", again)
 	}
 }
+
+// TestReadECHCmdSingle proves the single-edge (non-pool) live push: a node-written .echcmd is consumed
+// once and hot-swaps b.wsECH for the matching host, so the next dial presents it — no rebuild.
+func TestReadECHCmdSingle(t *testing.T) {
+	dir := t.TempDir()
+	status := filepath.Join(dir, "core-x.status")
+	b := &TCP{ws: true, wsHost: "a.example", wsECH: []byte("OLD"), st: newCoreStatus(status, "ws · edge:443")}
+
+	newECH := []byte("FRESH-single-edge-ech")
+	cmd := map[string]map[string]string{"snis": {"a.example": base64.StdEncoding.EncodeToString(newECH)}}
+	data, _ := json.Marshal(cmd)
+	if err := os.WriteFile(status+".echcmd", data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !b.readECHCmdSingle() {
+		t.Fatal("readECHCmdSingle should report a swap")
+	}
+	if !bytes.Equal(b.wsECH, newECH) {
+		t.Fatalf("wsECH = %q, want %q — single-edge live push did not hot-swap", b.wsECH, newECH)
+	}
+	if _, err := os.Stat(status + ".echcmd"); !os.IsNotExist(err) {
+		t.Fatal(".echcmd not removed after read — would re-fire every reconnect")
+	}
+	// Re-pushing the same key is a no-op (bytes.Equal gate).
+	os.WriteFile(status+".echcmd", data, 0o600)
+	if b.readECHCmdSingle() {
+		t.Fatal("re-pushing the SAME key must be a no-op")
+	}
+	// A push naming a DIFFERENT host must not touch our key.
+	other, _ := json.Marshal(map[string]map[string]string{"snis": {"other.host": base64.StdEncoding.EncodeToString([]byte("X"))}})
+	os.WriteFile(status+".echcmd", other, 0o600)
+	if b.readECHCmdSingle() || !bytes.Equal(b.wsECH, newECH) {
+		t.Fatal("a push for a foreign host must not swap our key")
+	}
+}
