@@ -1284,6 +1284,11 @@ func (b *TCP) retestLoop() {
 				log.Printf("core/ws: select edge %s=%s (panel pin)", kind, key)
 				b.SelectEdge(kind, key)
 			}
+			if hosts := b.pool.readECHCmd(); len(hosts) > 0 { // panel live-pushed a fresh ECH key
+				// Hot-swapped in memory (updateECH); the next dial presents the fresh key with no rebuild,
+				// so the live core stays ahead of Cloudflare's key rotation instead of failing first.
+				log.Printf("core/ws: live ECH key updated for %v (no rebuild)", hosts)
+			}
 			for _, spec := range b.pool.dueRetests() {
 				if b.closed.Load() {
 					return

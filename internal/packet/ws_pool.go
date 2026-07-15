@@ -807,6 +807,49 @@ func (p *wsPool) readSelectCmd() (kind, key string, ok bool) {
 	return c.Kind, c.Key, true
 }
 
+// echCmdPath is the sidecar file the node writes a LIVE ECH-key update into (JSON {"snis":{host:base64}}).
+// The panel pushes a freshly-fetched ECHConfigList here so the RUNNING pool adopts it without a rebuild.
+func (p *wsPool) echCmdPath() string {
+	if p.statusPath == "" {
+		return ""
+	}
+	return p.statusPath + ".echcmd"
+}
+
+// readECHCmd consumes a pending live ECH-key update (base64 ECHConfigList per SNI host) and hot-swaps
+// it into the pool via updateECH, so the NEXT dial presents the fresh key — no rebuild, no TUN drop.
+// Returns the hosts whose key actually changed (for logging). The file is removed once read (fires once).
+// This is the proactive counterpart to the in-band retry_configs self-heal: the panel pushes the new
+// key BEFORE the old one fails, so the live core never has to hit a stale-key rejection at all.
+func (p *wsPool) readECHCmd() []string {
+	cp := p.echCmdPath()
+	if cp == "" {
+		return nil
+	}
+	data, err := os.ReadFile(cp)
+	if err != nil {
+		return nil
+	}
+	os.Remove(cp)
+	var c struct {
+		SNIs map[string]string `json:"snis"`
+	}
+	if json.Unmarshal(data, &c) != nil || len(c.SNIs) == 0 {
+		return nil
+	}
+	var changed []string
+	for host, b64 := range c.SNIs {
+		ech, derr := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
+		if derr != nil || len(ech) == 0 {
+			continue
+		}
+		if p.updateECH(host, ech) {
+			changed = append(changed, host)
+		}
+	}
+	return changed
+}
+
 // healthStatus is one entry's health as published to the status file.
 type healthStatus struct {
 	Key        string `json:"key"`
