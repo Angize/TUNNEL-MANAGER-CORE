@@ -32,12 +32,14 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -1396,6 +1398,41 @@ func (b *TCP) retestLoop() {
 // ws pool it rotates edges: each attempt uses the pool's current (IP × SNI), a
 // failure burns the offending IP/SNI (establishWS), and a proactive timer tears the
 // connection down after b.rotate so the client moves before the edge is fingerprinted.
+// readECHCmdSingle consumes a pending live ECH-key push for a SINGLE (non-pool) ws/xhttp edge and
+// hot-swaps b.wsECH so the NEXT dial presents the fresh key — the single-edge counterpart to the pool's
+// readECHCmd (a pool keys off p.snis and has no b.st; a single edge keys off b.wsECH and has no pool).
+// The node writes the SAME <status>.echcmd sidecar for both. No-op unless this is a single ws edge with
+// a status file wired, the file exists, and it carries a genuinely different key for our host. Called
+// only from dialLoop (the sole writer of b.wsECH, alongside the also-dialLoop-driven noteECHSelfHeal),
+// so b.wsECH needs no lock.
+func (b *TCP) readECHCmdSingle() bool {
+	if !b.ws || b.wsHost == "" || b.st == nil {
+		return false // pools (b.st nil) and non-ws carriers never carry a single-edge ECH key here
+	}
+	cp := b.st.path + ".echcmd"
+	data, err := os.ReadFile(cp)
+	if err != nil {
+		return false
+	}
+	os.Remove(cp) // consume once: a fresh push rewrites it atomically
+	var c struct {
+		SNIs map[string]string `json:"snis"`
+	}
+	if json.Unmarshal(data, &c) != nil || len(c.SNIs) == 0 {
+		return false
+	}
+	b64, ok := c.SNIs[b.wsHost]
+	if !ok {
+		return false
+	}
+	ech, derr := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
+	if derr != nil || len(ech) == 0 || bytes.Equal(b.wsECH, ech) {
+		return false // undecodable or unchanged -> nothing to swap
+	}
+	b.wsECH = ech
+	return true
+}
+
 func (b *TCP) dialLoop() {
 	// direct-tcp peer/source pools: burnDest burns+advances the destination and, once the dest pool has
 	// cycled through every endpoint against the current source, walks the source too (same policy as the
@@ -1427,6 +1464,9 @@ func (b *TCP) dialLoop() {
 	for {
 		if b.closed.Load() {
 			return
+		}
+		if b.readECHCmdSingle() { // panel live-pushed a fresh ECH key for this single edge — use it on THIS dial
+			log.Printf("core/ws: live ECH key updated for %s (single edge, no rebuild)", b.wsHost)
 		}
 		conn, label, combo, err := b.dialCarrier(true) // primary dial: attribute failures. logs the transport failure itself
 		if err != nil {
