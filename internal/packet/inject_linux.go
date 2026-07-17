@@ -5,7 +5,7 @@
 // IP_HDRINCL raw socket ALWAYS recomputes the IPv4 header checksum (raw(7)), which silently
 // "repairs" a deliberately-bad checksum before it hits the wire — so a bad-checksum desync
 // decoy is a no-op over IP_HDRINCL. AF_PACKET hands the frame to the driver verbatim, so a
-// forged checksum (or, later, a hand-built TCP segment for the tcp-inject carrier) survives.
+// forged checksum (or a hand-built TCP segment for the tcp-inject carrier) survives.
 //
 // To send at L2 we need the Ethernet header the kernel would use for the peer: the egress
 // interface (its ifindex + MAC) and the next-hop MAC. We learn both from the kernel's own

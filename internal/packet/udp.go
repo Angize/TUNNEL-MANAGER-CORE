@@ -86,7 +86,7 @@ type UDP struct {
 
 	peer    atomic.Pointer[net.UDPAddr]      // current known peer (server learns it)
 	session atomic.Pointer[sealerBox]        // negotiated session sealer (nil until handshake / clear mode)
-	rp      replayGuard                      // driven only by netToTun (single receiver goroutine)
+	rp      replayGuard                      // driven only by the single receive goroutine (netToTun on the client; serverReadLoop under rxMu on the server)
 	pend    *sealerBox                       // server: session staged by a recent init, promoted only once a frame opens under it
 	pendRp  replayGuard                      // replay guard for the pending session (adopted on promotion)
 	hsCache initCache                        // server: recent inits -> responses (compute-DoS replay cache; receive-goroutine-only)

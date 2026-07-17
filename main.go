@@ -1,6 +1,6 @@
 // Command tnl-core is the custom data-plane core for the tunnel fleet
-// manager. This build implements a single slice: Mode "packet" / Profile "core"
-// — raw L3 packets over a TUN device, carried by UDP with optional AES-256-GCM.
+// manager. It carries raw L3 packets over a TUN device across a selectable
+// transport (udp/tcp/raw/flux/ws/xhttp) with optional configurable crypto.
 //
 // Usage:
 //
