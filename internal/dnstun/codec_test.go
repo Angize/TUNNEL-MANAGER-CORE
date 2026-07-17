@@ -97,6 +97,16 @@ func TestDecodeNameRejectsForeignZone(t *testing.T) {
 	}
 }
 
+func TestDecodeNameRejectsSharedSuffixLabel(t *testing.T) {
+	// "abt.example.com" shares the literal suffix "t.example.com" but "abt" is a single foreign
+	// label, not "ab" + the zone. A plain HasSuffix check would accept it and mis-parse "ab" as
+	// upstream data; the label-boundary check must reject it.
+	c, _ := NewCodec("t.example.com")
+	if _, err := c.DecodeName("abt.example.com."); err == nil {
+		t.Fatal("DecodeName accepted a name whose last label merely ends with the zone")
+	}
+}
+
 func TestDecodeBareZoneIsEmpty(t *testing.T) {
 	// A poll query for the bare zone (no data labels) is valid and carries zero upstream bytes.
 	c, _ := NewCodec("t.example.com")

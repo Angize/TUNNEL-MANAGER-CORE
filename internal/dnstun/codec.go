@@ -119,7 +119,10 @@ func (c *Codec) DecodeName(name string) ([]byte, error) {
 	if !strings.HasSuffix(nl, ".") {
 		nl += "."
 	}
-	if !strings.HasSuffix(nl, c.zone) {
+	// Require a real label boundary before the zone: "<data>.<zone>" or a bare "<zone>" query.
+	// A plain HasSuffix would accept e.g. "abt.example.com" for zone "t.example.com" and mis-parse
+	// the foreign label "ab" as upstream data.
+	if nl != c.zone && !strings.HasSuffix(nl, "."+c.zone) {
 		return nil, errBadName
 	}
 	prefix := strings.TrimSuffix(nl[:len(nl)-len(c.zone)], ".") // data labels, no trailing dot

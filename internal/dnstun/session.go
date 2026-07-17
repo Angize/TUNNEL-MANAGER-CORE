@@ -128,6 +128,10 @@ func (sc *sessionConn) recvPump(inCh <-chan []byte, onHandshake func([]byte)) {
 			return
 		case d, ok := <-inCh:
 			if !ok {
+				// The transport died (recvFanout closed inCh). Close the queue conn so a
+				// blocked kcp read/AcceptKCP unblocks and the dead session tears down promptly
+				// instead of waiting for kcp's dead-link timeout.
+				_ = sc.qpc.Close()
 				return
 			}
 			if len(d) < 1 {
@@ -266,12 +270,21 @@ func ServeSession(t WireTransport, cfg SessionConfig) (net.Conn, error) {
 
 	qpc := NewQueuePacketConn(peerKey)
 	sc := &sessionConn{qpc: qpc, t: t, sealer: sealer, done: done}
-	// Re-answer only a retransmit of the SAME init; a different ephemeral is a new session we
-	// do not adopt here (would swap keys mid-stream), so it is ignored.
+	// Re-answer a retransmit of the SAME init (a lost response self-heals). A DIFFERENT ephemeral
+	// means the previous client is gone and a new one is dialing (restart, or our own resp was
+	// lost so it timed out and re-dialed): tear this session down by closing the queue conn so a
+	// pre-accept AcceptKCP unblocks and the carrier reconnects to accept the new client — never
+	// leave the single session slot parked on a client that will never speak again.
 	onHS := func(hs []byte) {
-		if e, err := crypto.ParseInit(cfg.PSK, hs); err == nil && e == gotInit {
-			_ = t.Send(respDG)
+		e, err := crypto.ParseInit(cfg.PSK, hs)
+		if err != nil {
+			return
 		}
+		if e == gotInit {
+			_ = t.Send(respDG)
+			return
+		}
+		_ = sc.qpc.Close()
 	}
 	go sc.sendPump()
 	go sc.recvPump(inCh, onHS)

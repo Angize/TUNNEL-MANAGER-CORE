@@ -3,6 +3,7 @@ package dnstun
 import (
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -121,7 +122,10 @@ type dnsClient struct {
 // :53) and starts the poll loop. codec encodes datagrams into queries under the delegated zone.
 func NewDNSClientTransport(resolverAddr string, codec *Codec) (WireTransport, error) {
 	if _, _, err := net.SplitHostPort(resolverAddr); err != nil {
-		resolverAddr = net.JoinHostPort(resolverAddr, "53") // default the resolver port to 53
+		// No port: default to :53. Strip any brackets first so JoinHostPort (which re-brackets a
+		// colon-bearing host) doesn't double-bracket a bare "[v6]" into an invalid "[[v6]]:53".
+		host := strings.TrimSuffix(strings.TrimPrefix(resolverAddr, "["), "]")
+		resolverAddr = net.JoinHostPort(host, "53")
 	}
 	ra, err := net.ResolveUDPAddr("udp", resolverAddr)
 	if err != nil {

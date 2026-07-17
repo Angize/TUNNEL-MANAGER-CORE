@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
 // pipeTransport is an in-memory WireTransport: Send delivers onto the peer's rx channel (dropping
@@ -165,6 +167,85 @@ func TestSessionWrongPSKFails(t *testing.T) {
 	_, err := DialSession(cliT, SessionConfig{PSK: "wrong-client-psk", Cipher: "chacha20"})
 	if err == nil {
 		t.Fatal("DialSession succeeded with a mismatched PSK — handshake did not authenticate")
+	}
+}
+
+// TestServeSessionRecoversFromVanishedClient proves the server's single session slot is never
+// parked forever. A client arms the server with a valid init but then vanishes without completing
+// the KCP handshake (crash, or its own resp was lost so it timed out); the server sits in
+// AcceptKCP. A NEW client's init (different ephemeral) must make ServeSession return so the carrier
+// reconnects and accepts the new client — the old behavior ignored the new init and deadlocked.
+func TestServeSessionRecoversFromVanishedClient(t *testing.T) {
+	cliT, srvT := newPipePair(0)
+	cfg := SessionConfig{PSK: "recover-me", Cipher: "chacha20"}
+
+	srvErr := make(chan error, 1)
+	go func() {
+		_, err := ServeSession(srvT, cfg)
+		srvErr <- err
+	}()
+
+	// Client 1 arms the server with a valid init, then goes silent (never sends a KCP datagram).
+	ci1, err := crypto.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = cliT.Send(append([]byte{kindHandshake}, crypto.InitMsg(cfg.PSK, ci1)...))
+	time.Sleep(200 * time.Millisecond) // let the server arm and enter AcceptKCP
+
+	select {
+	case err := <-srvErr:
+		t.Fatalf("ServeSession returned before a new client dialed: %v", err)
+	default:
+	}
+
+	// Client 2 dials with a fresh ephemeral: this must unblock the parked server.
+	ci2, err := crypto.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = cliT.Send(append([]byte{kindHandshake}, crypto.InitMsg(cfg.PSK, ci2)...))
+
+	select {
+	case err := <-srvErr:
+		if err == nil {
+			t.Fatal("ServeSession returned nil; expected an error so the carrier reconnects")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ServeSession stayed parked in AcceptKCP after a new client dialed")
+	}
+}
+
+// TestServeSessionUnblocksOnTransportClose proves Close honors its contract even before a client
+// connects: with the server armed and parked in AcceptKCP, closing the transport (what the
+// carrier's Close does when no session is live yet) must unblock ServeSession — otherwise the
+// queue conn is never closed and the goroutines leak.
+func TestServeSessionUnblocksOnTransportClose(t *testing.T) {
+	cliT, srvT := newPipePair(0)
+	cfg := SessionConfig{PSK: "close-me", Cipher: "chacha20"}
+
+	srvErr := make(chan error, 1)
+	go func() {
+		_, err := ServeSession(srvT, cfg)
+		srvErr <- err
+	}()
+
+	ci, err := crypto.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = cliT.Send(append([]byte{kindHandshake}, crypto.InitMsg(cfg.PSK, ci)...))
+	time.Sleep(200 * time.Millisecond) // arm + enter AcceptKCP
+
+	_ = srvT.Close() // carrier Close with no live session tears down the transport
+
+	select {
+	case err := <-srvErr:
+		if err == nil {
+			t.Fatal("expected ServeSession error after the transport closed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ServeSession did not unblock when the transport closed (queue-conn leak)")
 	}
 }
 
