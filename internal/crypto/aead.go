@@ -1,8 +1,9 @@
 // Package crypto provides the AEAD sealing used by the core carrier.
 //
-// Two AEADs are supported and selected by name: AES-256-GCM (stdlib, fastest on
-// AES-NI hosts) and ChaCha20-Poly1305 (constant-time in software, faster on
-// hosts without AES acceleration such as many ARM boards). Both ends of a tunnel
+// Four AEADs are supported and selected by name: AES-256-GCM and AES-128-GCM
+// (stdlib, fastest on AES-NI hosts) and ChaCha20-Poly1305 / XChaCha20-Poly1305
+// (constant-time in software, faster on hosts without AES acceleration such as
+// many ARM boards). Both ends of a tunnel
 // MUST use the same cipher and PSK.
 //
 // Directional keys (v2). The AEAD key is derived PER DIRECTION — the client→server

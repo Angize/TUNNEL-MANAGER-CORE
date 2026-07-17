@@ -18,8 +18,10 @@
 //
 // Roles: the "server" listens and accepts; the "client" dials and reconnects
 // automatically with a short backoff. Because a core tunnel is a single
-// point-to-point link, only one connection is active at a time — a new accepted
-// connection replaces (and closes) the previous one. A single TUN reader feeds
+// point-to-point link, one connection carries data at a time, but the server keeps
+// up to maxAuthConns authenticated connections open at once (a warm-standby client
+// holds a second live carrier) rather than closing the previous one when a new one
+// authenticates. A single TUN reader feeds
 // whichever connection is currently live via an atomic pointer, so no L3 packet
 // is bound to a connection that may have dropped.
 package packet
@@ -2309,7 +2311,7 @@ func (b *TCP) diagLoop() {
 }
 
 // keepaliveLoop (client) pings the server over the live connection so idle
-// tunnels do not get reaped by stateful middleboxes. In obfs mode the period is
+// tunnels do not get reaped by stateful middleboxes. In all modes the period is
 // jittered so it does not emit on a fixed clock.
 func (b *TCP) keepaliveLoop() {
 	for {

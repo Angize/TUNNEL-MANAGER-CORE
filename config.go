@@ -38,9 +38,10 @@ type Config struct {
 
 	// Transport selects the carrier for core frames: "udp" (default,
 	// NAT-friendly datagrams), "tcp" (stream, length-prefixed frames), "raw"
-	// (each frame in a raw IPv4 packet of a chosen protocol — see Profile), or
+	// (each frame in a raw IPv4 packet of a chosen protocol — see Profile),
 	// "flux" (a polymorphic raw carrier whose IP protocol rotates every epoch on a
-	// clock-derived schedule both ends compute with no wire signal — see FluxRotateSecs).
+	// clock-derived schedule both ends compute with no wire signal — see FluxRotateSecs),
+	// or "ws" (a WebSocket carrier, CDN-frontable — see WSHost).
 	Transport string `json:"transport"`
 
 	// RawProfile selects the raw-transport encapsulation (Transport=="raw" only):
@@ -262,13 +263,14 @@ type Config struct {
 	FecData   int `json:"fec_data"`
 	FecParity int `json:"fec_parity"`
 
-	// FakeDesync (client, raw/flux carriers only) emits FakeCount decoy packets to the peer
+	// FakeDesync (client, raw/flux/tcp/ws carriers only) emits FakeCount decoy packets to the peer
 	// just before each handshake to mis-sync a stateful DPI. A low-TTL decoy expires a few
 	// hops out (before the server); a bad-checksum decoy is dropped by the server's IP stack —
 	// either way an on-path DPI ingests the decoy and mis-tracks the flow while the real,
-	// AEAD-authenticated session is untouched. It only helps where the core builds the whole
-	// IPv4 header (raw/flux); the kernel-socket carriers (udp/tcp/ws) cannot forge a
-	// TTL/checksum. Needs CAP_NET_RAW (the raw/flux carriers already require it).
+	// AEAD-authenticated session is untouched. It helps where the core builds the whole
+	// IPv4 header (raw/flux) or injects decoy TCP segments on the connection's 4-tuple via
+	// AF_PACKET (tcp/ws); only plain udp has no hook. Needs CAP_NET_RAW (the raw/flux carriers
+	// already require it; the AF_PACKET injector for tcp/ws needs it too).
 	FakeDesync bool   `json:"fake_desync"`
 	FakeTTL    int    `json:"fake_ttl"`   // low-TTL decoy hop budget (default 4)
 	FakeCount  int    `json:"fake_count"` // decoys per handshake (default 2)

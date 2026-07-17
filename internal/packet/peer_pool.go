@@ -466,7 +466,7 @@ func (c *rotationController) pinned() bool {
 }
 
 // fail is called when the current peer looks dead. rotDst/rotSrc are the carrier's swap funcs. While an
-// operator pin is in force it is a no-op — current() forces the pinned endpoint until it lands or lapses.
+// operator pin is in force it holds off failover until pinFailRelease proven-dead rounds auto-release it.
 func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 	if c.pinned() {
 		// A pinned endpoint proven blocked auto-releases so the tunnel recovers NOW instead of freezing on

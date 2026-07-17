@@ -869,7 +869,7 @@ func (f *Flux) SetSourcePool(sp *PeerPool) {
 	f.sp = sp
 	// Seed the initial source so the client stamps SrcIPs[0] from the first packet (matching the pool's
 	// cur=0), instead of the route-derived default until the first rotation. Called before Run(), so
-	// openFluxSockets' `if localIP==nil` guard then leaves this in place.
+	// learnPeer/tryHandshake's `if localIP==nil` guard then leaves this in place.
 	if sp != nil {
 		if ip := parseIP4(hostOnly(sp.current())); ip != nil {
 			f.localIP.Store(&net.IPAddr{IP: ip})
@@ -1103,7 +1103,7 @@ func (f *Flux) send(typ byte, payload []byte, to *net.IPAddr) {
 	f.sendCtrl(body, to)
 }
 
-// rotateWatcher refreshes the cached send-side shape every second (so writeOut
+// rotateWatcher refreshes the cached send-side shape every second (so carrierOut
 // never pays for an HKDF per packet) and logs each rotation, so an operator — and
 // the netns PoC — can see the moving target change with no wire signal. It only
 // observes the clock; the derivation both ends run is what keeps them in lock-step.
