@@ -275,6 +275,7 @@ func (f *Flux) Run() error {
 	go f.rotateWatcher()
 	if f.isClient {
 		go f.clientLoop()
+		f.st.setDW(int64(f.deadWin().Seconds())) // publish the resolved dead-window so the reader ages hb against it
 		go heartbeat(f.st, &f.lastRx, f.closeCh) // publish lastRx to the status file so an idle tunnel reads live, not half-open
 	}
 	return <-errc
@@ -813,17 +814,23 @@ func (f *Flux) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 // authenticated for ~3×keepalive (min 10s) the server probably restarted, so the
 // client drops the dead session and re-handshakes rather than pinging forever
 // under a key the fresh server cannot open.
+// deadWin resolves this carrier's dead-window (sessionStaleMult×keepalive floored at sessionStaleMinSecs,
+// or the dead_after_secs override) — shared by sessionStale() and the status heartbeat (setDW) so a reader
+// ages hb against the exact same window the carrier self-heals on.
+func (f *Flux) deadWin() time.Duration {
+	def := time.Duration(sessionStaleMult) * f.keepalive
+	if floor := time.Duration(sessionStaleMinSecs) * time.Second; def < floor {
+		def = floor
+	}
+	return deadWindow(f.keepalive, f.deadAfterSecs, def)
+}
+
 func (f *Flux) sessionStale() bool {
 	last := f.lastRx.Load()
 	if last == 0 {
 		return false
 	}
-	def := time.Duration(sessionStaleMult) * f.keepalive
-	if floor := time.Duration(sessionStaleMinSecs) * time.Second; def < floor {
-		def = floor
-	}
-	w := deadWindow(f.keepalive, f.deadAfterSecs, def) // per-tunnel override tightens the self-heal deadline
-	return time.Since(time.Unix(0, last)) > w
+	return time.Since(time.Unix(0, last)) > f.deadWin()
 }
 
 // SetPeerPool (client) wires a destination-IP rotation pool: a peer whose handshake never completes

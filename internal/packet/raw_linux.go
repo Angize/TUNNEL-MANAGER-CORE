@@ -373,6 +373,7 @@ func (r *Raw) Run() error {
 	}
 	if r.isClient {
 		go r.clientLoop()
+		r.st.setDW(int64(r.deadWin().Seconds())) // publish the resolved dead-window so the reader ages hb against it
 		go heartbeat(r.st, &r.lastRx, r.closeCh) // publish lastRx to the status file so an idle tunnel reads live, not half-open
 	}
 	return <-errc
@@ -927,17 +928,23 @@ func (r *Raw) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 // enough that the peer most likely restarted with a fresh session, so the client should drop its
 // dead session and re-handshake. Without it a SERVER restart wedges the tunnel: the client keeps
 // pinging under a key the fresh server can't open and never re-initiates. See UDP.sessionStale.
+// deadWin resolves this carrier's dead-window (sessionStaleMult×keepalive floored at sessionStaleMinSecs,
+// or the dead_after_secs override) — shared by sessionStale() and the status heartbeat (setDW) so a reader
+// ages hb against the exact same window the carrier self-heals on.
+func (r *Raw) deadWin() time.Duration {
+	def := time.Duration(sessionStaleMult) * r.keepalive
+	if floor := time.Duration(sessionStaleMinSecs) * time.Second; def < floor {
+		def = floor
+	}
+	return deadWindow(r.keepalive, r.deadAfterSecs, def)
+}
+
 func (r *Raw) sessionStale() bool {
 	last := r.lastRx.Load()
 	if last == 0 {
 		return false
 	}
-	def := time.Duration(sessionStaleMult) * r.keepalive
-	if floor := time.Duration(sessionStaleMinSecs) * time.Second; def < floor {
-		def = floor
-	}
-	w := deadWindow(r.keepalive, r.deadAfterSecs, def) // per-tunnel override tightens the self-heal deadline
-	return time.Since(time.Unix(0, last)) > w
+	return time.Since(time.Unix(0, last)) > r.deadWin()
 }
 
 // SetPeerPool (client) wires a destination-IP rotation pool: a peer whose handshake never completes
