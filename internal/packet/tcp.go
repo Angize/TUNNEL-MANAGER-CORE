@@ -683,8 +683,10 @@ func (b *TCP) Run() error {
 		go b.keepaliveLoop()
 		go b.diagLoop() // low-rate goroutine-count heartbeat so a slow session leak is visible in the log
 		if b.st != nil {
+			b.st.setDW(int64(b.idle.Seconds()))      // b.idle IS the resolved stream dead-window (idle backstop / dead_after)
 			go heartbeat(b.st, &b.lastRx, b.closeCh) // single-edge / direct-tcp: publish lastRx so an idle tunnel reads live, not half-open
 		} else if b.pool != nil {
+			b.pool.setDW(int64(b.idle.Seconds()))
 			go heartbeatPool(b.pool, &b.lastRx, b.closeCh) // ws/xhttp edge pool uses its own status writer
 		}
 		if b.pool != nil {

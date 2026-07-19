@@ -25,6 +25,7 @@ type coreStatus struct {
 	evSeq   int64
 	wasDown bool  // a disconnect is pending a matching recovery -> the next connect is a reconnect
 	hb      int64 // unix-seconds of the last authenticated inbound frame (lastRx); a periodic liveness heartbeat
+	dw      int64 // this carrier's RESOLVED dead-window in seconds — the single number a reader uses to age hb
 }
 
 // hbInterval is how often a client carrier republishes its lastRx heartbeat into the status file, so a
@@ -79,6 +80,18 @@ func (s *coreStatus) beat(sec int64) {
 	}
 	s.mu.Lock()
 	s.hb = sec
+	s.mu.Unlock()
+	s.write()
+}
+
+// setDW publishes this carrier's resolved dead-window (seconds) so a reader ages hb against the SAME
+// number the core self-heals on, instead of re-deriving a private multiplier. Called once at Run.
+func (s *coreStatus) setDW(secs int64) {
+	if s == nil || s.path == "" {
+		return
+	}
+	s.mu.Lock()
+	s.dw = secs
 	s.mu.Unlock()
 	s.write()
 }
@@ -161,13 +174,15 @@ func (s *coreStatus) write() {
 	evs := append([]coreEvent(nil), s.events...) // copy so the marshal runs outside s.mu
 	active := s.active
 	hb := s.hb
+	dw := s.dw
 	s.mu.Unlock()
 	payload := struct {
 		Active string      `json:"active"`
 		Events []coreEvent `json:"events"`
 		HB     int64       `json:"hb"`
+		DW     int64       `json:"dw"`
 		TS     int64       `json:"ts"`
-	}{Active: active, Events: evs, HB: hb, TS: time.Now().Unix()}
+	}{Active: active, Events: evs, HB: hb, DW: dw, TS: time.Now().Unix()}
 	buf, err := json.Marshal(payload)
 	if err != nil {
 		return

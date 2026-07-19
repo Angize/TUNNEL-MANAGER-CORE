@@ -92,6 +92,7 @@ type wsPool struct {
 	dataFail    map[string]int // per-IP count of consecutive short-lived (data-plane-fault) sessions
 	lastGood    int64          // unix time of the last SUSTAINED session on any edge (outage guard)
 	hb          int64          // unix-seconds of the carrier's lastRx — periodic liveness heartbeat (v2.48.3)
+	dw          int64          // resolved dead-window in seconds — the single number a reader ages hb against (v2.48.4)
 	events      []coreEvent    // rolling ring of core-observed events (down/burn) for the panel log
 	evSeq       int64          // monotonic sequence so the panel can consume each event exactly once
 	wasDown     bool           // a genuine carrier down is pending its matching "up" (down/reconnect pairing)
@@ -906,8 +907,9 @@ func (p *wsPool) writeStatus() {
 		PinIP      string         `json:"pin_ip"`
 		PinSNI     string         `json:"pin_sni"`
 		HB         int64          `json:"hb"`
+		DW         int64          `json:"dw"`
 		TS         int64          `json:"ts"`
-	}{Active: p.active, BurnedIPs: burnedIPs, BurnedSNIs: burnedSNIs, Health: health, Events: evs, PinIP: p.pinIP, PinSNI: p.pinSNI, HB: p.hb, TS: time.Now().Unix()}
+	}{Active: p.active, BurnedIPs: burnedIPs, BurnedSNIs: burnedSNIs, Health: health, Events: evs, PinIP: p.pinIP, PinSNI: p.pinSNI, HB: p.hb, DW: p.dw, TS: time.Now().Unix()}
 	p.mu.Unlock()
 	if data, err := json.Marshal(st); err == nil {
 		// writeMu already held across the snapshot above (serializes writers AND orders snapshot->write).
@@ -927,6 +929,18 @@ func (p *wsPool) beat(sec int64) {
 	}
 	p.mu.Lock()
 	p.hb = sec
+	p.mu.Unlock()
+	p.writeStatus()
+}
+
+// setDW publishes the carrier's resolved dead-window (seconds), so a reader ages hb against the same
+// number the core uses. Called once at Run. Nil-safe and no-op without a status path.
+func (p *wsPool) setDW(secs int64) {
+	if p == nil || p.statusPath == "" {
+		return
+	}
+	p.mu.Lock()
+	p.dw = secs
 	p.mu.Unlock()
 	p.writeStatus()
 }

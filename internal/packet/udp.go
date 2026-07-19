@@ -344,17 +344,23 @@ func (b *UDP) SetStatusPath(path string) {
 // the client keeps pinging under a key the fresh server cannot open and — because it still holds a
 // session — never re-initiates on its own. A false positive (a few lost pings on a healthy link)
 // only costs one harmless re-handshake. Only meaningful with crypto on.
+// deadWin resolves this carrier's dead-window: sessionStaleMult×keepalive (floored at sessionStaleMinSecs),
+// or the per-tunnel dead_after_secs override. Shared by sessionStale() and the status-file heartbeat (setDW)
+// so a reader ages hb against the EXACT same window the carrier self-heals on — no re-derived multiplier.
+func (b *UDP) deadWin() time.Duration {
+	def := time.Duration(sessionStaleMult) * b.keepalive
+	if floor := time.Duration(sessionStaleMinSecs) * time.Second; def < floor {
+		def = floor
+	}
+	return deadWindow(b.keepalive, b.deadAfterSecs, def)
+}
+
 func (b *UDP) sessionStale() bool {
 	last := b.lastRx.Load()
 	if last == 0 {
 		return false // no baseline yet
 	}
-	def := time.Duration(sessionStaleMult) * b.keepalive
-	if floor := time.Duration(sessionStaleMinSecs) * time.Second; def < floor {
-		def = floor
-	}
-	w := deadWindow(b.keepalive, b.deadAfterSecs, def) // per-tunnel override tightens the self-heal deadline
-	return time.Since(time.Unix(0, last)) > w
+	return time.Since(time.Unix(0, last)) > b.deadWin()
 }
 
 // Dial (client role) binds an ephemeral UDP socket and targets peerAddr.
@@ -492,6 +498,7 @@ func (b *UDP) Run() error {
 	if b.isClient {
 		go func() { errc <- b.netToTun() }()
 		go b.clientLoop()
+		b.st.setDW(int64(b.deadWin().Seconds())) // publish the resolved dead-window so the reader ages hb against it
 		go heartbeat(b.st, &b.lastRx, b.closeCh) // publish lastRx to the status file so an idle tunnel reads live, not half-open
 	} else {
 		for _, c := range b.srvConns {
