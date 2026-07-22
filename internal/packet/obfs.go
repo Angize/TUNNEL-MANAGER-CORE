@@ -57,7 +57,7 @@ func newObfsStream(psk string, salt []byte) (*chacha20.Cipher, error) {
 	return chacha20.NewUnauthenticatedCipher(deriveObfsKey(psk), salt)
 }
 
-// randPad returns n random bytes of padding, n UNIFORM in [0, max]. It uses
+// randUint returns a random int UNIFORM in [0, max]. It uses
 // rejection sampling rather than `% (max+1)`: modulo of a single byte biases the
 // low lengths (e.g. for max=64, 256 mod 65 leaves 0..60 slightly more likely and
 // values > 255 unreachable), which narrows the size histogram a DPI classifier
