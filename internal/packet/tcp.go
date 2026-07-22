@@ -2177,14 +2177,6 @@ func (b *TCP) dialLoopWarm() {
 func (b *TCP) RotateIP()  { b.rotate1(func() { b.pool.advanceIP() }) }
 func (b *TCP) RotateSNI() { b.rotate1(func() { b.pool.advanceSNI() }) }
 
-// ProbeNow forces an immediate retest of a pool entry (kind "ip"|"sni") on the retest
-// scheduler's next tick — backs a panel/node "probe now" control. No-op unless pooled.
-func (b *TCP) ProbeNow(kind, key string) {
-	if b.pool != nil {
-		b.pool.probeNow(kind, key)
-	}
-}
-
 // ProbeAllNow forces an immediate retest of every suspect/dead pool entry (backs the
 // panel "probe now" button, delivered as a signal that carries no key). No-op unless pooled.
 func (b *TCP) ProbeAllNow() {
