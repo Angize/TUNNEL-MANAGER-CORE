@@ -40,9 +40,14 @@ type PeerPool struct {
 	autoBurn   bool                  // burn a failing endpoint (vs. only rotate past it)
 	rotate     time.Duration         // proactive rotation interval (0 = failover-only)
 	statusPath string                // status file the panel reads (empty = off; also gates the pin cmd file)
-	pinKey     string                // operator-pinned endpoint: current() forces it until pinUntil
-	pinUntil   int64                 // unix time the pin is honoured until; after it, normal rotation resumes
-	now        func() int64          // injectable clock (unix seconds); overridden in tests
+	// pinKey/pinUntil back the panel's "make this active" button — a MOMENTARY jump, NOT a permanent lock.
+	// selectEntry forces pinKey now; the pin RELEASES the instant the carrier lands on it (first successful
+	// connect -> pinLanded clears it, ~1 handshake), after which normal rotation resumes. pinUntil is only a
+	// CEILING for a pick that never connects (a dead IP): once it lapses, current() stops forcing the pick so
+	// the tunnel recovers on a live endpoint. So a healthy pin is held for ~one handshake, not the whole TTL.
+	pinKey   string       // operator "make active" endpoint; current() forces it until it lands OR pinUntil lapses
+	pinUntil int64        // unix-secs ceiling for a NOT-YET-LANDED pin only; a landed pin releases well before this
+	now      func() int64 // injectable clock (unix seconds); overridden in tests
 }
 
 // NewPeerPool builds a pool from the candidate endpoints. addrs must be non-empty (the caller only
