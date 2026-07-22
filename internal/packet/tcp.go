@@ -1682,12 +1682,13 @@ func (b *TCP) dialLoop() {
 				}
 			}
 		} else if (b.pp != nil || b.sp != nil) && !b.closed.Load() {
-			// Direct-tcp peer/source pool: a scheduled proactive rotation is deliberate (clear any
-			// transient burns); a genuine death that came too soon means the endpoint connected but
-			// couldn't carry data (throttle/blackhole) — burn + advance off it (and walk the source once
-			// dests cycle). A death after a healthy lifetime is an ordinary drop (server restart): keep
-			// the endpoints and clear stale burns.
-			if rotated.Load() {
+			// Direct-tcp peer/source pool: a scheduled proactive rotation OR an operator "make this active"
+			// (manualSwitch) is deliberate (clear any transient burns; no fault, no "down" — a manual jump
+			// is logged SILENTLY like the ws edge pool, only the active endpoint changes). A genuine death
+			// that came too soon means the endpoint connected but couldn't carry data (throttle/blackhole)
+			// — burn + advance off it (and walk the source once dests cycle). A death after a healthy
+			// lifetime is an ordinary drop (server restart): keep the endpoints and clear stale burns.
+			if b.manualSwitch.Swap(false) || rotated.Load() {
 				deliberate = true
 				succeedBoth()
 			} else if time.Since(connectedAt) < minLiveness {
@@ -2219,6 +2220,7 @@ func (b *TCP) peerPinPollLoop() {
 			if b.pp != nil {
 				if key, ok := b.pp.readSelectCmd(); ok && b.pp.selectEntry(key) {
 					log.Printf("core/tcp: pin destination %s (panel select)", key)
+					b.st.setActive(b.stTag + " · " + key) // reflect the pinned destination in "active" — silently; drop() below is deliberate (no event)
 					drop()
 				}
 				b.pp.expirePinIfLapsed() // flush the status file the moment a lapsed pin stops being honoured (current() drops it under the hot lock but can't write)

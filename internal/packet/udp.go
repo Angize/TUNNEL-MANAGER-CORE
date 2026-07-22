@@ -300,8 +300,11 @@ func (b *UDP) adoptPeerUDP() {
 	b.session.Store(nil)
 	b.ci.Store(nil)
 	log.Printf("core/udp: pinned destination to %s", addr)
-	b.st.setActive("udp · " + ua.String()) // BUG #30: keep "active" tracking the pinned destination (see rotatePeerUDP)
-	b.st.down("peer-pin", "ip:"+addr)      // clears the session -> re-handshake -> reconnect pairs the down
+	// "Make this active" is a deliberate operator jump — logged SILENTLY like the ws edge pool: only the
+	// active endpoint changes, no down/up in the event ring. The session clear above still forces the
+	// re-handshake onto the pinned peer; setActive keeps "active" tracking it (see rotatePeerUDP). We do NOT
+	// emit down("peer-pin") — that armed a paired reconnect and surfaced a manual jump as a rotation event.
+	b.st.setActive("udp · " + ua.String())
 }
 
 // adoptSourceUDP rebinds the socket onto the pool's CURRENT source (an operator source pin). Safe from
@@ -314,7 +317,9 @@ func (b *UDP) adoptSourceUDP() {
 	addr := b.sp.current()
 	if host, ok := b.rebindSourceTo(addr); ok {
 		log.Printf("core/udp: pinned source to %s", host)
-		b.st.event("down", "src-pin", "ip:"+host) // source pin: session survives, no reconnect (see rotateSourceUDP)
+		// Silent, like the ws edge pool: a manual source "make this active" changes only the active source
+		// (the source pool's own status file reflects it). The session survives, so there's nothing to
+		// reconnect and no event is emitted — we no longer log a src-pin here.
 	}
 }
 
