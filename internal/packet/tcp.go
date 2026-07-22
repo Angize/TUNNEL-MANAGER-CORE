@@ -457,6 +457,10 @@ func (b *TCP) rotateSourceTCP(proactive bool) bool {
 	}
 	if moved {
 		log.Printf("core/tcp: rotated source to %s", addr)
+		// Surface the source rotation in the panel event ring, like the datagram carriers. A source
+		// rotation keeps the session (no reconnect to pair), so it is a plain event() not a down().
+		// nil-safe: a no-op on a ws edge pool (b.st==nil there) or the server.
+		b.st.event("down", "src-rotate", "ip:"+addr)
 	}
 	return moved
 }
@@ -1480,6 +1484,9 @@ func (b *TCP) dialLoop() {
 		}
 		if b.pp != nil {
 			b.pp.fail()
+			// Surface the destination rotation in the panel event ring, like the datagram carriers. A
+			// dest burn drops the session, so the reconnect pairs this down(). nil-safe (ws-pool/server).
+			b.st.down("peer-rotate", "ip:"+b.pp.current())
 			if destRot++; b.sp != nil && b.pp.size() > 0 && destRot >= b.pp.size() {
 				b.rotateSourceTCP(false)
 				destRot = 0
