@@ -42,7 +42,12 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-const xhttpUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+// chromeUA is the browser User-Agent presented by the ws AND xhttp carriers (single source of truth).
+// Its Chrome MAJOR version MUST match the uTLS ClientHello parrot (utls.HelloChrome_Auto — currently
+// Chrome 133) — otherwise the JA3/JA4 computed on the TLS handshake and the app-layer UA advertise
+// different Chrome versions, a combination no real browser produces and thus a cheap fingerprint.
+// TestUserAgentMatchesTLSParrot fails the build if the two drift apart (e.g. after a uTLS bump).
+const chromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 
 // maxXhChunk caps a single upstream POST body so a hostile client can't force a huge alloc.
 const maxXhChunk = 1 << 20
@@ -471,7 +476,7 @@ func (b *TCP) dialXHTTPOnce(dialAddr, host string, ech []byte, path string) (net
 	hc := &http.Client{Transport: rt}
 	ctx, cancel := context.WithCancel(context.Background())
 	setHdr := func(r *http.Request) {
-		r.Header.Set("User-Agent", xhttpUA)
+		r.Header.Set("User-Agent", chromeUA)
 		r.Header.Set("Accept", "*/*")
 		r.Header.Set("Accept-Language", "en-US,en;q=0.9")
 		r.Header.Set("Cache-Control", "no-store")

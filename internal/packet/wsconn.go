@@ -194,7 +194,7 @@ func wsClientHandshake(conn net.Conn, host, path string, deadline time.Time) (*b
 		"Connection: Upgrade\r\n" +
 		"Pragma: no-cache\r\n" +
 		"Cache-Control: no-cache\r\n" +
-		"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36\r\n" +
+		"User-Agent: " + chromeUA + "\r\n" +
 		"Upgrade: websocket\r\n" +
 		"Origin: https://" + host + "\r\n" +
 		"Sec-WebSocket-Version: 13\r\n" +
