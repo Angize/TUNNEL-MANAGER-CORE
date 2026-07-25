@@ -454,10 +454,33 @@ func (p *wsPool) aimStandby() {
 		idx := (p.i + off) % len(p.ips)
 		if ip := p.ips[idx]; ip != activeIP && p.ipHealth[ip] == nil {
 			p.i = idx // a healthy edge on a DIFFERENT IP than the active — the standby's home
+			p.aimNextHealthySNILocked()
 			return
 		}
 	}
 	p.stepLocked() // no distinct healthy IP available — degrade to a plain step (still varies the SNI axis)
+}
+
+// aimNextHealthySNILocked advances the SNI cursor to the next HEALTHY domain, wrapping. aimStandby's
+// IP-anchoring path used to return having written only p.i, so with warm standby on and a healthy pool
+// the SNI axis NEVER advanced and rotation silently degraded to IP-only: the operator configures N IPs
+// x M domains, and only the IPs ever move. That matters twice over — a domain that gets flagged is
+// never rotated off (it takes every IP down with it), and one permanently-reused SNI is itself a stable
+// fingerprint, which is the whole reason to carry several.
+// Landing on a HEALTHY SNI (rather than just stepping) is deliberate: current() scans from (i,j) and
+// calls stepLocked on an unhealthy combo, and stepLocked increments j and — on wrap — i, which would
+// walk the standby straight off the IP aimStandby just picked. Anchoring both axes on healthy entries
+// means current() matches immediately and the chosen IP holds.
+// Leaves the cursor where it is when no SNI is healthy; current() then falls back to the least-bad one.
+// Caller holds the lock.
+func (p *wsPool) aimNextHealthySNILocked() {
+	for off := 1; off <= len(p.snis); off++ {
+		idx := (p.j + off) % len(p.snis)
+		if p.sniHealth[p.snis[idx].host] == nil {
+			p.j = idx
+			return
+		}
+	}
 }
 
 // advanceIP / advanceSNI rotate a single dimension (manual "rotate now, IP only" /

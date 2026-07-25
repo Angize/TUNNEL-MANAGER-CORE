@@ -61,6 +61,41 @@ func TestWSPoolStandbyNeverCollidesWithActive(t *testing.T) {
 	}
 }
 
+// TestWSPoolStandbyVariesSNI: with warm standby on a HEALTHY pool, successive standby builds must
+// exercise the SNI axis as well as the IP axis. aimStandby's IP-anchoring path used to write only the
+// IP cursor and return, so the domain never changed and rotation silently degraded to IP-only — a
+// flagged domain could never be rotated off, and the one reused SNI stayed a stable fingerprint.
+func TestWSPoolStandbyVariesSNI(t *testing.T) {
+	p := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	p.setActive(activeLabel("a", "x")) // live edge: IP a, domain x
+	seen := map[string]bool{}
+	for round := 0; round < 8; round++ { // the CDN keeps reaping + rebuilding the idle standby
+		p.aimStandby()
+		ip, sni, ok := p.current()
+		if !ok {
+			t.Fatal("current() returned not-ok on a healthy 2x2 pool")
+		}
+		if ip == "a" {
+			t.Fatalf("round %d: standby collided with the active IP", round)
+		}
+		seen[sni.host] = true
+	}
+	if !seen["x"] || !seen["y"] {
+		t.Fatalf("standby never varied the SNI axis; saw %v", seen)
+	}
+
+	// A burned domain must be skipped, not parked on: with y suspect, every build stays on x.
+	p2 := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	p2.setActive(activeLabel("a", "x"))
+	p2.markSuspect("sni", "y", "test")
+	for round := 0; round < 4; round++ {
+		p2.aimStandby()
+		if _, sni, _ := p2.current(); sni.host != "x" {
+			t.Fatalf("round %d: burned domain y was selected (%q)", round, sni.host)
+		}
+	}
+}
+
 // TestPoolAdvanceReportsRealMove pins down advance()'s contract: it reports whether the edge the
 // carrier would actually DIAL changed, not whether the raw cursor moved (the cursor always moves).
 // The proactive rotation timer uses this to avoid tearing a healthy connection down when every other
