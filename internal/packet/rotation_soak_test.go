@@ -3,7 +3,6 @@ package packet
 import (
 	"bytes"
 	"os"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -65,9 +64,9 @@ func TestRotationSoakRapidRotate(t *testing.T) {
 	drainCounter(srvCtrl, &delivered)
 
 	seen := map[string]int{}
-	var mu sync.Mutex
-	stop := make(chan struct{})
+	stop, sampled := make(chan struct{}), make(chan struct{})
 	go func() { // sample the live active edge; a frozen rotation shows only ONE value
+		defer close(sampled)
 		tk := time.NewTicker(25 * time.Millisecond)
 		defer tk.Stop()
 		for {
@@ -76,9 +75,7 @@ func TestRotationSoakRapidRotate(t *testing.T) {
 				return
 			case <-tk.C:
 				if a := poolActive(pool); a != "" {
-					mu.Lock()
 					seen[a]++
-					mu.Unlock()
 				}
 			}
 		}
@@ -93,10 +90,13 @@ func TestRotationSoakRapidRotate(t *testing.T) {
 		time.Sleep(30 * time.Millisecond)
 	}
 	close(stop)
+	// JOIN, not just a signal. close(stop) only makes the sampler's next select eligible to take the
+	// stop arm — it can still be mid-tick and write seen[a] once more. Waiting for the goroutine to
+	// actually return is what puts every write before every read below; without it the final t.Logf
+	// formats the map concurrently with that last write (a real -race failure, ~1 run in 15).
+	<-sampled
 
-	mu.Lock()
 	distinct := len(seen)
-	mu.Unlock()
 	if distinct < 2 {
 		t.Fatalf("rotation appears frozen: saw only %d distinct active edge(s) across 3s of 150ms rotation (want >= 2): %v", distinct, seen)
 	}
