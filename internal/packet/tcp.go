@@ -2120,6 +2120,13 @@ func (b *TCP) dialLoopWarm() {
 				continue
 			}
 			log.Printf("core/tcp: connected to %s", label)
+			// Consume a stale manual-switch flag, exactly as dialLoop does after its own connect and as
+			// both adopt paths below already do. RotateIP/SelectEdge set it unconditionally, so one issued
+			// DURING an outage — when there is no live conn to drop — leaves it pending with no death to
+			// consume it. This blocking dial was the only setActive site that did not clear it, so the
+			// fresh active it establishes would have its NEXT genuine death read as an operator switch:
+			// no down/up pair in the log, and the edge that actually failed never burned.
+			b.manualSwitch.Store(false)
 			setActive(cf, conn, label, combo)
 			return true
 		}
