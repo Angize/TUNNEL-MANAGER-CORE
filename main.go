@@ -279,7 +279,14 @@ func main() {
 	// this tunnel re-establishes/fails over faster than the default (~3×keepalive / 60s idle backstop).
 	// Every carrier implements it; a 0 value leaves the default formula in place.
 	if cfg.Role == "client" && cfg.DeadAfterSecs > 0 {
-		if s, ok := b.(interface{ SetDeadAfter(int) }); ok {
+		s, ok := b.(interface{ SetDeadAfter(int) })
+		if !ok {
+			// Say so. The comment above used to claim every carrier implements this, and *packet.DNS did
+			// not — so the assertion failed, the log line below (which lives in the success branch) never
+			// printed, and a fleet-wide operator setting was silently inert on exactly one transport.
+			log.Printf("core: WARNING carrier %s ignores dead_after_secs — it implements no SetDeadAfter", cfg.Transport)
+		}
+		if ok {
 			s.SetDeadAfter(cfg.DeadAfterSecs)
 			// Log the EFFECTIVE deadline: the carrier clamps dead_after_secs up to >=2×keepalive
 			// (deadWindow), so logging cfg.DeadAfterSecs verbatim would misreport a clamped value.

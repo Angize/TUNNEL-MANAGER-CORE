@@ -806,7 +806,19 @@ func (b *TCP) xhttpHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
-		data, _ := io.ReadAll(io.LimitReader(r.Body, maxXhChunk))
+		data, rerr := io.ReadAll(io.LimitReader(r.Body, maxXhChunk))
+		if rerr != nil {
+			// A truncated body must NOT be delivered. Upstream is a length-prefixed AEAD stream, so a
+			// short chunk at seq N shifts every following byte: readFrame consumes the next frame's
+			// bytes as this one's payload and the desync cascades until the AEAD open fails — long
+			// after the truncation, and charged to the edge as a data-plane fault. Answering 204
+			// ("chunk accepted") made it worse: the client never learned and never re-dialled.
+			// Dropping it is safe and self-correcting — deliver()'s gap guard stalls at nextSeq and
+			// lets the client fail and re-dial, which restarts the stream cleanly.
+			log.Printf("core/xhttp: truncated upstream chunk seq=%d (%d bytes read): %v — dropping so the client re-dials", seq, len(data), rerr)
+			http.Error(w, "", http.StatusBadRequest)
+			return
+		}
 		s.deliver(seq, data)
 		w.WriteHeader(http.StatusNoContent) // 204: chunk accepted, session stays open
 		return
