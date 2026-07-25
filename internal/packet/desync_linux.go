@@ -109,6 +109,11 @@ func (d desyncCfg) specsTCP() []fakeSpec {
 // fakePayload returns a random-length, random-content payload sized like a small
 // handshake/keepalive frame. Our real frames are AEAD ciphertext (indistinguishable from
 // random on the wire), so a random decoy of a plausible size resembles a real flow packet.
+// fakeSeqGap offsets a decoy's sequence/counter far past the live stream's, so a decoy can never land
+// inside the real frame's sequence space and be mistaken for it by the peer (which drops it anyway on
+// the AEAD) or, worse, by a middlebox reassembling the flow.
+const fakeSeqGap = 1 << 20
+
 func fakePayload() []byte {
 	var lb [1]byte
 	_, _ = rand.Read(lb[:])
