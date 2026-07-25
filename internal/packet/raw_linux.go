@@ -201,7 +201,20 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 	var sa syscall.SockaddrInet4
 	copy(sa.Addr[:], to.IP.To4())
 	for _, sp := range r.desync.specs() {
-		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, fakePayload())
+		// Wrap the decoy in the SAME profile header the real frames carry. Sending fakePayload() bare
+		// only worked for bip/ipip, whose encap is a no-op; on icmp/gre/udp/tcp/esp it put random bytes
+		// where the carrier header belongs, so the decoy was not a well-formed packet of the protocol it
+		// claims in the IPv4 header. That inverts the whole point: a DPI cannot be desynced by something
+		// it discards as malformed, and a stream of proto-1 packets that are not valid ICMP is itself a
+		// cheap signature. Decoys take their own sequence space so they never collide with a real frame.
+		var dseq, dack uint32
+		if r.proto == protoTCP {
+			dseq, dack = r.tcpISN+r.tcpBytes.Load()+fakeSeqGap, r.tcpAck
+		} else {
+			dseq = r.seq.Load() + fakeSeqGap
+		}
+		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, dseq, dack, r.spi)
+		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
 		if out == nil {
 			continue
 		}
