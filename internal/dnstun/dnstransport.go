@@ -548,6 +548,8 @@ type dnsServer struct {
 	serveDone  chan struct{} // closed when serveLoop has fully exited
 	once       sync.Once
 
+	sendErr sendErrLog // throttled write-failure logging, same as the client half (see sendlog.go)
+
 	soa dnsmessage.Resource // apex SOA, answered so resolvers see a healthy (not lame) zone
 	ns  dnsmessage.Resource // apex NS, likewise
 }
@@ -656,7 +658,9 @@ func (s *dnsServer) serveLoop() {
 			}
 			resp, berr := buildResponse(id, qn, qtype, s.apexAnswers(qname, qtype))
 			if berr == nil {
-				_, _ = s.conn.WriteToUDP(resp, addr)
+				if _, err := s.conn.WriteToUDP(resp, addr); err != nil {
+					s.sendErr.note("dns/apex", err)
+				}
 			}
 			continue
 		}
@@ -729,7 +733,12 @@ func (s *dnsServer) write(id uint16, qn dnsmessage.Name, down []byte, addr *net.
 	if berr != nil {
 		return
 	}
-	_, _ = s.conn.WriteToUDP(resp, addr)
+	// The server half was left out when #157 gave the client throttled logging. A server that cannot
+	// answer (ENOBUFS, EPERM from an OUTPUT rule, a route flap) goes completely dark, and the CLIENT
+	// then reports "the resolver stopped answering" — pointing the operator at the wrong machine.
+	if _, err := s.conn.WriteToUDP(resp, addr); err != nil {
+		s.sendErr.note("dns/server", err)
+	}
 }
 
 // apexAnswers returns the authority records for a non-TXT query: the SOA or NS at the exact zone
