@@ -53,6 +53,11 @@ type SessionConfig struct {
 	Cipher    string
 	MTU       int
 	Keepalive time.Duration
+	// DeadAfter is the operator's dead_after_secs override. 0 = derive from Keepalive as before.
+	// Without it the fleet-wide setting was a silent no-op on exactly this transport: main.go probes
+	// for a SetDeadAfter method, *DNS did not have one, the assertion failed, and because the "self-heal
+	// deadline set" log line sits INSIDE the successful branch the operator got no line and no warning.
+	DeadAfter time.Duration
 }
 
 // peerKey is the single logical peer identity on both ends' QueuePacketConn. The tunnel is
@@ -285,13 +290,19 @@ func (sc *sessionConn) keepalive(interval, deadWindow time.Duration) {
 // resolveKeepalive turns the configured interval into (interval, deadWindow), applying the defaults and
 // the DNS-carrier floor. Called synchronously in DialSession so the keepalive goroutine holds only
 // local copies (no shared read of the package tunables).
-func resolveKeepalive(interval time.Duration) (time.Duration, time.Duration) {
+func resolveKeepalive(interval, deadAfter time.Duration) (time.Duration, time.Duration) {
 	if interval <= 0 {
 		interval = defaultKeepalive
 	}
 	dw := time.Duration(keepaliveDeadMult) * interval
 	if dw < keepaliveDeadFloor {
 		dw = keepaliveDeadFloor
+	}
+	if deadAfter > 0 { // operator override; still floored so a tiny value cannot reap a healthy session
+		dw = deadAfter
+		if dw < keepaliveDeadFloor {
+			dw = keepaliveDeadFloor
+		}
 	}
 	return interval, dw
 }
@@ -364,7 +375,7 @@ handshake:
 	sc := &sessionConn{UDPSession: conn, qpc: qpc, t: t, done: done}
 	sc.sealer.Store(sealer) // before the pumps start: sendPump's first Seal must not Load a nil sealer
 	sc.lastRx.Store(time.Now().UnixNano())
-	kaInterval, kaDeadWindow := resolveKeepalive(cfg.Keepalive)
+	kaInterval, kaDeadWindow := resolveKeepalive(cfg.Keepalive, cfg.DeadAfter)
 	go sc.sendPump()
 	go sc.recvPump(inCh, nil)                 // client ignores any late handshake datagrams
 	go sc.keepalive(kaInterval, kaDeadWindow) // detect a dead/mismatched server and re-dial (client only)

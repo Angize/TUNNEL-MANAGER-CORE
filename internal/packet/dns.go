@@ -74,6 +74,18 @@ func ListenDNS(dev *tun.Device, listenAddr, zone, psk, cipher string) (*DNS, err
 
 // Run drives the carrier: one long-lived tun→net loop feeds whatever session is live, while the
 // main loop (re)establishes a session and pumps net→tun until it dies, then reconnects with backoff.
+
+// SetDeadAfter (client) applies the operator's dead_after_secs to the dnstun session's dead window, so
+// the fleet-wide setting reaches this carrier like every other one. Previously *DNS simply had no such
+// method: main.go probes for it with a type assertion, the assertion failed, and the "self-heal deadline
+// set" log line sits inside the successful branch — so the knob was a no-op here with nothing said.
+// The session still floors the value, so a tiny setting cannot reap a healthy session.
+func (d *DNS) SetDeadAfter(secs int) {
+	if secs > 0 {
+		d.cfg.DeadAfter = time.Duration(secs) * time.Second
+	}
+}
+
 func (d *DNS) Run() error {
 	go d.tunToNet()
 	backoff := dnsBackoffMin

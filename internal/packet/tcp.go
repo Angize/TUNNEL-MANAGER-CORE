@@ -1251,7 +1251,25 @@ func (b *TCP) probeEdgeFull(ip string, sni wsSNIEntry) bool {
 		}
 		conn, err := b.dialXHTTPOnce(ip, host, sni.ech, sni.path)
 		if err != nil {
-			return false
+			// Retry ONCE with the fresh key on a stale-ECH rejection, exactly as the live path
+			// (establishXHTTP) and the ws probe (tlsToEdge, which has this built in) already do.
+			// Without it a rotated Cloudflare ECH key made every retest of a suspect/dead xhttp entry
+			// fail forever: it walked the backoff to dead and could never come back, so the self-heal
+			// FSM — whose whole purpose is that a TEMPORARY block recovers without a rebuild — was
+			// dead on this transport. Multi-domain pools were worst: only the SNI the LIVE dial happens
+			// to use ever got its key refreshed, leaving every other domain permanently stale. It also
+			// poisoned attribution, since differentialProbe's reproduce step and both isolation arms
+			// all failed for a reason that had nothing to do with the edge.
+			var echErr *utls.ECHRejectionError
+			if !errors.As(err, &echErr) || len(echErr.RetryConfigList) == 0 {
+				return false
+			}
+			log.Printf("core/xhttp: ECH-SELFHEAL[probe] for %s (%s) — stale key rejected, retrying with the fresh one", host, ip)
+			// Deliberately NOT persisted here: this mirrors tlsToEdge's live=false probe contract, where
+			// a probe proves reachability but does not publish a key. The live dial persists it.
+			if conn, err = b.dialXHTTPOnce(ip, host, echErr.RetryConfigList, sni.path); err != nil {
+				return false
+			}
 		}
 		conn.Close()
 		return true
