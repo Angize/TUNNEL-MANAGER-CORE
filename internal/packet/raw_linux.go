@@ -1086,7 +1086,15 @@ func srcAllowedIn(set map[string]struct{}, ip net.IP) bool {
 // an atomic swap (no socket rebind); the server follows the new source. IGNORED when spoofSrc is set —
 // a forged source is a deliberate decoy that must not be rotated away. Call before Run().
 func (r *Raw) SetSourcePool(sp *PeerPool) {
-	if !r.isClient || r.spoofSrc != nil {
+	if !r.isClient {
+		return
+	}
+	if r.spoofSrc != nil {
+		// spoof_src owns the source field, so a rotation pool cannot also drive it. Refusing is right;
+		// refusing SILENTLY was not — main.go logs "source pool: N source IPs rotate=..." immediately
+		// after this call and has no way to know it was dropped, so the operator read a pool as active
+		// that never existed. Config validation rejects the combination now; this stays as the guard.
+		log.Printf("core/raw: source pool ignored — spoof_src pins the source IP (remove one of them)")
 		return
 	}
 	r.sp = sp
