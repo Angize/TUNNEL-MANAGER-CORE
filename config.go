@@ -698,6 +698,14 @@ func (c *Config) validate() error {
 	if c.Obfs && !c.Crypto.Enabled {
 		return errors.New("obfs requires crypto enabled")
 	}
+	// The dns carrier has no obfs framing: main.go's dns case calls ListenDNS/DialDNS, whose signatures
+	// take no obfs flag, and nothing in internal/dnstun references it. Every OTHER carrier is handed
+	// cfg.Obfs. Left unchecked, obfs+dns validated, persisted, showed as enabled in the panel and in
+	// core-<name>.json, and did nothing — false assurance that anti-DPI framing was running, on the most
+	// sensitive carrier there is. Reject it so the misconfiguration is visible at build time instead.
+	if c.Obfs && c.Transport == "dns" {
+		return errors.New("obfs is not supported on the dns transport (the DNS carrier has no obfs framing)")
+	}
 	if c.Fec {
 		// FEC repairs lost datagrams from parity — it only makes sense on the datagram
 		// carriers (udp / raw / flux). On tcp/ws the stream is already reliable, so FEC
