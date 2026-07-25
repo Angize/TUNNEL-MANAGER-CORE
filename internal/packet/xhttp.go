@@ -94,6 +94,16 @@ func (c *xhttpConn) Write(p []byte) (int, error) {
 	if c.up != nil { // client: each write becomes a short POST with a seq
 		return c.up.write(p)
 	}
+	// Two independent guards, cheapest-and-most-definitive first.
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		// net/http forbids touching a ResponseWriter once its handler has returned, and Close is what
+		// releases the handler. Without this guard a late framer write — a keepalive racing teardown —
+		// reached a dead ResponseWriter, which is undefined behaviour rather than a clean error.
+		return 0, net.ErrClosed
+	}
 	// SERVER: c.w is the long-lived GET's ResponseWriter. If the client stops reading, the h2 flow
 	// -control window fills and this Write parks — with no deadline of its own, forever, holding the
 	// goroutine that drains the TUN. connFramer arms a write deadline before every framed write

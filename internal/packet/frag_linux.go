@@ -48,10 +48,12 @@ func (f *fragConn) ttlOpt() (int, int) {
 func (f *fragConn) writeDisorder(p []byte, at int) (int, error) {
 	sc, ok := f.Conn.(syscall.Conn)
 	if !ok {
+		f.degraded("the connection exposes no raw fd")
 		return f.writeSplit(p, at)
 	}
 	raw, err := sc.SyscallConn()
 	if err != nil {
+		f.degraded("SyscallConn: " + err.Error())
 		return f.writeSplit(p, at)
 	}
 	level, opt := f.ttlOpt()
@@ -66,7 +68,8 @@ func (f *fragConn) writeDisorder(p []byte, at int) (int, error) {
 		}
 		syscall.SetsockoptInt(int(fd), level, opt, ttl)
 	}); cerr != nil {
-		return f.writeSplit(p, at) // couldn't touch the socket -> at least split
+		f.degraded("setsockopt(TTL): " + cerr.Error()) // e.g. a container without the capability
+		return f.writeSplit(p, at)                     // at least split
 	}
 	n1, werr := f.Conn.Write(p[:at]) // head flushed at the low TTL -> expires before the server
 	_ = raw.Control(func(fd uintptr) {
@@ -149,7 +152,7 @@ func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 		copy(fake[i:i+len(f.host)], decoySNI(len(f.host)))
 	}
 	seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), snd, rcv, tcpPshAck, 0xffff, fake)
-	badTCPChecksum(seg)                                                // the SERVER drops the fake (bad L4 checksum); the DPI still ingests it
+	badTCPChecksum(seg)                                                        // the SERVER drops the fake (bad L4 checksum); the DPI still ingests it
 	if ip := buildIP4Ext(src, dst, protoTCP, fakeTTL, false, seg); ip != nil { // normal TTL so the fake reaches the DPI; the checksum, not TTL, kills it before the server
 		_ = inj.send(ip)
 	}

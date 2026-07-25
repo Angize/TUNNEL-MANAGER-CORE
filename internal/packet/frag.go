@@ -2,6 +2,7 @@ package packet
 
 import (
 	"bytes"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -45,6 +46,18 @@ type fragConn struct {
 	ttl  int    // disorder: TTL for the head segment (0 = default); low enough to die before the server
 	mu   sync.Mutex
 	sent bool
+	warn sync.Once // one line per conn when the chosen mode had to fall back to a plain split
+}
+
+// degraded reports, exactly once per connection, that the operator's chosen SNI mode could not be
+// applied and this conn fell back to a plain in-order split. Silence here was the bug: disorder and
+// fake are materially stronger than split, the panel keeps showing the mode the operator picked, and
+// the usual cause — a container without the capability to set a per-segment TTL — is invisible from
+// the outside. Once per conn, not per write, so a busy tunnel cannot flood the journal.
+func (f *fragConn) degraded(why string) {
+	f.warn.Do(func() {
+		log.Printf("core/tls: sni_mode %q fell back to a plain split (%s) — the split still helps a stateless DPI, the desync does not apply", f.mode, why)
+	})
 }
 
 // newFragConn wraps c so its first write is split. host is the SNI (for auto split-point location),
