@@ -3,6 +3,7 @@ package dnstun
 import (
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -77,6 +78,14 @@ func parseResponseTXT(buf []byte, wantID uint16) ([]byte, error) {
 	}
 	if h.ID != wantID || !h.Response {
 		return nil, errors.New("dns: response id/flag mismatch")
+	}
+	// A rejection is NOT an empty answer. SERVFAIL / REFUSED / NXDOMAIN all arrive with Response set and
+	// a matching ID and no TXT records, so without this check they were indistinguishable from a healthy
+	// response that simply had nothing queued — and the tunnel went quiet with no error at all while the
+	// resolver was refusing every query (rate limit, a blocked zone, a resolver that stopped recursing).
+	// Surfacing it lets the caller's empty/failure accounting see the real cause.
+	if h.RCode != dnsmessage.RCodeSuccess {
+		return nil, fmt.Errorf("dns: resolver returned %v", h.RCode)
 	}
 	if err := p.SkipAllQuestions(); err != nil {
 		return nil, err
