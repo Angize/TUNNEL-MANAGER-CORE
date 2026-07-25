@@ -871,10 +871,18 @@ func (b *UDP) clientLoop() {
 		// pongs our keepalive pings, so once it stops answering (lastRx ages past the dead window) burn
 		// and advance the pool. The baseline is seeded at connect and reset on every rotation, so a
 		// fresh tunnel or a just-jumped-to endpoint gets a full window before it can false-fail.
-		if !b.cryptoOn && rc.active() && b.sessionStale() {
-			rc.fail(b.rotatePeerUDP, b.rotateSourceUDP)
+		if !b.cryptoOn && b.sessionStale() {
+			if rc.active() {
+				rc.fail(b.rotatePeerUDP, b.rotateSourceUDP)
+			}
 			b.lastRx.Store(time.Now().UnixNano()) // fresh window even if the pool couldn't move (single endpoint / source-only rotate)
 			b.peerAnswered.Store(false)           // stale -> the current endpoint is no longer proven answering
+			// The event is NOT conditional on a pool. It used to be, and that left one configuration —
+			// clear mode (cipher=none) with no rotation pool — unable to write any event at all: every
+			// other down/up site here is gated on crypto or on a pool. Meanwhile the panel classifies
+			// every udp link as "precise" from the TRANSPORT alone (STATUSRING_TRANSPORTS) and therefore
+			// suppresses its own coarse down/up. The dot still went red off the frozen heartbeat, but the
+			// system log recorded nothing — no drop, no recovery — for the entire life of the tunnel.
 			b.st.down("stale", "udp")
 		}
 		if b.sealer() == nil && b.cryptoOn {
@@ -897,7 +905,11 @@ func (b *UDP) clientLoop() {
 			// Pair it on the data-plane recovery: once the CURRENT endpoint answers again (peerAnswered,
 			// set by deliver and cleared on every rotation), report the reconnect. reconnected() is a
 			// no-op unless a down is pending, so calling it on each answering loop never invents an "up".
-			if !b.cryptoOn && rc.active() && b.peerAnswered.Load() {
+			// Ungated on the pool for the same reason the stale down() above is: without a pool this was
+			// the only site that could pair it, so opening the down alone would leave an UNPAIRED down —
+			// a red log entry that never resolves. peerAnswered is maintained with or without a pool
+			// (deliver sets it; only a rotation clears it), so the pairing is just as sound here.
+			if !b.cryptoOn && b.peerAnswered.Load() {
 				b.st.reconnected("udp")
 			}
 			failN = 0
