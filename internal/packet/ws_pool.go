@@ -933,12 +933,10 @@ func (p *wsPool) writeStatus() {
 		Active string         `json:"active"`
 		Health []healthStatus `json:"health"`
 		Events []coreEvent    `json:"events"`
-		PinIP  string         `json:"pin_ip"`
-		PinSNI string         `json:"pin_sni"`
 		HB     int64          `json:"hb"`
 		DW     int64          `json:"dw"`
 		TS     int64          `json:"ts"`
-	}{Active: p.active, Health: health, Events: evs, PinIP: p.pinIP, PinSNI: p.pinSNI, HB: p.hb, DW: p.dw, TS: time.Now().Unix()}
+	}{Active: p.active, Health: health, Events: evs, HB: p.hb, DW: p.dw, TS: time.Now().Unix()}
 	p.mu.Unlock()
 	if data, err := json.Marshal(st); err == nil {
 		// writeMu already held across the snapshot above (serializes writers AND orders snapshot->write).
