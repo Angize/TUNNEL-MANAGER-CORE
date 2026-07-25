@@ -1947,17 +1947,20 @@ func (b *TCP) dialLoopWarm() {
 	// establish retries with a short backoff until a conn comes up or Close fires; on success it
 	// delivers the warm conn on out, or closes it if Close won the race against the buffered send.
 	dialWorker := func(wantStandby bool, out chan warmConn) {
+		var backoff time.Duration // #148's exponential+jittered retry; see the note in dialActiveBlocking
 		for {
 			if b.closed.Load() {
 				return
 			}
 			cf, conn, label, combo, err := b.warmEstablish(wantStandby)
 			if err != nil {
-				if b.sleep(1 * time.Second) {
+				backoff = nextReconnectDelay(backoff)
+				if b.sleep(backoff) {
 					return
 				}
 				continue
 			}
+			backoff = 0 // a live connection resets the ladder, exactly as dialLoop does
 			select {
 			case out <- warmConn{cf, conn, label, combo}:
 				// The channel is buffered, so this send can succeed AFTER the manager has already
@@ -2026,13 +2029,19 @@ func (b *TCP) dialLoopWarm() {
 	// and as the fallback when the active dies with no warm standby ready. Returns false if Close
 	// fired during the retry.
 	dialActiveBlocking := func() bool {
+		// Exponential + jittered, like dialLoop since #148. A fixed 1s retry against a filtered edge is
+		// a perfectly periodic SYN/TLS train — a tunnel signature that positively confirms the endpoint
+		// to a censor, and one that never stops here: the standby path skips attributeFailure, so a
+		// blocked edge is never burned and the beacon is permanent rather than transient.
+		var backoff time.Duration
 		for {
 			if b.closed.Load() {
 				return false
 			}
 			cf, conn, label, combo, err := b.warmEstablish(false)
 			if err != nil {
-				if b.sleep(1 * time.Second) {
+				backoff = nextReconnectDelay(backoff)
+				if b.sleep(backoff) {
 					return false
 				}
 				continue
@@ -2085,6 +2094,14 @@ func (b *TCP) dialLoopWarm() {
 					b.pool.down(classifyErr(cause), activeLabel) // arms the paired "up" the next reconnect emits
 					if time.Since(activeSince) < minLiveness {
 						b.pool.dataFailure(activeLabel)
+						// ...and MOVE OFF it, exactly as dialLoop does ("don't re-stick on the bad edge").
+						// Without this the cursor stays put, current() still reports the dead edge healthy,
+						// and dialActiveAsync re-dials the SAME one — and because that dial SUCCEEDS there
+						// is no sleep on the path, so the tunnel spins connect -> die-in-<minLiveness ->
+						// reconnect-same-edge back to back. On a freshly built tunnel it never even burns:
+						// wsPool.lastGood is 0, so dataFailure's recentGood gate is false and the fail
+						// counter never increments. Advancing is what makes the failover actually fail over.
+						b.pool.advance()
 					} else {
 						b.pool.dataSuccess(activeLabel)
 					}
@@ -2190,6 +2207,20 @@ func (b *TCP) dialLoopWarm() {
 				// "rotation stopped" report can be told apart from a genuine stall (this branch used to
 				// be silent, which is exactly why a quiet rotation looked like a hang).
 				log.Printf("core/tcp: proactive rotation skipped — edge is pinned")
+				continue
+			}
+			// The standby must actually be on a DIFFERENT edge, or this "rotation" is pure churn. When the
+			// pool is down to one healthy combo (the ordinary "one edge survived the filter" state, and any
+			// 1IP x 1SNI pool) aimStandby finds no distinct healthy IP, degrades to a plain step, and
+			// currentLocked resolves straight back to the only healthy combo, so the standby is built on the
+			// SAME edge as the active. Promoting it retires a healthy carrier and immediately rebuilds an
+			// identical one: a full TCP+TLS+WS-upgrade+core-handshake to the same edge every ws_rotate_secs,
+			// forever. setActive sees no change, so nothing is logged and the operator just sees the rotation
+			// log fall silent while connection churn continues. Same shape as the guard #152 added to the
+			// non-warm loop. Compared on the COMBO, not the label: the label is only the IP, so an SNI-only
+			// rotation on the same IP is a real rotation and must not be skipped.
+			if standby != nil && standbyCombo == activeCombo {
+				log.Printf("core/tcp: proactive rotation skipped — the only warm standby is the same edge (%s)", activeCombo)
 				continue
 			}
 			if promote() {
