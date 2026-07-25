@@ -352,8 +352,8 @@ func TestCurrentFallbackLeastBad(t *testing.T) {
 	}
 }
 
-// The status snapshot carries the full per-entry FSM state, and keeps the legacy burned arrays
-// populated with the suspect-or-dead keys.
+// The status snapshot carries the full per-entry FSM state — key/kind/state/fails/next_retest — which
+// is everything the node and panel read.
 func TestStatusSnapshotStates(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "st.json")
@@ -366,10 +366,8 @@ func TestStatusSnapshotStates(t *testing.T) {
 		t.Fatalf("status file not written: %v", err)
 	}
 	var st struct {
-		Active     string   `json:"active"`
-		BurnedIPs  []string `json:"burned_ips"`
-		BurnedSNIs []string `json:"burned_snis"`
-		Health     []struct {
+		Active string `json:"active"`
+		Health []struct {
 			Key        string `json:"key"`
 			Kind       string `json:"kind"`
 			State      string `json:"state"`
@@ -394,11 +392,8 @@ func TestStatusSnapshotStates(t *testing.T) {
 	if aNext != *now+30 {
 		t.Fatalf("suspect a next_retest_unix=%d, want %d", aNext, *now+30)
 	}
-	if len(st.BurnedIPs) != 1 || st.BurnedIPs[0] != "a" {
-		t.Fatalf("expected burned_ips=[a], got %v", st.BurnedIPs)
-	}
-	if len(st.BurnedSNIs) != 0 {
-		t.Fatalf("expected no burned_snis, got %v", st.BurnedSNIs)
+	if len(st.Health) != 3 {
+		t.Fatalf("health should list every pool entry (2 ips + 1 sni), got %d", len(st.Health))
 	}
 }
 

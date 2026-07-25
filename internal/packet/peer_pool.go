@@ -580,12 +580,11 @@ func (c *rotationController) pollPins(applyDst, applySrc func()) {
 }
 
 // peerPoolStatus is the pool state written to the status file the node/panel read. Health carries the
-// full per-endpoint FSM (state/fails/next_retest); Burned keeps the flat suspect-or-dead list so any
-// existing reader keeps working; Pin is the operator-pinned endpoint (empty = none).
+// full per-endpoint FSM (state/fails/next_retest), which is what every reader uses; Pin is the
+// operator-pinned endpoint (empty = none).
 type peerPoolStatus struct {
 	Active  string         `json:"active"`
 	Addrs   []string       `json:"addrs"`
-	Burned  []string       `json:"burned"`
 	Health  []healthStatus `json:"health"`
 	Pin     string         `json:"pin"`
 	Updated int64          `json:"updated_unix"`
@@ -606,17 +605,15 @@ func (p *PeerPool) writeStatus() {
 	defer p.writeMu.Unlock()
 	p.mu.Lock()
 	health := make([]healthStatus, 0, len(p.addrs))
-	burned := []string{}
 	for _, a := range p.addrs {
 		hs := healthStatus{Key: a, Kind: "ip", State: "healthy"}
 		if r := p.health[a]; r != nil {
 			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
-			burned = append(burned, a)
 		}
 		health = append(health, hs)
 	}
 	st := peerPoolStatus{Active: p.addrs[p.cur], Addrs: append([]string(nil), p.addrs...),
-		Burned: burned, Health: health, Pin: p.pinKey, Updated: time.Now().Unix()}
+		Health: health, Pin: p.pinKey, Updated: time.Now().Unix()}
 	p.mu.Unlock()
 	data, err := json.Marshal(st)
 	if err != nil {

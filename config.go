@@ -200,8 +200,8 @@ type Config struct {
 	// full-duplex request wrapped as a real gRPC stream (Content-Type application/grpc +
 	// gRPC message framing): a CDN like Cloudflare connects to the origin with h2c and
 	// streams the gRPC call instead of buffering it, which is what makes a full-duplex
-	// stream survive the CDN->origin leg (needs ws_tls). "stream" is a legacy alias for
-	// "grpc" (plain stream-one was removed — it stalled through buffering CDNs). Only
+	// stream survive the CDN->origin leg (needs ws_tls). Those two are the only modes —
+	// plain stream-one was removed, it stalled through buffering CDNs. Only
 	// meaningful when ws_xhttp is set; the server auto-detects the client's style per
 	// request (and serves h2c so the CDN can reach it over HTTP/2).
 	WSXHTTPMode string `json:"ws_xhttp_mode"`
@@ -587,15 +587,15 @@ func (c *Config) validate() error {
 				return errors.New("split_ttl must be between 0 and 255")
 			}
 		}
-		// xhttp upstream style: packet-up (default) or grpc ("stream" is a legacy alias for
-		// grpc). grpc is a single full-duplex request and needs HTTP/2 to the edge, so on a
-		// single-edge client it requires ws_tls (a pool is always wss; the server auto-detects).
+		// xhttp upstream style: packet-up (default) or grpc. grpc is a single full-duplex
+		// request and needs HTTP/2 to the edge, so on a single-edge client it requires ws_tls
+		// (a pool is always wss; the server auto-detects).
 		switch c.WSXHTTPMode {
-		case "", "packet", "stream", "grpc":
+		case "", "packet", "grpc":
 		default:
-			return errors.New("ws_xhttp_mode must be \"packet\", \"stream\", or \"grpc\"")
+			return errors.New("ws_xhttp_mode must be \"packet\" or \"grpc\"")
 		}
-		if (c.WSXHTTPMode == "stream" || c.WSXHTTPMode == "grpc") && c.Role == "client" && !c.WSTLS && len(c.WSEdgeIPs) == 0 {
+		if c.WSXHTTPMode == "grpc" && c.Role == "client" && !c.WSTLS && len(c.WSEdgeIPs) == 0 {
 			return errors.New("ws_xhttp_mode \"" + c.WSXHTTPMode + "\" requires ws_tls (needs HTTP/2 to the edge)")
 		}
 		// Edge pool: a client+wss rotation set; every SNI's ECH must decode.

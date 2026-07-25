@@ -74,7 +74,7 @@ func (p *pipeTransport) Close() error {
 // a 15%-lossy transport — the whole session layer the DNS carrier rides on, minus the DNS codec.
 func TestSessionOverLossyPipe(t *testing.T) {
 	cliT, srvT := newPipePair(15)
-	cfg := SessionConfig{PSK: "correct-horse-battery-staple", Cipher: "chacha20"}
+	cfg := SessionConfig{PSK: "correct-horse-battery-staple", Cipher: "chacha20-poly1305"}
 
 	srvCh := make(chan net.Conn, 1)
 	go func() {
@@ -163,9 +163,9 @@ func TestSessionWrongPSKFails(t *testing.T) {
 	defer func() { handshakeTimeout = orig }()
 
 	cliT, srvT := newPipePair(0)
-	go func() { _, _ = ServeSession(srvT, SessionConfig{PSK: "server-psk", Cipher: "chacha20"}) }()
+	go func() { _, _ = ServeSession(srvT, SessionConfig{PSK: "server-psk", Cipher: "chacha20-poly1305"}) }()
 
-	_, err := DialSession(cliT, SessionConfig{PSK: "wrong-client-psk", Cipher: "chacha20"})
+	_, err := DialSession(cliT, SessionConfig{PSK: "wrong-client-psk", Cipher: "chacha20-poly1305"})
 	if err == nil {
 		t.Fatal("DialSession succeeded with a mismatched PSK — handshake did not authenticate")
 	}
@@ -178,7 +178,7 @@ func TestSessionWrongPSKFails(t *testing.T) {
 // re-init, in about one round trip rather than a KCP dead-link timeout.
 func TestServeSessionRecoversFromVanishedClient(t *testing.T) {
 	cliT, srvT := newPipePair(0)
-	cfg := SessionConfig{PSK: "recover-me", Cipher: "chacha20"}
+	cfg := SessionConfig{PSK: "recover-me", Cipher: "chacha20-poly1305"}
 
 	srvCh := make(chan net.Conn, 1)
 	srvErr := make(chan error, 1)
@@ -242,7 +242,7 @@ func TestServeSessionRecoversFromVanishedClient(t *testing.T) {
 // may promote.
 func TestServeSessionIgnoresReplayedInit(t *testing.T) {
 	cliT, srvT := newPipePair(0)
-	cfg := SessionConfig{PSK: "no-teardown", Cipher: "chacha20"}
+	cfg := SessionConfig{PSK: "no-teardown", Cipher: "chacha20-poly1305"}
 
 	srvCh := make(chan net.Conn, 1)
 	go func() {
@@ -308,7 +308,7 @@ func TestServeSessionIgnoresReplayedInit(t *testing.T) {
 // queue conn is never closed and the goroutines leak.
 func TestServeSessionUnblocksOnTransportClose(t *testing.T) {
 	cliT, srvT := newPipePair(0)
-	cfg := SessionConfig{PSK: "close-me", Cipher: "chacha20"}
+	cfg := SessionConfig{PSK: "close-me", Cipher: "chacha20-poly1305"}
 
 	srvErr := make(chan error, 1)
 	go func() {
@@ -341,7 +341,7 @@ func TestServeSessionUnblocksOnTransportClose(t *testing.T) {
 // flows. With the old single pend slot, ONE attacker init would have evicted the legit candidate.
 func TestServeSessionStagedSetResistsEviction(t *testing.T) {
 	cliT, srvT := newPipePair(0)
-	cfg := SessionConfig{PSK: "no-evict", Cipher: "chacha20"}
+	cfg := SessionConfig{PSK: "no-evict", Cipher: "chacha20-poly1305"}
 
 	srvCh := make(chan net.Conn, 1)
 	srvErr := make(chan error, 1)
@@ -411,7 +411,7 @@ func TestSessionKeepaliveReapsSilentPeer(t *testing.T) {
 	defer func() { defaultKeepalive, keepaliveDeadFloor = origKA, origFloor }()
 
 	cliT, srvT := newPipePair(0)
-	cfg := SessionConfig{PSK: "reap-me", Cipher: "chacha20"} // Keepalive 0 -> defaultKeepalive
+	cfg := SessionConfig{PSK: "reap-me", Cipher: "chacha20-poly1305"} // Keepalive 0 -> defaultKeepalive
 
 	// Minimal server: answer the init once so the client establishes, then go silent — never pong.
 	go func() {
@@ -460,7 +460,7 @@ func TestSessionKeepaliveReapsSilentPeer(t *testing.T) {
 // TestSessionCloseIsIdempotent guards the teardown path (Close is called from multiple defers).
 func TestSessionCloseIsIdempotent(t *testing.T) {
 	cliT, srvT := newPipePair(0)
-	cfg := SessionConfig{PSK: "k", Cipher: "chacha20"}
+	cfg := SessionConfig{PSK: "k", Cipher: "chacha20-poly1305"}
 	go func() {
 		c, err := ServeSession(srvT, cfg)
 		if err == nil {

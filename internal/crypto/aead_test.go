@@ -50,7 +50,12 @@ func TestSealOpenRoundTripAllCiphers(t *testing.T) {
 func TestResolveCipher(t *testing.T) {
 	cases := map[string]string{
 		"": CipherAES256, "auto": CipherAES256, "AES-256-GCM": CipherAES256,
-		"aes128": CipherAES128, "chacha": CipherChaCha, "xchacha20": CipherXChaCha,
+		CipherAES128: CipherAES128, CipherChaCha: CipherChaCha, CipherXChaCha: CipherXChaCha,
+	}
+	// The short-form aliases were removed: nothing in the fleet can emit one, and an unknown name
+	// must fall through unchanged so NewSealer rejects it rather than silently picking a cipher.
+	if got := ResolveCipher("chacha"); got != "chacha" {
+		t.Fatalf("removed alias %q should pass through unchanged, got %q", "chacha", got)
 	}
 	for in, want := range cases {
 		if got := ResolveCipher(in); got != want {

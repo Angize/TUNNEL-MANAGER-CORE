@@ -232,40 +232,6 @@ func testTunnelXHTTP(t *testing.T, mode string, obfs bool) {
 	xhttpInject(t, cliCtrl, srvCtrl)
 }
 
-// TestTunnelXHTTPStreamAlias runs a full tunnel with the legacy mode value "stream", which now
-// routes to gRPC (plain stream-one was removed). It proves the alias still round-trips both ways
-// over one full-duplex request against an HTTP/2 TLS edge — so old ws_xhttp_mode="stream" configs
-// keep working via gRPC. (TestTunnelXHTTPGrpc covers the "grpc" value itself.)
-func TestTunnelXHTTPStreamAlias(t *testing.T) {
-	const psk = "e2e-shared-pre-shared-key-1234567890"
-	const cipher = "aes-256-gcm"
-	srvDev, srvCtrl := tunPair(t, "xhssrv")
-	cliDev, cliCtrl := tunPair(t, "xhscli")
-	ka := 1 * time.Second
-
-	srv, err := ListenXHTTP("127.0.0.1:0", srvDev, ka, false, true, psk, cipher)
-	if err != nil {
-		t.Fatalf("ListenXHTTP: %v", err)
-	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", srv.xhttpHandler)
-	ts := httptest.NewUnstartedServer(mux)
-	ts.EnableHTTP2 = true
-	ts.StartTLS()
-	go srv.Run() // starts tunLoop so the server reads its TUN; its own plain listener stays idle
-	t.Cleanup(func() { ts.Close(); srv.Close() })
-
-	cli, err := DialXHTTP(ts.Listener.Addr().String(), cliDev, ka, false, true, psk, cipher, "", "/", true, nil, "stream")
-	if err != nil {
-		t.Fatalf("DialXHTTP: %v", err)
-	}
-	cli.xhTLS = &tls.Config{InsecureSkipVerify: true} // trust the httptest cert (test only)
-	go cli.Run()
-	t.Cleanup(func() { cli.Close() })
-	time.Sleep(600 * time.Millisecond)
-	xhttpInject(t, cliCtrl, srvCtrl)
-}
-
 // TestGrpcFraming round-trips payloads through the gRPC message framing (writer -> reader) with a
 // small read buffer, so it exercises the deframer's leftover-buffer path (a message split across
 // several Reads) and the Hunk wrap/unwrap.
