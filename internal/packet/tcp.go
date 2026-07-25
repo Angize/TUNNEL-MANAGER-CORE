@@ -375,8 +375,10 @@ type TCP struct {
 	xhSessions map[string]*xhttpSession
 
 	isClient bool
-	addr     string // server: listen addr; client: peer addr
-	bindIP   string // client: source IP to dial FROM (empty = kernel default); tcp/ws/xhttp only
+	addr     string      // server: listen addr; client: peer addr
+	bindIP   string      // client: source IP to dial FROM (empty = kernel default); tcp/ws/xhttp only
+	srcWarn  sync.Once   // one line when the pinned source is not a local address (see dialer)
+	probing  atomic.Bool // a retest batch is in flight; keeps the retest tick free for the operator pin
 
 	// TCP-segment injection desync (client, optional): after each kernel TCP connect we inject a
 	// few decoy TCP segments on the real 4-tuple (low-TTL, so they die before the edge/server) to
@@ -525,16 +527,46 @@ func (b *TCP) SetStatusPath(path string) {
 	b.stTag = carrier // reused by setActive when a direct dest pool rotates the active endpoint
 }
 
-// dialer returns a net.Dialer that, when a source IP is pinned, binds the outbound socket to
-// it (LocalAddr). A malformed or non-local IP is ignored (falls back to the kernel default).
+// dialer returns a net.Dialer that, when a source IP is pinned, binds the outbound socket to it
+// (LocalAddr). Only an IP that is actually configured on this host is bound.
+//
+// The old comment claimed a non-local IP was "ignored"; only a MALFORMED one was. A well-formed IP
+// that is no longer on any interface — the node's address changed, a secondary IP was not re-added
+// after a provider event — was still installed as LocalAddr, and every dial then failed instantly with
+// EADDRNOTAVAIL. dialLoop charges a failed dial to the DESTINATION, so one bad SOURCE burned the whole
+// destination pool one endpoint at a time while the peers were perfectly reachable. Skipping the bind
+// keeps the tunnel up on the kernel's default source, and the log names the real cause.
 func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 	d := &net.Dialer{Timeout: timeout}
 	if src := b.sourceIP(); src != "" { // rotation pool's current source, or the fixed bindIP
 		if ip := net.ParseIP(src); ip != nil {
-			d.LocalAddr = &net.TCPAddr{IP: ip}
+			if canBindSource(ip) {
+				d.LocalAddr = &net.TCPAddr{IP: ip}
+			} else {
+				b.srcWarn.Do(func() {
+					log.Printf("core/tcp: source IP %s is not configured on this host — dialing from the kernel default instead", src)
+				})
+			}
 		}
 	}
 	return d
+}
+
+// canBindSource reports whether the kernel will let us bind an outbound socket to ip.
+//
+// It ASKS the kernel rather than comparing against InterfaceAddrs(): an exact-address comparison is
+// wrong on the very cases that matter. Loopback aliases (127.0.0.2, used by TestSourceIPBind and by
+// real multi-IP setups) are bindable while the interface reports only 127.0.0.1/8, and a subnet-
+// contains test is too loose in the other direction — it would accept the peer's own address. A
+// throwaway bind on port 0 is the same question the dial itself asks, one cheap syscall pair per dial
+// attempt, and it is not on the data path.
+func canBindSource(ip net.IP) bool {
+	l, err := net.ListenTCP("tcp", &net.TCPAddr{IP: ip, Port: 0})
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
 }
 
 func idleFor(keepalive time.Duration) time.Duration {
@@ -1443,13 +1475,24 @@ func (b *TCP) retestLoop() {
 				// so the live core stays ahead of Cloudflare's key rotation instead of failing first.
 				log.Printf("core/ws: live ECH key updated for %v (no rebuild)", hosts)
 			}
-			for _, spec := range b.pool.dueRetests() {
-				if b.closed.Load() {
-					return
-				}
-				// Full TLS+ws-upgrade probe so a suspect isn't falsely healed by a TLS-only success
-				// on an edge whose ws/origin path is actually broken.
-				b.pool.retestResult(spec.kind, spec.key, b.probeEdgeFull(spec.ip, spec.sni))
+			// Probe OFF the tick. Each due entry costs a full TLS + ws-upgrade round trip, and they ran
+			// inline and serially — so after an outage left several edges suspect, the next tick (and
+			// with it readSelectCmd, the operator's "pin this edge") waited behind the whole batch. The
+			// pin is the control the operator reaches for exactly when the pool is in that state.
+			// One batch at a time: probing is a background heal, so skipping a tick while a batch is
+			// still running is correct — it must never pile up concurrent probes on a struggling edge.
+			if due := b.pool.dueRetests(); len(due) > 0 && b.probing.CompareAndSwap(false, true) {
+				go func(due []retestSpec) {
+					defer b.probing.Store(false)
+					for _, spec := range due {
+						if b.closed.Load() {
+							return
+						}
+						// Full TLS+ws-upgrade probe so a suspect isn't falsely healed by a TLS-only
+						// success on an edge whose ws/origin path is actually broken.
+						b.pool.retestResult(spec.kind, spec.key, b.probeEdgeFull(spec.ip, spec.sni))
+					}
+				}(due)
 			}
 		}
 	}
