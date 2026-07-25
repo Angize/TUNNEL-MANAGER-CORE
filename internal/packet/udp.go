@@ -113,6 +113,7 @@ type UDP struct {
 	peer    atomic.Pointer[net.UDPAddr]      // current known peer (server learns it)
 	session atomic.Pointer[sealerBox]        // negotiated session sealer (nil until handshake / clear mode)
 	rp      replayGuard                      // driven only by the single receive goroutine (netToTun on the client; serverReadLoop under rxMu on the server)
+	sendErr sendErrLog                       // throttled data-plane send-failure logging (see sendlog.go)
 	staged  []*stagedBox                     // server: bounded set of sessions staged by recent inits, each promoted only once a frame opens under it
 	hsCache initCache                        // server: recent inits -> responses (compute-DoS replay cache; receive-goroutine-only)
 	ci      atomic.Pointer[crypto.Ephemeral] // client's current handshake ephemeral
@@ -211,7 +212,14 @@ func (b *UDP) SetSourcePool(sp *PeerPool) {
 			host = h
 		}
 		if ip := net.ParseIP(host); ip != nil {
-			if nc, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip}); err == nil {
+			nc, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip})
+			if err != nil {
+				// Loud, like the rotation twin below: silence here left the client on the kernel's
+				// default source with the operator's chosen egress IP quietly unused — and with a lone
+				// src_ip and rotate=0 the pool never moves, so it is never retried either.
+				log.Printf("core/udp: initial source bind to %s failed: %v", host, err)
+			}
+			if err == nil {
 				applyConnSockBuf(nc)
 				old := b.conn.Load()
 				b.conn.Store(nc)
@@ -522,7 +530,11 @@ func (b *UDP) initFec(fec bool, fecData, fecParity int) {
 		func(pkt []byte) {
 			if p := b.peer.Load(); p != nil {
 				if c := b.sendConn(); c != nil {
-					_, _ = c.WriteToUDP(pkt, p)
+					// With FEC on, tunToNet hands every frame to the encoder and never writes itself, so
+					// this callback IS the data plane — swallowing here loses the whole carrier in silence.
+					if _, err := c.WriteToUDP(pkt, p); err != nil {
+						b.sendErr.note("udp/fec", err)
+					}
 				}
 			}
 		},
@@ -611,7 +623,9 @@ func (b *UDP) tunToNet() error {
 		}
 		if c := b.sendConn(); c != nil {
 			if _, err := c.WriteToUDP(frame, peer); err != nil {
-				log.Printf("core: write error: %v", err)
+				// Throttled: a failing socket fails at packet rate, and the old unthrottled line wrote
+				// thousands a second into the journal — which hid the fault as effectively as silence.
+				b.sendErr.note("udp", err)
 			}
 		}
 	}
@@ -828,7 +842,12 @@ func (b *UDP) writeCtrl(pkt []byte, to *net.UDPAddr) {
 		return
 	}
 	if c := b.replySock(); c != nil {
-		_, _ = c.WriteToUDP(fecTag(b.fecEnc, pkt), to)
+		if _, err := c.WriteToUDP(fecTag(b.fecEnc, pkt), to); err != nil {
+			// The handshake init/RESP and every keepalive ping/pong leave through here. Losing these
+			// silently is worse than losing data: the tunnel never establishes, or its heartbeat
+			// freezes, and the panel blames the peer for a fault that is local.
+			b.sendErr.note("udp/ctrl", err)
+		}
 	}
 }
 
