@@ -1582,6 +1582,18 @@ func (b *TCP) dialLoop() {
 		cf, err := b.handshakeAndPrime(conn)
 		if err != nil {
 			conn.Close()
+			// Attribute this exactly like a failed dial. A TCP connect that COMPLETES and then fails the
+			// core handshake is the signature of a DPI that lets the SYN through and kills the payload —
+			// the most common interference shape on this fleet's paths — so the endpoint is as unusable as
+			// one that never answered. Without this the branch fell straight through to the backoff: the
+			// pool never advanced and the direct-tcp endpoint was never burned, so the client re-dialed
+			// the SAME blocked endpoint forever and destination/source rotation was inert for the one
+			// failure mode it exists to escape. (The dial-failure branch 20 lines up has always done this.)
+			if b.pool != nil {
+				b.pool.advance() // rotate to the next combo; edge health stays for attributeFailure/dataFailure
+			} else {
+				burnDest() // direct-tcp: this endpoint answers TCP but won't carry the tunnel -> burn + advance
+			}
 			backoff = nextReconnectDelay(backoff)
 			if b.sleep(backoff) {
 				return
