@@ -66,8 +66,8 @@ type Raw struct {
 	fixedPeer net.IP
 	antiLeak  func() // removes the kernel anti-leak (iptables) rule on Close
 
-	localIP  atomic.Pointer[net.IPAddr] // our source IP toward the peer (for TCP/UDP checksums)
-	peer     atomic.Pointer[net.IPAddr] // current known peer (server learns it)
+	localIP atomic.Pointer[net.IPAddr] // our source IP toward the peer (for TCP/UDP checksums)
+	peer    atomic.Pointer[net.IPAddr] // current known peer (server learns it)
 	// replySrc (server, non-decoy) is the local IP the client dialed = the source to answer FROM, so a
 	// destination-pool client that rotates across our IPs gets each reply from the SAME IP it dialed
 	// (else the kernel picks our default IP, the client's source filter drops it, and that pool IP burns).
@@ -77,14 +77,15 @@ type Raw struct {
 	// frame's dst on the same goroutine so they are always correct; only the ASYNC download source could
 	// be momentarily steered by a source-spoofing attacker (availability-only, self-corrects on the next
 	// genuine frame) — accepted over threading the dst through every synchronous reply path.
-	replySrc atomic.Pointer[net.IP]
-	srcAllow map[string]struct{}        // server pool: the client's known source IPs (4-byte keys) it may rotate across; set once before Run, then read-only
-	session  atomic.Pointer[sealerBox]
-	rp       replayGuard
-	staged   []*stagedBox // server: bounded set of sessions staged by recent inits, each promoted only once a frame opens under it
-	hsCache  initCache    // server: recent inits -> responses (compute-DoS replay cache; receive-goroutine-only)
-	ci       atomic.Pointer[crypto.Ephemeral]
-	seq      atomic.Uint32
+	replySrc  atomic.Pointer[net.IP]
+	noPktinfo sync.Once           // one-shot warning: server frames arrived without IP_PKTINFO, so replySrc stays unset
+	srcAllow  map[string]struct{} // server pool: the client's known source IPs (4-byte keys) it may rotate across; set once before Run, then read-only
+	session   atomic.Pointer[sealerBox]
+	rp        replayGuard
+	staged    []*stagedBox // server: bounded set of sessions staged by recent inits, each promoted only once a frame opens under it
+	hsCache   initCache    // server: recent inits -> responses (compute-DoS replay cache; receive-goroutine-only)
+	ci        atomic.Pointer[crypto.Ephemeral]
+	seq       atomic.Uint32
 	// Synthetic-TCP-profile state (tcp profile only; ignored by the others): a per-session
 	// ISN and a constant peer-ISN we "acknowledge", so the forged segments carry an advancing
 	// sequence and a non-zero ACK — a live-established-flow look — instead of the tell-tale
@@ -320,7 +321,11 @@ func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoO
 		return nil, err
 	}
 	applyConnSockBuf(conn) // this IPConn is the normal (non-decoy) raw RX/TX socket
-	enablePktinfoDst(conn) // server: learn which of our IPs each frame targeted, to answer from it (dest-pool rotation)
+	// server: learn which of our IPs each frame targeted, to answer from it (dest-pool rotation).
+	// A failure is survivable but must never be silent — it degrades to the pre-v2.48.23 behaviour.
+	if err := enablePktinfoDst(conn); err != nil {
+		log.Printf("raw: WARNING IP_PKTINFO could not be enabled (%v) — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one", err)
+	}
 	r := newRaw(conn, dev, ka, obfs, cryptoOn, psk, cipher, profile, false)
 	r.proto = proto
 	if realPeer != "" { // client forges its source, so we can't learn it — reply to this real IP
@@ -701,9 +706,20 @@ func (r *Raw) netToTun() error {
 				// admits the client's other known source IPs so a source rotation reaches crypto and re-binds
 			}
 		}
-		if !r.isClient && oobn > 0 { // server: answer THIS frame (and its handshake RESP) from the IP the client dialed
-			if d := pktinfoDst(oob[:oobn]); d != nil {
+		if !r.isClient { // server: answer THIS frame (and its handshake RESP) from the IP the client dialed
+			var d net.IP
+			if oobn > 0 {
+				d = pktinfoDst(oob[:oobn])
+			}
+			if d != nil {
 				r.replySrc.Store(&d)
+			} else {
+				// setsockopt reported success but the kernel delivers no (or an unparseable) cmsg —
+				// replies fall back to the default source. Warn ONCE: silent is how this class of
+				// breakage cost days of debugging before.
+				r.noPktinfo.Do(func() {
+					log.Printf("raw: WARNING inbound frames carry no IP_PKTINFO — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one")
+				})
 			}
 		}
 		r.handleRaw(buf[:n], addr)
