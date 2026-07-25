@@ -920,6 +920,14 @@ func (f *Flux) adoptPeerFlux() {
 	// Refresh the status descriptor to the pinned peer so "active" tracks the current destination
 	// (same "flux:<carrier> · <peer>" format as SetStatusPath; nil-safe when status is off).
 	f.st.setActive("flux:" + f.carrier + " · " + ip.String())
+	// The same two resets rotatePeerFlux performs, and for the same reason: a pin jumps to an endpoint
+	// that has proven NOTHING yet. Leaving peerAnswered true from the PREVIOUS endpoint lets the very
+	// next loop tick treat the newly pinned one as proven — clearing its burn, emitting a false heal,
+	// and releasing the pin through pinLanded() before it had actually landed, which resumes normal
+	// rotation and defeats the operator pick. lastRx likewise stayed recent from the old endpoint, so
+	// the dead window for the new one was measured from a frame it never sent.
+	f.lastRx.Store(time.Now().UnixNano())
+	f.peerAnswered.Store(false)
 	log.Printf("flux: pinned destination to %s", ip)
 	// "Make this active" is a deliberate operator jump — SILENT, like udp/tcp and the ws edge pool: only
 	// the active endpoint changes, no down/up in the event ring. The session clear above still forces the

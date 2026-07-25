@@ -289,6 +289,15 @@ func (b *UDP) adoptPeerUDP() {
 	b.peer.Store(ua)
 	b.session.Store(nil)
 	b.ci.Store(nil)
+	// The same two resets rotatePeerUDP performs, for the same reason: a pin is a jump to an endpoint
+	// that has proven NOTHING yet. Without them, in clear mode (no handshake to gate on) peerAnswered
+	// stayed true from the PREVIOUS endpoint, so the very next clientLoop tick ran the heal for the
+	// newly pinned one — clearing its burn record, emitting a false "heal", and releasing the pin
+	// through pinLanded() before it had actually landed, which let normal rotation resume immediately
+	// and defeated the operator's pick. lastRx likewise stayed recent from the old endpoint, so the
+	// dead window for the new one was measured from a frame it never sent.
+	b.lastRx.Store(time.Now().UnixNano())
+	b.peerAnswered.Store(false)
 	log.Printf("core/udp: pinned destination to %s", addr)
 	// "Make this active" is a deliberate operator jump — logged SILENTLY like the ws edge pool: only the
 	// active endpoint changes, no down/up in the event ring. The session clear above still forces the

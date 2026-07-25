@@ -1151,6 +1151,14 @@ func (r *Raw) adoptPeerRaw() {
 	r.st.setActive("raw:" + r.profile + " · " + ip.String()) // refresh the frozen active descriptor to the new destination (matches SetStatusPath)
 	r.session.Store(nil)
 	r.ci.Store(nil)
+	// The same two resets rotatePeerRaw performs, and for the same reason: a pin jumps to an endpoint
+	// that has proven NOTHING yet. Leaving peerAnswered true from the PREVIOUS endpoint lets the very
+	// next loop tick treat the newly pinned one as proven — clearing its burn, emitting a false heal,
+	// and releasing the pin through pinLanded() before it had actually landed, which resumes normal
+	// rotation and defeats the operator pick. lastRx likewise stayed recent from the old endpoint, so
+	// the dead window for the new one was measured from a frame it never sent.
+	r.lastRx.Store(time.Now().UnixNano())
+	r.peerAnswered.Store(false)
 	log.Printf("raw: pinned destination to %s", ip)
 	// "Make this active" is a deliberate operator jump — SILENT, like udp/tcp and the ws edge pool: only
 	// the active endpoint changes, no down/up in the event ring. The session clear above still forces the
