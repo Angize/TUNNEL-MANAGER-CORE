@@ -509,14 +509,42 @@ func (r *Raw) writeOut(pkt []byte, to *net.IPAddr) {
 		r.sendMu.RUnlock()
 		return
 	}
-	if rs := r.replySrc.Load(); rs != nil { // server: answer FROM the IP the client dialed (IP_PKTINFO source)
-		if _, _, err := r.conn.WriteMsgIP(pkt, pktinfoOOB(*rs), to); err == nil {
+	if src := r.pinnedSrc(); src != nil {
+		if _, _, err := r.conn.WriteMsgIP(pkt, pktinfoOOB(src), to); err == nil {
 			return
 		}
 		// Unreachable under normal routing (the pinned source is always one of our own local IPs);
 		// on the off chance the pin is rejected, degrade to a default-source send, not a silent drop.
 	}
 	_, _ = r.conn.WriteToIP(pkt, to)
+}
+
+// pinnedSrc is the local IP this send must leave FROM, or nil to let the kernel choose. Two callers,
+// one mechanism (the IP_PKTINFO control message, which sets ipi_spec_dst = the outgoing source):
+//
+//   - SERVER: replySrc, the IP the client dialed — so a destination-pool client that rotates across our
+//     addresses gets every reply from the exact one it targeted (see replySrc's own note).
+//   - CLIENT with a SOURCE pool: the pool's current source. Without this the whole source-rotation
+//     feature was inert on raw: rotateSourceRaw stored localIP, logged, and moved the pool's status
+//     file, while every packet still left from the kernel-default address — the source only reached
+//     the wire through the IP_HDRINCL branch above, which exists ONLY when spoofing is configured, and
+//     rotateSourceRaw deliberately no-ops under spoofSrc. The two conditions are mutually exclusive, so
+//     the pool could never take effect. (flux was always correct: it crafts every header itself.)
+//     Pinning here also re-aligns the tcp/udp raw profiles' L4 checksum, which rawEncap computes over
+//     srcIP() — with the kernel picking a different source, every synthetic segment after the first
+//     rotation carried an invalid checksum, the exact forged-packet tell those profiles exist to avoid.
+//
+// A plain single-source client has nothing to pin and keeps the previous routing-picked behaviour.
+func (r *Raw) pinnedSrc() net.IP {
+	if rs := r.replySrc.Load(); rs != nil { // server (non-decoy)
+		return *rs
+	}
+	if r.sp != nil { // client under a source pool; sp is set before Run and then read-only
+		if l := r.localIP.Load(); l != nil {
+			return l.IP
+		}
+	}
+	return nil
 }
 
 // replyAddr is where the server sends answers. Normally that's the packet source,
