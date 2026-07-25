@@ -1114,7 +1114,10 @@ func (r *Raw) adoptPeerRaw() {
 	r.session.Store(nil)
 	r.ci.Store(nil)
 	log.Printf("raw: pinned destination to %s", ip)
-	r.st.down("peer-pin", "ip:"+ip.String()) // clears the session -> re-handshake -> reconnect pairs the down
+	// "Make this active" is a deliberate operator jump — SILENT, like udp/tcp and the ws edge pool: only
+	// the active endpoint changes, no down/up in the event ring. The session clear above still forces the
+	// re-handshake onto the pinned peer and setActive (above) keeps "active" tracking it. Emitting
+	// down("peer-pin") here armed a paired reconnect and surfaced a manual jump as a rotation event.
 }
 
 // adoptSourceRaw swaps the crafted-header source to the pool's CURRENT source (an operator source pin).
@@ -1129,7 +1132,8 @@ func (r *Raw) adoptSourceRaw() {
 	}
 	r.localIP.Store(&net.IPAddr{IP: ip})
 	log.Printf("raw: pinned source to %s", ip)
-	r.st.event("down", "src-pin", "ip:"+ip.String()) // source pin: session survives, no reconnect (see rotateSourceRaw)
+	// Silent for the same reason as the destination pin: the session survives a source swap, so there is
+	// nothing to reconnect and nothing to log — the source pool's own status file reflects the change.
 }
 
 // ProbeAllNow retests every suspect/dead endpoint on both pools at once (the panel "probe now" control,

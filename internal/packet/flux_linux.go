@@ -915,7 +915,10 @@ func (f *Flux) adoptPeerFlux() {
 	// (same "flux:<carrier> · <peer>" format as SetStatusPath; nil-safe when status is off).
 	f.st.setActive("flux:" + f.carrier + " · " + ip.String())
 	log.Printf("flux: pinned destination to %s", ip)
-	f.st.down("peer-pin", "ip:"+ip.String()) // clears the session -> re-handshake -> reconnect pairs the down
+	// "Make this active" is a deliberate operator jump — SILENT, like udp/tcp and the ws edge pool: only
+	// the active endpoint changes, no down/up in the event ring. The session clear above still forces the
+	// re-handshake onto the pinned peer and setActive (above) keeps "active" tracking it. Emitting
+	// down("peer-pin") here armed a paired reconnect and surfaced a manual jump as a rotation event.
 }
 
 // adoptSourceFlux swaps the crafted-header source to the pool's CURRENT source (an operator source pin).
@@ -930,7 +933,8 @@ func (f *Flux) adoptSourceFlux() {
 	}
 	f.localIP.Store(&net.IPAddr{IP: ip})
 	log.Printf("flux: pinned source to %s", ip)
-	f.st.event("down", "src-pin", "ip:"+ip.String()) // source pin: session survives, no reconnect (see rotateSourceFlux)
+	// Silent for the same reason as the destination pin: the source is stamped per packet so the AEAD
+	// session survives — nothing to reconnect, nothing to log. The source pool's status file shows it.
 }
 
 // ProbeAllNow retests every suspect/dead endpoint on both pools at once (the panel "probe now" control,
