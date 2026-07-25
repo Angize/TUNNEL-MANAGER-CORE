@@ -79,6 +79,7 @@ type Raw struct {
 	// genuine frame) — accepted over threading the dst through every synchronous reply path.
 	replySrc  atomic.Pointer[net.IP]
 	noPktinfo sync.Once           // one-shot warning: server frames arrived without IP_PKTINFO, so replySrc stays unset
+	sendErr   sendErrLog          // throttled data-plane send-failure logging (see sendlog.go)
 	srcAllow  map[string]struct{} // server pool: the client's known source IPs (4-byte keys) it may rotate across; set once before Run, then read-only
 	session   atomic.Pointer[sealerBox]
 	rp        replayGuard
@@ -504,7 +505,9 @@ func (r *Raw) writeOut(pkt []byte, to *net.IPAddr) {
 		// (The conn.WriteToIP path below is poller-managed and safe against a concurrent Close.)
 		r.sendMu.RLock()
 		if !r.sendDown {
-			_ = syscall.Sendto(r.spoofFd, out, 0, &sa)
+			if err := syscall.Sendto(r.spoofFd, out, 0, &sa); err != nil {
+				r.sendErr.note("raw/spoof", err)
+			}
 		}
 		r.sendMu.RUnlock()
 		return
@@ -512,11 +515,18 @@ func (r *Raw) writeOut(pkt []byte, to *net.IPAddr) {
 	if src := r.pinnedSrc(); src != nil {
 		if _, _, err := r.conn.WriteMsgIP(pkt, pktinfoOOB(src), to); err == nil {
 			return
+		} else {
+			// Degrade to a default-source send rather than dropping — but say so. The pinned source is
+			// normally one of our own local IPs, so this means it stopped being one mid-session (a pool
+			// IP removed from the interface, a provider agent re-adding a secondary after a flap). Every
+			// reply then leaves from the host default, the peer's source filter drops it, and the tunnel
+			// blackholes. #151 made the setsockopt and missing-cmsg cases loud; this was the third.
+			r.sendErr.note("raw/pinned-source", err)
 		}
-		// Unreachable under normal routing (the pinned source is always one of our own local IPs);
-		// on the off chance the pin is rejected, degrade to a default-source send, not a silent drop.
 	}
-	_, _ = r.conn.WriteToIP(pkt, to)
+	if _, err := r.conn.WriteToIP(pkt, to); err != nil {
+		r.sendErr.note("raw", err)
+	}
 }
 
 // pinnedSrc is the local IP this send must leave FROM, or nil to let the kernel choose. Two callers,

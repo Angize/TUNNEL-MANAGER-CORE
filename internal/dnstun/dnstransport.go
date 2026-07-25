@@ -170,6 +170,7 @@ type dnsClient struct {
 	closed    chan struct{}
 	once      sync.Once
 	qid       atomic.Uint32 // fallback DNS transaction-id source when a crypto/rand read fails
+	sendErr   sendErrLog    // throttled write-failure logging (see sendlog.go)
 
 	// Pipelining state. inflight maps a live query's DNS id to its deadline + the nonce label the
 	// reply must echo (matching by id AND nonce keeps the off-path anti-spoof strength of the old
@@ -321,8 +322,20 @@ func (c *dnsClient) fill() bool {
 		target = pipelineWindow
 	}
 	for c.inflightLen() < target {
+		before := c.inflightLen()
 		if !c.sendOne(nil) {
 			return false
+		}
+		// sendOne rolls its slot back and still returns true on ANY pre-send failure — an unroutable
+		// resolver (ENETUNREACH from an IPv6 entry on a v4-only node), an egress REJECT (EPERM), an
+		// encode error. The in-flight count then never reaches target and this became a tight, sleepless
+		// loop that pegged a core for the life of the transport, allocating a fresh nonce and DNS id
+		// every iteration, while nothing was logged: the operator saw only "handshake timed out", which
+		// reads as censorship and sends diagnosis in the wrong direction.
+		// Stop filling this round instead. The ticker retries, the transport stays alive, and the
+		// failure surfaces through sendOne's own log.
+		if c.inflightLen() <= before {
+			break
 		}
 	}
 	return true
@@ -367,6 +380,10 @@ func (c *dnsClient) sendOne(up []byte) bool {
 	}
 	resolver := c.resolvers[int(c.rr.Add(1)-1)%len(c.resolvers)]
 	if _, err := c.conn.WriteToUDP(query, resolver); err != nil {
+		// Surface it: a resolver we cannot even write to is a local fault (unroutable address, egress
+		// REJECT, source gone), but the only symptom the operator sees is the session failing to
+		// establish — which reads as censorship. Throttled, because this fails at query rate.
+		c.sendErr.note("dns/"+resolver.String(), err)
 		c.dropInflight(id)
 		return true
 	}

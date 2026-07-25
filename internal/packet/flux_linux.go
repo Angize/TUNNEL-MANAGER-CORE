@@ -57,8 +57,8 @@ type Flux struct {
 	sendFd int // AF_INET SOCK_RAW + IP_HDRINCL: builds each packet's IPv4 header (any protocol)
 	pktFd  int // AF_PACKET SOCK_DGRAM: receives every IPv4 frame regardless of protocol
 
-	localIP  atomic.Pointer[net.IPAddr] // our source IP toward the peer
-	peer     atomic.Pointer[net.IPAddr] // current known peer (server learns it)
+	localIP atomic.Pointer[net.IPAddr] // our source IP toward the peer
+	peer    atomic.Pointer[net.IPAddr] // current known peer (server learns it)
 	// replySrc (server) is the local IP the client dialed = the source to answer FROM, so a destination-
 	// pool client rotating across our IPs gets each reply from the SAME IP it dialed (flux crafts every
 	// header via buildIP4, so srcIP() feeds the source directly). Set per received frame in netToTun
@@ -67,7 +67,7 @@ type Flux struct {
 	// synchronous replies are always correct; only the async download source could be briefly steered by
 	// a source-spoofing attacker (availability-only, self-correcting) — see the raw carrier's note.
 	replySrc atomic.Pointer[net.IP]
-	srcAllow map[string]struct{}        // server pool: the client's known source IPs (4-byte keys) it may rotate across; set once before Run, then read-only
+	srcAllow map[string]struct{} // server pool: the client's known source IPs (4-byte keys) it may rotate across; set once before Run, then read-only
 	session  atomic.Pointer[sealerBox]
 	curShape atomic.Pointer[fluxShape] // this epoch's shape (refreshed each second by rotateWatcher)
 	rp       replayGuard
@@ -86,6 +86,7 @@ type Flux struct {
 	antiLeakIP net.IP                 // the IP the current anti-leak rule is scoped to (guarded by leakMu); nil = none
 	sendMu     sync.RWMutex           // senders RLock around the raw-fd Sendto; Close takes the write lock before closing it
 	sendDown   bool                   // set under sendMu.Lock in Close: no more Sendto on the (about-to-be-closed) raw fd
+	sendErr    sendErrLog             // throttled data-plane send-failure logging (see sendlog.go)
 	desync     desyncCfg              // client-only fake-packet desync (decoys emitted before each handshake); zero value = off
 	inj        *l2inject              // AF_PACKET injector for bad-checksum decoys (IP_HDRINCL repairs the checksum); nil unless a badsum/both mode is on
 	closeCh    chan struct{}
@@ -427,7 +428,12 @@ func (f *Flux) carrierOut(body []byte, to *net.IPAddr) {
 	// The RLock is uncontended in steady state and cheap next to the syscall itself.
 	f.sendMu.RLock()
 	if !f.sendDown {
-		_ = syscall.Sendto(f.sendFd, out, 0, &sa)
+		// carrierOut is the SINGLE egress for data, handshake and keepalive frames, so a persistent
+		// failure here is indistinguishable from "the peer is filtering us": the tunnel goes stale,
+		// re-handshakes, burns pool endpoints and rotates, all on a healthy network with no output.
+		if err := syscall.Sendto(f.sendFd, out, 0, &sa); err != nil {
+			f.sendErr.note("flux", err)
+		}
 	}
 	f.sendMu.RUnlock()
 }
