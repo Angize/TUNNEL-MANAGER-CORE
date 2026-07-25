@@ -745,6 +745,14 @@ func (c *Config) validate() error {
 		default:
 			return errors.New("fake_desync is supported on the raw, flux, tcp and ws carriers (not plain udp)")
 		}
+		// ws is only half true: the injector mirrors the connection's real 4-tuple, and an xhttp
+		// session has no single kernel socket to mirror — its conn is synthetic, so the *net.TCPAddr
+		// assertion in tcp_inject_linux.go fails and injectDecoys returns without emitting anything.
+		// Accepting the flag there meant the operator saw desync stored, forwarded and logged as ON
+		// while not one decoy ever left the box: a defence they believed they had and did not.
+		if c.WSXHTTP {
+			return errors.New("fake_desync does not work on the xhttp mode (its conn has no real TCP 4-tuple to mirror) — use the plain ws mode, or turn desync off")
+		}
 		if c.FakeTTL < 0 || c.FakeTTL > 255 {
 			return errors.New("fake_ttl must be between 0 and 255 (0 defaults to 4)")
 		}
