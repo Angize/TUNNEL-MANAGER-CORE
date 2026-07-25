@@ -217,6 +217,13 @@ func (p *wsPool) healthMap(kind string) map[string]*healthRec {
 func (p *wsPool) current() (string, wsSNIEntry, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.currentLocked()
+}
+
+// currentLocked is current() without taking the lock, so advance() can resolve the edge BEFORE and
+// AFTER a step under one lock and answer whether the step actually changes what the carrier will dial.
+// Caller holds the lock.
+func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 	if len(p.ips) == 0 || len(p.snis) == 0 {
 		return "", wsSNIEntry{}, false
 	}
@@ -403,11 +410,25 @@ func (p *wsPool) stepLocked() {
 	}
 }
 
-// advance rotates to the next combination (proactive rotation timer / post-failure retry).
-func (p *wsPool) advance() {
+// advance rotates to the next combination (proactive rotation timer / post-failure retry) and reports
+// whether the edge the carrier would actually DIAL changed. When every other combination is burned —
+// the common "one edge survived the filter" steady state — a step lands straight back on the same edge,
+// and a caller that drops the live connection anyway pays a re-dial + handshake + traffic gap every
+// interval for no edge change and no log line. The direct pools already make this check through
+// PeerPool.rotateOnce; this is the ws-pool equivalent.
+// The comparison goes through currentLocked() BOTH times rather than looking at the raw cursor, because
+// the cursor always moves — what matters is the resolved edge (a pin forced, else the first fully
+// healthy combo, else the least-bad pair), which is exactly what the next dial will use.
+func (p *wsPool) advance() bool {
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	beforeIP, beforeSNI, okBefore := p.currentLocked()
 	p.stepLocked()
-	p.mu.Unlock()
+	afterIP, afterSNI, okAfter := p.currentLocked()
+	if !okBefore || !okAfter {
+		return false // empty pool — there is nothing to rotate onto
+	}
+	return beforeIP != afterIP || beforeSNI.host != afterSNI.host
 }
 
 // aimStandby positions the rotation cursor for the WARM STANDBY dial: onto a HEALTHY edge whose IP

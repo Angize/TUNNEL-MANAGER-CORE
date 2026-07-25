@@ -1637,8 +1637,17 @@ func (b *TCP) dialLoop() {
 					rot.Reset(b.rotate) // still pinned — hold rotation off, but keep checking (never freeze)
 					return
 				}
+				// Only drop the live connection when the pool can actually reach a DIFFERENT edge.
+				// With every other combo burned, advance() resolves straight back to this one, and
+				// closing anyway costs a re-dial + handshake + traffic gap every interval for no edge
+				// change and no log line. Same guard the direct-pool branch below applies via
+				// rotateOnce(); rotated is set only once the close is really happening, so a skipped
+				// beat is never mistaken for a deliberate rotation.
+				if !b.pool.advance() {
+					rot.Reset(b.rotate) // re-arm so rotation resumes as soon as another edge heals
+					return
+				}
 				rotated.Store(true)
-				b.pool.advance()
 				c.Close()
 			})
 		} else if (b.pp != nil && b.pp.rotate > 0) || (b.sp != nil && b.sp.rotate > 0) {
