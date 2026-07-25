@@ -17,15 +17,22 @@ import (
 // send it pins the source to that same IP — so the server answers FROM the exact IP the client dialed.
 
 // enablePktinfoDst turns on IP_PKTINFO so ReadMsgIP reports each datagram's destination address.
-// Best-effort: a failure just leaves the old (reply-from-default) behaviour.
-func enablePktinfoDst(c *net.IPConn) {
+// It RETURNS the failure instead of swallowing it. Without IP_PKTINFO the server silently reverts to
+// the kernel-default reply source — i.e. exactly the destination-rotation bug this plumbing exists to
+// prevent, but with nothing in the logs or the status file to show for it. The caller logs it so the
+// degradation is loud; the fallback itself stays best-effort (the socket is still usable).
+func enablePktinfoDst(c *net.IPConn) error {
 	rc, err := c.SyscallConn()
 	if err != nil {
-		return
+		return err
 	}
-	_ = rc.Control(func(fd uintptr) {
-		_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_PKTINFO, 1)
-	})
+	var serr error
+	if cerr := rc.Control(func(fd uintptr) {
+		serr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_PKTINFO, 1)
+	}); cerr != nil {
+		return cerr
+	}
+	return serr
 }
 
 // pktinfoOOB builds an IP_PKTINFO control message pinning the SOURCE (ipi_spec_dst) of an outgoing
