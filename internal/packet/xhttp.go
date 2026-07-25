@@ -31,9 +31,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -78,6 +80,7 @@ type xhttpConn struct {
 	up    *xhUp // client only: packet-up upstream sender (nil on the server)
 
 	wmu     sync.Mutex
+	wdl     atomic.Int64 // unix-nanos write deadline (0 = none); honoured by Write, unlike a no-op setter
 	mu      sync.Mutex
 	closed  bool
 	closeFn func()
@@ -90,6 +93,14 @@ func (c *xhttpConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 func (c *xhttpConn) Write(p []byte) (int, error) {
 	if c.up != nil { // client: each write becomes a short POST with a seq
 		return c.up.write(p)
+	}
+	// SERVER: c.w is the long-lived GET's ResponseWriter. If the client stops reading, the h2 flow
+	// -control window fills and this Write parks — with no deadline of its own, forever, holding the
+	// goroutine that drains the TUN. connFramer arms a write deadline before every framed write
+	// expecting exactly this to be bounded (wsconn honours it); on xhttp the setter used to be a bare
+	// `return nil`, so the protection silently did not exist here.
+	if dl := c.wdl.Load(); dl != 0 && time.Now().UnixNano() > dl {
+		return 0, os.ErrDeadlineExceeded
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
@@ -144,10 +155,20 @@ func (c *xhttpConn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-func (c *xhttpConn) SetWriteDeadline(time.Time) error { return nil }
-func (c *xhttpConn) SetDeadline(t time.Time) error    { return c.SetReadDeadline(t) }
-func (c *xhttpConn) LocalAddr() net.Addr              { return c.la }
-func (c *xhttpConn) RemoteAddr() net.Addr             { return c.ra }
+func (c *xhttpConn) SetWriteDeadline(t time.Time) error {
+	if t.IsZero() {
+		c.wdl.Store(0)
+	} else {
+		c.wdl.Store(t.UnixNano())
+	}
+	return nil
+}
+func (c *xhttpConn) SetDeadline(t time.Time) error {
+	_ = c.SetWriteDeadline(t)
+	return c.SetReadDeadline(t)
+}
+func (c *xhttpConn) LocalAddr() net.Addr  { return c.la }
+func (c *xhttpConn) RemoteAddr() net.Addr { return c.ra }
 
 func randSID() string {
 	var b [16]byte
