@@ -61,6 +61,60 @@ func TestWSPoolStandbyNeverCollidesWithActive(t *testing.T) {
 	}
 }
 
+// TestPoolAdvanceReportsRealMove pins down advance()'s contract: it reports whether the edge the
+// carrier would actually DIAL changed, not whether the raw cursor moved (the cursor always moves).
+// The proactive rotation timer uses this to avoid tearing a healthy connection down when every other
+// combination is burned — the common "one edge survived the filter" steady state, where a blind close
+// cost a re-dial + handshake + traffic gap every interval for no edge change and no log line.
+func TestPoolAdvanceReportsRealMove(t *testing.T) {
+	// Healthy multi-edge pool: a step reaches a different combo, so advance() reports a real move.
+	p := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	for i := 0; i < 4; i++ {
+		if !p.advance() {
+			t.Fatalf("healthy 2x2 pool: advance() must report a move (step %d)", i)
+		}
+	}
+
+	// Burn everything except one IP: every step resolves back to that same survivor, so advance()
+	// must report NO move and the timer must leave the live connection alone.
+	p2 := newWSPool([]string{"a", "b", "c"}, snis("x"), true, "")
+	p2.markSuspect("ip", "b", "test")
+	p2.markSuspect("ip", "c", "test")
+	ipBefore, _, ok := p2.current()
+	if !ok || ipBefore != "a" {
+		t.Fatalf("only a is healthy; got ip=%q ok=%v", ipBefore, ok)
+	}
+	for i := 0; i < 5; i++ {
+		if p2.advance() {
+			t.Fatalf("single healthy edge: advance() must report no move (step %d)", i)
+		}
+		if ip, _, _ := p2.current(); ip != "a" {
+			t.Fatalf("single healthy edge: must stay on a, got %q", ip)
+		}
+	}
+
+	// A burned ws edge is re-admitted only when its health record is actually CLEARED — by a live
+	// success or a passing probe. Elapsed time alone never re-admits it here (unlike PeerPool, whose
+	// current() has an explicit "a DUE burned endpoint gets a live retry" pass), so the guard keeps
+	// holding until something really heals. Once b heals, rotation resumes.
+	p2.retestResult("ip", "b", true)
+	if !p2.advance() {
+		t.Fatal("after edge b healed, advance() must report a move again")
+	}
+
+	// A single-combo pool can never move.
+	p3 := newWSPool([]string{"a"}, snis("x"), true, "")
+	if p3.advance() {
+		t.Fatal("1x1 pool: advance() must report no move")
+	}
+
+	// An empty pool is not a move either (and must not panic).
+	p4 := newWSPool(nil, nil, true, "")
+	if p4.advance() {
+		t.Fatal("empty pool: advance() must report no move")
+	}
+}
+
 func TestPoolRotatesAllCombos(t *testing.T) {
 	p := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
 	seen := map[string]bool{}
