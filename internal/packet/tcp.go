@@ -368,7 +368,7 @@ type TCP struct {
 	// core frames directly over these requests (the HTTP layer replaces the WS upgrade),
 	// the server must NOT run wsServerHandshake on an xhttp conn — see handleServerConn.
 	xhttp      bool
-	xhMode     string                      // client: "stream" (single full-duplex request) else packet-up
+	xhMode     string                      // client: "grpc" (single full-duplex request) else packet-up
 	xhTLS      *tls.Config                 // test-only: overrides the client edge TLS config (nil in production)
 	httpSrv    atomic.Pointer[http.Server] // server: the xhttp endpoint (nil otherwise); atomic — written by runXHTTPServer's goroutine, read by Close
 	xhMu       sync.Mutex

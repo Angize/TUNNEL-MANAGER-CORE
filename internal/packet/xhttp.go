@@ -303,7 +303,7 @@ func (b *TCP) xhttpEdge() (dialAddr, host string, ech []byte, path string, err e
 //	packet-up (default): a long-lived downstream GET plus short seq-tagged POSTs — most
 //	                     CDN-compatible, since a CDN that buffers request bodies still forwards
 //	                     short complete POSTs at once.
-//	grpc (b.xhMode=="grpc", or the legacy "stream" alias): one full-duplex request presented as a
+//	grpc (b.xhMode=="grpc"): one full-duplex request presented as a
 //	                     real gRPC call — needs HTTP/2 to the edge (ws_tls) so a CDN streams it.
 func (b *TCP) establishXHTTP(attribute bool) (net.Conn, string, string, error) {
 	dialAddr, host, ech, path, err := b.xhttpEdge()
@@ -359,8 +359,8 @@ func (b *TCP) establishXHTTP(attribute bool) (net.Conn, string, string, error) {
 // the ECH lives in tr.TLSClientConfig. On error, everything this attempt allocated is already torn
 // down by the dialXHTTP* helper (ctx cancelled, pipes/bodies closed).
 func (b *TCP) dialXHTTPOnce(dialAddr, host string, ech []byte, path string) (net.Conn, error) {
-	single := b.xhMode == "stream" || b.xhMode == "grpc" // one full-duplex request (both need h2)
-	h2 := single && b.wsTLS                              // grpc/stream over wss ride HTTP/2 to the edge
+	single := b.xhMode == "grpc" // one full-duplex request over h2
+	h2 := single && b.wsTLS      // grpc over wss rides HTTP/2 to the edge
 
 	// rawDial always targets the fixed edge, regardless of the request URL host, so the Host/SNI
 	// stays the fronting domain while we connect to a specific (clean) CDN IP.
@@ -481,12 +481,12 @@ func (b *TCP) dialXHTTPOnce(dialAddr, host string, ech []byte, path string) (net
 		r.Header.Set("Accept-Language", "en-US,en;q=0.9")
 		r.Header.Set("Cache-Control", "no-store")
 	}
-	// "stream" is a legacy alias for grpc: plain stream-one (octet-stream) was removed because it
-	// stalled through CDNs that buffer the origin leg; grpc is the full-duplex mode that streams.
+	// Only two modes: grpc (one full-duplex request) and packet-up (default). Plain stream-one
+	// (octet-stream) was removed because it stalled through CDNs that buffer the origin leg.
 	var conn net.Conn
 	var err error
 	switch b.xhMode {
-	case "grpc", "stream":
+	case "grpc":
 		conn, err = b.dialXHTTPGrpc(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)
 	default:
 		conn, err = b.dialXHTTPPacket(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)

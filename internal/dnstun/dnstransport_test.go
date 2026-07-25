@@ -80,7 +80,7 @@ func TestDNSCarrierSurvivesLossyResolver(t *testing.T) {
 		t.Fatal(err)
 	}
 	mtu := codec.MaxUpstream() - SessionOverhead
-	cfg := SessionConfig{PSK: "psk", Cipher: "chacha20", MTU: mtu}
+	cfg := SessionConfig{PSK: "psk", Cipher: "chacha20-poly1305", MTU: mtu}
 
 	srvT, srvAddr, err := NewDNSServerTransport("127.0.0.1:0", codec)
 	if err != nil {
@@ -392,7 +392,7 @@ func TestDNSCarrierEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	mtu := codec.MaxUpstream() - SessionOverhead
-	cfg := SessionConfig{PSK: "dns-carrier-psk", Cipher: "chacha20", MTU: mtu}
+	cfg := SessionConfig{PSK: "dns-carrier-psk", Cipher: "chacha20-poly1305", MTU: mtu}
 
 	// Server transport binds an ephemeral UDP port (stands in for :53); the client dials it
 	// directly (standing in for a recursive resolver forwarding to our authoritative NS).

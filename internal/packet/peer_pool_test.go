@@ -219,7 +219,7 @@ func TestPeerPoolProbeAllNow(t *testing.T) {
 }
 
 // TestPeerPoolStatusFileFSM checks the richer status file: active, the health array with per-endpoint
-// state, the flat burned list, and the pin all round-trip through the JSON the panel reads.
+// state, and the pin all round-trip through the JSON the panel reads.
 func TestPeerPoolStatusFileFSM(t *testing.T) {
 	dir := t.TempDir()
 	sp := dir + "/core-x.peerpool"
@@ -233,7 +233,6 @@ func TestPeerPoolStatusFileFSM(t *testing.T) {
 	var st struct {
 		Active string   `json:"active"`
 		Addrs  []string `json:"addrs"`
-		Burned []string `json:"burned"`
 		Pin    string   `json:"pin"`
 		Health []struct {
 			Key, State string

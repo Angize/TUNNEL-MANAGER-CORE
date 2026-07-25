@@ -75,19 +75,21 @@ type Sealer struct {
 	ctr      atomic.Uint64
 }
 
-// ResolveCipher maps a requested name (incl. aliases and "auto") to a concrete
-// cipher. Unknown names are returned unchanged so NewSealer can reject them.
+// ResolveCipher maps a requested name (or "auto") to a concrete cipher. Unknown names are returned
+// unchanged so NewSealer can reject them. The short-form aliases (aes/chacha/xchacha/...) are gone:
+// the panel and the node both whitelist the canonical names, so nothing in the fleet can emit one,
+// and the shipped examples use the canonical spelling.
 func ResolveCipher(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "", "auto":
 		return CipherDefault // deterministic so both ends match regardless of CPU
-	case CipherAES256, "aes", "aesgcm", "aes256", "aes-256":
+	case CipherAES256:
 		return CipherAES256
-	case CipherAES128, "aes128", "aes-128":
+	case CipherAES128:
 		return CipherAES128
-	case CipherChaCha, "chacha", "chacha20", "chachapoly":
+	case CipherChaCha:
 		return CipherChaCha
-	case CipherXChaCha, "xchacha", "xchacha20":
+	case CipherXChaCha:
 		return CipherXChaCha
 	default:
 		return name

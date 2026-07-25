@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -899,10 +898,9 @@ type healthStatus struct {
 	NextRetest int64  `json:"next_retest_unix"`
 }
 
-// writeStatus snapshots {active, burned_ips, burned_snis, health, ts} to statusPath (best
-// effort) so the node/panel can show the live edge and drive the pool. health carries the
-// full per-entry FSM state; burned_ips/burned_snis keep the old arrays alive (every
-// suspect-or-dead key) so existing readers keep working.
+// writeStatus snapshots {active, health, ts} to statusPath (best effort) so the node/panel can show
+// the live edge and drive the pool. health carries the full per-entry FSM state (state/fails/
+// next_retest), which is what every reader actually uses.
 func (p *wsPool) writeStatus() {
 	if p.statusPath == "" {
 		return
@@ -916,12 +914,10 @@ func (p *wsPool) writeStatus() {
 	defer p.writeMu.Unlock()
 	p.mu.Lock()
 	health := make([]healthStatus, 0, len(p.ips)+len(p.snis))
-	burnedIPs, burnedSNIs := []string{}, []string{}
 	for _, ip := range p.ips {
 		hs := healthStatus{Key: ip, Kind: "ip", State: "healthy"}
 		if r := p.ipHealth[ip]; r != nil {
 			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
-			burnedIPs = append(burnedIPs, ip)
 		}
 		health = append(health, hs)
 	}
@@ -929,25 +925,20 @@ func (p *wsPool) writeStatus() {
 		hs := healthStatus{Key: s.host, Kind: "sni", State: "healthy"}
 		if r := p.sniHealth[s.host]; r != nil {
 			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
-			burnedSNIs = append(burnedSNIs, s.host)
 		}
 		health = append(health, hs)
 	}
-	sort.Strings(burnedIPs)
-	sort.Strings(burnedSNIs)
 	evs := append([]coreEvent(nil), p.events...) // copy so the marshal runs outside the lock
 	st := struct {
-		Active     string         `json:"active"`
-		BurnedIPs  []string       `json:"burned_ips"`
-		BurnedSNIs []string       `json:"burned_snis"`
-		Health     []healthStatus `json:"health"`
-		Events     []coreEvent    `json:"events"`
-		PinIP      string         `json:"pin_ip"`
-		PinSNI     string         `json:"pin_sni"`
-		HB         int64          `json:"hb"`
-		DW         int64          `json:"dw"`
-		TS         int64          `json:"ts"`
-	}{Active: p.active, BurnedIPs: burnedIPs, BurnedSNIs: burnedSNIs, Health: health, Events: evs, PinIP: p.pinIP, PinSNI: p.pinSNI, HB: p.hb, DW: p.dw, TS: time.Now().Unix()}
+		Active string         `json:"active"`
+		Health []healthStatus `json:"health"`
+		Events []coreEvent    `json:"events"`
+		PinIP  string         `json:"pin_ip"`
+		PinSNI string         `json:"pin_sni"`
+		HB     int64          `json:"hb"`
+		DW     int64          `json:"dw"`
+		TS     int64          `json:"ts"`
+	}{Active: p.active, Health: health, Events: evs, PinIP: p.pinIP, PinSNI: p.pinSNI, HB: p.hb, DW: p.dw, TS: time.Now().Unix()}
 	p.mu.Unlock()
 	if data, err := json.Marshal(st); err == nil {
 		// writeMu already held across the snapshot above (serializes writers AND orders snapshot->write).
