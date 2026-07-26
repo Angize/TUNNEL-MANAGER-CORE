@@ -317,6 +317,12 @@ func main() {
 			log.Printf("tnl-core: fake-desync on (%d decoys, ttl=%d, mode=%s)", cfg.FakeCount, cfg.FakeTTL, cfg.FakeMode)
 		}
 	}
+	// Packet-up upstream shape (client, xhttp): per-CDN, see SetXHTTPUpstream. Before any dial.
+	if cfg.Role == "client" && cfg.WSXHTTP && (cfg.XHUpWorkers|cfg.XHUpBatchKB|cfg.XHUpRate) != 0 {
+		packet.SetXHTTPUpstream(cfg.XHUpWorkers, cfg.XHUpBatchKB, cfg.XHUpRate)
+		log.Printf("tnl-core: xhttp upstream: workers=%d batch=%dKB rate=%d/s (0 = default)",
+			cfg.XHUpWorkers, cfg.XHUpBatchKB, cfg.XHUpRate)
+	}
 	// SNI fragmentation (client, ws/xhttp): split the wss ClientHello so the cleartext SNI crosses a
 	// TCP segment boundary. Only the ws/xhttp carrier implements it; others ignore this.
 	if cfg.Role == "client" && cfg.SNISplit {

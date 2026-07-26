@@ -205,6 +205,15 @@ type Config struct {
 	// meaningful when ws_xhttp is set; the server auto-detects the client's style per
 	// request (and serves h2c so the CDN can reach it over HTTP/2).
 	WSXHTTPMode string `json:"ws_xhttp_mode"`
+	// XHUpWorkers / XHUpBatchKB / XHUpRate size the packet-up upstream (ws_xhttp with the default
+	// "packet" mode) for the CDN in front. The default suits Cloudflare, which does not mind ~70
+	// requests/sec from one address; a WAF-protected CDN needs fewer, larger POSTs or it blocks the
+	// source IP. XHUpRate is a ceiling on POSTs per second and is the portable one — a worker count
+	// means a different request rate on a fast path than on a slow one. All zero = compiled defaults.
+	XHUpWorkers int `json:"xh_up_workers"`
+	XHUpBatchKB int `json:"xh_up_batch_kb"`
+	XHUpRate    int `json:"xh_up_rate"`
+
 	// WSECH is a base64 ECHConfigList (draft-ietf-tls-esni / RFC 9460 HTTPS-record
 	// "ech="). On a wss client it encrypts the real SNI (WSHost) inside the ClientHello,
 	// leaving only a benign public name on the wire — so an SNI-blocklisting censor
@@ -571,6 +580,23 @@ func (c *Config) validate() error {
 		// SNI fragmentation splits the wss ClientHello, so it needs wss on a client. split_pos is a
 		// byte offset into the ClientHello (0 = auto: middle of the hostname); cap it so a runaway
 		// value can't push the split past a plausible ClientHello.
+		// The upstream shape only exists on a packet-up client; reject it elsewhere rather than
+		// storing a setting that silently does nothing (the class of defect that made fake_desync on
+		// xhttp look enabled for months).
+		if c.XHUpWorkers != 0 || c.XHUpBatchKB != 0 || c.XHUpRate != 0 {
+			if c.Role != "client" || !c.WSXHTTP || c.WSXHTTPMode == "grpc" {
+				return errors.New("xh_up_workers/xh_up_batch_kb/xh_up_rate apply to a packet-up xhttp CLIENT only")
+			}
+			if c.XHUpWorkers < 0 || c.XHUpWorkers > 16 {
+				return errors.New("xh_up_workers must be between 1 and 16 (0 = default)")
+			}
+			if c.XHUpBatchKB < 0 || c.XHUpBatchKB > 512 {
+				return errors.New("xh_up_batch_kb must be between 8 and 512 (0 = default)")
+			}
+			if c.XHUpRate < 0 || c.XHUpRate > 1000 {
+				return errors.New("xh_up_rate must be between 1 and 1000 POSTs/sec (0 = unpaced)")
+			}
+		}
 		if c.SNISplit {
 			if !c.WSTLS || c.Role != "client" {
 				return errors.New("sni_split requires ws_tls on a client")

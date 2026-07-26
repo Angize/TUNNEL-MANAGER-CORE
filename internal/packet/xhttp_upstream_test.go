@@ -53,6 +53,87 @@ func TestUpstreamSizingInvariants(t *testing.T) {
 	if upWorkers > 12 {
 		t.Errorf("upWorkers %d is more parallel requests than a browser plausibly opens", upWorkers)
 	}
+	// The default must stay the Cloudflare shape: unpaced. A CDN that needs pacing asks for it.
+	if upMinGap != 0 {
+		t.Errorf("upMinGap defaults to %v; the compiled-in profile must not throttle", upMinGap)
+	}
+}
+
+// The shape is per-CDN now, so the setter has to actually move all of it — and clamp, because these
+// numbers reach the core straight from an operator field. A batch over the server's per-POST read cap
+// would be truncated, and a truncated length-prefixed AEAD chunk desyncs the stream.
+func TestSetXHTTPUpstream(t *testing.T) {
+	w0, b0, c0, i0, g0 := upWorkers, maxUpBatch, upChanCap, upIdleConns, upMinGap
+	defer func() { upWorkers, maxUpBatch, upChanCap, upIdleConns, upMinGap = w0, b0, c0, i0, g0 }()
+
+	SetXHTTPUpstream(0, 0, 0)
+	if upWorkers != w0 || maxUpBatch != b0 || upMinGap != g0 {
+		t.Fatalf("all-zero must leave the defaults alone, got %d/%d/%v", upWorkers, maxUpBatch, upMinGap)
+	}
+
+	SetXHTTPUpstream(4, 512, 30) // the measured ArvanCloud profile
+	if upWorkers != 4 || maxUpBatch != 512<<10 {
+		t.Errorf("workers/batch not applied: %d/%d", upWorkers, maxUpBatch)
+	}
+	if upChanCap*1400 < maxUpBatch {
+		t.Errorf("upChanCap %d was not recomputed for the new batch, so batches would stay small", upChanCap)
+	}
+	if upIdleConns < upWorkers+1 {
+		t.Errorf("upIdleConns %d not recomputed: POSTs would re-handshake", upIdleConns)
+	}
+	if want := time.Second / 30; upMinGap != want {
+		t.Errorf("upMinGap %v, want %v (30 POSTs/sec)", upMinGap, want)
+	}
+
+	SetXHTTPUpstream(999, 99999, 99999)
+	if upWorkers != 16 {
+		t.Errorf("workers not clamped: %d", upWorkers)
+	}
+	if maxUpBatch != 512<<10 || maxUpBatch >= maxXhChunk {
+		t.Errorf("batch not clamped under the server read cap: %d (cap %d)", maxUpBatch, maxXhChunk)
+	}
+	if upMinGap != time.Second/1000 {
+		t.Errorf("rate not clamped: %v", upMinGap)
+	}
+}
+
+// Pacing must cost nothing when the link is idle — the gap only ever applies to a dispatch that
+// FOLLOWS a recent one. A cap that also delayed the first packet would put a fixed tax on every
+// interactive round-trip.
+func TestUpMinGapPacesBurstsButNotAnIdleLink(t *testing.T) {
+	g0 := upMinGap
+	defer func() { upMinGap = g0 }()
+	upMinGap = 60 * time.Millisecond
+
+	r := newUpRecorder(0)
+	u, failed, done := startUp(t, r)
+	defer done()
+
+	t0 := time.Now()
+	if _, err := u.write(make([]byte, 100)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	r.waitPosts(t, 1, 3*time.Second)
+	if d := time.Since(t0); d > 40*time.Millisecond {
+		t.Errorf("the first POST on an idle link waited %v; pacing must not delay it", d)
+	}
+
+	// Now a burst. The clock starts BEFORE the writes: write() blocks on the queue, so the pacing is
+	// paid during the loop — timing only the wait afterwards measures nothing.
+	t1 := time.Now()
+	for i := 0; i < 400; i++ {
+		if _, err := u.write(make([]byte, 1400)); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	r.waitPosts(t, 5, 10*time.Second)
+	if d := time.Since(t1); d < 3*upMinGap {
+		t.Errorf("5 batches went out in %v, under the %v the rate cap requires — pacing is not applied",
+			d, 3*upMinGap)
+	}
+	if failed() {
+		t.Error("the upstream reported a POST failure")
+	}
 }
 
 // upRecorder is a fake edge that records each POST's seq and body.

@@ -229,7 +229,23 @@ type seqChunk struct {
 // Client-side only, and not a wire change: the POST framing, the seq contract and the server's
 // reassembly are all unchanged, and maxUpBatch stays well under maxXhChunk (the server's per-POST read
 // cap), so a new client interoperates with an old server and vice versa.
-const (
+//
+// THE SHAPE IS PER-CDN, because the constraint is not bandwidth — it is how many requests per second
+// the CDN in front is willing to see from one address. Measured against a real ArvanCloud edge at a
+// ~120ms round-trip, the same tunnel, TCP goodput up/down:
+//
+//	8×128K  (~70 req/s)   BANNED — the source IP is TCP-blocked for ~3.5 minutes
+//	6×256K  (~55 req/s)   BANNED
+//	4×512K  (~33 req/s)   4.2 / 106 Mbit    <- the sweet spot
+//	4×256K  (~33 req/s)   3.7 /  86 Mbit
+//	2×512K  (~18 req/s)   1.4 /  13 Mbit
+//
+// Two things fall out. The threshold is on the WORKER count, not on bytes — a bigger batch costs no
+// extra requests, so at a fixed request budget you max the batch. And the request rate is
+// workers/RTT, which means a fixed worker count is NOT portable: 4 workers is 33 req/s at 120ms but
+// 133 req/s at 30ms, back in the banned range. That is what upMinGap is for — it paces dispatch in
+// TIME, so the same profile behaves the same on a fast path and a slow one.
+var (
 	// maxUpBatch caps how many bytes the batcher coalesces into ONE upstream POST. Batching amortizes
 	// the per-POST round-trip: without it each ~MTU datagram cost a full HTTP request through the CDN.
 	maxUpBatch = 128 << 10
@@ -241,15 +257,41 @@ const (
 	// whatever is already queued, so it cannot coalesce more than this) and no more. Bigger is not a
 	// buffer, it is standing latency. 1400 = the usual TUN MTU, i.e. one chunk.
 	upChanCap = maxUpBatch/1400 + 2
-	// upWorkCap is how many coalesced batches may wait for a free worker. One, so the batcher blocks
-	// (and through it write(), and through that the TUN reader) instead of building a queue: with all
-	// workers busy the pipe is already full and queueing only adds delay.
-	upWorkCap = 1
 	// upIdleConns must exceed upWorkers so a finished POST's connection is kept instead of closed —
 	// otherwise every other POST pays a fresh TCP+TLS handshake through the CDN. The streaming GET
 	// holds one of these too.
 	upIdleConns = upWorkers * 2
+	// upMinGap is the minimum time between two batch dispatches — an RTT-independent ceiling on
+	// requests per second. Zero (the default) paces nothing. It only ever DELAYS a dispatch when one
+	// happened recently, so an idle link still posts its first chunk immediately; under load the wait
+	// simply lets the next batch grow, trading request rate for batch size, which is exactly the trade
+	// a WAF wants.
+	upMinGap time.Duration
 )
+
+// upWorkCap is how many coalesced batches may wait for a free worker. One, so the batcher blocks (and
+// through it write(), and through that the TUN reader) instead of building a queue: with all workers
+// busy the pipe is already full and queueing only adds delay.
+const upWorkCap = 1
+
+// SetXHTTPUpstream sizes the packet-up upstream for the CDN this tunnel fronts through. Zero leaves a
+// value at its default. Safe as package state for the same reason ApplyTuning is: one tnl-core process
+// serves exactly ONE tunnel and this runs once at startup, before any carrier is built.
+func SetXHTTPUpstream(workers, batchKB, ratePerSec int) {
+	if workers > 0 {
+		upWorkers = tclamp(workers, 1, 16)
+		upIdleConns = upWorkers * 2
+	}
+	if batchKB > 0 {
+		// stays well under maxXhChunk, the server's per-POST read cap — a batch over it is truncated,
+		// and a truncated length-prefixed AEAD chunk desyncs the stream rather than failing cleanly.
+		maxUpBatch = tclamp(batchKB, 8, 512) << 10
+		upChanCap = maxUpBatch/1400 + 2
+	}
+	if ratePerSec > 0 {
+		upMinGap = time.Second / time.Duration(tclamp(ratePerSec, 1, 1000))
+	}
+}
 
 // xhUp is the client's packet-up upstream. Writes are copied and queued; a single batcher coalesces
 // them into one POST per batch (tagging each with a monotonic seq so the server reassembles in order)
@@ -265,13 +307,14 @@ type xhUp struct {
 	seq    uint64        // batch sequence; assigned only by the single batcher goroutine, so no atomic needed
 	ch     chan []byte   // raw upstream byte chunks from write()
 	work   chan seqChunk // coalesced, seq-tagged batches ready to POST
+	minGap time.Duration // snapshot of upMinGap: read once here, never from the batcher goroutine
 	fail   func()
 	once   sync.Once
 }
 
 func newXhUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string, setHdr func(*http.Request), fail func()) *xhUp {
 	u := &xhUp{hc: hc, ctx: ctx, urlFor: urlFor, setHdr: setHdr, fail: fail,
-		ch: make(chan []byte, upChanCap), work: make(chan seqChunk, upWorkCap)}
+		ch: make(chan []byte, upChanCap), work: make(chan seqChunk, upWorkCap), minGap: upMinGap}
 	go u.batcher()
 	for i := 0; i < upWorkers; i++ {
 		go u.worker()
@@ -302,6 +345,7 @@ func (u *xhUp) write(p []byte) (int, error) {
 // length-prefixed AEAD stream rather than failing cleanly.
 func (u *xhUp) batcher() {
 	var carry []byte
+	var lastSend time.Time
 	for {
 		var buf []byte
 		if carry != nil {
@@ -327,6 +371,18 @@ func (u *xhUp) batcher() {
 			default:
 				break drain
 			}
+		}
+		if u.minGap > 0 { // request-rate ceiling: wait out the gap, which also grows the next batch
+			if d := u.minGap - time.Since(lastSend); d > 0 && !lastSend.IsZero() {
+				t := time.NewTimer(d)
+				select {
+				case <-t.C:
+				case <-u.ctx.Done():
+					t.Stop()
+					return
+				}
+			}
+			lastSend = time.Now()
 		}
 		seq := u.seq
 		u.seq++
