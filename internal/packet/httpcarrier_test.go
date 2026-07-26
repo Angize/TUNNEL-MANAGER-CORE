@@ -18,9 +18,9 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// echoXHTTP is a minimal packet-up server: it reassembles the client's seq-tagged upstream POSTs
+// echoHTTPC is a minimal packet-up server: it reassembles the client's seq-tagged upstream POSTs
 // into an ordered byte stream and echoes it back on the session's long-lived downstream GET.
-func echoXHTTP() *httptest.Server {
+func echoHTTPC() *httptest.Server {
 	type sess struct {
 		pr   *io.PipeReader
 		pw   *io.PipeWriter
@@ -83,14 +83,14 @@ func echoXHTTP() *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
-// TestXHTTPProbeUsesRealEstablish locks in the xhttp probe fix: probeEdgeFull must run a REAL xhttp
+// TestHTTPCProbeUsesRealEstablish locks in the HTTP-carrier probe fix: probeEdgeFull must run a REAL httpc
 // session (which validates the origin's HTTP 200), not a TLS-only reachability check. A CDN
 // terminates TLS for any of its anycast IPs, so a dead origin behind it completes TCP+TLS yet 502s
-// the actual xhttp establish — the old TLS-only probe passed that edge (falsely healing it on retest
+// the actual httpc establish — the old TLS-only probe passed that edge (falsely healing it on retest
 // and defeating the manual-pin auto-release, which read the block as "transient"). The real-establish
 // probe must fail it. packet-up mode over plain http isolates exactly this: front reachable, origin dead.
-func TestXHTTPProbeUsesRealEstablish(t *testing.T) {
-	good := echoXHTTP()
+func TestHTTPCProbeUsesRealEstablish(t *testing.T) {
+	good := echoHTTPC()
 	defer good.Close()
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway) // reachable front (TCP+TLS OK), dead origin (502 on establish)
@@ -98,53 +98,53 @@ func TestXHTTPProbeUsesRealEstablish(t *testing.T) {
 	defer bad.Close()
 
 	probe := func(addr string) bool {
-		b := &TCP{addr: addr, ws: true, xhttp: true, wsPath: "/", wsTLS: false}
+		b := &TCP{addr: addr, ws: true, httpc: true, wsPath: "/", wsTLS: false}
 		return b.probeEdgeFull(addr, wsSNIEntry{path: "/"})
 	}
 	if !probe(good.Listener.Addr().String()) {
-		t.Fatal("a working xhttp origin must probe healthy")
+		t.Fatal("a working httpc origin must probe healthy")
 	}
 	if probe(bad.Listener.Addr().String()) {
 		t.Fatal("a 502-origin behind a reachable front must probe DEAD (a TLS-only probe would wrongly pass it)")
 	}
 }
 
-// TestXHTTPGrpcProbeHealthyOnRealOrigin proves the same real-establish probe reports healthy for a
+// TestHTTPCGrpcProbeHealthyOnRealOrigin proves the same real-establish probe reports healthy for a
 // LIVE grpc origin — the exact carrier the operator runs — so the fix doesn't over-burn a good grpc edge.
-func TestXHTTPGrpcProbeHealthyOnRealOrigin(t *testing.T) {
+func TestHTTPCGrpcProbeHealthyOnRealOrigin(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	srvDev, _ := tunPair(t, "xhgprobe")
-	srv, err := ListenXHTTP("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
+	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
 	if err != nil {
-		t.Fatalf("ListenXHTTP: %v", err)
+		t.Fatalf("ListenHTTPC: %v", err)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", srv.xhttpHandler)
+	mux.HandleFunc("/", srv.httpcHandler)
 	ts := httptest.NewUnstartedServer(mux)
 	ts.EnableHTTP2 = true
 	ts.StartTLS()
 	go srv.Run()
 	t.Cleanup(func() { ts.Close(); srv.Close() })
 
-	b := &TCP{addr: ts.Listener.Addr().String(), ws: true, xhttp: true, xhMode: "grpc", wsPath: "/",
-		wsTLS: true, xhTLS: &tls.Config{InsecureSkipVerify: true}}
+	b := &TCP{addr: ts.Listener.Addr().String(), ws: true, httpc: true, httpcMode: "grpc", wsPath: "/",
+		wsTLS: true, httpcTLS: &tls.Config{InsecureSkipVerify: true}}
 	if !b.probeEdgeFull(ts.Listener.Addr().String(), wsSNIEntry{path: "/"}) {
-		t.Fatal("a real grpc xhttp origin must probe healthy")
+		t.Fatal("a real grpc httpc origin must probe healthy")
 	}
 }
 
-func TestXHTTPCarrierRoundTrip(t *testing.T) {
-	srv := echoXHTTP()
+func TestHTTPCCarrierRoundTrip(t *testing.T) {
+	srv := echoHTTPC()
 	defer srv.Close()
 	b := &TCP{addr: srv.Listener.Addr().String(), wsPath: "/", wsTLS: false}
-	conn, _, _, err := b.establishXHTTP(true)
+	conn, _, _, err := b.establishHTTPC(true)
 	if err != nil {
-		t.Fatalf("establishXHTTP: %v", err)
+		t.Fatalf("establishHTTPC: %v", err)
 	}
 	defer conn.Close()
 
 	// write several framed-ish chunks upstream; expect them echoed (in order) on the downstream.
-	msgs := [][]byte{[]byte("hello xhttp"), []byte("second frame"), make([]byte, 5000)}
+	msgs := [][]byte{[]byte("hello http"), []byte("second frame"), make([]byte, 5000)}
 	for i := range msgs[2] {
 		msgs[2][i] = byte(i)
 	}
@@ -154,7 +154,7 @@ func TestXHTTPCarrierRoundTrip(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}()
-	want := append(append([]byte("hello xhttp"), []byte("second frame")...), msgs[2]...)
+	want := append(append([]byte("hello http"), []byte("second frame")...), msgs[2]...)
 	got := make([]byte, 0, len(want))
 	buf := make([]byte, 4096)
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -168,12 +168,12 @@ func TestXHTTPCarrierRoundTrip(t *testing.T) {
 	if string(got) != string(want) {
 		t.Fatalf("round-trip mismatch: got %d bytes, want %d", len(got), len(want))
 	}
-	t.Logf("xhttp packet-up round-tripped %d bytes both ways", len(got))
+	t.Logf("httpc packet-up round-tripped %d bytes both ways", len(got))
 }
 
-// xhttpInject drives one packet each way through a live xhttp tunnel and asserts it arrives
+// httpcInject drives one packet each way through a live httpc tunnel and asserts it arrives
 // intact — the same end-to-end path a node runs (handshake, seal/open, TUN both directions).
-func xhttpInject(t *testing.T, cliCtrl, srvCtrl *os.File) {
+func httpcInject(t *testing.T, cliCtrl, srvCtrl *os.File) {
 	t.Helper()
 	pkt1 := bytes.Repeat([]byte{0xC1}, 200)
 	if _, err := cliCtrl.Write(pkt1); err != nil {
@@ -198,17 +198,17 @@ func xhttpInject(t *testing.T, cliCtrl, srvCtrl *os.File) {
 	}
 }
 
-// TestTunnelXHTTPPacketUp runs a full server<->client xhttp tunnel in packet-up mode over a real
+// TestTunnelHTTPCPacketUp runs a full server<->client httpc tunnel in packet-up mode over a real
 // (plain HTTP/1.1) socket and asserts a packet traverses each way. It is the regression test for
-// the server-side bug where handleServerConn ran wsServerHandshake on an xhttp conn (b.ws is set
-// for xhttp): the client speaks core frames directly over the GET/POST pair, so a WS handshake
+// the server-side bug where handleServerConn ran wsServerHandshake on an HTTP-carrier conn (b.ws is set
+// for httpc): the client speaks core frames directly over the GET/POST pair, so a WS handshake
 // there misreads the core handshake as an HTTP request and the tunnel connects but passes no data.
-func TestTunnelXHTTPPacketUp(t *testing.T) { testTunnelXHTTP(t, "packet", false) }
+func TestTunnelHTTPCPacketUp(t *testing.T) { testTunnelHTTPC(t, "packet", false) }
 
-// TestTunnelXHTTPPacketUpObfs is the same with the length-mask obfs handshake in play.
-func TestTunnelXHTTPPacketUpObfs(t *testing.T) { testTunnelXHTTP(t, "packet", true) }
+// TestTunnelHTTPCPacketUpObfs is the same with the length-mask obfs handshake in play.
+func TestTunnelHTTPCPacketUpObfs(t *testing.T) { testTunnelHTTPC(t, "packet", true) }
 
-func testTunnelXHTTP(t *testing.T, mode string, obfs bool) {
+func testTunnelHTTPC(t *testing.T, mode string, obfs bool) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"
 	srvDev, srvCtrl := tunPair(t, "xhsrv")
@@ -216,20 +216,20 @@ func testTunnelXHTTP(t *testing.T, mode string, obfs bool) {
 	ka := 1 * time.Second
 	addr := freeTCPPort(t)
 
-	srv, err := ListenXHTTP(addr, srvDev, ka, obfs, true, psk, cipher)
+	srv, err := ListenHTTPC(addr, srvDev, ka, obfs, true, psk, cipher)
 	if err != nil {
-		t.Fatalf("ListenXHTTP: %v", err)
+		t.Fatalf("ListenHTTPC: %v", err)
 	}
 	// single-edge packet-up client over plain HTTP; host defaults to the dial addr.
-	cli, err := DialXHTTP(addr, cliDev, ka, obfs, true, psk, cipher, "", "/", false, nil, mode)
+	cli, err := DialHTTPC(addr, cliDev, ka, obfs, true, psk, cipher, "", "/", false, nil, mode)
 	if err != nil {
-		t.Fatalf("DialXHTTP: %v", err)
+		t.Fatalf("DialHTTPC: %v", err)
 	}
 	go srv.Run()
 	go cli.Run()
 	t.Cleanup(func() { cli.Close(); srv.Close() })
 	time.Sleep(400 * time.Millisecond)
-	xhttpInject(t, cliCtrl, srvCtrl)
+	httpcInject(t, cliCtrl, srvCtrl)
 }
 
 // TestGrpcFraming round-trips payloads through the gRPC message framing (writer -> reader) with a
@@ -261,48 +261,48 @@ func TestGrpcFraming(t *testing.T) {
 	}
 }
 
-// TestTunnelXHTTPGrpc runs a full tunnel in grpc mode: one full-duplex request presenting as a
+// TestTunnelHTTPCGrpc runs a full tunnel in grpc mode: one full-duplex request presenting as a
 // gRPC call (Content-Type application/grpc + gRPC framing) over an HTTP/2 TLS edge. Proves the
 // gRPC-framed stream round-trips a packet each way.
-func TestTunnelXHTTPGrpc(t *testing.T) {
+func TestTunnelHTTPCGrpc(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"
 	srvDev, srvCtrl := tunPair(t, "xhgsrv")
 	cliDev, cliCtrl := tunPair(t, "xhgcli")
 	ka := 1 * time.Second
 
-	srv, err := ListenXHTTP("127.0.0.1:0", srvDev, ka, false, true, psk, cipher)
+	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, ka, false, true, psk, cipher)
 	if err != nil {
-		t.Fatalf("ListenXHTTP: %v", err)
+		t.Fatalf("ListenHTTPC: %v", err)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", srv.xhttpHandler)
+	mux.HandleFunc("/", srv.httpcHandler)
 	ts := httptest.NewUnstartedServer(mux)
 	ts.EnableHTTP2 = true
 	ts.StartTLS()
 	go srv.Run()
 	t.Cleanup(func() { ts.Close(); srv.Close() })
 
-	cli, err := DialXHTTP(ts.Listener.Addr().String(), cliDev, ka, false, true, psk, cipher, "", "/", true, nil, "grpc")
+	cli, err := DialHTTPC(ts.Listener.Addr().String(), cliDev, ka, false, true, psk, cipher, "", "/", true, nil, "grpc")
 	if err != nil {
-		t.Fatalf("DialXHTTP: %v", err)
+		t.Fatalf("DialHTTPC: %v", err)
 	}
-	cli.xhTLS = &tls.Config{InsecureSkipVerify: true}
+	cli.httpcTLS = &tls.Config{InsecureSkipVerify: true}
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
 	time.Sleep(600 * time.Millisecond)
-	xhttpInject(t, cliCtrl, srvCtrl)
+	httpcInject(t, cliCtrl, srvCtrl)
 }
 
-// TestXHTTPServerH2C verifies the xhttp server accepts an HTTP/2 cleartext (h2c) connection — the
+// TestHTTPCServerH2C verifies the HTTP-carrier server accepts an HTTP/2 cleartext (h2c) connection — the
 // leg a CDN uses to reach the origin for gRPC. A prior-knowledge h2c client sends a probe (bad
 // sid) and must get an HTTP/2 404 back, proving h2c is served on the plain listener.
-func TestXHTTPServerH2C(t *testing.T) {
+func TestHTTPCServerH2C(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	srvDev, _ := tunPair(t, "h2csrv")
-	srv, err := ListenXHTTP("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
+	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
 	if err != nil {
-		t.Fatalf("ListenXHTTP: %v", err)
+		t.Fatalf("ListenHTTPC: %v", err)
 	}
 	go srv.Run()
 	t.Cleanup(func() { srv.Close() })
@@ -406,9 +406,9 @@ func TestDoWithHeaderTimeout(t *testing.T) {
 	cancel()     // release the parked handler + the buffered background Do goroutine (no leak)
 }
 
-func TestXHTTPConnReadDeadline(t *testing.T) {
+func TestHTTPCConnReadDeadline(t *testing.T) {
 	pr, _ := io.Pipe()
-	c := &xhttpConn{r: pr, w: io.Discard}
+	c := &httpcConn{r: pr, w: io.Discard}
 	c.SetReadDeadline(time.Now().Add(80 * time.Millisecond))
 	start := time.Now()
 	buf := make([]byte, 8)

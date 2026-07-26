@@ -11,7 +11,7 @@ import (
 // real browser's JA3/JA4 (derived from its TLS ClientHello) and its User-Agent always agree; if they
 // disagree here — e.g. a uTLS bump moved HelloChrome_Auto but the UA const was left behind, or vice
 // versa — that mismatch is a cheap, high-confidence fingerprint. Wiring the two together in a test
-// fails the build the moment they drift, so the ws/xhttp carriers can never ship a skewed pair.
+// fails the build the moment they drift, so the ws/HTTP carriers can never ship a skewed pair.
 func TestUserAgentMatchesTLSParrot(t *testing.T) {
 	parrot := utls.HelloChrome_Auto.Version // e.g. "133"
 	if parrot == "" {

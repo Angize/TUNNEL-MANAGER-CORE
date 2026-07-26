@@ -30,6 +30,18 @@ type WSSNI struct {
 	Path string `json:"path"`
 }
 
+// cdnIsHTTP reports whether this carrier sends HTTP REQUESTS rather than a WebSocket upgrade — true
+// for both "http" and "grpc", since both ride ordinary requests through the CDN.
+func (c *Config) cdnIsHTTP() bool { return c.CDNCarrier == "http" || c.CDNCarrier == "grpc" }
+
+// cdnMode is the upstream style the data plane is told: "grpc", else packet-up.
+func (c *Config) cdnMode() string {
+	if c.CDNCarrier == "grpc" {
+		return "grpc"
+	}
+	return "packet"
+}
+
 type Config struct {
 	Role    string `json:"role"`    // "server" (public, listens) | "client" (behind NAT, dials)
 	Mode    string `json:"mode"`    // "packet" (only mode implemented in this slice)
@@ -127,7 +139,7 @@ type Config struct {
 	// BindIP is the source IP the client dials FROM (its own node IP). On a host with
 	// several IPs the kernel would otherwise egress from the primary IP; binding pins the
 	// outbound socket to this node's registered IP so the peer/CDN sees the expected source.
-	// Empty = let the kernel choose. TCP-family carriers only (tcp/ws/xhttp).
+	// Empty = let the kernel choose. TCP-family carriers only (tcp/ws/http).
 	BindIP string `json:"bind_ip"`
 
 	TunName string `json:"tun_name"` // requested interface name, e.g. "tnl0"
@@ -144,7 +156,7 @@ type Config struct {
 	SockBuf int `json:"sock_buf"`
 	// DeadAfterSecs (client) is the per-tunnel self-heal deadline: the carrier is declared dead — and the
 	// client re-establishes / fails over — if no authenticated inbound frame arrives within this many
-	// seconds. It sets the read-deadline ceiling (b.idle for tcp/ws/xhttp; the stale window for udp/raw/
+	// seconds. It sets the read-deadline ceiling (b.idle for tcp/ws/http; the stale window for udp/raw/
 	// flux), so an operator can make a tunnel heal faster than the default (~3×keepalive ping-loss, 60s
 	// idle backstop). 0 = use the default formula. Clamped to >=2×keepalive so a healthy pinging link is
 	// never mis-reaped, so for a very short window lower Keepalive too.
@@ -180,7 +192,7 @@ type Config struct {
 	// SNISplit fragments the wss ClientHello across two TCP segments so the cleartext SNI lands on
 	// the segment boundary — a stateless SNI-blocklist DPI can no longer match the full hostname
 	// (SNI fragmentation). A cheap complement to ECH for edges/censors where ECH is unavailable;
-	// ws/xhttp client + wss only. SplitPos is the split offset into the ClientHello (0 = auto: the
+	// ws/http client + wss only. SplitPos is the split offset into the ClientHello (0 = auto: the
 	// middle of the cleartext hostname; naturally a no-op under ECH, where the SNI is encrypted).
 	SNISplit bool `json:"sni_split"`
 	SplitPos int  `json:"split_pos"`
@@ -190,11 +202,17 @@ type Config struct {
 	// server still gets the real bytes. SplitTTL is the disorder head TTL (0 = default).
 	SNIMode  string `json:"sni_mode"`
 	SplitTTL int    `json:"split_ttl"`
-	// WSXHTTP switches the ws carrier from a WebSocket upgrade to the xhttp mode (a
-	// GET-down + POST-up HTTP request pair), which passes CDNs that block WebSocket.
-	// Same fronting fields (ws_host/ws_tls/ws_ech/ws_path). Not combined with the pool.
-	WSXHTTP bool `json:"ws_xhttp"`
-	// WSXHTTPMode picks the xhttp upstream style. "packet" (default) is packet-up: each
+	// CDNCarrier picks the SHAPE the CDN-frontable carrier takes on the wire. All three share the
+	// fronting fields (ws_host / ws_tls / ws_ech / ws_path) and differ only in what they send:
+	//
+	//	"ws"    a WebSocket upgrade — the default; empty means this
+	//	"http"  a GET-down + POST-up request pair, which passes a CDN that blocks WebSocket
+	//	"grpc"  one full-duplex request dressed as a real gRPC call
+	//
+	// One field, not a boolean plus a mode: that pair could express states that do not exist
+	// ("not http, but grpc") and made the code and the panel call the same thing different names.
+	CDNCarrier string `json:"cdn_carrier"`
+	// On "http" the upstream is packet-up: each
 	// write is a short discrete POST — the most CDN-compatible, since a CDN that buffers
 	// request bodies still forwards short complete POSTs at once. "grpc" is a single
 	// full-duplex request wrapped as a real gRPC stream (Content-Type application/grpc +
@@ -202,17 +220,15 @@ type Config struct {
 	// streams the gRPC call instead of buffering it, which is what makes a full-duplex
 	// stream survive the CDN->origin leg (needs ws_tls). Those two are the only modes —
 	// plain stream-one was removed, it stalled through buffering CDNs. Only
-	// meaningful when ws_xhttp is set; the server auto-detects the client's style per
-	// request (and serves h2c so the CDN can reach it over HTTP/2).
-	WSXHTTPMode string `json:"ws_xhttp_mode"`
-	// XHUpWorkers / XHUpBatchKB / XHUpRate size the packet-up upstream (ws_xhttp with the default
-	// "packet" mode) for the CDN in front. The default suits Cloudflare, which does not mind ~70
+	// The server auto-detects the client's style per request (and serves h2c so the CDN can reach
+	// it over HTTP/2), so only the client side needs to be told.
+	// HTTPUpWorkers / HTTPUpBatchKB / HTTPUpRate size the packet-up upstream (cdn_carrier "http") for the CDN in front. The default suits Cloudflare, which does not mind ~70
 	// requests/sec from one address; a WAF-protected CDN needs fewer, larger POSTs or it blocks the
-	// source IP. XHUpRate is a ceiling on POSTs per second and is the portable one — a worker count
+	// source IP. HTTPUpRate is a ceiling on POSTs per second and is the portable one — a worker count
 	// means a different request rate on a fast path than on a slow one. All zero = compiled defaults.
-	XHUpWorkers int `json:"xh_up_workers"`
-	XHUpBatchKB int `json:"xh_up_batch_kb"`
-	XHUpRate    int `json:"xh_up_rate"`
+	HTTPUpWorkers int `json:"http_up_workers"`
+	HTTPUpBatchKB int `json:"http_up_batch_kb"`
+	HTTPUpRate    int `json:"http_up_rate"`
 
 	// WSECH is a base64 ECHConfigList (draft-ietf-tls-esni / RFC 9460 HTTPS-record
 	// "ech="). On a wss client it encrypts the real SNI (WSHost) inside the ClientHello,
@@ -582,19 +598,19 @@ func (c *Config) validate() error {
 		// value can't push the split past a plausible ClientHello.
 		// The upstream shape only exists on a packet-up client; reject it elsewhere rather than
 		// storing a setting that silently does nothing (the class of defect that made fake_desync on
-		// xhttp look enabled for months).
-		if c.XHUpWorkers != 0 || c.XHUpBatchKB != 0 || c.XHUpRate != 0 {
-			if c.Role != "client" || !c.WSXHTTP || c.WSXHTTPMode == "grpc" {
-				return errors.New("xh_up_workers/xh_up_batch_kb/xh_up_rate apply to a packet-up xhttp CLIENT only")
+		// httpc look enabled for months).
+		if c.HTTPUpWorkers != 0 || c.HTTPUpBatchKB != 0 || c.HTTPUpRate != 0 {
+			if c.Role != "client" || c.CDNCarrier != "http" {
+				return errors.New("http_up_workers/http_up_batch_kb/http_up_rate apply to a packet-up httpc CLIENT only")
 			}
-			if c.XHUpWorkers < 0 || c.XHUpWorkers > 16 {
-				return errors.New("xh_up_workers must be between 1 and 16 (0 = default)")
+			if c.HTTPUpWorkers < 0 || c.HTTPUpWorkers > 16 {
+				return errors.New("http_up_workers must be between 1 and 16 (0 = default)")
 			}
-			if c.XHUpBatchKB < 0 || c.XHUpBatchKB > 512 {
-				return errors.New("xh_up_batch_kb must be between 8 and 512 (0 = default)")
+			if c.HTTPUpBatchKB < 0 || c.HTTPUpBatchKB > 512 {
+				return errors.New("http_up_batch_kb must be between 8 and 512 (0 = default)")
 			}
-			if c.XHUpRate < 0 || c.XHUpRate > 1000 {
-				return errors.New("xh_up_rate must be between 1 and 1000 POSTs/sec (0 = unpaced)")
+			if c.HTTPUpRate < 0 || c.HTTPUpRate > 1000 {
+				return errors.New("http_up_rate must be between 1 and 1000 POSTs/sec (0 = unpaced)")
 			}
 		}
 		if c.SNISplit {
@@ -613,16 +629,16 @@ func (c *Config) validate() error {
 				return errors.New("split_ttl must be between 0 and 255")
 			}
 		}
-		// xhttp upstream style: packet-up (default) or grpc. grpc is a single full-duplex
+		// httpc upstream style: packet-up (default) or grpc. grpc is a single full-duplex
 		// request and needs HTTP/2 to the edge, so on a single-edge client it requires ws_tls
 		// (a pool is always wss; the server auto-detects).
-		switch c.WSXHTTPMode {
-		case "", "packet", "grpc":
+		switch c.CDNCarrier {
+		case "", "ws", "http", "grpc":
 		default:
-			return errors.New("ws_xhttp_mode must be \"packet\" or \"grpc\"")
+			return errors.New("cdn_carrier must be \"ws\", \"http\" or \"grpc\"")
 		}
-		if c.WSXHTTPMode == "grpc" && c.Role == "client" && !c.WSTLS && len(c.WSEdgeIPs) == 0 {
-			return errors.New("ws_xhttp_mode \"" + c.WSXHTTPMode + "\" requires ws_tls (needs HTTP/2 to the edge)")
+		if c.CDNCarrier == "grpc" && c.Role == "client" && !c.WSTLS && len(c.WSEdgeIPs) == 0 {
+			return errors.New("cdn_carrier \"" + c.CDNCarrier + "\" requires ws_tls (needs HTTP/2 to the edge)")
 		}
 		// Edge pool: a client+wss rotation set; every SNI's ECH must decode.
 		if len(c.WSEdgeIPs) > 0 || len(c.WSEdgeSNIs) > 0 {
@@ -771,13 +787,13 @@ func (c *Config) validate() error {
 		default:
 			return errors.New("fake_desync is supported on the raw, flux, tcp and ws carriers (not plain udp)")
 		}
-		// ws is only half true: the injector mirrors the connection's real 4-tuple, and an xhttp
+		// ws is only half true: the injector mirrors the connection's real 4-tuple, and an httpc
 		// session has no single kernel socket to mirror — its conn is synthetic, so the *net.TCPAddr
 		// assertion in tcp_inject_linux.go fails and injectDecoys returns without emitting anything.
 		// Accepting the flag there meant the operator saw desync stored, forwarded and logged as ON
 		// while not one decoy ever left the box: a defence they believed they had and did not.
-		if c.WSXHTTP {
-			return errors.New("fake_desync does not work on the xhttp mode (its conn has no real TCP 4-tuple to mirror) — use the plain ws mode, or turn desync off")
+		if c.cdnIsHTTP() {
+			return errors.New("fake_desync does not work on the HTTP carrier (its conn has no real TCP 4-tuple to mirror) — use the plain ws mode, or turn desync off")
 		}
 		if c.FakeTTL < 0 || c.FakeTTL > 255 {
 			return errors.New("fake_ttl must be between 0 and 255 (0 defaults to 4)")

@@ -28,7 +28,7 @@ func clockPool(ips []string, snis []wsSNIEntry, autoBurn bool, statusPath string
 // standby is rebuilt (a CDN reaps the idle standby, over and over), it is always aimed at a DIFFERENT IP
 // than the live active edge — so a proactive rotation always moves to a real, distinct edge instead of
 // silently promoting onto the active's own edge. Regression for the "rotation silently stopped / both
-// edges ended up the same" report across the ws-family carriers (ws, xhttp-grpc, xhttp-packet-up).
+// edges ended up the same" report across the ws-family carriers (ws, httpc-grpc, httpc-packet-up).
 func TestWSPoolStandbyNeverCollidesWithActive(t *testing.T) {
 	p := newWSPool([]string{"a", "b"}, snis("x"), true, "")
 	standbyIP := func() string { // mimic warmEstablish(standby): aim, then read the edge via current()

@@ -1,6 +1,6 @@
 // Command tnl-core is the custom data-plane core for the tunnel fleet
 // manager. It carries raw L3 packets over a TUN device across a selectable
-// transport (udp/tcp/raw/flux/ws/xhttp) with optional configurable crypto.
+// transport (udp/tcp/raw/flux/ws/http) with optional configurable crypto.
 //
 // Usage:
 //
@@ -172,10 +172,10 @@ func main() {
 	case "ws":
 		switch cfg.Role {
 		case "server":
-			if cfg.WSXHTTP {
-				b, err = packet.ListenXHTTP(cfg.Listen, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher)
+			if cfg.cdnIsHTTP() {
+				b, err = packet.ListenHTTPC(cfg.Listen, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher)
 				if err == nil {
-					log.Printf("tnl-core: listening (core/xhttp%s) on %s", obfsTag, cfg.Listen)
+					log.Printf("tnl-core: listening (core/http%s) on %s", obfsTag, cfg.Listen)
 				}
 				break
 			}
@@ -185,16 +185,16 @@ func main() {
 			}
 		case "client":
 			carrier := "ws"
-			if cfg.WSXHTTP {
-				carrier = "xhttp"
+			if cfg.cdnIsHTTP() {
+				carrier = "http"
 			}
-			if len(cfg.WSEdgeIPs) > 0 { // rotating edge pool overrides the single edge (ws or xhttp)
+			if len(cfg.WSEdgeIPs) > 0 { // rotating edge pool overrides the single edge (ws or httpc)
 				snis := make([]packet.WSPoolSNI, len(cfg.WSEdgeSNIs))
 				for i, s := range cfg.WSEdgeSNIs {
 					snis[i] = packet.WSPoolSNI{Host: s.Host, ECH: s.ECH, Path: s.Path}
 				}
 				b, err = packet.DialWSPoolCfg(dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher,
-					cfg.WSEdgeIPs, snis, time.Duration(cfg.WSRotateSecs)*time.Second, cfg.WSAutoBurn, cfg.WSStatusPath, cfg.WSXHTTP, cfg.WSXHTTPMode, cfg.WSWarmStandby)
+					cfg.WSEdgeIPs, snis, time.Duration(cfg.WSRotateSecs)*time.Second, cfg.WSAutoBurn, cfg.WSStatusPath, cfg.cdnIsHTTP(), cfg.cdnMode(), cfg.WSWarmStandby)
 				if err == nil {
 					warmTag := ""
 					if cfg.WSWarmStandby {
@@ -209,14 +209,14 @@ func main() {
 			if cfg.WSECH != "" { // validated as base64 in Config.Validate
 				echList, _ = base64.StdEncoding.DecodeString(cfg.WSECH)
 			}
-			if cfg.WSXHTTP { // single-edge xhttp carrier
-				b, err = packet.DialXHTTP(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath, cfg.WSTLS, echList, cfg.WSXHTTPMode)
+			if cfg.cdnIsHTTP() { // single-edge HTTP carrier
+				b, err = packet.DialHTTPC(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath, cfg.WSTLS, echList, cfg.cdnMode())
 				if err == nil {
-					mode := cfg.WSXHTTPMode
+					mode := cfg.cdnMode()
 					if mode == "" {
 						mode = "packet"
 					}
-					log.Printf("tnl-core: dialing (core/xhttp:%s%s wss) %s", mode, obfsTag, cfg.Peer)
+					log.Printf("tnl-core: dialing (core/http:%s%s wss) %s", mode, obfsTag, cfg.Peer)
 				}
 				break
 			}
@@ -268,7 +268,7 @@ func main() {
 	}
 	// Pin the client's outbound source IP to this node's own registered IP when set, so on a
 	// multi-IP host the peer/CDN sees that IP instead of the kernel's default primary. Only the
-	// TCP-family carriers (tcp/ws/xhttp) implement it; others ignore it.
+	// TCP-family carriers (tcp/ws/http) implement it; others ignore it.
 	if cfg.Role == "client" && cfg.BindIP != "" {
 		if s, ok := b.(interface{ SetSourceIP(string) }); ok {
 			s.SetSourceIP(cfg.BindIP)
@@ -317,14 +317,14 @@ func main() {
 			log.Printf("tnl-core: fake-desync on (%d decoys, ttl=%d, mode=%s)", cfg.FakeCount, cfg.FakeTTL, cfg.FakeMode)
 		}
 	}
-	// Packet-up upstream shape (client, xhttp): per-CDN, see SetXHTTPUpstream. Before any dial.
-	if cfg.Role == "client" && cfg.WSXHTTP && (cfg.XHUpWorkers|cfg.XHUpBatchKB|cfg.XHUpRate) != 0 {
-		packet.SetXHTTPUpstream(cfg.XHUpWorkers, cfg.XHUpBatchKB, cfg.XHUpRate)
-		log.Printf("tnl-core: xhttp upstream: workers=%d batch=%dKB rate=%d/s (0 = default)",
-			cfg.XHUpWorkers, cfg.XHUpBatchKB, cfg.XHUpRate)
+	// Packet-up upstream shape (client, httpc): per-CDN, see SetHTTPUpstream. Before any dial.
+	if cfg.Role == "client" && cfg.cdnIsHTTP() && (cfg.HTTPUpWorkers|cfg.HTTPUpBatchKB|cfg.HTTPUpRate) != 0 {
+		packet.SetHTTPUpstream(cfg.HTTPUpWorkers, cfg.HTTPUpBatchKB, cfg.HTTPUpRate)
+		log.Printf("tnl-core: httpc upstream: workers=%d batch=%dKB rate=%d/s (0 = default)",
+			cfg.HTTPUpWorkers, cfg.HTTPUpBatchKB, cfg.HTTPUpRate)
 	}
-	// SNI fragmentation (client, ws/xhttp): split the wss ClientHello so the cleartext SNI crosses a
-	// TCP segment boundary. Only the ws/xhttp carrier implements it; others ignore this.
+	// SNI fragmentation (client, ws/http): split the wss ClientHello so the cleartext SNI crosses a
+	// TCP segment boundary. Only the ws/HTTP carrier implements it; others ignore this.
 	if cfg.Role == "client" && cfg.SNISplit {
 		if s, ok := b.(interface {
 			SetSNISplit(bool, int, string, int)

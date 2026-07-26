@@ -1,4 +1,4 @@
-// xhttp carrier: the core stream rides plain HTTP requests instead of a WebSocket upgrade, so
+// HTTP carrier: the core stream rides plain HTTP requests instead of a WebSocket upgrade, so
 // it passes through CDNs that block or don't proxy WebSocket (e.g. a Cloudflare account with
 // WebSocket disabled) while still looking like ordinary HTTPS.
 //
@@ -11,7 +11,7 @@
 //	                               server reassembles them by seq into the upstream byte stream.
 //	correlation: a random session id in the query ties the GET and the POSTs together.
 //
-// Both directions present a byte stream, so xhttpConn is a net.Conn and the existing connFramer
+// Both directions present a byte stream, so httpcConn is a net.Conn and the existing connFramer
 // (length-prefix + AEAD + obfs + keepalive) rides on top unchanged — exactly as over raw TCP, a
 // TLS-cover, or a WebSocket conn. The same fronting fields as ws apply (host/edge/ECH/path); the
 // server stays plain (the CDN terminates TLS).
@@ -44,40 +44,40 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-// chromeUA is the browser User-Agent presented by the ws AND xhttp carriers (single source of truth).
+// chromeUA is the browser User-Agent presented by the ws AND HTTP carriers (single source of truth).
 // Its Chrome MAJOR version MUST match the uTLS ClientHello parrot (utls.HelloChrome_Auto — currently
 // Chrome 133) — otherwise the JA3/JA4 computed on the TLS handshake and the app-layer UA advertise
 // different Chrome versions, a combination no real browser produces and thus a cheap fingerprint.
 // TestUserAgentMatchesTLSParrot fails the build if the two drift apart (e.g. after a uTLS bump).
 const chromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 
-// maxXhChunk caps a single upstream POST body so a hostile client can't force a huge alloc.
-const maxXhChunk = 1 << 20
+// maxPostBody caps a single upstream POST body so a hostile client can't force a huge alloc.
+const maxPostBody = 1 << 20
 
-// xhttpEstablishTimeout bounds the wait for the establishing request's response HEADERS (the
+// httpcEstablishTimeout bounds the wait for the establishing request's response HEADERS (the
 // downstream GET, or the grpc POST). TCP dial and the TLS handshake are each already bounded
 // (10s + TLSHandshakeTimeout); this covers the otherwise-unbounded wait for the edge to START
 // streaming. A CDN that completes TCP+TLS but never streams the origin leg (a throttled origin,
 // a half-open grpc call, a stale-ECH edge that Cloudflare still TLS-terminates) must not block
 // establishment forever — that stall is what freezes rotation and manual pin. Generous, because
 // it also covers the bounded TCP+TLS phases; a healthy edge flushes headers immediately.
-const xhttpEstablishTimeout = 3 * handshakeTimeout
+const httpcEstablishTimeout = 3 * handshakeTimeout
 
-// strAddr is a net.Addr for an xhttp conn (there is no single socket behind it).
+// strAddr is a net.Addr for an HTTP-carrier conn (there is no single socket behind it).
 type strAddr string
 
-func (a strAddr) Network() string { return "xhttp" }
+func (a strAddr) Network() string { return "http" }
 func (a strAddr) String() string  { return string(a) }
 
-// xhttpConn presents the GET(down) + packet-up(POSTs) pair (client) or the reassembled upstream
+// httpcConn presents the GET(down) + packet-up(POSTs) pair (client) or the reassembled upstream
 // pipe + downstream ResponseWriter (server) as a single net.Conn. On the client, Write goes to
 // the packet-up sender (up); on the server, Write goes to the GET response writer (w). Read
 // deadlines are honoured by an idle timer that closes the conn when it fires.
-type xhttpConn struct {
+type httpcConn struct {
 	r     io.Reader
 	w     io.Writer
 	flush func()
-	up    *xhUp // client only: packet-up upstream sender (nil on the server)
+	up    *httpcUp // client only: packet-up upstream sender (nil on the server)
 
 	wmu     sync.Mutex
 	wdl     atomic.Int64 // unix-nanos write deadline (0 = none); honoured by Write, unlike a no-op setter
@@ -88,9 +88,9 @@ type xhttpConn struct {
 	ra, la  net.Addr
 }
 
-func (c *xhttpConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+func (c *httpcConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
-func (c *xhttpConn) Write(p []byte) (int, error) {
+func (c *httpcConn) Write(p []byte) (int, error) {
 	if c.up != nil { // client: each write becomes a short POST with a seq
 		return c.up.write(p)
 	}
@@ -107,7 +107,7 @@ func (c *xhttpConn) Write(p []byte) (int, error) {
 	// SERVER: c.w is the long-lived GET's ResponseWriter. If the client stops reading, the h2 flow
 	// -control window fills and this Write parks — with no deadline of its own, forever, holding the
 	// goroutine that drains the TUN. connFramer arms a write deadline before every framed write
-	// expecting exactly this to be bounded (wsconn honours it); on xhttp the setter used to be a bare
+	// expecting exactly this to be bounded (wsconn honours it); on httpc the setter used to be a bare
 	// `return nil`, so the protection silently did not exist here.
 	if dl := c.wdl.Load(); dl != 0 && time.Now().UnixNano() > dl {
 		return 0, os.ErrDeadlineExceeded
@@ -121,7 +121,7 @@ func (c *xhttpConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (c *xhttpConn) Close() error {
+func (c *httpcConn) Close() error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -145,7 +145,7 @@ func (c *xhttpConn) Close() error {
 	return nil
 }
 
-func (c *xhttpConn) SetReadDeadline(t time.Time) error {
+func (c *httpcConn) SetReadDeadline(t time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
@@ -165,7 +165,7 @@ func (c *xhttpConn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-func (c *xhttpConn) SetWriteDeadline(t time.Time) error {
+func (c *httpcConn) SetWriteDeadline(t time.Time) error {
 	if t.IsZero() {
 		c.wdl.Store(0)
 	} else {
@@ -173,12 +173,12 @@ func (c *xhttpConn) SetWriteDeadline(t time.Time) error {
 	}
 	return nil
 }
-func (c *xhttpConn) SetDeadline(t time.Time) error {
+func (c *httpcConn) SetDeadline(t time.Time) error {
 	_ = c.SetWriteDeadline(t)
 	return c.SetReadDeadline(t)
 }
-func (c *xhttpConn) LocalAddr() net.Addr  { return c.la }
-func (c *xhttpConn) RemoteAddr() net.Addr { return c.ra }
+func (c *httpcConn) LocalAddr() net.Addr  { return c.la }
+func (c *httpcConn) RemoteAddr() net.Addr { return c.ra }
 
 func randSID() string {
 	var b [16]byte
@@ -186,7 +186,7 @@ func randSID() string {
 	return hex.EncodeToString(b[:])
 }
 
-func xhttpPath(p string) string {
+func httpcPath(p string) string {
 	p = strings.TrimSpace(p)
 	if p == "" || p[0] != '/' {
 		p = "/" + p
@@ -227,7 +227,7 @@ type seqChunk struct {
 // untouched: it already ran at ~60 Mbit with ping at 66 ms.
 //
 // Client-side only, and not a wire change: the POST framing, the seq contract and the server's
-// reassembly are all unchanged, and maxUpBatch stays well under maxXhChunk (the server's per-POST read
+// reassembly are all unchanged, and maxUpBatch stays well under maxPostBody (the server's per-POST read
 // cap), so a new client interoperates with an old server and vice versa.
 //
 // THE SHAPE IS PER-CDN, because the constraint is not bandwidth — it is how many requests per second
@@ -274,16 +274,16 @@ var (
 // busy the pipe is already full and queueing only adds delay.
 const upWorkCap = 1
 
-// SetXHTTPUpstream sizes the packet-up upstream for the CDN this tunnel fronts through. Zero leaves a
+// SetHTTPUpstream sizes the packet-up upstream for the CDN this tunnel fronts through. Zero leaves a
 // value at its default. Safe as package state for the same reason ApplyTuning is: one tnl-core process
 // serves exactly ONE tunnel and this runs once at startup, before any carrier is built.
-func SetXHTTPUpstream(workers, batchKB, ratePerSec int) {
+func SetHTTPUpstream(workers, batchKB, ratePerSec int) {
 	if workers > 0 {
 		upWorkers = tclamp(workers, 1, 16)
 		upIdleConns = upWorkers * 2
 	}
 	if batchKB > 0 {
-		// stays well under maxXhChunk, the server's per-POST read cap — a batch over it is truncated,
+		// stays well under maxPostBody, the server's per-POST read cap — a batch over it is truncated,
 		// and a truncated length-prefixed AEAD chunk desyncs the stream rather than failing cleanly.
 		maxUpBatch = tclamp(batchKB, 8, 512) << 10
 		upChanCap = maxUpBatch/1400 + 2
@@ -293,13 +293,13 @@ func SetXHTTPUpstream(workers, batchKB, ratePerSec int) {
 	}
 }
 
-// xhUp is the client's packet-up upstream. Writes are copied and queued; a single batcher coalesces
+// httpcUp is the client's packet-up upstream. Writes are copied and queued; a single batcher coalesces
 // them into one POST per batch (tagging each with a monotonic seq so the server reassembles in order)
 // and hands the batch to a small pool of workers that POST it as a short, complete request. Short
 // discrete POSTs (not one long streaming POST a CDN would buffer) are what flow through Cloudflare;
 // coalescing keeps the round-trip cost from throttling upstream throughput. Any POST failure fails the
 // whole conn (once) so dialLoop re-dials a fresh session.
-type xhUp struct {
+type httpcUp struct {
 	hc     *http.Client
 	ctx    context.Context
 	urlFor func(seq uint64) string
@@ -312,8 +312,8 @@ type xhUp struct {
 	once   sync.Once
 }
 
-func newXhUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string, setHdr func(*http.Request), fail func()) *xhUp {
-	u := &xhUp{hc: hc, ctx: ctx, urlFor: urlFor, setHdr: setHdr, fail: fail,
+func newHTTPCUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string, setHdr func(*http.Request), fail func()) *httpcUp {
+	u := &httpcUp{hc: hc, ctx: ctx, urlFor: urlFor, setHdr: setHdr, fail: fail,
 		ch: make(chan []byte, upChanCap), work: make(chan seqChunk, upWorkCap), minGap: upMinGap}
 	go u.batcher()
 	for i := 0; i < upWorkers; i++ {
@@ -322,7 +322,7 @@ func newXhUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string, s
 	return u
 }
 
-func (u *xhUp) write(p []byte) (int, error) {
+func (u *httpcUp) write(p []byte) (int, error) {
 	b := make([]byte, len(p))
 	copy(b, p)
 	select {
@@ -343,7 +343,7 @@ func (u *xhUp) write(p []byte) (int, error) {
 // was invisible at a 32 KiB cap and stayed under the server's 1 MiB read limit, but it meant maxUpBatch
 // was not actually a bound — raise it to the read limit and the server would truncate, which desyncs a
 // length-prefixed AEAD stream rather than failing cleanly.
-func (u *xhUp) batcher() {
+func (u *httpcUp) batcher() {
 	var carry []byte
 	var lastSend time.Time
 	for {
@@ -394,7 +394,7 @@ func (u *xhUp) batcher() {
 	}
 }
 
-func (u *xhUp) worker() {
+func (u *httpcUp) worker() {
 	for {
 		select {
 		case <-u.ctx.Done():
@@ -408,7 +408,7 @@ func (u *xhUp) worker() {
 	}
 }
 
-func (u *xhUp) post(sc seqChunk) error {
+func (u *httpcUp) post(sc seqChunk) error {
 	req, err := http.NewRequestWithContext(u.ctx, "POST", u.urlFor(sc.seq), bytes.NewReader(sc.data))
 	if err != nil {
 		return err
@@ -422,20 +422,20 @@ func (u *xhUp) post(sc seqChunk) error {
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("xhttp: up seq %d got HTTP %d", sc.seq, resp.StatusCode)
+		return fmt.Errorf("httpc: up seq %d got HTTP %d", sc.seq, resp.StatusCode)
 	}
 	return nil
 }
 
-// xhttpEdge resolves the (dialAddr, host, ech, path) for this attempt. With an edge pool it uses
+// httpcEdge resolves the (dialAddr, host, ech, path) for this attempt. With an edge pool it uses
 // the pool's current (IP × SNI); current() never dead-ends (it falls back to the least-bad combo).
 // A single fixed edge uses the plain WSHost/WSECH/WSPath.
-func (b *TCP) xhttpEdge() (dialAddr, host string, ech []byte, path string, err error) {
+func (b *TCP) httpcEdge() (dialAddr, host string, ech []byte, path string, err error) {
 	dialAddr, host, ech, path = b.addr, b.wsHost, b.wsECH, b.wsPath
 	if b.pool != nil {
 		ip, sni, ok := b.pool.current()
 		if !ok {
-			return "", "", nil, "", fmt.Errorf("xhttp: edge pool is empty")
+			return "", "", nil, "", fmt.Errorf("httpc: edge pool is empty")
 		}
 		dialAddr, host, ech, path = ip, sni.host, sni.ech, sni.path
 	}
@@ -445,21 +445,21 @@ func (b *TCP) xhttpEdge() (dialAddr, host string, ech []byte, path string, err e
 	return dialAddr, host, ech, path, nil
 }
 
-// establishXHTTP (client) opens a fresh xhttp session to the edge and returns a net.Conn over it.
+// establishHTTPC (client) opens a fresh HTTP-carrier session to the edge and returns a net.Conn over it.
 // Two upstream styles share the same fronting (TLS+ECH mirror wss) and the same pool rotation
 // (each attempt uses the pool's current IP × SNI; a failure burns the offending IP or SNI):
 //
 //	packet-up (default): a long-lived downstream GET plus short seq-tagged POSTs — most
 //	                     CDN-compatible, since a CDN that buffers request bodies still forwards
 //	                     short complete POSTs at once.
-//	grpc (b.xhMode=="grpc"): one full-duplex request presented as a
+//	grpc (b.httpcMode=="grpc"): one full-duplex request presented as a
 //	                     real gRPC call — needs HTTP/2 to the edge (ws_tls) so a CDN streams it.
-func (b *TCP) establishXHTTP(attribute bool) (net.Conn, string, string, error) {
-	dialAddr, host, ech, path, err := b.xhttpEdge()
+func (b *TCP) establishHTTPC(attribute bool) (net.Conn, string, string, error) {
+	dialAddr, host, ech, path, err := b.httpcEdge()
 	if err != nil {
 		return nil, "", "", err
 	}
-	conn, err := b.dialXHTTPOnce(dialAddr, host, ech, path)
+	conn, err := b.dialHTTPCOnce(dialAddr, host, ech, path)
 	// In-band ECH self-heal (mirrors the ws carrier's tlsToEdge): Cloudflare rotates the ECH key
 	// periodically, and once the config we hold goes stale EVERY edge rejects ECH ("tls: server
 	// rejected ECH") until a rebuild — the exact production stall. The rejection carries a fresh
@@ -470,9 +470,9 @@ func (b *TCP) establishXHTTP(attribute bool) (net.Conn, string, string, error) {
 		var echErr *utls.ECHRejectionError
 		if errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
 			ech = echErr.RetryConfigList
-			log.Printf("core/xhttp: ECH self-heal for %s (%s) — stale key rejected, retrying with fresh key %s",
+			log.Printf("core/http: ECH self-heal for %s (%s) — stale key rejected, retrying with fresh key %s",
 				host, dialAddr, base64.StdEncoding.EncodeToString(ech))
-			conn, err = b.dialXHTTPOnce(dialAddr, host, ech, path)
+			conn, err = b.dialHTTPCOnce(dialAddr, host, ech, path)
 			if err == nil { // self-heal succeeded: persist the fresh key and surface it (pool or single-edge)
 				b.noteECHSelfHeal(host, ech)
 			}
@@ -481,7 +481,7 @@ func (b *TCP) establishXHTTP(attribute bool) (net.Conn, string, string, error) {
 	// Attribute the outcome to the health FSM here (one place for both modes): a failure runs
 	// the differential probe to decide IP vs SNI vs transient; a success clears both axes.
 	// attribute is FALSE on the warm-standby build path: that differential probe fires several full
-	// establishes (each bounded by xhttpEstablishTimeout), and running it in the single standby-build
+	// establishes (each bounded by httpcEstablishTimeout), and running it in the single standby-build
 	// goroutine blocks it for that whole time with standbyBuilding still set — so requestStandby()
 	// no-ops, the standby never becomes ready, and proactive rotation silently freezes while the open
 	// active keeps the tunnel up (the exact "rotation stopped after hours, tunnel still up" report).
@@ -502,13 +502,13 @@ func (b *TCP) establishXHTTP(attribute bool) (net.Conn, string, string, error) {
 	return conn, dialAddr, combo, err
 }
 
-// dialXHTTPOnce builds a fresh transport/client/context for ONE attempt against (dialAddr, host,
-// ech, path) and opens the session in the configured mode. Split out of establishXHTTP so a stale
+// dialHTTPCOnce builds a fresh transport/client/context for ONE attempt against (dialAddr, host,
+// ech, path) and opens the session in the configured mode. Split out of establishHTTPC so a stale
 // ECH rejection can be retried with a fresh config — each attempt needs its own transport, since
 // the ECH lives in tr.TLSClientConfig. On error, everything this attempt allocated is already torn
-// down by the dialXHTTP* helper (ctx cancelled, pipes/bodies closed).
-func (b *TCP) dialXHTTPOnce(dialAddr, host string, ech []byte, path string) (net.Conn, error) {
-	single := b.xhMode == "grpc" // one full-duplex request over h2
+// down by the dialHTTPC* helper (ctx cancelled, pipes/bodies closed).
+func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net.Conn, error) {
+	single := b.httpcMode == "grpc" // one full-duplex request over h2
 	h2 := single && b.wsTLS      // grpc over wss rides HTTP/2 to the edge
 
 	// rawDial always targets the fixed edge, regardless of the request URL host, so the Host/SNI
@@ -550,9 +550,9 @@ func (b *TCP) dialXHTTPOnce(dialAddr, host string, ech []byte, path string) (net
 
 	var rt http.RoundTripper
 	var closeIdle func()
-	if b.wsTLS && b.xhTLS == nil {
+	if b.wsTLS && b.httpcTLS == nil {
 		// Production TLS: uTLS with a Chrome fingerprint (see uEdgeHandshake), same as the ws
-		// carrier — the xhttp handshake must not look like Go's crypto/tls either. packet-up rides
+		// carrier — the HTTP-carrier handshake must not look like Go's crypto/tls either. packet-up rides
 		// http/1.1 (force that ALPN); grpc/stream ride h2 (keep Chrome's [h2, http/1.1] so the edge
 		// picks h2). We do the TLS ourselves via DialTLSContext so the transport never runs its own.
 		var alpn []string
@@ -591,7 +591,7 @@ func (b *TCP) dialXHTTPOnce(dialAddr, host string, ech []byte, path string) (net
 			rt, closeIdle = tr, func() { tr.CloseIdleConnections(); forceClose() }
 		}
 	} else {
-		// No TLS (plain http), or a test that overrides the edge TLS wholesale (xhTLS). The
+		// No TLS (plain http), or a test that overrides the edge TLS wholesale (httpcTLS). The
 		// transport runs its own TLS (Go's) on a raw-dialed conn.
 		tr := &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -611,7 +611,7 @@ func (b *TCP) dialXHTTPOnce(dialAddr, host string, ech []byte, path string) (net
 			TLSHandshakeTimeout: handshakeTimeout,
 		}
 		if b.wsTLS {
-			tr.TLSClientConfig = b.xhTLS
+			tr.TLSClientConfig = b.httpcTLS
 		}
 		rt, closeIdle = tr, func() { tr.CloseIdleConnections(); forceClose() }
 	}
@@ -621,7 +621,7 @@ func (b *TCP) dialXHTTPOnce(dialAddr, host string, ech []byte, path string) (net
 		scheme = "https"
 	}
 	sid := randSID()
-	base := scheme + "://" + host + xhttpPath(path)
+	base := scheme + "://" + host + httpcPath(path)
 	hc := &http.Client{Transport: rt}
 	ctx, cancel := context.WithCancel(context.Background())
 	setHdr := func(r *http.Request) {
@@ -634,11 +634,11 @@ func (b *TCP) dialXHTTPOnce(dialAddr, host string, ech []byte, path string) (net
 	// (octet-stream) was removed because it stalled through CDNs that buffer the origin leg.
 	var conn net.Conn
 	var err error
-	switch b.xhMode {
+	switch b.httpcMode {
 	case "grpc":
-		conn, err = b.dialXHTTPGrpc(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)
+		conn, err = b.dialHTTPCGrpc(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)
 	default:
-		conn, err = b.dialXHTTPPacket(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)
+		conn, err = b.dialHTTPCPacket(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)
 	}
 	if err != nil {
 		// A FAILED establish (dial ok but header timeout / non-200 / write error) has cancelled the
@@ -667,7 +667,7 @@ func doWithHeaderTimeout(hc *http.Client, req *http.Request, d time.Duration) (*
 	case r := <-ch:
 		return r.resp, r.err
 	case <-time.After(d):
-		return nil, fmt.Errorf("xhttp: response-header timeout (%s)", d)
+		return nil, fmt.Errorf("httpc: response-header timeout (%s)", d)
 	}
 }
 
@@ -734,7 +734,7 @@ func (g *grpcDeframingReader) Read(p []byte) (int, error) {
 		}
 		msgLen := binary.BigEndian.Uint32(hdr[1:5])
 		if msgLen > grpcMaxMsg {
-			return 0, fmt.Errorf("xhttp/grpc: message too large (%d)", msgLen)
+			return 0, fmt.Errorf("http/grpc: message too large (%d)", msgLen)
 		}
 		if msgLen == 0 {
 			continue
@@ -758,9 +758,9 @@ func (g *grpcDeframingReader) Close() error {
 	return nil
 }
 
-// dialXHTTPGrpc (grpc) is stream-one dressed as a gRPC call: one full-duplex POST with
+// dialHTTPCGrpc (grpc) is stream-one dressed as a gRPC call: one full-duplex POST with
 // Content-Type application/grpc and gRPC message framing on both directions.
-func (b *TCP) dialXHTTPGrpc(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request)) (net.Conn, error) {
+func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request)) (net.Conn, error) {
 	pr, pw := io.Pipe()
 	req, err := http.NewRequestWithContext(ctx, "POST", base+"?s="+sid, pr)
 	if err != nil {
@@ -773,7 +773,7 @@ func (b *TCP) dialXHTTPGrpc(hc *http.Client, closeIdle func(), ctx context.Conte
 	req.Header.Set("TE", "trailers")
 	req.Header.Set("grpc-encoding", "identity")
 	req.ContentLength = -1
-	resp, err := doWithHeaderTimeout(hc, req, xhttpEstablishTimeout)
+	resp, err := doWithHeaderTimeout(hc, req, httpcEstablishTimeout)
 	if err != nil {
 		cancel()
 		pw.Close()
@@ -783,27 +783,27 @@ func (b *TCP) dialXHTTPGrpc(hc *http.Client, closeIdle func(), ctx context.Conte
 		resp.Body.Close()
 		cancel()
 		pw.Close()
-		return nil, fmt.Errorf("xhttp/grpc: got HTTP %d (want 200)", resp.StatusCode)
+		return nil, fmt.Errorf("http/grpc: got HTTP %d (want 200)", resp.StatusCode)
 	}
-	conn := &xhttpConn{
+	conn := &httpcConn{
 		r:  &grpcDeframingReader{r: resp.Body}, // Read <- deframed downstream
 		w:  &grpcFramingWriter{w: pw},          // Write -> framed -> pipe -> request body (upstream)
-		ra: strAddr(dialAddr), la: strAddr("xhttp-client"),
+		ra: strAddr(dialAddr), la: strAddr("http-client"),
 	}
 	conn.closeFn = func() { cancel(); pw.Close(); resp.Body.Close(); closeIdle() }
 	return conn, nil
 }
 
-// dialXHTTPPacket (packet-up) opens the long-lived downstream GET and starts the packet-up
+// dialHTTPCPacket (packet-up) opens the long-lived downstream GET and starts the packet-up
 // upstream sender for a fresh session, returning a net.Conn over the pair.
-func (b *TCP) dialXHTTPPacket(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request)) (net.Conn, error) {
+func (b *TCP) dialHTTPCPacket(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request)) (net.Conn, error) {
 	greq, err := http.NewRequestWithContext(ctx, "GET", base+"?s="+sid, nil)
 	if err != nil { // a malformed host/path would otherwise nil-deref inside doWithHeaderTimeout's goroutine
 		cancel()
 		return nil, err
 	}
 	setHdr(greq)
-	gresp, err := doWithHeaderTimeout(hc, greq, xhttpEstablishTimeout)
+	gresp, err := doWithHeaderTimeout(hc, greq, httpcEstablishTimeout)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -811,23 +811,23 @@ func (b *TCP) dialXHTTPPacket(hc *http.Client, closeIdle func(), ctx context.Con
 	if gresp.StatusCode != http.StatusOK {
 		gresp.Body.Close()
 		cancel()
-		return nil, fmt.Errorf("xhttp: down got HTTP %d (want 200)", gresp.StatusCode)
+		return nil, fmt.Errorf("httpc: down got HTTP %d (want 200)", gresp.StatusCode)
 	}
 	urlFor := func(seq uint64) string {
 		return base + "?s=" + sid + "&seq=" + strconv.FormatUint(seq, 10)
 	}
-	conn := &xhttpConn{
+	conn := &httpcConn{
 		r:  gresp.Body,
-		ra: strAddr(dialAddr), la: strAddr("xhttp-client"),
+		ra: strAddr(dialAddr), la: strAddr("http-client"),
 	}
 	conn.closeFn = func() { cancel(); gresp.Body.Close(); closeIdle() }
-	conn.up = newXhUp(ctx, hc, urlFor, setHdr, func() { conn.Close() })
+	conn.up = newHTTPCUp(ctx, hc, urlFor, setHdr, func() { conn.Close() })
 	return conn, nil
 }
 
 // --- server ----------------------------------------------------------------------------------
 
-type xhttpSession struct {
+type httpcSession struct {
 	upR    *io.PipeReader
 	upW    *io.PipeWriter
 	done   chan struct{}
@@ -840,17 +840,17 @@ type xhttpSession struct {
 	pend    map[uint64][]byte // out-of-order chunks waiting for the gap to fill
 }
 
-// xhttpGetOrCreate returns the session for sid, creating it (with a fresh upstream pipe and a
+// httpcGetOrCreate returns the session for sid, creating it (with a fresh upstream pipe and a
 // watchdog that reaps a session whose GET never arrives) on first sight.
-func (b *TCP) xhttpGetOrCreate(sid string) *xhttpSession {
-	b.xhMu.Lock()
-	defer b.xhMu.Unlock()
-	if s := b.xhSessions[sid]; s != nil {
+func (b *TCP) httpcGetOrCreate(sid string) *httpcSession {
+	b.httpcMu.Lock()
+	defer b.httpcMu.Unlock()
+	if s := b.httpcSessions[sid]; s != nil {
 		return s
 	}
 	pr, pw := io.Pipe()
-	s := &xhttpSession{upR: pr, upW: pw, done: make(chan struct{}), served: make(chan struct{}), pend: map[uint64][]byte{}}
-	b.xhSessions[sid] = s
+	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), served: make(chan struct{}), pend: map[uint64][]byte{}}
+	b.httpcSessions[sid] = s
 	time.AfterFunc(handshakeTimeout, func() { s.reapIfUnserved(b, sid) })
 	return s
 }
@@ -859,7 +859,7 @@ func (b *TCP) xhttpGetOrCreate(sid string) *xhttpSession {
 // handshake window. It MUST spare a live session: the guard is s.served (closed when the GET starts
 // serving), NOT s.done (closed only at session END) — checking s.done would reap every healthy
 // packet-up session at handshakeTimeout.
-func (s *xhttpSession) reapIfUnserved(b *TCP, sid string) {
+func (s *httpcSession) reapIfUnserved(b *TCP, sid string) {
 	select {
 	case <-s.served: // a GET bound and serve started -> live session, leave it
 	case <-s.done: // already ended
@@ -871,7 +871,7 @@ func (s *xhttpSession) reapIfUnserved(b *TCP, sid string) {
 // deliver feeds one packet-up chunk into the ordered upstream. Out-of-order chunks are buffered
 // until the gap fills; already-delivered seqs are dropped. Writes happen under upMu so the byte
 // stream stays correctly ordered even with several POSTs in flight.
-func (s *xhttpSession) deliver(seq uint64, data []byte) {
+func (s *httpcSession) deliver(seq uint64, data []byte) {
 	s.upMu.Lock()
 	defer s.upMu.Unlock()
 	if seq < s.nextSeq {
@@ -896,22 +896,22 @@ func (s *xhttpSession) deliver(seq uint64, data []byte) {
 	}
 }
 
-func (s *xhttpSession) close(b *TCP, sid string) {
+func (s *httpcSession) close(b *TCP, sid string) {
 	s.end.Do(func() {
 		close(s.done)
 		s.upW.Close()
 		s.upR.Close()
-		b.xhMu.Lock()
-		delete(b.xhSessions, sid)
-		b.xhMu.Unlock()
+		b.httpcMu.Lock()
+		delete(b.httpcSessions, sid)
+		b.httpcMu.Unlock()
 	})
 }
 
-// serveXHTTPGrpc handles a gRPC-framed full-duplex request: the single request IS the session, the
+// serveHTTPCGrpc handles a gRPC-framed full-duplex request: the single request IS the session, the
 // body carries gRPC message framing and the response
 // presents as gRPC (Content-Type application/grpc + a grpc-status trailer on clean close), so a
 // CDN proxies it as a gRPC call (h2c to the origin, streamed, not buffered).
-func (b *TCP) serveXHTTPGrpc(w http.ResponseWriter, r *http.Request) {
+func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "", http.StatusInternalServerError)
@@ -922,22 +922,22 @@ func (b *TCP) serveXHTTPGrpc(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Trailer", "grpc-status") // announced now, set after the body on clean close
 	w.WriteHeader(http.StatusOK)
 	fl.Flush() // send the response head now so the client's request returns and the duplex opens
-	conn := &xhttpConn{
+	conn := &httpcConn{
 		r:     &grpcDeframingReader{r: r.Body},
 		w:     &grpcFramingWriter{w: w},
 		flush: fl.Flush,
-		ra:    strAddr(r.RemoteAddr), la: strAddr("xhttp-server"),
+		ra:    strAddr(r.RemoteAddr), la: strAddr("http-server"),
 	}
 	b.handleServerConn(conn) // the request lifetime IS the session; blocks until it ends
 	conn.Close()
 	w.Header().Set("grpc-status", "0") // OK (trailer)
 }
 
-// xhttpHandler routes a session's requests by shape. grpc is a single full-duplex POST with
+// httpcHandler routes a session's requests by shape. grpc is a single full-duplex POST with
 // Content-Type application/grpc. packet-up uses a GET (downstream body, drives handleServerConn
 // once) plus seq-tagged POSTs (?seq=N) fed into the upstream. The server auto-detects the style
 // per request, so a grpc client and a packet client both work against one endpoint.
-func (b *TCP) xhttpHandler(w http.ResponseWriter, r *http.Request) {
+func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 	sid := r.URL.Query().Get("s")
 	if len(sid) != 32 || strings.Trim(sid, "0123456789abcdef") != "" {
 		http.Error(w, "Not Found", http.StatusNotFound) // a probe/scanner sees a plain 404
@@ -945,17 +945,17 @@ func (b *TCP) xhttpHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// grpc: a single full-duplex POST presenting as a gRPC call (Content-Type application/grpc).
 	if r.Method == http.MethodPost && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
-		b.serveXHTTPGrpc(w, r)
+		b.serveHTTPCGrpc(w, r)
 		return
 	}
-	s := b.xhttpGetOrCreate(sid)
+	s := b.httpcGetOrCreate(sid)
 	if r.Method == http.MethodPost {
 		seq, err := strconv.ParseUint(r.URL.Query().Get("seq"), 10, 64)
 		if err != nil {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
-		data, rerr := io.ReadAll(io.LimitReader(r.Body, maxXhChunk))
+		data, rerr := io.ReadAll(io.LimitReader(r.Body, maxPostBody))
 		if rerr != nil {
 			// A truncated body must NOT be delivered. Upstream is a length-prefixed AEAD stream, so a
 			// short chunk at seq N shifts every following byte: readFrame consumes the next frame's
@@ -964,7 +964,7 @@ func (b *TCP) xhttpHandler(w http.ResponseWriter, r *http.Request) {
 			// ("chunk accepted") made it worse: the client never learned and never re-dialled.
 			// Dropping it is safe and self-correcting — deliver()'s gap guard stalls at nextSeq and
 			// lets the client fail and re-dial, which restarts the stream cleanly.
-			log.Printf("core/xhttp: truncated upstream chunk seq=%d (%d bytes read): %v — dropping so the client re-dials", seq, len(data), rerr)
+			log.Printf("core/http: truncated upstream chunk seq=%d (%d bytes read): %v — dropping so the client re-dials", seq, len(data), rerr)
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}
@@ -986,9 +986,9 @@ func (b *TCP) xhttpHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no") // ask any nginx/CDN in front not to buffer
 	w.WriteHeader(http.StatusOK)
 	fl.Flush()
-	conn := &xhttpConn{
+	conn := &httpcConn{
 		r: s.upR, w: w, flush: fl.Flush,
-		ra: strAddr(r.RemoteAddr), la: strAddr("xhttp-server"),
+		ra: strAddr(r.RemoteAddr), la: strAddr("http-server"),
 		closeFn: func() { s.close(b, sid) },
 	}
 	// Drive the authenticated core session once (the GET owns the downstream writer).
@@ -999,11 +999,11 @@ func (b *TCP) xhttpHandler(w http.ResponseWriter, r *http.Request) {
 	<-s.done // hold the GET open (streaming downstream) until the session ends
 }
 
-// runXHTTPServer serves the xhttp endpoint until Close. A non-matching path/probe gets a plain
+// runHTTPCServer serves the HTTP-carrier endpoint until Close. A non-matching path/probe gets a plain
 // 404 from the handler, so the port looks like an ordinary idle web endpoint.
-func (b *TCP) runXHTTPServer() {
+func (b *TCP) runHTTPCServer() {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", b.xhttpHandler)
+	mux.HandleFunc("/", b.httpcHandler)
 	// Wrap in an h2c handler so a CDN can reach us over HTTP/2 cleartext. Cloudflare connects to
 	// the origin with h2c when gRPC is enabled — that is the leg that STREAMS a full-duplex call
 	// instead of buffering the request body (which stalls stream-one over a plain HTTP/1.1 origin).
@@ -1011,6 +1011,6 @@ func (b *TCP) runXHTTPServer() {
 	srv := &http.Server{Handler: h2c.NewHandler(mux, &http2.Server{})}
 	b.httpSrv.Store(srv) // publish atomically so Close (another goroutine) sees it without a data race
 	if err := srv.Serve(b.ln); err != nil && !b.closed.Load() {
-		log.Printf("core/xhttp: server: %v", err)
+		log.Printf("core/http: server: %v", err)
 	}
 }

@@ -307,8 +307,8 @@ type TCP struct {
 
 	pool   *wsPool       // client: rotating edge pool (nil = single fixed edge above)
 	rotate time.Duration // client: proactive pool-rotation interval (0 = failover-only)
-	st     *coreStatus   // client + single-edge ws/xhttp: self-heal event ring -> status file (nil = off / pool / server)
-	stTag  string        // carrier label prefix ("tcp"/"cover"/"ws"/"xhttp") for setActive on a direct-pool rotation; set alongside st
+	st     *coreStatus   // client + single-edge ws/http: self-heal event ring -> status file (nil = off / pool / server)
+	stTag  string        // carrier label prefix ("tcp"/"cover"/"ws"/"http") for setActive on a direct-pool rotation; set alongside st
 	lastRx atomic.Int64  // client: unix-nano of the last authenticated INBOUND frame — feeds the status-file heartbeat (v2.48.3). Seeded once in Run() and advanced ONLY by readLoop; never stamp it for a frame we sent, or a carrier that reconnects forever behind a CDN reads "alive" while nothing flows (v2.48.5)
 
 	// lastData is the unix-nano of the last real DATA frame moved in EITHER direction (never ping/pong).
@@ -330,13 +330,13 @@ type TCP struct {
 	// nil = fixed bindIP. Direct-tcp client only.
 	sp *PeerPool
 
-	sniSplit bool   // client ws/xhttp: split the ClientHello so the cleartext SNI crosses a TCP segment boundary
+	sniSplit bool   // client ws/http: split the ClientHello so the cleartext SNI crosses a TCP segment boundary
 	splitPos int    // explicit split offset into the ClientHello (0 = auto: middle of the hostname)
 	sniMode  string // "split" (in-order) | "disorder" (low-TTL head, desyncs a reassembling DPI)
 	splitTTL int    // disorder head-segment TTL (0 = default)
 
 	// probeFn lets tests substitute a deterministic reachability oracle for the real network probe.
-	// nil in production -> the differential prober uses probeEdgeFull (a full ws-upgrade / xhttp-grpc
+	// nil in production -> the differential prober uses probeEdgeFull (a full ws-upgrade / httpc-grpc
 	// establish, so a CDN that terminates TLS for a dead origin isn't read as reachable).
 	probeFn func(ip string, sni wsSNIEntry) bool
 
@@ -361,22 +361,22 @@ type TCP struct {
 	standby     atomic.Pointer[connFramer] // client+warm: the warm standby framer (nil when none)
 	standbyConn atomic.Pointer[net.Conn]   // client+warm: the standby's live conn (for teardown)
 
-	// xhttp carrier (transport "ws" with ws_xhttp): the core stream rides an HTTP request
+	// HTTP carrier (transport "ws" with ws_httpc): the core stream rides an HTTP request
 	// pair (packet-up: GET-down + seq-POSTs-up) or a single full-duplex request
 	// (stream-one) instead of a WebSocket upgrade, so it passes CDNs that block WebSocket.
 	// Same fronting fields (wsHost/wsTLS/wsECH/wsPath) apply. Because the client carries
 	// core frames directly over these requests (the HTTP layer replaces the WS upgrade),
-	// the server must NOT run wsServerHandshake on an xhttp conn — see handleServerConn.
-	xhttp      bool
-	xhMode     string                      // client: "grpc" (single full-duplex request) else packet-up
-	xhTLS      *tls.Config                 // test-only: overrides the client edge TLS config (nil in production)
-	httpSrv    atomic.Pointer[http.Server] // server: the xhttp endpoint (nil otherwise); atomic — written by runXHTTPServer's goroutine, read by Close
-	xhMu       sync.Mutex
-	xhSessions map[string]*xhttpSession
+	// the server must NOT run wsServerHandshake on an HTTP-carrier conn — see handleServerConn.
+	httpc      bool
+	httpcMode     string                      // client: "grpc" (single full-duplex request) else packet-up
+	httpcTLS      *tls.Config                 // test-only: overrides the client edge TLS config (nil in production)
+	httpSrv    atomic.Pointer[http.Server] // server: the HTTP-carrier endpoint (nil otherwise); atomic — written by runHTTPCServer's goroutine, read by Close
+	httpcMu       sync.Mutex
+	httpcSessions map[string]*httpcSession
 
 	isClient bool
 	addr     string      // server: listen addr; client: peer addr
-	bindIP   string      // client: source IP to dial FROM (empty = kernel default); tcp/ws/xhttp only
+	bindIP   string      // client: source IP to dial FROM (empty = kernel default); tcp/ws/http only
 	srcWarn  sync.Once   // one line when the pinned source is not a local address (see dialer)
 	probing  atomic.Bool // a retest batch is in flight; keeps the retest tick free for the operator pin
 
@@ -391,7 +391,7 @@ type TCP struct {
 	dsMode     string
 	dsFailOnce sync.Once // logs an AF_PACKET/capability failure at most once (fired per connect)
 
-	ln      net.Listener               // server: primary/first listener (ws/xhttp use only this)
+	ln      net.Listener               // server: primary/first listener (ws/http use only this)
 	lns     []net.Listener             // server: ALL bound listeners; a pooled direct-TCP server binds one per selected IP so it accepts on exactly the IPs the client rotates through (lns[0]==ln)
 	cur     atomic.Pointer[connFramer] // currently live connection / server downstream target (nil when none)
 	curConn atomic.Pointer[net.Conn]   // client+pool: the live carrier conn, closed to force a re-dial on rotation
@@ -481,7 +481,7 @@ func (b *TCP) SetDesync(on bool, ttl, count int, mode string) {
 	b.dsOn, b.dsTTL, b.dsCount, b.dsMode = true, ttl, count, mode
 }
 
-// SetSNISplit (client, ws/xhttp) turns on SNI fragmentation: the TLS ClientHello to the edge is
+// SetSNISplit (client, ws/http) turns on SNI fragmentation: the TLS ClientHello to the edge is
 // written across two TCP segments so the cleartext SNI is split, defeating a stateless SNI-blocklist
 // DPI. pos is the split offset into the ClientHello (0 = auto: the middle of the hostname). Only
 // meaningful with wss; a no-op on the server or a non-ws carrier. main wires it via the shared
@@ -502,7 +502,7 @@ func (b *TCP) fragWrap(conn net.Conn, host string) net.Conn {
 	return conn
 }
 
-// SetStatusPath (client, single-edge ws/xhttp) wires a status-file event ring so the carrier's
+// SetStatusPath (client, single-edge ws/http) wires a status-file event ring so the carrier's
 // precise self-heal events (e.g. an in-band ECH self-heal) reach the node/panel system log — the
 // same file shape the datagram carriers write. A pool writes its own richer status file, so this is
 // skipped when a pool is configured; the server never wires it. main wires it via the shared
@@ -512,12 +512,12 @@ func (b *TCP) SetStatusPath(path string) {
 		return
 	}
 	// Label the status file by the ACTUAL transport, not a hardcoded "ws": a direct tcp or a
-	// cover/REALITY carrier also reaches here and must not be mislabeled "ws". xhttp implies ws,
+	// cover/REALITY carrier also reaches here and must not be mislabeled "ws". httpc implies ws,
 	// so it is checked first; cover is a direct-tcp variant, so it falls under the non-ws branch.
 	carrier := "tcp"
 	switch {
-	case b.xhttp:
-		carrier = "xhttp"
+	case b.httpc:
+		carrier = "http"
 	case b.ws:
 		carrier = "ws"
 	case b.cover:
@@ -624,9 +624,9 @@ func DialWS(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cry
 // edge is fingerprinted and burning a blocked one. rotate is the proactive rotation
 // interval (0 = rotate only on failure). wsTLS is always on (the pool is a wss set).
 // warmStandby keeps a second edge fully handshaked in the background for instant failover.
-func DialWSPool(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, pool *wsPool, rotate time.Duration, xhttp bool, xhMode string, warmStandby bool) (*TCP, error) {
+func DialWSPool(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, pool *wsPool, rotate time.Duration, httpc bool, httpcMode string, warmStandby bool) (*TCP, error) {
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
-		ws: true, wsTLS: true, xhttp: xhttp, xhMode: xhMode, pool: pool, rotate: rotate, warmStandby: warmStandby,
+		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, pool: pool, rotate: rotate, warmStandby: warmStandby,
 		idle: idleFor(keepalive), isClient: true, addr: "pool", closeCh: make(chan struct{})}, nil
 }
 
@@ -639,25 +639,25 @@ func newWSPoolFromCfg(ips []string, snis []wsSNIEntry, autoBurn bool, statusPath
 	return newWSPool(ips, snis, autoBurn, statusPath)
 }
 
-// DialXHTTP (client role) is DialWS over the xhttp carrier: it reaches the edge with the
+// DialHTTPC (client role) is DialWS over the HTTP carrier: it reaches the edge with the
 // same wss/ECH/Host, but carries the stream over a GET(down)+POST(up) pair rather than a
 // WebSocket upgrade, so it passes a CDN that blocks WebSocket.
-func DialXHTTP(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte, xhMode string) (*TCP, error) {
+func DialHTTPC(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte, httpcMode string) (*TCP, error) {
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
-		ws: true, xhttp: true, xhMode: xhMode, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH,
+		ws: true, httpc: true, httpcMode: httpcMode, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH,
 		idle: idleFor(keepalive), isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
 }
 
-// ListenXHTTP (server role) serves the xhttp endpoint over plain HTTP (a CDN in front
+// ListenHTTPC (server role) serves the HTTP-carrier endpoint over plain HTTP (a CDN in front
 // terminates TLS). A non-session request gets a plausible 404.
-func ListenXHTTP(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string) (*TCP, error) {
+func ListenHTTPC(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string) (*TCP, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, err
 	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
-		ws: true, xhttp: true, idle: idleFor(keepalive), addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
-		preAuth: make(chan struct{}, maxPreAuthConns), xhSessions: make(map[string]*xhttpSession)}, nil
+		ws: true, httpc: true, idle: idleFor(keepalive), addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
+		preAuth: make(chan struct{}, maxPreAuthConns), httpcSessions: make(map[string]*httpcSession)}, nil
 }
 
 // ListenWS (server role) accepts WebSocket connections (plain HTTP upgrade; a CDN
@@ -731,7 +731,7 @@ func (b *TCP) Run() error {
 			go heartbeat(b.st, &b.lastRx, b.closeCh) // single-edge / direct-tcp: publish lastRx so an idle tunnel reads live, not half-open
 		} else if b.pool != nil {
 			b.pool.setDW(int64(b.idle.Seconds()))
-			go heartbeatPool(b.pool, &b.lastRx, b.closeCh) // ws/xhttp edge pool uses its own status writer
+			go heartbeatPool(b.pool, &b.lastRx, b.closeCh) // ws/http edge pool uses its own status writer
 		}
 		if b.pool != nil {
 			go b.retestLoop() // background health retests with exponential backoff
@@ -743,8 +743,8 @@ func (b *TCP) Run() error {
 		} else {
 			b.dialLoop()
 		}
-	} else if b.xhttp {
-		b.runXHTTPServer()
+	} else if b.httpc {
+		b.runHTTPCServer()
 	} else {
 		// One accept loop per bound listener. A pooled direct-TCP server binds several of its own IPs
 		// (one listener each), so the extra listeners run in background goroutines and the first runs
@@ -889,8 +889,8 @@ func (b *TCP) handleServerConn(conn net.Conn) {
 	}
 	defer release()
 
-	if b.ws && !b.xhttp { // WebSocket upgrade; a non-WS probe gets a 404 and is dropped
-		// (xhttp is excluded: its conn already carries core frames — the HTTP GET/POST pair
+	if b.ws && !b.httpc { // WebSocket upgrade; a non-WS probe gets a 404 and is dropped
+		// (httpc is excluded: its conn already carries core frames — the HTTP GET/POST pair
 		// or the single full-duplex request replaced the WS upgrade — so a ws handshake here
 		// would misread the client's core handshake as an HTTP request and drop the session.)
 		r, werr := wsServerHandshake(conn, time.Now().Add(handshakeTimeout))
@@ -1067,7 +1067,7 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 // ECH cannot close (ECH hides the SNI, not the fingerprint). ServerName=host is the SNI; when ech
 // is set uTLS injects the real Encrypted ClientHello in place of Chrome's GREASE-ECH, keeping BOTH
 // the fingerprint and the hidden SNI. A stale ECH key surfaces as a *utls.ECHRejectionError with a
-// fresh RetryConfigList for the caller's self-heal. Shared by the ws (tlsToEdge) and xhttp carriers.
+// fresh RetryConfigList for the caller's self-heal. Shared by the ws (tlsToEdge) and HTTP carriers.
 func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string) (net.Conn, error) {
 	cfg := &utls.Config{ServerName: host}
 	var echPub string
@@ -1205,7 +1205,7 @@ func chromeSpec(alpn []string) (utls.ClientHelloSpec, error) {
 // In pool mode ANY failure is handed to attributeFailure, which runs a differential probe
 // to decide by TRUTH — not a guess — whether the IP, the SNI, or neither is at fault, and
 // pulls the guilty axis into the health FSM. A successful connect clears both axes.
-// attribute is FALSE on the warm-standby build path — see establishXHTTP for why the differential
+// attribute is FALSE on the warm-standby build path — see establishHTTPC for why the differential
 // probe must not run there (it blocks the standby-build goroutine and silently freezes rotation).
 func (b *TCP) establishWS(attribute bool) (net.Conn, string, string, error) {
 	dialAddr, host, ech, path := b.addr, b.wsHost, b.wsECH, b.wsPath
@@ -1268,24 +1268,24 @@ const (
 // — the steady state of a dead origin behind a CDN that terminates TLS for anyone) from being
 // mislabeled "reachable" the way a TLS-only probe would, and from falsely healing a suspect.
 func (b *TCP) probeEdgeFull(ip string, sni wsSNIEntry) bool {
-	if b.xhttp {
-		// The SAME reasoning as the ws upgrade check applies to xhttp/grpc — even more so, since a CDN
+	if b.httpc {
+		// The SAME reasoning as the ws upgrade check applies to http/grpc — even more so, since a CDN
 		// terminates TLS for ANY of its anycast IPs, so a TLS-only probe (probeEdge) reports "reachable"
-		// for a blocked edge whose real xhttp/grpc path to the origin is dead or 502s. Using TLS-only
-		// here would falsely HEAL a dead xhttp edge on retest AND defeat the manual-pin auto-release
+		// for a blocked edge whose real http/grpc path to the origin is dead or 502s. Using TLS-only
+		// here would falsely HEAL a dead httpc edge on retest AND defeat the manual-pin auto-release
 		// (attribution would read a genuine block as transient — the reproduce step "succeeds" on TLS —
 		// so it never burns and the pin hangs the whole window). So run a REAL establish: open an
-		// xhttp/grpc session (which validates the origin's 200, not just the TLS front) and tear it
-		// straight down. dialXHTTPOnce cleans up everything it allocated on both success and error.
+		// http/grpc session (which validates the origin's 200, not just the TLS front) and tear it
+		// straight down. dialHTTPCOnce cleans up everything it allocated on both success and error.
 		host := sni.host
 		if host == "" {
 			host = ip
 		}
-		conn, err := b.dialXHTTPOnce(ip, host, sni.ech, sni.path)
+		conn, err := b.dialHTTPCOnce(ip, host, sni.ech, sni.path)
 		if err != nil {
 			// Retry ONCE with the fresh key on a stale-ECH rejection, exactly as the live path
-			// (establishXHTTP) and the ws probe (tlsToEdge, which has this built in) already do.
-			// Without it a rotated Cloudflare ECH key made every retest of a suspect/dead xhttp entry
+			// (establishHTTPC) and the ws probe (tlsToEdge, which has this built in) already do.
+			// Without it a rotated Cloudflare ECH key made every retest of a suspect/dead httpc entry
 			// fail forever: it walked the backoff to dead and could never come back, so the self-heal
 			// FSM — whose whole purpose is that a TEMPORARY block recovers without a rebuild — was
 			// dead on this transport. Multi-domain pools were worst: only the SNI the LIVE dial happens
@@ -1296,10 +1296,10 @@ func (b *TCP) probeEdgeFull(ip string, sni wsSNIEntry) bool {
 			if !errors.As(err, &echErr) || len(echErr.RetryConfigList) == 0 {
 				return false
 			}
-			log.Printf("core/xhttp: ECH-SELFHEAL[probe] for %s (%s) — stale key rejected, retrying with the fresh one", host, ip)
+			log.Printf("core/http: ECH-SELFHEAL[probe] for %s (%s) — stale key rejected, retrying with the fresh one", host, ip)
 			// Deliberately NOT persisted here: this mirrors tlsToEdge's live=false probe contract, where
 			// a probe proves reachability but does not publish a key. The live dial persists it.
-			if conn, err = b.dialXHTTPOnce(ip, host, echErr.RetryConfigList, sni.path); err != nil {
+			if conn, err = b.dialHTTPCOnce(ip, host, echErr.RetryConfigList, sni.path); err != nil {
 				return false
 			}
 		}
@@ -1502,7 +1502,7 @@ func (b *TCP) retestLoop() {
 // ws pool it rotates edges: each attempt uses the pool's current (IP × SNI), a
 // failure burns the offending IP/SNI (establishWS), and a proactive timer tears the
 // connection down after b.rotate so the client moves before the edge is fingerprinted.
-// readECHCmdSingle consumes a pending live ECH-key push for a SINGLE (non-pool) ws/xhttp edge and
+// readECHCmdSingle consumes a pending live ECH-key push for a SINGLE (non-pool) ws/http edge and
 // hot-swaps b.wsECH so the NEXT dial presents the fresh key — the single-edge counterpart to the pool's
 // readECHCmd (a pool keys off p.snis and has no b.st; a single edge keys off b.wsECH and has no pool).
 // The node writes the SAME <status>.echcmd sidecar for both. No-op unless this is a single ws edge with
@@ -1830,19 +1830,19 @@ func (b *TCP) dialLoop() {
 	}
 }
 
-// dialCarrier opens the transport connection for ONE dial attempt: a pool/single ws or xhttp
-// edge (with failure attribution inside establishWS/establishXHTTP), or a plain/cover TCP dial.
+// dialCarrier opens the transport connection for ONE dial attempt: a pool/single ws or httpc
+// edge (with failure attribution inside establishWS/establishHTTPC), or a plain/cover TCP dial.
 // It returns the live conn and a label for logging, and logs the specific transport-level
 // failure itself so callers only decide retry/rotation policy. It does NOT frame or handshake.
 // attribute gates the differential-probe failure attribution: true on the primary/active dial,
-// false on the warm-standby build (whose goroutine must not block in the probe — see establishXHTTP).
+// false on the warm-standby build (whose goroutine must not block in the probe — see establishHTTPC).
 func (b *TCP) dialCarrier(attribute bool) (net.Conn, string, string, error) {
 	if b.ws { // pool or single edge: dial + wss(+ECH) + upgrade, burning on failure
 		var c net.Conn
 		var edge, combo string
 		var err error
-		if b.xhttp {
-			c, edge, combo, err = b.establishXHTTP(attribute)
+		if b.httpc {
+			c, edge, combo, err = b.establishHTTPC(attribute)
 		} else {
 			c, edge, combo, err = b.establishWS(attribute)
 		}
@@ -1898,7 +1898,7 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 	_ = cf.writeFrame(typePing, nil) // prime + authenticate us to the server
 	// Deliberately do NOT stamp b.lastRx here: this ping is something WE sent, and lastRx means "last
 	// authenticated INBOUND frame". Crediting it refreshed the status-file heartbeat on every reconnect,
-	// so a pooled/xhttp client whose dial+TLS always succeeds (a CDN edge always accepts) but which never
+	// so a pooled/httpc client whose dial+TLS always succeeds (a CDN edge always accepts) but which never
 	// receives a frame back reported "connected" forever while the tunnel carried nothing — green dot,
 	// 100% in-tunnel ping loss. Only readLoop's fresh authenticated inbound frame may stamp it.
 	return cf, nil
