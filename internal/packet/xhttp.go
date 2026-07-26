@@ -201,11 +201,55 @@ type seqChunk struct {
 	data []byte
 }
 
-// maxUpBatch caps how many bytes the batcher coalesces into ONE upstream POST. Batching amortizes the
-// per-POST round-trip: without it each ~MTU datagram cost a full HTTP request through the CDN, so a
-// burst of upstream — e.g. the KCP acks a heavy download generates — couldn't be posted fast enough and
-// backed up into unbounded latency (bufferbloat). Well under maxXhChunk (the server's per-POST cap).
-const maxUpBatch = 32 << 10
+// Packet-up upstream sizing. This is a request/response ladder — every batch costs one full HTTP
+// round-trip through the CDN — so the numbers below ARE the upstream's bandwidth-delay product, and
+// they were measured rather than guessed. Two separate quantities, easy to conflate:
+//
+//	IN FLIGHT  = upWorkers × maxUpBatch — bytes on the wire at once. This sets CAPACITY:
+//	             capacity ≈ in-flight / RTT. It is not queueing delay; it is the pipe being full.
+//	WAITING    = upChanCap + upWorkCap×maxUpBatch — bytes queued but not yet sent. This is pure
+//	             LATENCY: a keepalive ping (and the inner TCP's acks) sit behind all of it, and the
+//	             obfs length-mask keystream makes reordering illegal, so there is no priority lane —
+//	             the only lever on ping is keeping this small.
+//
+// The old numbers had that backwards: in flight 4×32K = 128K, waiting 256 chunks + 8×32K ≈ 600K.
+// So capacity was tiny AND the queue was huge. Measured in a two-netns lab with netem (both cores
+// on one box, obfs+chacha20, 40–60 Mbit offered upstream):
+//
+//	                          RTT 150ms                    RTT 60ms
+//	                  upstream   ping under load    upstream   ping under load
+//	4×32K, wait 600K   4.4 Mbit   151 → 1550 ms     11.2 Mbit   60 → 518 ms
+//	8×128K, wait 260K  29.7 Mbit  151 →  365 ms     57.8 Mbit   60 → 113 ms
+//
+// and on a deliberately slow 4 Mbit uplink (RTT 60ms) a saturating TCP flow went from 1.33 Mbit at
+// 219 ms to 3.10 Mbit at 161 ms — so the wider window does NOT cost latency on a thin line: the deep
+// waiting queue was the thing hurting it. Downstream (the streaming GET) was never the problem and is
+// untouched: it already ran at ~60 Mbit with ping at 66 ms.
+//
+// Client-side only, and not a wire change: the POST framing, the seq contract and the server's
+// reassembly are all unchanged, and maxUpBatch stays well under maxXhChunk (the server's per-POST read
+// cap), so a new client interoperates with an old server and vice versa.
+const (
+	// maxUpBatch caps how many bytes the batcher coalesces into ONE upstream POST. Batching amortizes
+	// the per-POST round-trip: without it each ~MTU datagram cost a full HTTP request through the CDN.
+	maxUpBatch = 128 << 10
+	// upWorkers is how many batches may be POSTing at once. Also the parallel-request count a CDN
+	// sees, so it stays in the range a browser plausibly opens to one host — not a number to raise
+	// freely for throughput.
+	upWorkers = 8
+	// upChanCap is the write queue in chunks, sized to hold exactly ONE full batch (the batcher drains
+	// whatever is already queued, so it cannot coalesce more than this) and no more. Bigger is not a
+	// buffer, it is standing latency. 1400 = the usual TUN MTU, i.e. one chunk.
+	upChanCap = maxUpBatch/1400 + 2
+	// upWorkCap is how many coalesced batches may wait for a free worker. One, so the batcher blocks
+	// (and through it write(), and through that the TUN reader) instead of building a queue: with all
+	// workers busy the pipe is already full and queueing only adds delay.
+	upWorkCap = 1
+	// upIdleConns must exceed upWorkers so a finished POST's connection is kept instead of closed —
+	// otherwise every other POST pays a fresh TCP+TLS handshake through the CDN. The streaming GET
+	// holds one of these too.
+	upIdleConns = upWorkers * 2
+)
 
 // xhUp is the client's packet-up upstream. Writes are copied and queued; a single batcher coalesces
 // them into one POST per batch (tagging each with a monotonic seq so the server reassembles in order)
@@ -226,9 +270,10 @@ type xhUp struct {
 }
 
 func newXhUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string, setHdr func(*http.Request), fail func()) *xhUp {
-	u := &xhUp{hc: hc, ctx: ctx, urlFor: urlFor, setHdr: setHdr, fail: fail, ch: make(chan []byte, 256), work: make(chan seqChunk, 8)}
+	u := &xhUp{hc: hc, ctx: ctx, urlFor: urlFor, setHdr: setHdr, fail: fail,
+		ch: make(chan []byte, upChanCap), work: make(chan seqChunk, upWorkCap)}
 	go u.batcher()
-	for i := 0; i < 4; i++ {
+	for i := 0; i < upWorkers; i++ {
 		go u.worker()
 	}
 	return u
@@ -249,22 +294,39 @@ func (u *xhUp) write(p []byte) (int, error) {
 // monotonic seq so the server reassembles in order. It blocks for the first chunk, then drains whatever
 // is ALREADY queued without waiting — so an idle link posts one chunk at once (low latency) while a
 // burst posts a big batch (few round-trips). One goroutine, so seq stays strictly in byte order.
+//
+// A chunk that would push the batch past maxUpBatch is CARRIED to the next one rather than appended:
+// the old loop tested the length before appending, so a batch could overrun the cap by one frame. That
+// was invisible at a 32 KiB cap and stayed under the server's 1 MiB read limit, but it meant maxUpBatch
+// was not actually a bound — raise it to the read limit and the server would truncate, which desyncs a
+// length-prefixed AEAD stream rather than failing cleanly.
 func (u *xhUp) batcher() {
+	var carry []byte
 	for {
 		var buf []byte
-		select {
-		case buf = <-u.ch:
-		case <-u.ctx.Done():
-			return
+		if carry != nil {
+			buf, carry = carry, nil
+		} else {
+			select {
+			case buf = <-u.ch:
+			case <-u.ctx.Done():
+				return
+			}
 		}
+	drain:
 		for len(buf) < maxUpBatch {
 			select {
 			case more := <-u.ch:
+				if len(buf)+len(more) > maxUpBatch {
+					carry = more // next batch starts with it; order is preserved either way
+					break drain
+				}
 				buf = append(buf, more...)
-				continue
+			case <-u.ctx.Done():
+				return
 			default:
+				break drain
 			}
-			break
 		}
 		seq := u.seq
 		u.seq++
@@ -466,8 +528,8 @@ func (b *TCP) dialXHTTPOnce(dialAddr, host string, ech []byte, path string) (net
 		} else {
 			tr := &http.Transport{
 				DialTLSContext:      func(ctx context.Context, _, _ string) (net.Conn, error) { return dialTLS(ctx) },
-				MaxIdleConns:        16,
-				MaxIdleConnsPerHost: 8, // the streaming GET holds one conn; the packet-up POSTs reuse the rest
+				MaxIdleConns:        upIdleConns * 2,
+				MaxIdleConnsPerHost: upIdleConns, // the GET holds one of these; the packet-up POSTs reuse the rest
 				IdleConnTimeout:     90 * time.Second,
 			}
 			rt, closeIdle = tr, func() { tr.CloseIdleConnections(); forceClose() }
@@ -487,8 +549,8 @@ func (b *TCP) dialXHTTPOnce(dialAddr, host string, ech []byte, path string) (net
 				return track(c), nil
 			},
 			ForceAttemptHTTP2:   h2,
-			MaxIdleConns:        16,
-			MaxIdleConnsPerHost: 8,
+			MaxIdleConns:        upIdleConns * 2,
+			MaxIdleConnsPerHost: upIdleConns,
 			IdleConnTimeout:     90 * time.Second,
 			TLSHandshakeTimeout: handshakeTimeout,
 		}
