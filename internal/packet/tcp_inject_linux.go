@@ -18,7 +18,7 @@ import (
 )
 
 // sendTCPFakes injects the configured decoy segments on conn's 4-tuple just after connect. It
-// is best-effort: xhttp's synthetic conn addresses fail the *net.TCPAddr assertion and are
+// is best-effort: httpc's synthetic conn addresses fail the *net.TCPAddr assertion and are
 // skipped; a missing CAP_NET_RAW (AF_PACKET) or an unresolvable next hop just drops the decoys.
 // The injector is one-shot per connect — the next-hop neighbour is guaranteed warm here (the
 // kernel just completed the 3-way handshake through it), so resolveL2 succeeds immediately.
@@ -29,7 +29,7 @@ func (b *TCP) sendTCPFakes(conn net.Conn) {
 	la, ok1 := conn.LocalAddr().(*net.TCPAddr)
 	ra, ok2 := conn.RemoteAddr().(*net.TCPAddr)
 	if !ok1 || !ok2 {
-		return // synthetic addrs (xhttp) — no real 4-tuple to mirror
+		return // synthetic addrs (httpc) — no real 4-tuple to mirror
 	}
 	src, dst := la.IP.To4(), ra.IP.To4()
 	if src == nil || dst == nil {

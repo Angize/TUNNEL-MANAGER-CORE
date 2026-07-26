@@ -73,7 +73,7 @@ func TestTLSToEdgeUsesChromeFingerprintALPNh1(t *testing.T) {
 	}
 }
 
-// The grpc/stream xhttp carrier passes alpn=nil to uEdgeHandshake so the ClientHello keeps Chrome's
+// The grpc/stream HTTP carrier passes alpn=nil to uEdgeHandshake so the ClientHello keeps Chrome's
 // h2 (the edge must negotiate HTTP/2). Verify the emitted hello is still Chrome (GREASE) and offers
 // h2 in ALPN.
 func TestUEdgeHandshakeH2ALPN(t *testing.T) {

@@ -41,8 +41,8 @@ func TestUpstreamSizingInvariants(t *testing.T) {
 			upChanCap, upChanCap*1400, maxUpBatch)
 	}
 	// A batch must fit the server's per-POST read cap, or the server truncates and drops it.
-	if maxUpBatch >= maxXhChunk {
-		t.Errorf("maxUpBatch %d must stay under maxXhChunk %d", maxUpBatch, maxXhChunk)
+	if maxUpBatch >= maxPostBody {
+		t.Errorf("maxUpBatch %d must stay under maxPostBody %d", maxUpBatch, maxPostBody)
 	}
 	// Fewer idle conns than workers means a finished POST's connection is closed rather than kept,
 	// so the next POST pays a fresh TCP+TLS handshake through the CDN. +1 for the streaming GET.
@@ -62,16 +62,16 @@ func TestUpstreamSizingInvariants(t *testing.T) {
 // The shape is per-CDN now, so the setter has to actually move all of it — and clamp, because these
 // numbers reach the core straight from an operator field. A batch over the server's per-POST read cap
 // would be truncated, and a truncated length-prefixed AEAD chunk desyncs the stream.
-func TestSetXHTTPUpstream(t *testing.T) {
+func TestSetHTTPCUpstream(t *testing.T) {
 	w0, b0, c0, i0, g0 := upWorkers, maxUpBatch, upChanCap, upIdleConns, upMinGap
 	defer func() { upWorkers, maxUpBatch, upChanCap, upIdleConns, upMinGap = w0, b0, c0, i0, g0 }()
 
-	SetXHTTPUpstream(0, 0, 0)
+	SetHTTPUpstream(0, 0, 0)
 	if upWorkers != w0 || maxUpBatch != b0 || upMinGap != g0 {
 		t.Fatalf("all-zero must leave the defaults alone, got %d/%d/%v", upWorkers, maxUpBatch, upMinGap)
 	}
 
-	SetXHTTPUpstream(4, 512, 30) // the measured ArvanCloud profile
+	SetHTTPUpstream(4, 512, 30) // the measured ArvanCloud profile
 	if upWorkers != 4 || maxUpBatch != 512<<10 {
 		t.Errorf("workers/batch not applied: %d/%d", upWorkers, maxUpBatch)
 	}
@@ -85,12 +85,12 @@ func TestSetXHTTPUpstream(t *testing.T) {
 		t.Errorf("upMinGap %v, want %v (30 POSTs/sec)", upMinGap, want)
 	}
 
-	SetXHTTPUpstream(999, 99999, 99999)
+	SetHTTPUpstream(999, 99999, 99999)
 	if upWorkers != 16 {
 		t.Errorf("workers not clamped: %d", upWorkers)
 	}
-	if maxUpBatch != 512<<10 || maxUpBatch >= maxXhChunk {
-		t.Errorf("batch not clamped under the server read cap: %d (cap %d)", maxUpBatch, maxXhChunk)
+	if maxUpBatch != 512<<10 || maxUpBatch >= maxPostBody {
+		t.Errorf("batch not clamped under the server read cap: %d (cap %d)", maxUpBatch, maxPostBody)
 	}
 	if upMinGap != time.Second/1000 {
 		t.Errorf("rate not clamped: %v", upMinGap)
@@ -196,12 +196,12 @@ func (r *upRecorder) waitPosts(t *testing.T, n int, d time.Duration) {
 // startUp returns the upstream, a "did a POST fail yet" probe, and a teardown. The probe is separate
 // from teardown on purpose: cancelling the context legitimately fails whatever POSTs are still in
 // flight, so asserting after teardown would flag every test that ends with a busy pipeline.
-func startUp(t *testing.T, r *upRecorder) (*xhUp, func() bool, func()) {
+func startUp(t *testing.T, r *upRecorder) (*httpcUp, func() bool, func()) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(r.handler))
 	ctx, cancel := context.WithCancel(context.Background())
 	var failed atomic.Bool
-	u := newXhUp(ctx, srv.Client(),
+	u := newHTTPCUp(ctx, srv.Client(),
 		func(seq uint64) string { return srv.URL + "/?s=x&seq=" + strconv.FormatUint(seq, 10) },
 		func(*http.Request) {},
 		func() { failed.Store(true) })
@@ -318,7 +318,7 @@ func TestXhUpCoalescesAndReassemblesOutOfOrder(t *testing.T) {
 	// Now reassemble exactly the way the server does, but hand the chunks over in REVERSE seq order —
 	// the pathological case for the in-order buffer that concurrent workers make routine.
 	pr, pw := io.Pipe()
-	s := &xhttpSession{upR: pr, upW: pw, done: make(chan struct{}), served: make(chan struct{}),
+	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), served: make(chan struct{}),
 		pend: map[uint64][]byte{}}
 	var out []byte
 	var rerr error

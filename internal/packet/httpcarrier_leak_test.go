@@ -26,9 +26,9 @@ func settleGoroutines() int {
 	return prev
 }
 
-// TestXHTTPGrpcNoConnLeakOnRotation guards the grpc teardown path: establishing and retiring many
+// TestHTTPCGrpcNoConnLeakOnRotation guards the grpc teardown path: establishing and retiring many
 // grpc sessions (the proactive-rotation churn) must not grow the process goroutine count. It backs
-// the force-close-on-teardown fix in dialXHTTPOnce, where a retired session's underlying h2 conn was
+// the force-close-on-teardown fix in dialHTTPCOnce, where a retired session's underlying h2 conn was
 // closed only via CloseIdleConnections — which, on a fresh-per-session transport with no
 // IdleConnTimeout, can race the async stream teardown and, if the far side holds the TCP conn open
 // (a CDN edge does), never actually close it, leaking the conn's reader/writer goroutines and fd
@@ -39,28 +39,28 @@ func settleGoroutines() int {
 // fix. It is a no-regression guard (the teardown path reaps its own goroutines) and executable
 // documentation of the concern, NOT proof the production stall is resolved. Production confirmation
 // comes from the goroutine-count heartbeat (diagLoop) and the rotation-skip logs added alongside.
-func TestXHTTPGrpcNoConnLeakOnRotation(t *testing.T) {
+func TestHTTPCGrpcNoConnLeakOnRotation(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	srvDev, _ := tunPair(t, "xhgleak")
-	srv, err := ListenXHTTP("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
+	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
 	if err != nil {
-		t.Fatalf("ListenXHTTP: %v", err)
+		t.Fatalf("ListenHTTPC: %v", err)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", srv.xhttpHandler)
+	mux.HandleFunc("/", srv.httpcHandler)
 	ts := httptest.NewUnstartedServer(mux)
 	ts.EnableHTTP2 = true
 	ts.StartTLS()
 	go srv.Run()
 	t.Cleanup(func() { ts.Close(); srv.Close() })
 
-	b := &TCP{addr: ts.Listener.Addr().String(), ws: true, xhttp: true, xhMode: "grpc",
-		wsPath: "/", wsTLS: true, xhTLS: &tls.Config{InsecureSkipVerify: true}}
+	b := &TCP{addr: ts.Listener.Addr().String(), ws: true, httpc: true, httpcMode: "grpc",
+		wsPath: "/", wsTLS: true, httpcTLS: &tls.Config{InsecureSkipVerify: true}}
 
 	establishAndRetire := func() {
-		conn, _, _, err := b.establishXHTTP(true)
+		conn, _, _, err := b.establishHTTPC(true)
 		if err != nil {
-			t.Fatalf("establishXHTTP: %v", err)
+			t.Fatalf("establishHTTPC: %v", err)
 		}
 		_, _ = conn.Write([]byte("prime")) // make the h2 conn fully live before we retire it
 		conn.Close()                        // the rotation teardown path: closeFn -> closeIdle -> forceClose

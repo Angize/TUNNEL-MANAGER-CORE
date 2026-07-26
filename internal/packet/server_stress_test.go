@@ -12,38 +12,38 @@ import (
 	"time"
 )
 
-// xhttpStressServer stands up a real xhttp core server behind an httptest HTTP server, returning the
+// httpcStressServer stands up a real httpc core server behind an httptest HTTP server, returning the
 // base URL and an http.Client. The core server's TUN side is a socketpair that nothing drains — fine,
 // the stress only exercises the HTTP-facing session machinery (create / serve / reap / teardown).
-func xhttpStressServer(t *testing.T) (string, *http.Client, *TCP) {
+func httpcStressServer(t *testing.T) (string, *http.Client, *TCP) {
 	t.Helper()
 	const psk = "server-stress-psk-abcdefghijklmnop"
 	srvDev, _ := tunPair(t, "srvstress")
-	srv, err := ListenXHTTP("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
+	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
 	if err != nil {
-		t.Fatalf("ListenXHTTP: %v", err)
+		t.Fatalf("ListenHTTPC: %v", err)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", srv.xhttpHandler)
+	mux.HandleFunc("/", srv.httpcHandler)
 	ts := httptest.NewServer(mux)
 	go srv.Run()
 	t.Cleanup(func() { ts.Close(); srv.Close() })
 	return ts.URL, ts.Client(), srv
 }
 
-// liveSessions returns the current xhttp session-table size under its lock.
+// liveSessions returns the current HTTP-carrier session-table size under its lock.
 func liveSessions(b *TCP) int {
-	b.xhMu.Lock()
-	defer b.xhMu.Unlock()
-	return len(b.xhSessions)
+	b.httpcMu.Lock()
+	defer b.httpcMu.Unlock()
+	return len(b.httpcSessions)
 }
 
-// TestXHTTPServerMalformedBlast fires a flood of concurrent MALFORMED requests at the xhttp handler:
+// TestHTTPCServerMalformedBlast fires a flood of concurrent MALFORMED requests at the HTTP-carrier handler:
 // bad session ids, wrong methods, missing/garbage seq, oversized and empty bodies, bogus grpc. The
 // server must answer each with a clean 4xx and never panic, race, or wedge. Run under -race this is
 // the concurrency-safety check on the session table and the handler's error paths.
-func TestXHTTPServerMalformedBlast(t *testing.T) {
-	base, hc, _ := xhttpStressServer(t)
+func TestHTTPCServerMalformedBlast(t *testing.T) {
+	base, hc, _ := httpcStressServer(t)
 	hc.Timeout = 3 * time.Second
 
 	kinds := []func(i int) *http.Request{
@@ -103,14 +103,14 @@ func TestXHTTPServerMalformedBlast(t *testing.T) {
 	}
 }
 
-// TestXHTTPServerSessionChurn drives the session lifecycle concurrently: each worker binds a
+// TestHTTPCServerSessionChurn drives the session lifecycle concurrently: each worker binds a
 // downstream GET (which starts serve), POSTs an upstream chunk through it, then abandons the GET
 // (context cancel). Real client ordering is GET-first, because deliver() writes to the upstream pipe
 // that only drains once serve reads it. Many of these in parallel stress create/serve/teardown and
 // the session map. The point of the test is running it under -race: any unsynchronised access to the
-// xhSessions map or a session's fields shows up here. Afterward the server must stay responsive.
-func TestXHTTPServerSessionChurn(t *testing.T) {
-	base, hc, srv := xhttpStressServer(t)
+// httpcSessions map or a session's fields shows up here. Afterward the server must stay responsive.
+func TestHTTPCServerSessionChurn(t *testing.T) {
+	base, hc, srv := httpcStressServer(t)
 	hc.Timeout = 2 * time.Second // never let a held-open GET hang a worker
 
 	var wg sync.WaitGroup
@@ -153,7 +153,7 @@ func TestXHTTPServerSessionChurn(t *testing.T) {
 	}
 	resp.Body.Close()
 	if n := liveSessions(srv); n > 600 {
-		t.Fatalf("xhttp session table unbounded after churn: %d live sessions", n)
+		t.Fatalf("HTTP-carrier session table unbounded after churn: %d live sessions", n)
 	}
 	t.Logf("session-churn soak: server alive after 600 churned sessions, table=%d", liveSessions(srv))
 }

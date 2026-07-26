@@ -56,7 +56,7 @@ sudo ./tnl-core --config core-<id>.json
 | `tcp` | استریمی، پایدار پشتِ فایروال؛ تنها ترنسپورتی که `cover` (پوششِ TLS) می‌پذیرد |
 | `raw` | بستهٔ خامِ IP — پروفایل `bip` (253 نیتیو) / `ipip` / `gre` / `icmp` / `udp` / `tcp` / `esp` (50)؛ پشتیبانِ جعلِ IP |
 | `flux` | چندریختیِ چرخشی — حاملِ `udp`/`stun`/`raw`؛ شکل (پروتکل/پورت/padding) هر epoch از `HKDF(PSK, ساعت)` عوض می‌شود، **بدونِ هیچ سیگنالِ روی سیم** |
-| `ws` | WebSocket یا xHTTP روی CDN (دامنه‌فرونتینگ) — با ECH، poolِ چرخشیِ edge و warm-standby |
+| `ws` | پشتِ CDN (دامنه‌فرونتینگ)، با حاملِ `ws` / `http` / `grpc` — با ECH، poolِ چرخشیِ edge و warm-standby |
 | `dns` | تونلِ DNS — نشستِ AEAD/KCP داخلِ کوئری‌های DNS؛ راهِ آخر زیرِ وایت‌لیستِ کاملِ پروتکل+مقصد |
 
 ## قابلیت‌ها
@@ -70,7 +70,7 @@ sudo ./tnl-core --config core-<id>.json
 | `spoof_src_ip` / `spoof_dst_ip` | جعلِ IPِ مبدأ / مقصدِ طعمه (روی پروفایلِ `raw` `bip`) |
 | ECH | رمزکردنِ SNIِ واقعی داخلِ ClientHello (`ws` + `wss`)؛ نود کلید را از رکوردِ HTTPSِ دامنه روی DoH می‌گیرد |
 | poolِ edge | چرخشِ ترکیبِ (IPِ edge × SNI) با auto-burn و warm-standby (make-before-break) برای `ws` |
-| `xhttp` | GET-پایین/POST-بالا (`packet`) یا استریمِ دوطرفهٔ gRPC — عبور از CDNهایی که WebSocket را می‌بندند |
+| `cdn_carrier` | شکلِ حامل پشتِ CDN: `ws` (upgrade) / `http` (GET-پایین + POST-بالا) / `grpc` (استریمِ دوطرفه) — `http`/`grpc` از CDNهایی که WebSocket را می‌بندند رد می‌شوند |
 | SNI-split | تکه‌کردنِ ClientHelloِ wss (`split`/`disorder`/`fake`) برای شکستِ DPIِ مبتنی بر SNI |
 | `fake_desync` | بسته‌های طعمه پیش از هر دست‌داد برای بی‌سنکرون‌کردنِ DPIِ حالت‌مند (`raw`/`flux`/`tcp`/`ws`) |
 | poolِ چرخشی | چرخشِ IPِ مقصد و مبدأ برای ترنسپورت‌های مستقیم (`udp`/`tcp`/`raw`/`flux`) با burnِ IPِ بلاک‌شده |

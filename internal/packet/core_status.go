@@ -59,7 +59,7 @@ func heartbeat(s *coreStatus, lastRx *atomic.Int64, done <-chan struct{}) {
 	heartbeatLoop(s.beat, lastRx, done)
 }
 
-// heartbeatPool is heartbeat for a ws/xhttp edge pool, whose status file is written by wsPool.writeStatus
+// heartbeatPool is heartbeat for a ws/http edge pool, whose status file is written by wsPool.writeStatus
 // (not coreStatus), so an idle pooled tunnel reads live, not half-open. A nil pool is a no-op.
 func heartbeatPool(p *wsPool, lastRx *atomic.Int64, done <-chan struct{}) {
 	if p == nil {
