@@ -67,7 +67,7 @@ type Flux struct {
 	// synchronous replies are always correct; only the async download source could be briefly steered by
 	// a source-spoofing attacker (availability-only, self-correcting) — see the raw carrier's note.
 	replySrc atomic.Pointer[net.IP]
-	srcAllow map[string]struct{} // server pool: the client's known source IPs (4-byte keys) it may rotate across; set once before Run, then read-only
+	srcAllow map[string]struct{} // admitted peer IPs (4-byte keys): the client's source pool on a server, the destination pool on a client; set once before Run, then read-only
 	session  atomic.Pointer[sealerBox]
 	curShape atomic.Pointer[fluxShape] // this epoch's shape (refreshed each second by rotateWatcher)
 	rp       replayGuard
@@ -92,9 +92,10 @@ type Flux struct {
 	closeCh    chan struct{}
 	closeOnce  sync.Once
 
-	st *coreStatus // client-only: precise self-heal event ring written to the status file (nil = off)
-	pp *PeerPool   // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
-	sp *PeerPool   // client-only: source-IP rotation pool (nil = single fixed source; swaps the crafted header src)
+	st      *coreStatus         // client-only: precise self-heal event ring written to the status file (nil = off)
+	pp      *PeerPool           // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
+	poolIPs map[string]struct{} // client-only: the destination pool's IPs (4-byte keys) — see provenFrom
+	sp      *PeerPool           // client-only: source-IP rotation pool (nil = single fixed source; swaps the crafted header src)
 }
 
 // SetDeadAfter (client) tightens the session-stale deadline to the per-tunnel dead_after_secs so the
@@ -651,15 +652,16 @@ func (f *Flux) handleCrypto(body []byte, addr *net.IPAddr) {
 		if len(body) < 2 || body[0] != magic {
 			return
 		}
-		f.markRx()                 // the peer is answering (clear mode has no session to prove it)
-		f.peerAnswered.Store(true) // this endpoint has replied since we pointed at it -> safe to heal its burn
+		f.markRx()            // the peer is answering (clear mode has no session to prove it)
+		f.provenFrom(addr.IP) // ...and, unless it came from an endpoint we left, the current one is alive
 		f.learnPeer(addr)
 		f.dispatch(body[1], iff(body[1] == typeData, body[2:], nil), addr)
 		return
 	}
 	if s := f.sealer(); s != nil {
 		if typ, session, seq, payload, oerr := f.openWith(s, body); oerr == nil && f.rp.ok(session, seq) {
-			f.markRx() // the session is answering
+			f.markRx()            // the session is answering
+			f.provenFrom(addr.IP) // ...and, unless it came from an endpoint we left, the current one is alive
 			f.learnPeer(addr)
 			f.dispatch(typ, payload, addr)
 			return
@@ -807,12 +809,44 @@ func (f *Flux) markRx() {
 	f.hbRx.Store(now)
 }
 
+// provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for
+// about one RTT after a jump the endpoint we LEFT is still answering; those frames are ours and are
+// delivered, but they say nothing about the endpoint we just moved to — counting them as proof is what
+// let a blocked IP hide behind the one it replaced. A frame from any address that is NOT another pool
+// endpoint is unattributable (a server that replies from one fixed IP rather than the dialed one) and
+// still counts, so an unusual listen config degrades to the old behaviour instead of a rotation storm.
+func (f *Flux) provenFrom(ip net.IP) {
+	if ip != nil && len(f.poolIPs) > 0 {
+		if p := f.peer.Load(); p != nil && !p.IP.Equal(ip) {
+			if v4 := ip.To4(); v4 != nil {
+				if _, other := f.poolIPs[string(v4)]; other {
+					return
+				}
+			}
+		}
+	}
+	f.peerAnswered.Store(true)
+}
+
 // SetPeerPool (client) wires a destination-IP rotation pool: a peer whose handshake never completes
 // is burned and the client re-points at the next live endpoint (a proactive timer also rotates).
 // nil / single-endpoint = no rotation. main wires it via the shared SetPeerPool type assertion.
 func (f *Flux) SetPeerPool(pp *PeerPool) {
 	if f.isClient {
 		f.pp = pp
+		if pp != nil {
+			f.poolIPs = buildSrcAllow(pp.all()) // see provenFrom: tells "the endpoint we left" apart from "an unattributable source"
+		}
+		// Admit every pool endpoint as a reply source: a timed rotation keeps the session (see
+		// rotatePeerFlux), so for about one RTT after the jump the server is still answering from the
+		// endpoint we just left. Those frames are ours and open under the same keys; the strict
+		// single-source filter would drop them and turn a seamless rotation back into a loss burst.
+		// All pool addresses belong to the same server node and the AEAD still authenticates each frame.
+		if pp != nil {
+			if m := buildSrcAllow(pp.all()); len(m) > 0 {
+				f.srcAllow = m
+			}
+		}
 	}
 }
 
@@ -878,6 +912,11 @@ func (f *Flux) rotateSourceFlux(proactive bool) {
 // rotatePeerFlux points the client at the next pool endpoint (burn+advance, or a timed rotate) and
 // clears the session so the next loop re-handshakes against the new destination. No-op when the pool
 // did not move or the endpoint is not a valid IPv4 (flux is IPv4-only).
+// A TIMED rotation keeps the AEAD session, so not one packet is dropped: every pool endpoint is an
+// address of the SAME server process and the session is independent of the address. The server stamps
+// its reply source from each received frame's header dst, so it follows on the first frame, and
+// SetPeerPool admits the endpoint we just left for the frames still in flight from it. A FAILOVER
+// rotation still clears — that endpoint stopped answering. Mirrors rotatePeerUDP / rotatePeerRaw.
 func (f *Flux) rotatePeerFlux(proactive bool) {
 	if f.pp == nil {
 		return
@@ -891,8 +930,10 @@ func (f *Flux) rotatePeerFlux(proactive bool) {
 		return
 	}
 	f.peer.Store(&net.IPAddr{IP: ip})
-	f.session.Store(nil)
-	f.ci.Store(nil)
+	if !proactive {
+		f.session.Store(nil) // the endpoint failed — force a fresh handshake to the next one
+		f.ci.Store(nil)
+	}
 	// Refresh the status descriptor to the NEW peer so "active" doesn't stay pinned to the dialed IP
 	// SetStatusPath baked in — same "flux:<carrier> · <peer>" format (nil-safe when status is off).
 	f.st.setActive("flux:" + f.carrier + " · " + ip.String())
@@ -901,6 +942,12 @@ func (f *Flux) rotatePeerFlux(proactive bool) {
 	f.lastRx.Store(time.Now().UnixNano())
 	f.peerAnswered.Store(false)
 	log.Printf("flux: rotated destination to %s", addr)
+	if proactive {
+		// Seamless: nothing was cleared, so there is no re-handshake and nothing for a "reconnect" to
+		// pair with. event() records the jump WITHOUT arming wasDown, like the source rotation above.
+		f.st.event("down", "peer-rotate", "ip:"+addr)
+		return
+	}
 	f.st.down("peer-rotate", "ip:"+addr) // clears the session -> re-handshake -> reconnect pairs the down
 }
 
@@ -964,7 +1011,8 @@ func (f *Flux) pinPollLoop(rc *rotationController) {
 }
 
 func (f *Flux) clientLoop() {
-	failN := 0
+	failN := 0        // consecutive handshake retransmits (or unanswered probes) -> the endpoint may be dead
+	unproven := false // the current destination has not answered since we jumped to it -> probe at 1s, not keepalive
 	rc := newRotationController(f.pp, f.sp)
 	if rc.active() {
 		go f.pinPollLoop(rc)
@@ -988,6 +1036,7 @@ func (f *Flux) clientLoop() {
 			f.st.down("stale", "flux")
 		}
 		if f.cryptoOn && f.sealer() == nil {
+			unproven = false // the handshake path already ticks at 1s and drives its own failover
 			f.sendInit()
 			if failN++; rc.active() && failN >= peerFailThreshold {
 				rc.fail(f.rotatePeerFlux, f.rotateSourceFlux) // burn+advance dest; walk source once dests cycle
@@ -999,11 +1048,28 @@ func (f *Flux) clientLoop() {
 			if failN > 0 || (!f.cryptoOn && rc.active() && f.peerAnswered.Load()) {
 				healEvents(f.st, rc)
 			}
-			failN = 0
-			f.send(typePing, nil, f.peer.Load())
 			rc.proactive(f.rotatePeerFlux, f.rotateSourceFlux, time.Now())
+			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the
+			// NEW destination sees, and it is what makes the server stamp its replies from that IP.
+			f.send(typePing, nil, f.peer.Load())
+			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session
+			// survives, no handshake failure will ever say so. Count unanswered ticks here — AFTER the
+			// jump, so the very next wait is already the 1s probe interval — on the same threshold the
+			// handshake path uses. Checking before the rotation cost a full keepalive first, which let
+			// sessionStale (a whole dead window) win the race and turned a blocked IP into a ~30s hole.
+			if unproven = f.cryptoOn && rc.active() && !f.peerAnswered.Load(); unproven {
+				if failN++; failN >= peerFailThreshold {
+					f.session.Store(nil) // not answering: drop back to the handshake path, which burns and advances
+					f.ci.Store(nil)
+					f.st.down("peer-dead", "flux")
+					rc.fail(f.rotatePeerFlux, f.rotateSourceFlux)
+					failN = 0
+				}
+			} else {
+				failN = 0
+			}
 			if f.cryptoOn && f.sealer() == nil {
-				// A proactive DESTINATION rotation just cleared the crypto session — loop back NOW to send
+				// A FAILOVER rotation just cleared the crypto session — loop back NOW to send
 				// the re-handshake init immediately, instead of first sleeping the 1s retransmit interval
 				// below, so the rotation gap is ~1 RTT rather than ~1s (matters for live streams). Clear
 				// mode has no session/handshake so this never fires there; a duplicated init is harmless
@@ -1012,8 +1078,8 @@ func (f *Flux) clientLoop() {
 			}
 		}
 		wait := keepaliveInterval(f.keepalive, f.psk)
-		if f.cryptoOn && f.sealer() == nil {
-			wait = time.Second // retransmit the handshake faster than keepalive
+		if (f.cryptoOn && f.sealer() == nil) || unproven {
+			wait = time.Second // retransmit the handshake — or re-probe an unproven endpoint — faster than keepalive
 		}
 		select {
 		case <-f.closeCh:
