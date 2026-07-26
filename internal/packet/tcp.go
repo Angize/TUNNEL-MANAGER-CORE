@@ -367,10 +367,10 @@ type TCP struct {
 	// Same fronting fields (wsHost/wsTLS/wsECH/wsPath) apply. Because the client carries
 	// core frames directly over these requests (the HTTP layer replaces the WS upgrade),
 	// the server must NOT run wsServerHandshake on an HTTP-carrier conn — see handleServerConn.
-	httpc      bool
+	httpc         bool
 	httpcMode     string                      // client: "grpc" (single full-duplex request) else packet-up
 	httpcTLS      *tls.Config                 // test-only: overrides the client edge TLS config (nil in production)
-	httpSrv    atomic.Pointer[http.Server] // server: the HTTP-carrier endpoint (nil otherwise); atomic — written by runHTTPCServer's goroutine, read by Close
+	httpSrv       atomic.Pointer[http.Server] // server: the HTTP-carrier endpoint (nil otherwise); atomic — written by runHTTPCServer's goroutine, read by Close
 	httpcMu       sync.Mutex
 	httpcSessions map[string]*httpcSession
 

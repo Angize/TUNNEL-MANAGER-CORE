@@ -509,7 +509,7 @@ func (b *TCP) establishHTTPC(attribute bool) (net.Conn, string, string, error) {
 // down by the dialHTTPC* helper (ctx cancelled, pipes/bodies closed).
 func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net.Conn, error) {
 	single := b.httpcMode == "grpc" // one full-duplex request over h2
-	h2 := single && b.wsTLS      // grpc over wss rides HTTP/2 to the edge
+	h2 := single && b.wsTLS         // grpc over wss rides HTTP/2 to the edge
 
 	// rawDial always targets the fixed edge, regardless of the request URL host, so the Host/SNI
 	// stays the fronting domain while we connect to a specific (clean) CDN IP.
