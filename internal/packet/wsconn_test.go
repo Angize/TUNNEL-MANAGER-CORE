@@ -102,7 +102,7 @@ func TestWSConnRejectsMalformedFrames(t *testing.T) {
 			t.Fatalf("%s: Read returned nil error, want the connection dropped", name)
 		}
 	}
-	check("reserved opcode 0x3", []byte{0x83, 0x00})                            // FIN|0x3, unmasked, 0-length
+	check("reserved opcode 0x3", []byte{0x83, 0x00})                                    // FIN|0x3, unmasked, 0-length
 	check("oversized ping", append([]byte{0x89, 126, 0x00, 200}, make([]byte, 200)...)) // FIN|0x9, 16-bit len=200 (>125)
 }
 

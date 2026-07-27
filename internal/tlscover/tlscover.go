@@ -42,9 +42,9 @@ import (
 )
 
 const (
-	authMagic  = "TNLR"     // 4 bytes; marks a genuine token after decryption
-	authWindow = 120        // seconds a token stays valid (replay bound)
-	maxRelays  = 256        // concurrent probe→dest relays cap
+	authMagic  = "TNLR" // 4 bytes; marks a genuine token after decryption
+	authWindow = 120    // seconds a token stays valid (replay bound)
+	maxRelays  = 256    // concurrent probe→dest relays cap
 )
 
 // ErrProbe means the connection was not an authenticated client and has been
