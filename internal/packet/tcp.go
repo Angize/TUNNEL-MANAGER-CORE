@@ -134,6 +134,14 @@ type connFramer struct {
 	// pingLossThreshold; serve() resets it to 0 on any received frame. Touched by the
 	// keepalive goroutine and the read goroutine, so it is atomic.
 	unanswered atomic.Int32
+
+	// rxAt is the unix-nano of the last authenticated inbound frame ON THIS CONNECTION — its own
+	// liveness, kept for every carrier including a warm standby that carries no traffic. The crypto
+	// handshake seeds it (the responder answering is inbound proof a CDN edge cannot fake) and readLoop
+	// advances it. It is what the tunnel-level b.lastRx adopts when this carrier goes live, so a
+	// promoted standby publishes the truth it has been collecting instead of waiting for its next frame.
+	// Written by the dialing goroutine and the read goroutine, read by the manager -> atomic.
+	rxAt atomic.Int64
 }
 
 // sendSalt emits our per-connection salt once and arms the write keystream.
@@ -309,7 +317,7 @@ type TCP struct {
 	rotate time.Duration // client: proactive pool-rotation interval (0 = failover-only)
 	st     *coreStatus   // client + single-edge ws/http: self-heal event ring -> status file (nil = off / pool / server)
 	stTag  string        // carrier label prefix ("tcp"/"cover"/"ws"/"http") for setActive on a direct-pool rotation; set alongside st
-	lastRx atomic.Int64  // client: unix-nano of the last authenticated INBOUND frame on the LIVE carrier — feeds the status-file heartbeat (v2.48.3). Advanced only by the crypto handshake and by readLoop while cf==b.cur; never stamp it for a frame we sent (a carrier that reconnects forever behind a CDN would read "alive" while nothing flows, v2.48.5), nor for a warm standby (its keepalive pongs would hold the tunnel green with an empty active slot)
+	lastRx atomic.Int64  // client: unix-nano of the last authenticated INBOUND frame on the LIVE carrier — feeds the status-file heartbeat (v2.48.3). Advanced only by readLoop while cf==b.cur, and by adoptRx from the carrier's own rxAt when it goes live; never stamp it for a frame we sent (a carrier that reconnects forever behind a CDN would read "alive" while nothing flows, v2.48.5), nor for a carrier that is not the tunnel's — a warm standby or a parked rotation carrier keeps its proof in cf.rxAt until it is promoted/adopted
 
 	// lastData is the unix-nano of the last real DATA frame moved in EITHER direction (never ping/pong).
 	// It drives opportunistic keepalive: when data moved within the last keepalive period the standalone
@@ -1764,6 +1772,7 @@ func (b *TCP) dialLoop() {
 		// so a rotate1 that actually drops this carrier — only possible after the store — always wins.)
 		b.manualSwitch.Store(false)
 		b.cur.Store(cf)
+		b.adoptRx(cf) // this carrier is the tunnel now: publish the heartbeat it already proved
 		cc := conn
 		b.curConn.Store(&cc) // expose the live conn so RotateIP/RotateSNI can drop it
 		if b.pool != nil {
@@ -2012,10 +2021,12 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 			return nil, err
 		}
 		// A completed crypto handshake means the SERVER answered — an end-to-end authentication a CDN edge
-		// cannot fake — so this is genuine INBOUND proof. Stamp the heartbeat now for fast green on a real
-		// connect. A dead origin fails clientHandshake above and never reaches here, so this cannot
-		// false-green (unlike the old prime-ping stamp this replaces).
-		b.lastRx.Store(time.Now().UnixNano())
+		// cannot fake — so this is genuine INBOUND proof. It is recorded on THIS CONNECTION, not on the
+		// tunnel: handshakeAndPrime also builds carriers that are not (yet) the tunnel's — the warm
+		// standby and the parked rotation carrier — and crediting the tunnel for those is a false green.
+		// b.lastRx adopts this the moment the carrier actually goes live, which keeps the fast green on a
+		// real connect. A dead origin fails clientHandshake above and never reaches here.
+		cf.rxAt.Store(time.Now().UnixNano())
 	}
 	if b.obfs {
 		if err := cf.sendSalt(); err != nil { // client speaks first (length-mask salt)
@@ -2134,6 +2145,7 @@ func (b *TCP) dialLoopWarm() {
 		activeCombo = combo
 		activeSince = time.Now()
 		b.cur.Store(cf)
+		b.adoptRx(cf) // this carrier is the tunnel now: publish the heartbeat it already proved
 		cc := conn
 		b.curConn.Store(&cc)
 		if b.pool != nil {
@@ -2205,6 +2217,7 @@ func (b *TCP) dialLoopWarm() {
 		standbyLabel = ""
 		standbyCombo = ""
 		b.cur.Store(standby) // instant failover; the next TUN packet flips the server downstream
+		b.adoptRx(standby)   // and the heartbeat adopts the pongs the standby has been answering all along
 		if sc := b.standbyConn.Load(); sc != nil {
 			b.curConn.Store(sc)
 		}
@@ -2558,6 +2571,29 @@ func (b *TCP) serve(cf *connFramer) {
 	b.onConnErr(cf, b.readLoop(cf))
 }
 
+// adoptRx moves the TUNNEL's heartbeat onto the carrier that has just become live, taking that carrier's
+// OWN last authenticated inbound frame: its crypto handshake, or — for a promoted warm standby — the
+// keepalive pongs it has been answering all along. Called right after every client-side b.cur publish
+// (dialLoop, setActive, promote), which is what keeps the green instant on a real connect now that
+// building a carrier no longer stamps the tunnel.
+//
+// hb only ever moves FORWARD. A warm standby built minutes ago can carry an older rxAt than the frame the
+// outgoing active received a moment before it died, and publishing that would age a healthy tunnel toward
+// red on a rotation. The CAS loop also settles the harmless race with the carrier's own reader, which is
+// live from the instant b.cur is published.
+func (b *TCP) adoptRx(cf *connFramer) {
+	if cf == nil {
+		return
+	}
+	rx := cf.rxAt.Load()
+	for {
+		old := b.lastRx.Load()
+		if rx <= old || b.lastRx.CompareAndSwap(old, rx) {
+			return
+		}
+	}
+}
+
 // readLoop reads framed messages from one connection until it errors or closes, dispatching
 // each to handleFrame. It does NOT touch b.cur/authConns, so the warm-standby manager can run
 // it directly in a per-connection goroutine and own the pointer transitions itself; serve wraps
@@ -2580,7 +2616,9 @@ func (b *TCP) readLoop(cf *connFramer) error {
 			continue
 		}
 		cf.unanswered.Store(0) // a fresh inbound frame proves the peer is alive -> reset ping-loss
-		// ...but only the LIVE carrier may stamp the tunnel's heartbeat. Under warm standby every carrier
+		now := time.Now().UnixNano()
+		cf.rxAt.Store(now) // THIS connection's own liveness — true for a standby as much as for the active
+		// ...but only the LIVE carrier may stamp the TUNNEL's heartbeat. Under warm standby every carrier
 		// runs its own readLoop and keepaliveLoop pings the standby too, so an unguarded stamp let the
 		// STANDBY's pongs keep hb fresh while b.cur was empty — an operator pin re-dialing an edge that
 		// will not come up, or a failover with nothing promoted yet. The panel read green for the whole
@@ -2588,7 +2626,7 @@ func (b *TCP) readLoop(cf *connFramer) error {
 		// prevent. b.cur is set before the reader starts on every client path (dialLoop, setActive,
 		// promote), so the live carrier's own frames are never missed.
 		if cf == b.cur.Load() {
-			b.lastRx.Store(time.Now().UnixNano())
+			b.lastRx.Store(now)
 		}
 		b.handleFrame(cf, typ, payload)
 	}
