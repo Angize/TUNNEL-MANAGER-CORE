@@ -41,9 +41,10 @@ concurrency:
 
 env:
   GO_VERSION: '1.25'
-  # TODO pin this to the exact version of the first green run — a floating @latest lets an unrelated
-  # staticcheck release turn an unrelated pull request red.
-  STATICCHECK_VERSION: latest
+  # Pinned on purpose: a floating @latest lets an unrelated staticcheck release turn an unrelated pull
+  # request red. v0.7.0 is release 2026.1 — the one the first green run of this workflow used. Bumping it
+  # is a deliberate act, and the bump commit is where any newly-reported check gets dealt with.
+  STATICCHECK_VERSION: v0.7.0
 
 jobs:
   check:
