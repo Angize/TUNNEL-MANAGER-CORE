@@ -318,6 +318,12 @@ type TCP struct {
 	// Stamped by tunLoop (outbound) and handleFrame's typeData case (inbound).
 	lastData atomic.Int64
 
+	// warmNext holds a connection that was fully dialled and handshaked BEFORE the live one was
+	// dropped, so a timed destination rotation costs no outage: dialLoop adopts it instead of dialing.
+	// Buffered depth 1 — only the rotation timer fills it, and only while a connection is live.
+	// Drained on dialLoop exit so a conn built as Close fired cannot leak its fd.
+	warmNext chan *warmDial
+
 	// pp is the DESTINATION rotation pool for the direct TCP carriers (plain tcp / tcp+cover): the
 	// client cycles the peer IPs and burns a blocked one so a single filtered server IP doesn't kill
 	// the tunnel. It is the direct-transport analogue of the ws edge pool (which owns rotation on the
@@ -1559,7 +1565,65 @@ func nextReconnectDelay(cur time.Duration) time.Duration {
 	return jitterFrac(next)
 }
 
+// warmDial is a carrier that is already connected and handshaked, waiting to replace the live one.
+type warmDial struct {
+	cf    *connFramer
+	conn  net.Conn
+	label string
+	combo string
+}
+
+// buildWarm dials and handshakes the destination pool's CURRENT endpoint (the rotation timer has
+// already advanced it) and parks the result for dialLoop, WITHOUT touching the live connection. It
+// returns false if the new endpoint would not come up — the caller then keeps the healthy connection
+// rather than trading it for a dead one, which is the whole point of make-before-break.
+//
+// Failures are attributed exactly like a primary dial (dialCarrier(true) + burn on a failed
+// handshake), so a rotation onto a blocked IP still burns it.
+func (b *TCP) buildWarm(burn func()) bool {
+	if b.closed.Load() {
+		return false
+	}
+	conn, label, combo, err := b.dialCarrier(true)
+	if err != nil {
+		burn()
+		return false
+	}
+	cf, err := b.handshakeAndPrime(conn)
+	if err != nil {
+		conn.Close()
+		burn() // answers TCP but will not carry the tunnel — same attribution the primary path uses
+		return false
+	}
+	select {
+	case b.warmNext <- &warmDial{cf: cf, conn: conn, label: label, combo: combo}:
+		return true
+	default:
+		conn.Close() // a warm conn is already parked (should not happen: one timer, one live conn)
+		return false
+	}
+}
+
+// takeWarm returns a parked warm connection, or nil.
+func (b *TCP) takeWarm() *warmDial {
+	if b.warmNext == nil {
+		return nil
+	}
+	select {
+	case w := <-b.warmNext:
+		return w
+	default:
+		return nil
+	}
+}
+
 func (b *TCP) dialLoop() {
+	b.warmNext = make(chan *warmDial, 1)
+	defer func() {
+		if w := b.takeWarm(); w != nil {
+			w.conn.Close() // built just as Close fired — do not leak the fd
+		}
+	}()
 	// direct-tcp peer/source pools: burnDest burns+advances the destination and, once the dest pool has
 	// cycled through every endpoint against the current source, walks the source too (same policy as the
 	// datagram carriers' rotationController). succeedBoth clears transient burns after a healthy session.
@@ -1609,39 +1673,50 @@ func (b *TCP) dialLoop() {
 		if b.readECHCmdSingle() { // panel live-pushed a fresh ECH key for this single edge — use it on THIS dial
 			log.Printf("core/ws: live ECH key updated for %s (single edge, no rebuild)", b.wsHost)
 		}
-		conn, label, combo, err := b.dialCarrier(true) // primary dial: attribute failures. logs the transport failure itself
-		if err != nil {
-			if b.pool != nil {
-				b.pool.advance() // rotate to the next combo for the retry
-			} else {
-				burnDest() // direct-tcp: this endpoint won't connect -> burn + advance (dest, then source)
+		// A timed rotation parks the next carrier here, already connected and handshaked, so this
+		// iteration costs neither a connect nor a handshake — that is what removes the rotation gap.
+		w := b.takeWarm()
+		var conn net.Conn
+		var label, combo string
+		var cf *connFramer
+		if w != nil {
+			conn, label, combo, cf = w.conn, w.label, w.combo, w.cf
+		} else {
+			var err error
+			conn, label, combo, err = b.dialCarrier(true) // primary dial: attribute failures. logs the transport failure itself
+			if err != nil {
+				if b.pool != nil {
+					b.pool.advance() // rotate to the next combo for the retry
+				} else {
+					burnDest() // direct-tcp: this endpoint won't connect -> burn + advance (dest, then source)
+				}
+				backoff = nextReconnectDelay(backoff)
+				if b.sleep(backoff) {
+					return
+				}
+				continue
 			}
-			backoff = nextReconnectDelay(backoff)
-			if b.sleep(backoff) {
-				return
+			cf, err = b.handshakeAndPrime(conn)
+			if err != nil {
+				conn.Close()
+				// Attribute this exactly like a failed dial. A TCP connect that COMPLETES and then fails the
+				// core handshake is the signature of a DPI that lets the SYN through and kills the payload —
+				// the most common interference shape on this fleet's paths — so the endpoint is as unusable as
+				// one that never answered. Without this the branch fell straight through to the backoff: the
+				// pool never advanced and the direct-tcp endpoint was never burned, so the client re-dialed
+				// the SAME blocked endpoint forever and destination/source rotation was inert for the one
+				// failure mode it exists to escape. (The dial-failure branch 20 lines up has always done this.)
+				if b.pool != nil {
+					b.pool.advance() // rotate to the next combo; edge health stays for attributeFailure/dataFailure
+				} else {
+					burnDest() // direct-tcp: this endpoint answers TCP but won't carry the tunnel -> burn + advance
+				}
+				backoff = nextReconnectDelay(backoff)
+				if b.sleep(backoff) {
+					return
+				}
+				continue
 			}
-			continue
-		}
-		cf, err := b.handshakeAndPrime(conn)
-		if err != nil {
-			conn.Close()
-			// Attribute this exactly like a failed dial. A TCP connect that COMPLETES and then fails the
-			// core handshake is the signature of a DPI that lets the SYN through and kills the payload —
-			// the most common interference shape on this fleet's paths — so the endpoint is as unusable as
-			// one that never answered. Without this the branch fell straight through to the backoff: the
-			// pool never advanced and the direct-tcp endpoint was never burned, so the client re-dialed
-			// the SAME blocked endpoint forever and destination/source rotation was inert for the one
-			// failure mode it exists to escape. (The dial-failure branch 20 lines up has always done this.)
-			if b.pool != nil {
-				b.pool.advance() // rotate to the next combo; edge health stays for attributeFailure/dataFailure
-			} else {
-				burnDest() // direct-tcp: this endpoint answers TCP but won't carry the tunnel -> burn + advance
-			}
-			backoff = nextReconnectDelay(backoff)
-			if b.sleep(backoff) {
-				return
-			}
-			continue
 		}
 		log.Printf("core/tcp: connected to %s", label)
 		backoff = 0 // the endpoint answered — a later re-dial starts from reconnectBase again
@@ -1743,27 +1818,40 @@ func (b *TCP) dialLoop() {
 					rot.Reset(iv) // an operator pin freezes rotation for its window — re-arm, never freeze for the life of the conn
 					return
 				}
-				moved := false
+				moved, addr := false, ""
 				if b.pp != nil {
-					if addr, m := b.pp.rotateOnce(); m {
-						moved = true
-						// A proactive destination rotation is otherwise silent (rotateOnce only refreshes the
-						// pool-state file). Surface it in the panel event ring and update the active endpoint,
-						// mirroring rotatePeerUDP which emits peer-rotate on the proactive path too. down() arms
-						// the "up" the re-dial's reconnected() pairs. nil-safe on a ws-pool/server (b.st==nil).
-						b.st.setActive(b.stTag + " · " + addr)
-						b.st.down("peer-rotate", "ip:"+addr)
+					if a, m := b.pp.rotateOnce(); m {
+						moved, addr = true, a
 					}
 				}
 				if b.rotateSourceTCP(true) { // advances the source pool; re-dial applies the new LocalAddr
 					moved = true
 				}
-				if moved {
-					rotated.Store(true)
-					c.Close()
-				} else {
+				if !moved {
 					rot.Reset(iv) // every other endpoint burned this beat — re-arm so rotation resumes once one heals
+					return
 				}
+				// MAKE BEFORE BREAK. A connection-oriented carrier cannot carry its session across a
+				// destination change the way the datagram carriers now do, so build the NEXT one first
+				// and only then drop this one: dialLoop adopts the parked carrier without dialing, and
+				// the changeover costs no connect and no handshake. Measured on the shipped code, closing
+				// first cost 0.20-0.25s of blackout at every rotation.
+				if !b.buildWarm(burnDest) {
+					// The endpoint we advanced onto will not come up. KEEP the healthy connection —
+					// trading it for a dead one is exactly what make-before-break exists to prevent —
+					// and re-arm; buildWarm already burned it, so the next beat picks a different one.
+					rot.Reset(iv)
+					return
+				}
+				// Only now is the rotation real. It is seamless, so it emits event() rather than down():
+				// down() would arm a "reconnect" that the adopting iteration then pairs, and every timed
+				// rotation would read in the panel as a drop plus a self-heal. Mirrors rotatePeerUDP.
+				if addr != "" {
+					b.st.setActive(b.stTag + " · " + addr)
+					b.st.event("down", "peer-rotate", "ip:"+addr)
+				}
+				rotated.Store(true)
+				c.Close()
 			})
 		}
 		b.serve(cf)            // blocks until this connection dies

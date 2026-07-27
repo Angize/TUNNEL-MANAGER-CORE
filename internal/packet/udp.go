@@ -963,9 +963,14 @@ func (b *UDP) clientLoop() {
 			// via a completed handshake (failN>0 then a session); clear mode has no handshake, so use the
 			// data plane: peerAnswered is set when the CURRENT endpoint replies and cleared on rotation,
 			// so healing here can never falsely clear a just-jumped-to (unproven) endpoint's burn.
-			heal := failN > 0 || (!b.cryptoOn && rc.active() && b.peerAnswered.Load())
-			if heal {
-				healEvents(b.st, rc) // active endpoints alive — clear transient burns (and release a landed pin), emit any heal
+			// Heal only what the CURRENT endpoint has EARNED. "failN > 0" alone used to be proof: it could
+			// only be non-zero in crypto mode after handshake retransmits, and reaching this branch at all
+			// meant the handshake had just succeeded. Now that a timed rotation keeps the session, failN
+			// also counts unanswered probes on an endpoint we have merely jumped to — so the old signal
+			// cleared the burn of an endpoint that had proven nothing, and a blocked IP was un-burned on
+			// every visit and never dropped out of rotation. peerAnswered is the proof, in both modes.
+			if b.peerAnswered.Load() && (failN > 0 || (!b.cryptoOn && rc.active())) {
+				healEvents(b.st, rc) // this endpoint is answering — clear transient burns, release a landed pin, emit any heal
 			}
 			// BUG #35: clear mode has no handshake to fire st.reconnected(), so a self-heal down() (the
 			// clear-mode failover above, or a peer rotate/pin) would arm wasDown with no matching "up".

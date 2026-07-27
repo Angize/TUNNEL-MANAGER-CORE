@@ -1045,8 +1045,14 @@ func (f *Flux) clientLoop() {
 		} else {
 			// Heal transient burns on endpoints proving themselves. Clear mode has no handshake, so use
 			// the data plane (peerAnswered), so a just-jumped-to endpoint's burn is never falsely cleared.
-			if failN > 0 || (!f.cryptoOn && rc.active() && f.peerAnswered.Load()) {
-				healEvents(f.st, rc)
+			// Heal only what the CURRENT endpoint has EARNED. "failN > 0" alone used to be proof: it could
+			// only be non-zero in crypto mode after handshake retransmits, and reaching this branch at all
+			// meant the handshake had just succeeded. Now that a timed rotation keeps the session, failN
+			// also counts unanswered probes on an endpoint we have merely jumped to — so the old signal
+			// cleared the burn of an endpoint that had proven nothing, and a blocked IP was un-burned on
+			// every visit and never dropped out of rotation. peerAnswered is the proof, in both modes.
+			if f.peerAnswered.Load() && (failN > 0 || (!f.cryptoOn && rc.active())) {
+				healEvents(f.st, rc) // this endpoint is answering — clear transient burns, release a landed pin, emit any heal
 			}
 			rc.proactive(f.rotatePeerFlux, f.rotateSourceFlux, time.Now())
 			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the
