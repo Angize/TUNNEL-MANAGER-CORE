@@ -1,0 +1,90 @@
+name: ci
+
+# The real compile check for this repository.
+#
+# Nothing in here can be checked on the maintainer's machine: there is no Go toolchain on it, and most of
+# the dataplane is `//go:build linux` anyway. Until now the only workflow was release-core.yml — it fires
+# on a TAG and it only builds. So a pull request could merge with a failing vet, a broken test, or code
+# that compiles for amd64 and not for arm64, and the first sign of any of it was a red release, after the
+# tag was already cut.
+#
+# release-core.yml is deliberately NOT touched: tagging still goes straight to build and publish.
+# Verifying a commit before it is tagged stays a human step on the Linux test box.
+#
+# Every push and every pull request now runs, in this order:
+#
+#   gofmt          -> formatting (list-only; the job fails and names the files)
+#   build          -> BOTH release architectures, so an arm64-only break cannot reach a tag
+#   vet            -> the standard suspicious-construct set
+#   staticcheck    -> the lint the maintainer runs by hand on the Linux test box
+#   test -race     -> the ~9k lines of tests that, before this file existed, ran nowhere automatically
+#
+# Hunting a flake:  Actions -> ci -> Run workflow -> test_count = 20   (runs `go test -count=20`).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      test_count:
+        description: 'go test -count=N — raise it to hunt an intermittent failure'
+        required: false
+        default: '1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.25'
+  # TODO pin this to the exact version of the first green run — a floating @latest lets an unrelated
+  # staticcheck release turn an unrelated pull request red.
+  STATICCHECK_VERSION: latest
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: gofmt
+        run: |
+          set -eu
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt'd:"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+          echo "gofmt: clean"
+
+      # CGO_ENABLED=0 and both arches, exactly as release-core.yml builds the shipped binary.
+      - name: build (linux/amd64 + linux/arm64)
+        run: |
+          set -eux
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build ./...
+          done
+
+      - name: vet
+        run: go vet ./...
+
+      - name: staticcheck
+        run: |
+          set -eux
+          go install honnef.co/go/tools/cmd/staticcheck@${{ env.STATICCHECK_VERSION }}
+          staticcheck -version
+          staticcheck ./...
+
+      # -race needs cgo, so this one build is deliberately NOT CGO_ENABLED=0.
+      - name: test -race
+        run: go test -race -count=${{ github.event.inputs.test_count || '1' }} ./...
