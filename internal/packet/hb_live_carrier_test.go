@@ -73,3 +73,62 @@ func TestOnlyTheLiveCarrierStampsHeartbeat(t *testing.T) {
 		return b.lastRx.Load() > promotedAt
 	})
 }
+
+// TestGoingLiveAdoptsTheCarriersOwnHeartbeat covers the other half of the same rule: a carrier that is
+// not the tunnel's records its liveness on ITSELF (cf.rxAt) — the crypto handshake and every pong it
+// answers as a standby — and the tunnel adopts that only when the carrier actually goes live.
+//
+// Without the split, building such a carrier stamped the tunnel: every warm-standby rebuild and every
+// parked rotation carrier reset the tunnel's age to zero and bought a dead tunnel another dead-window of
+// green. With it, hb still jumps the instant the carrier is promoted — from the proof it already had, not
+// from a fabricated "now" — so nothing waits for the next keepalive to go green.
+func TestGoingLiveAdoptsTheCarriersOwnHeartbeat(t *testing.T) {
+	b := &TCP{isClient: true, warmStandby: true, keepalive: time.Second, idle: 5 * time.Second,
+		closeCh: make(chan struct{})}
+
+	standbyConn, standbyPeer := net.Pipe()
+	t.Cleanup(func() {
+		close(b.closeCh)
+		standbyConn.Close()
+		standbyPeer.Close()
+	})
+	standby := b.newFramer(standbyConn)
+	standbyWire := b.newFramer(standbyPeer)
+
+	// A carrier built while the tunnel has no live one at all — exactly what warmEstablish(standby) and
+	// buildWarm produce. Its handshake proof lands on the connection.
+	handshake := time.Now().UnixNano()
+	standby.rxAt.Store(handshake)
+	if hb := b.lastRx.Load(); hb != 0 {
+		t.Fatalf("building a carrier moved the tunnel heartbeat (hb=%d) before it was ever live", hb)
+	}
+
+	// It answers keepalives for a while, still not the tunnel's carrier.
+	go b.readLoop(standby)
+	if err := standbyWire.writeFrame(typePong, nil); err != nil {
+		t.Fatalf("write standby pong: %v", err)
+	}
+	waitFor(t, 4*time.Second, "the standby recorded its own liveness", func() bool {
+		return standby.rxAt.Load() > handshake
+	})
+	if hb := b.lastRx.Load(); hb != 0 {
+		t.Fatalf("a standby's pong moved the tunnel heartbeat (hb=%d) with no live carrier", hb)
+	}
+
+	// Promotion: the tunnel adopts what the carrier already proved, with no wait for its next frame.
+	own := standby.rxAt.Load()
+	b.cur.Store(standby)
+	b.adoptRx(standby)
+	if hb := b.lastRx.Load(); hb != own {
+		t.Fatalf("a promoted carrier must publish its own last inbound frame: hb=%d, carrier=%d", hb, own)
+	}
+
+	// And hb never walks backwards — a standby built minutes ago must not age a tunnel whose outgoing
+	// active was receiving until a moment before it died.
+	newer := own + int64(time.Second)
+	b.lastRx.Store(newer)
+	b.adoptRx(standby)
+	if hb := b.lastRx.Load(); hb != newer {
+		t.Fatalf("adopting an older carrier moved the heartbeat backwards: hb=%d, want %d", hb, newer)
+	}
+}
