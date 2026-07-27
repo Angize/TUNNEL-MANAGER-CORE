@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// TestHTTPCWatchdogSparesServedSession locks in the packet-up reap fix. The handshake-window
+// TestHTTPCWatchdogSparesServedSession locks in the http-carrier reap fix. The handshake-window
 // watchdog must reap a session whose downstream GET never arrived, but must NOT kill a healthy
 // session that IS serving. Before the fix the guard checked s.done (closed only at session END), so
-// the watchdog reaped every live packet-up session at handshakeTimeout, flapping the tunnel every 10s.
+// the watchdog reaped every live http session at handshakeTimeout, flapping the tunnel every 10s.
 func TestHTTPCWatchdogSparesServedSession(t *testing.T) {
 	b := &TCP{httpcSessions: map[string]*httpcSession{}}
 	mk := func(sid string) *httpcSession {

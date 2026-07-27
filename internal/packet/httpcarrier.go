@@ -4,7 +4,7 @@
 //
 //	downstream (server -> client): one long-lived GET whose streaming response body carries
 //	                               the sealed frames.
-//	upstream   (client -> server): PACKET-UP — each write is a short, discrete POST carrying one
+//	upstream   (client -> server): a POST LADDER — each write is a short, discrete POST carrying one
 //	                               chunk plus a monotonic seq. A CDN like Cloudflare buffers a
 //	                               single long streaming request body (which stalled the
 //	                               handshake), but forwards short complete POSTs immediately; the
@@ -69,15 +69,15 @@ type strAddr string
 func (a strAddr) Network() string { return "http" }
 func (a strAddr) String() string  { return string(a) }
 
-// httpcConn presents the GET(down) + packet-up(POSTs) pair (client) or the reassembled upstream
+// httpcConn presents the GET(down) + POST-ladder(up) pair (client) or the reassembled upstream
 // pipe + downstream ResponseWriter (server) as a single net.Conn. On the client, Write goes to
-// the packet-up sender (up); on the server, Write goes to the GET response writer (w). Read
+// the POST-ladder sender (up); on the server, Write goes to the GET response writer (w). Read
 // deadlines are honoured by an idle timer that closes the conn when it fires.
 type httpcConn struct {
 	r     io.Reader
 	w     io.Writer
 	flush func()
-	up    *httpcUp // client only: packet-up upstream sender (nil on the server)
+	up    *httpcUp // client only: POST-ladder upstream sender (nil on the server)
 
 	wmu     sync.Mutex
 	wdl     atomic.Int64 // unix-nanos write deadline (0 = none); honoured by Write, unlike a no-op setter
@@ -194,14 +194,14 @@ func httpcPath(p string) string {
 	return p
 }
 
-// --- client: packet-up upstream --------------------------------------------------------------
+// --- client: POST-ladder upstream --------------------------------------------------------------
 
 type seqChunk struct {
 	seq  uint64
 	data []byte
 }
 
-// Packet-up upstream sizing. This is a request/response ladder — every batch costs one full HTTP
+// POST-ladder upstream sizing. This is a request/response ladder — every batch costs one full HTTP
 // round-trip through the CDN — so the numbers below ARE the upstream's bandwidth-delay product, and
 // they were measured rather than guessed. Two separate quantities, easy to conflate:
 //
@@ -274,7 +274,7 @@ var (
 // busy the pipe is already full and queueing only adds delay.
 const upWorkCap = 1
 
-// SetHTTPUpstream sizes the packet-up upstream for the CDN this tunnel fronts through. Zero leaves a
+// SetHTTPUpstream sizes the POST-ladder upstream for the CDN this tunnel fronts through. Zero leaves a
 // value at its default. Safe as package state for the same reason ApplyTuning is: one tnl-core process
 // serves exactly ONE tunnel and this runs once at startup, before any carrier is built.
 func SetHTTPUpstream(workers, batchKB, ratePerSec int) {
@@ -293,7 +293,7 @@ func SetHTTPUpstream(workers, batchKB, ratePerSec int) {
 	}
 }
 
-// httpcUp is the client's packet-up upstream. Writes are copied and queued; a single batcher coalesces
+// httpcUp is the client's POST-ladder upstream. Writes are copied and queued; a single batcher coalesces
 // them into one POST per batch (tagging each with a monotonic seq so the server reassembles in order)
 // and hands the batch to a small pool of workers that POST it as a short, complete request. Short
 // discrete POSTs (not one long streaming POST a CDN would buffer) are what flow through Cloudflare;
@@ -449,7 +449,7 @@ func (b *TCP) httpcEdge() (dialAddr, host string, ech []byte, path string, err e
 // Two upstream styles share the same fronting (TLS+ECH mirror wss) and the same pool rotation
 // (each attempt uses the pool's current IP × SNI; a failure burns the offending IP or SNI):
 //
-//	packet-up (default): a long-lived downstream GET plus short seq-tagged POSTs — most
+//	post (default): a long-lived downstream GET plus short seq-tagged POSTs — most
 //	                     CDN-compatible, since a CDN that buffers request bodies still forwards
 //	                     short complete POSTs at once.
 //	grpc (b.httpcMode=="grpc"): one full-duplex request presented as a
@@ -465,7 +465,7 @@ func (b *TCP) establishHTTPC(attribute bool) (net.Conn, string, string, error) {
 	// rejected ECH") until a rebuild — the exact production stall. The rejection carries a fresh
 	// RetryConfigList; redial ONCE with it BEFORE we blame the edge, so the fleet heals from the
 	// clock with no panel rebuild. errors.As reaches the *utls.ECHRejectionError (uTLS does the
-	// edge handshake) through the http.Client.Do / http2 error chain — for both packet-up and grpc.
+	// edge handshake) through the http.Client.Do / http2 error chain — for both post and grpc.
 	if err != nil && b.wsTLS && len(ech) > 0 {
 		var echErr *utls.ECHRejectionError
 		if errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
@@ -526,7 +526,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 	// happens to close it — or forever. Over hours of proactive rotation that accumulates fds and
 	// goroutines until a new standby dial can no longer be made: rotation silently stops while the
 	// already-open active conn keeps the tunnel up. Force-closing the raw conn on teardown is what
-	// actually releases it. (Harmless for the http/1.1 packet-up path too — those conns are already
+	// actually releases it. (Harmless for the http/1.1 POST-ladder path too — those conns are already
 	// idle-reaped, and Close on an already-closed conn is a no-op error we ignore.)
 	var dialedMu sync.Mutex
 	var dialed []net.Conn
@@ -552,7 +552,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 	var closeIdle func()
 	if b.wsTLS && b.httpcTLS == nil {
 		// Production TLS: uTLS with a Chrome fingerprint (see uEdgeHandshake), same as the ws
-		// carrier — the HTTP-carrier handshake must not look like Go's crypto/tls either. packet-up rides
+		// carrier — the HTTP-carrier handshake must not look like Go's crypto/tls either. the POST ladder rides
 		// http/1.1 (force that ALPN); grpc/stream ride h2 (keep Chrome's [h2, http/1.1] so the edge
 		// picks h2). We do the TLS ourselves via DialTLSContext so the transport never runs its own.
 		var alpn []string
@@ -585,7 +585,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 			tr := &http.Transport{
 				DialTLSContext:      func(ctx context.Context, _, _ string) (net.Conn, error) { return dialTLS(ctx) },
 				MaxIdleConns:        upIdleConns * 2,
-				MaxIdleConnsPerHost: upIdleConns, // the GET holds one of these; the packet-up POSTs reuse the rest
+				MaxIdleConnsPerHost: upIdleConns, // the GET holds one of these; the upstream POSTs reuse the rest
 				IdleConnTimeout:     90 * time.Second,
 			}
 			rt, closeIdle = tr, func() { tr.CloseIdleConnections(); forceClose() }
@@ -630,7 +630,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 		r.Header.Set("Accept-Language", "en-US,en;q=0.9")
 		r.Header.Set("Cache-Control", "no-store")
 	}
-	// Only two modes: grpc (one full-duplex request) and packet-up (default). Plain stream-one
+	// Only two modes: grpc (one full-duplex request) and post (default). Plain stream-one
 	// (octet-stream) was removed because it stalled through CDNs that buffer the origin leg.
 	var conn net.Conn
 	var err error
@@ -638,7 +638,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 	case "grpc":
 		conn, err = b.dialHTTPCGrpc(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)
 	default:
-		conn, err = b.dialHTTPCPacket(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)
+		conn, err = b.dialHTTPCPost(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)
 	}
 	if err != nil {
 		// A FAILED establish (dial ok but header timeout / non-200 / write error) has cancelled the
@@ -794,9 +794,9 @@ func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Conte
 	return conn, nil
 }
 
-// dialHTTPCPacket (packet-up) opens the long-lived downstream GET and starts the packet-up
+// dialHTTPCPost (post) opens the long-lived downstream GET and starts the POST-ladder
 // upstream sender for a fresh session, returning a net.Conn over the pair.
-func (b *TCP) dialHTTPCPacket(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request)) (net.Conn, error) {
+func (b *TCP) dialHTTPCPost(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request)) (net.Conn, error) {
 	greq, err := http.NewRequestWithContext(ctx, "GET", base+"?s="+sid, nil)
 	if err != nil { // a malformed host/path would otherwise nil-deref inside doWithHeaderTimeout's goroutine
 		cancel()
@@ -835,7 +835,7 @@ type httpcSession struct {
 	start  sync.Once
 	end    sync.Once
 
-	upMu    sync.Mutex        // orders packet-up POSTs by seq before writing to the upstream pipe
+	upMu    sync.Mutex        // orders upstream POSTs by seq before writing to the upstream pipe
 	nextSeq uint64            // next seq we expect to hand to upW
 	pend    map[uint64][]byte // out-of-order chunks waiting for the gap to fill
 }
@@ -858,7 +858,7 @@ func (b *TCP) httpcGetOrCreate(sid string) *httpcSession {
 // reapIfUnserved closes a session that never had a downstream GET bind (serve start) within the
 // handshake window. It MUST spare a live session: the guard is s.served (closed when the GET starts
 // serving), NOT s.done (closed only at session END) — checking s.done would reap every healthy
-// packet-up session at handshakeTimeout.
+// http session at handshakeTimeout.
 func (s *httpcSession) reapIfUnserved(b *TCP, sid string) {
 	select {
 	case <-s.served: // a GET bound and serve started -> live session, leave it
@@ -868,7 +868,7 @@ func (s *httpcSession) reapIfUnserved(b *TCP, sid string) {
 	}
 }
 
-// deliver feeds one packet-up chunk into the ordered upstream. Out-of-order chunks are buffered
+// deliver feeds one upstream chunk into the ordered upstream. Out-of-order chunks are buffered
 // until the gap fills; already-delivered seqs are dropped. Writes happen under upMu so the byte
 // stream stays correctly ordered even with several POSTs in flight.
 func (s *httpcSession) deliver(seq uint64, data []byte) {
@@ -934,7 +934,7 @@ func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request) {
 }
 
 // httpcHandler routes a session's requests by shape. grpc is a single full-duplex POST with
-// Content-Type application/grpc. packet-up uses a GET (downstream body, drives handleServerConn
+// Content-Type application/grpc. post uses a GET (downstream body, drives handleServerConn
 // once) plus seq-tagged POSTs (?seq=N) fed into the upstream. The server auto-detects the style
 // per request, so a grpc client and a packet client both work against one endpoint.
 func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
@@ -1007,7 +1007,7 @@ func (b *TCP) runHTTPCServer() {
 	// Wrap in an h2c handler so a CDN can reach us over HTTP/2 cleartext. Cloudflare connects to
 	// the origin with h2c when gRPC is enabled — that is the leg that STREAMS a full-duplex call
 	// instead of buffering the request body (which stalls stream-one over a plain HTTP/1.1 origin).
-	// h2c falls through to HTTP/1.1 for packet-up, so every mode shares this one plaintext listener.
+	// h2c falls through to HTTP/1.1 for the POST ladder, so every mode shares this one plaintext listener.
 	srv := &http.Server{Handler: h2c.NewHandler(mux, &http2.Server{})}
 	b.httpSrv.Store(srv) // publish atomically so Close (another goroutine) sees it without a data race
 	if err := srv.Serve(b.ln); err != nil && !b.closed.Load() {

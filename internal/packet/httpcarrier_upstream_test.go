@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// The packet-up upstream is a request/response ladder: capacity ≈ (in-flight bytes)/RTT, while
+// The http carrier's upstream is a request/response ladder: capacity ≈ (in-flight bytes)/RTT, while
 // anything merely QUEUED is pure added latency that a keepalive ping cannot jump (the obfs length-mask
 // keystream forbids reordering, so there is no priority lane). Those two quantities are easy to
 // conflate, and the original numbers had them backwards — a 128 KiB window behind a ~600 KiB queue,
