@@ -907,7 +907,7 @@ func (p *wsPool) writeStatus() {
 	}
 	// Hold writeMu across BOTH the snapshot and the file write, so two concurrent writers can't snapshot
 	// in one order and win the write in the reverse order — an older snapshot must never overwrite a
-	// newer file (as of v2.48.3 beat() also re-publishes every hbInterval, so a stale file additionally
+	// newer file (as of v2.48.3 beat() also re-publishes every heartbeat period, so a stale file additionally
 	// self-corrects within one interval; the ordering below still matters for two near-simultaneous writes).
 	// p.mu is always released before any caller reaches writeStatus, so writeMu→p.mu never inverts.
 	p.writeMu.Lock()

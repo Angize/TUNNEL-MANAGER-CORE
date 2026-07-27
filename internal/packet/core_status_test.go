@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestTCPSingleEdgeECHSelfHeal verifies a single fixed-edge ws client (no pool) persists the fresh
@@ -79,6 +80,43 @@ func TestCoreStatusEventPairing(t *testing.T) {
 	off.down("stale", "udp")
 	off.reconnected("udp")
 	off.event("down", "stale", "udp")
+}
+
+// TestHBPeriodTracksDeadWindow pins the rule that keeps a healthy tunnel out of the red: hb is a
+// TIMESTAMP, so the publish period must stay a fraction of the window the reader ages it against.
+//
+// The worst case is the tightest window the config allows — dead_after clamped to 2×keepalive — where a
+// perfectly healthy carrier's newest frame is already up to 1.3×keepalive old (the keepalive jitter
+// ceiling) when it is read. The old fixed 5s period added a whole 5s on top of that and crossed dw.
+func TestHBPeriodTracksDeadWindow(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		dw   int64
+		want time.Duration
+	}{
+		{"the default 30s window keeps the 5s ceiling", 30, 5 * time.Second},
+		{"a window of exactly 20s still keeps it", 20, 5 * time.Second},
+		{"the reported flicker case (keepalive 5 + dead_after 10)", 10, 2500 * time.Millisecond},
+		{"a tight window floors at one second, not below", 3, time.Second},
+		{"no window resolved keeps the plain ceiling", 0, 5 * time.Second},
+	} {
+		if got := hbPeriod(c.dw); got != c.want {
+			t.Errorf("%s: hbPeriod(%d) = %v, want %v", c.name, c.dw, got, c.want)
+		}
+	}
+
+	// The property the numbers exist for: publish lag + the oldest a healthy keepalive can be must stay
+	// inside the window, for every window a carrier can resolve to. dw==2×keepalive is the tightest legal
+	// pairing (deadWindow clamps there). Below dw=3 the jitter ceiling alone (1.3×keepalive) all but fills
+	// the window, so the carrier self-heals on its own timing and no publisher can help; the smallest
+	// window the shipped knobs can even produce is far above that (dead_after starts at 10).
+	for dw := int64(3); dw <= 600; dw++ {
+		keepalive := float64(dw) / 2
+		oldest := 1.3*keepalive + hbPeriod(dw).Seconds()
+		if oldest >= float64(dw) {
+			t.Fatalf("dw=%ds: a healthy carrier publishes an age of %.2fs against a %ds window — it reads dead", dw, oldest, dw)
+		}
+	}
 }
 
 func readEvents(t *testing.T, path string) []coreEvent {

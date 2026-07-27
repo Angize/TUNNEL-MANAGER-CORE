@@ -28,16 +28,48 @@ type coreStatus struct {
 	dw      int64 // this carrier's RESOLVED dead-window in seconds — the single number a reader uses to age hb
 }
 
-// hbInterval is how often a client carrier republishes its lastRx heartbeat into the status file, so a
-// reader can tell a live-but-idle tunnel (hb advances every keepalive) from a dead one (hb frozen) with
-// no ICMP. Kept small relative to keepalive so the freeze becomes visible promptly.
+// hbInterval is the CEILING on how often a client carrier republishes its lastRx heartbeat into the
+// status file, so a reader can tell a live-but-idle tunnel (hb advances every keepalive) from a dead one
+// (hb frozen) with no ICMP. Kept small relative to keepalive so the freeze becomes visible promptly.
 const hbInterval = 5 * time.Second
 
-// heartbeatLoop republishes the carrier's lastRx (unix-seconds) via beat every hbInterval until done
-// closes: an immediate publish so a reader sees a heartbeat at startup, then one per tick.
-func heartbeatLoop(beat func(int64), lastRx *atomic.Int64, done <-chan struct{}) {
+// hbMinInterval floors the republish period: a very tight dead-window must not turn every tunnel's
+// heartbeat into a sub-second status-file rewrite loop.
+const hbMinInterval = time.Second
+
+// hbPeriod resolves how often to republish for a carrier whose resolved dead-window is dwSecs — the SAME
+// number setDW publishes, which is what a reader ages hb against.
+//
+// hb is a TIMESTAMP, not a tick: the reader computes age = now - hb, so a late republish INFLATES the age
+// by up to one whole period. A fixed 5s period is fine against a 30s window and wrong against a tight
+// one: keepalive=5s with dead_after=10s (both allowed; dw=10) publishes an age that reaches ~12.5s on a
+// tunnel that never lost a frame, and the panel dot flickers red/green.
+//
+// dw/4 is what the arithmetic asks for. A healthy idle carrier's newest inbound frame is already up to
+// 1.3×keepalive old (the keepalive jitter ceiling), and dead_after is clamped to >=2×keepalive, so that
+// term is at most 0.65×dw; a quarter-window of publish lag lands the published age at 0.9×dw plus the
+// pong's RTT, leaving a tenth of the window as margin. A third-window leaves ~1.7% — under a tight
+// dw=10 that is 0.17s, i.e. less than the RTT on any real path, so it would still flicker.
+//
+// dwSecs<=0 (no window resolved) keeps the plain ceiling.
+func hbPeriod(dwSecs int64) time.Duration {
+	p := hbInterval
+	if dwSecs > 0 {
+		if quarter := time.Duration(dwSecs) * time.Second / 4; quarter < p {
+			p = quarter
+		}
+	}
+	if p < hbMinInterval {
+		p = hbMinInterval
+	}
+	return p
+}
+
+// heartbeatLoop republishes the carrier's lastRx (unix-seconds) via beat every period until done closes:
+// an immediate publish so a reader sees a heartbeat at startup, then one per tick.
+func heartbeatLoop(beat func(int64), lastRx *atomic.Int64, done <-chan struct{}, period time.Duration) {
 	beat(lastRx.Load() / int64(time.Second))
-	t := time.NewTicker(hbInterval)
+	t := time.NewTicker(period)
 	defer t.Stop()
 	for {
 		select {
@@ -49,23 +81,23 @@ func heartbeatLoop(beat func(int64), lastRx *atomic.Int64, done <-chan struct{})
 	}
 }
 
-// heartbeat republishes lastRx into the coreStatus file. A nil status writer (no status_path wired) is a
-// no-op, so it is always safe to start for any client. The nil guard stays HERE so a nil status never
-// leaves a goroutine ticking forever.
-func heartbeat(s *coreStatus, lastRx *atomic.Int64, done <-chan struct{}) {
+// heartbeat republishes lastRx into the coreStatus file, paced against the carrier's dead-window dwSecs.
+// A nil status writer (no status_path wired) is a no-op, so it is always safe to start for any client.
+// The nil guard stays HERE so a nil status never leaves a goroutine ticking forever.
+func heartbeat(s *coreStatus, lastRx *atomic.Int64, done <-chan struct{}, dwSecs int64) {
 	if s == nil {
 		return
 	}
-	heartbeatLoop(s.beat, lastRx, done)
+	heartbeatLoop(s.beat, lastRx, done, hbPeriod(dwSecs))
 }
 
 // heartbeatPool is heartbeat for a ws/http edge pool, whose status file is written by wsPool.writeStatus
 // (not coreStatus), so an idle pooled tunnel reads live, not half-open. A nil pool is a no-op.
-func heartbeatPool(p *wsPool, lastRx *atomic.Int64, done <-chan struct{}) {
+func heartbeatPool(p *wsPool, lastRx *atomic.Int64, done <-chan struct{}, dwSecs int64) {
 	if p == nil {
 		return
 	}
-	heartbeatLoop(p.beat, lastRx, done)
+	heartbeatLoop(p.beat, lastRx, done, hbPeriod(dwSecs))
 }
 
 // beat records the latest lastRx (unix-seconds) and flushes the file. lastRx only moves forward (it is

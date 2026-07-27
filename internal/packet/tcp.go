@@ -732,12 +732,13 @@ func (b *TCP) Run() error {
 		// brief) from "connected" (hb advancing), so a freshly (re)built tunnel reads YELLOW — not green —
 		// until the peer actually answers, and a carrier that never connects ages to red instead of
 		// looking alive from a startup seed.
+		dw := int64(b.idle.Seconds()) // b.idle IS the resolved stream dead-window (idle backstop / dead_after)
 		if b.st != nil {
-			b.st.setDW(int64(b.idle.Seconds()))      // b.idle IS the resolved stream dead-window (idle backstop / dead_after)
-			go heartbeat(b.st, &b.lastRx, b.closeCh) // single-edge / direct-tcp: publish lastRx so an idle tunnel reads live, not half-open
+			b.st.setDW(dw)                                 // publish it so the reader ages hb against it...
+			go heartbeat(b.st, &b.lastRx, b.closeCh, dw)   // ...and pace the republish off it: single-edge / direct-tcp
 		} else if b.pool != nil {
-			b.pool.setDW(int64(b.idle.Seconds()))
-			go heartbeatPool(b.pool, &b.lastRx, b.closeCh) // ws/http edge pool uses its own status writer
+			b.pool.setDW(dw)
+			go heartbeatPool(b.pool, &b.lastRx, b.closeCh, dw) // ws/http edge pool uses its own status writer
 		}
 		if b.pool != nil {
 			go b.retestLoop() // background health retests with exponential backoff

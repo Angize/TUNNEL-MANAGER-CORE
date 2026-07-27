@@ -593,8 +593,9 @@ func (b *UDP) Run() error {
 	if b.isClient {
 		go func() { errc <- b.netToTun() }()
 		go b.clientLoop()
-		b.st.setDW(int64(b.deadWin().Seconds())) // publish the resolved dead-window so the reader ages hb against it
-		go heartbeat(b.st, &b.hbRx, b.closeCh)   // publish lastRx to the status file so an idle tunnel reads live, not half-open
+		dw := int64(b.deadWin().Seconds())         // the resolved dead-window, in seconds
+		b.st.setDW(dw)                             // publish it so the reader ages hb against it...
+		go heartbeat(b.st, &b.hbRx, b.closeCh, dw) // ...and pace the republish off it, so an idle tunnel reads live, not half-open
 	} else {
 		for _, c := range b.srvConns {
 			c := c
