@@ -1057,16 +1057,17 @@ func (r *Raw) SetPeerPool(pp *PeerPool) {
 	if r.isClient {
 		r.pp = pp
 		if pp != nil {
-			r.poolIPs = buildSrcAllow(pp.all()) // see provenFrom: tells "the endpoint we left" apart from "an unattributable source"
-		}
-		// Admit every pool endpoint as a reply source. A timed rotation keeps the session (see
-		// rotatePeerRaw), so for about one RTT after the jump the server is still answering from the
-		// endpoint we just left — those frames open under the same keys and are ours, but the strict
-		// single-source filter in netToTun would drop them and turn a seamless rotation back into a
-		// small loss burst. All pool addresses belong to the same server node, and the AEAD still
-		// authenticates every frame, so this widens nothing an attacker can use.
-		if pp != nil {
-			if m := buildSrcAllow(pp.all()); len(m) > 0 {
+			// ONE map, two readers, so the two views of the pool can never drift apart:
+			//  - poolIPs: see provenFrom — tells "the endpoint we left" apart from "an unattributable source".
+			//  - srcAllow: admit every pool endpoint as a reply source. A timed rotation keeps the session
+			//    (see rotatePeerRaw), so for about one RTT after the jump the server is still answering from
+			//    the endpoint we just left — those frames open under the same keys and are ours, but the
+			//    strict single-source filter in netToTun would drop them and turn a seamless rotation back
+			//    into a small loss burst. All pool addresses belong to the same server node, and the AEAD
+			//    still authenticates every frame, so this widens nothing an attacker can use.
+			m := buildSrcAllow(pp.all())
+			r.poolIPs = m
+			if len(m) > 0 {
 				r.srcAllow = m
 			}
 		}
