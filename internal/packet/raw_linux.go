@@ -406,8 +406,9 @@ func (r *Raw) Run() error {
 	}
 	if r.isClient {
 		go r.clientLoop()
-		r.st.setDW(int64(r.deadWin().Seconds())) // publish the resolved dead-window so the reader ages hb against it
-		go heartbeat(r.st, &r.hbRx, r.closeCh)   // publish lastRx to the status file so an idle tunnel reads live, not half-open
+		dw := int64(r.deadWin().Seconds())         // the resolved dead-window, in seconds
+		r.st.setDW(dw)                             // publish it so the reader ages hb against it...
+		go heartbeat(r.st, &r.hbRx, r.closeCh, dw) // ...and pace the republish off it, so an idle tunnel reads live, not half-open
 	}
 	return <-errc
 }

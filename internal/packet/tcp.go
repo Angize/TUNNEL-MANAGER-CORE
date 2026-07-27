@@ -309,7 +309,7 @@ type TCP struct {
 	rotate time.Duration // client: proactive pool-rotation interval (0 = failover-only)
 	st     *coreStatus   // client + single-edge ws/http: self-heal event ring -> status file (nil = off / pool / server)
 	stTag  string        // carrier label prefix ("tcp"/"cover"/"ws"/"http") for setActive on a direct-pool rotation; set alongside st
-	lastRx atomic.Int64  // client: unix-nano of the last authenticated INBOUND frame — feeds the status-file heartbeat (v2.48.3). Seeded once in Run() and advanced ONLY by readLoop; never stamp it for a frame we sent, or a carrier that reconnects forever behind a CDN reads "alive" while nothing flows (v2.48.5)
+	lastRx atomic.Int64  // client: unix-nano of the last authenticated INBOUND frame on the LIVE carrier — feeds the status-file heartbeat (v2.48.3). Advanced only by the crypto handshake and by readLoop while cf==b.cur; never stamp it for a frame we sent (a carrier that reconnects forever behind a CDN would read "alive" while nothing flows, v2.48.5), nor for a warm standby (its keepalive pongs would hold the tunnel green with an empty active slot)
 
 	// lastData is the unix-nano of the last real DATA frame moved in EITHER direction (never ping/pong).
 	// It drives opportunistic keepalive: when data moved within the last keepalive period the standalone
@@ -732,12 +732,13 @@ func (b *TCP) Run() error {
 		// brief) from "connected" (hb advancing), so a freshly (re)built tunnel reads YELLOW — not green —
 		// until the peer actually answers, and a carrier that never connects ages to red instead of
 		// looking alive from a startup seed.
+		dw := int64(b.idle.Seconds()) // b.idle IS the resolved stream dead-window (idle backstop / dead_after)
 		if b.st != nil {
-			b.st.setDW(int64(b.idle.Seconds()))      // b.idle IS the resolved stream dead-window (idle backstop / dead_after)
-			go heartbeat(b.st, &b.lastRx, b.closeCh) // single-edge / direct-tcp: publish lastRx so an idle tunnel reads live, not half-open
+			b.st.setDW(dw)                               // publish it so the reader ages hb against it...
+			go heartbeat(b.st, &b.lastRx, b.closeCh, dw) // ...and pace the republish off it: single-edge / direct-tcp
 		} else if b.pool != nil {
-			b.pool.setDW(int64(b.idle.Seconds()))
-			go heartbeatPool(b.pool, &b.lastRx, b.closeCh) // ws/http edge pool uses its own status writer
+			b.pool.setDW(dw)
+			go heartbeatPool(b.pool, &b.lastRx, b.closeCh, dw) // ws/http edge pool uses its own status writer
 		}
 		if b.pool != nil {
 			go b.retestLoop() // background health retests with exponential backoff
@@ -2578,8 +2579,17 @@ func (b *TCP) readLoop(cf *connFramer) error {
 			// FRESH (non-replayed) frame proves the live peer is still answering.
 			continue
 		}
-		cf.unanswered.Store(0)                // a fresh inbound frame proves the peer is alive -> reset ping-loss
-		b.lastRx.Store(time.Now().UnixNano()) // ...and stamp liveness for the status-file heartbeat (client hb)
+		cf.unanswered.Store(0) // a fresh inbound frame proves the peer is alive -> reset ping-loss
+		// ...but only the LIVE carrier may stamp the tunnel's heartbeat. Under warm standby every carrier
+		// runs its own readLoop and keepaliveLoop pings the standby too, so an unguarded stamp let the
+		// STANDBY's pongs keep hb fresh while b.cur was empty — an operator pin re-dialing an edge that
+		// will not come up, or a failover with nothing promoted yet. The panel read green for the whole
+		// pin_ttl while 100% of the packets were dropped, which is the exact false-green lastRx exists to
+		// prevent. b.cur is set before the reader starts on every client path (dialLoop, setActive,
+		// promote), so the live carrier's own frames are never missed.
+		if cf == b.cur.Load() {
+			b.lastRx.Store(time.Now().UnixNano())
+		}
 		b.handleFrame(cf, typ, payload)
 	}
 }
