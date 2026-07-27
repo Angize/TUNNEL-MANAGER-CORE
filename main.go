@@ -214,7 +214,7 @@ func main() {
 				if err == nil {
 					mode := cfg.cdnMode()
 					if mode == "" {
-						mode = "packet"
+						mode = "post"
 					}
 					log.Printf("tnl-core: dialing (core/http:%s%s wss) %s", mode, obfsTag, cfg.Peer)
 				}
@@ -317,7 +317,7 @@ func main() {
 			log.Printf("tnl-core: fake-desync on (%d decoys, ttl=%d, mode=%s)", cfg.FakeCount, cfg.FakeTTL, cfg.FakeMode)
 		}
 	}
-	// Packet-up upstream shape (client, httpc): per-CDN, see SetHTTPUpstream. Before any dial.
+	// POST-ladder upstream shape (client, httpc): per-CDN, see SetHTTPUpstream. Before any dial.
 	if cfg.Role == "client" && cfg.cdnIsHTTP() && (cfg.HTTPUpWorkers|cfg.HTTPUpBatchKB|cfg.HTTPUpRate) != 0 {
 		packet.SetHTTPUpstream(cfg.HTTPUpWorkers, cfg.HTTPUpBatchKB, cfg.HTTPUpRate)
 		log.Printf("tnl-core: httpc upstream: workers=%d batch=%dKB rate=%d/s (0 = default)",

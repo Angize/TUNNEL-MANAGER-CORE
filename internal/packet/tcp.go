@@ -376,13 +376,13 @@ type TCP struct {
 	standbyConn atomic.Pointer[net.Conn]   // client+warm: the standby's live conn (for teardown)
 
 	// HTTP carrier (transport "ws" with ws_httpc): the core stream rides an HTTP request
-	// pair (packet-up: GET-down + seq-POSTs-up) or a single full-duplex request
+	// pair (post: GET-down + seq-POSTs-up) or a single full-duplex request
 	// (stream-one) instead of a WebSocket upgrade, so it passes CDNs that block WebSocket.
 	// Same fronting fields (wsHost/wsTLS/wsECH/wsPath) apply. Because the client carries
 	// core frames directly over these requests (the HTTP layer replaces the WS upgrade),
 	// the server must NOT run wsServerHandshake on an HTTP-carrier conn — see handleServerConn.
 	httpc         bool
-	httpcMode     string                      // client: "grpc" (single full-duplex request) else packet-up
+	httpcMode     string                      // client: "grpc" (single full-duplex request) else "post"
 	httpcTLS      *tls.Config                 // test-only: overrides the client edge TLS config (nil in production)
 	httpSrv       atomic.Pointer[http.Server] // server: the HTTP-carrier endpoint (nil otherwise); atomic — written by runHTTPCServer's goroutine, read by Close
 	httpcMu       sync.Mutex
@@ -1194,7 +1194,7 @@ func verifyOuterCert(certs []*x509.Certificate, publicName string, roots *x509.C
 
 // chromeSpec returns a freshly built current-Chrome ClientHelloSpec. When alpn is non-nil it
 // overrides Chrome's ALPN VALUES (Chrome offers [h2, http/1.1]) — we force ["http/1.1"] for the
-// WebSocket/packet-up carriers so the edge does not pick h2, and pass nil for the grpc carrier to
+// WebSocket/POST-ladder carriers so the edge does not pick h2, and pass nil for the grpc carrier to
 // keep Chrome's h2. Only the ALPN values change, not the extension SET, so the JA3 still matches
 // Chrome (the ApplicationSettings extension keeps its authentic h2; only ALPN drives negotiation).
 // UTLSIdToSpec builds a fresh spec each call, so mutating its ALPN cannot disturb a shared parrot;
@@ -2683,7 +2683,7 @@ func (b *TCP) tunLoop() {
 }
 
 // diagLoop (client) emits a low-rate heartbeat of the process goroutine count. A carrier session
-// that is retired on rotation but not fully reaped (its reader, packet-up workers, or an underlying
+// that is retired on rotation but not fully reaped (its reader, upstream POST workers, or an underlying
 // h2 conn left dangling) shows up here as a steadily climbing number in journald — turning an
 // "it worked for hours then rotation just stopped" report into a measurable trend instead of a
 // guess. One line every few minutes is negligible log volume and never touches the data path.

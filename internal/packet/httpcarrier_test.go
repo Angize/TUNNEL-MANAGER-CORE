@@ -18,7 +18,7 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// echoHTTPC is a minimal packet-up server: it reassembles the client's seq-tagged upstream POSTs
+// echoHTTPC is a minimal http-carrier server: it reassembles the client's seq-tagged upstream POSTs
 // into an ordered byte stream and echoes it back on the session's long-lived downstream GET.
 func echoHTTPC() *httptest.Server {
 	type sess struct {
@@ -88,7 +88,7 @@ func echoHTTPC() *httptest.Server {
 // terminates TLS for any of its anycast IPs, so a dead origin behind it completes TCP+TLS yet 502s
 // the actual httpc establish — the old TLS-only probe passed that edge (falsely healing it on retest
 // and defeating the manual-pin auto-release, which read the block as "transient"). The real-establish
-// probe must fail it. packet-up mode over plain http isolates exactly this: front reachable, origin dead.
+// probe must fail it. the http carrier over plain HTTP isolates exactly this: front reachable, origin dead.
 func TestHTTPCProbeUsesRealEstablish(t *testing.T) {
 	good := echoHTTPC()
 	defer good.Close()
@@ -168,7 +168,7 @@ func TestHTTPCCarrierRoundTrip(t *testing.T) {
 	if string(got) != string(want) {
 		t.Fatalf("round-trip mismatch: got %d bytes, want %d", len(got), len(want))
 	}
-	t.Logf("httpc packet-up round-tripped %d bytes both ways", len(got))
+	t.Logf("httpc round-tripped %d bytes both ways", len(got))
 }
 
 // httpcInject drives one packet each way through a live httpc tunnel and asserts it arrives
@@ -198,15 +198,15 @@ func httpcInject(t *testing.T, cliCtrl, srvCtrl *os.File) {
 	}
 }
 
-// TestTunnelHTTPCPacketUp runs a full server<->client httpc tunnel in packet-up mode over a real
+// TestTunnelHTTPCPost runs a full server<->client httpc tunnel in POST-ladder mode over a real
 // (plain HTTP/1.1) socket and asserts a packet traverses each way. It is the regression test for
 // the server-side bug where handleServerConn ran wsServerHandshake on an HTTP-carrier conn (b.ws is set
 // for httpc): the client speaks core frames directly over the GET/POST pair, so a WS handshake
 // there misreads the core handshake as an HTTP request and the tunnel connects but passes no data.
-func TestTunnelHTTPCPacketUp(t *testing.T) { testTunnelHTTPC(t, "packet", false) }
+func TestTunnelHTTPCPost(t *testing.T) { testTunnelHTTPC(t, "post", false) }
 
-// TestTunnelHTTPCPacketUpObfs is the same with the length-mask obfs handshake in play.
-func TestTunnelHTTPCPacketUpObfs(t *testing.T) { testTunnelHTTPC(t, "packet", true) }
+// TestTunnelHTTPCPostObfs is the same with the length-mask obfs handshake in play.
+func TestTunnelHTTPCPostObfs(t *testing.T) { testTunnelHTTPC(t, "post", true) }
 
 func testTunnelHTTPC(t *testing.T, mode string, obfs bool) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
@@ -220,7 +220,7 @@ func testTunnelHTTPC(t *testing.T, mode string, obfs bool) {
 	if err != nil {
 		t.Fatalf("ListenHTTPC: %v", err)
 	}
-	// single-edge packet-up client over plain HTTP; host defaults to the dial addr.
+	// single-edge http client over plain HTTP; host defaults to the dial addr.
 	cli, err := DialHTTPC(addr, cliDev, ka, obfs, true, psk, cipher, "", "/", false, nil, mode)
 	if err != nil {
 		t.Fatalf("DialHTTPC: %v", err)

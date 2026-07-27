@@ -34,12 +34,12 @@ type WSSNI struct {
 // for both "http" and "grpc", since both ride ordinary requests through the CDN.
 func (c *Config) cdnIsHTTP() bool { return c.CDNCarrier == "http" || c.CDNCarrier == "grpc" }
 
-// cdnMode is the upstream style the data plane is told: "grpc", else packet-up.
+// cdnMode is the upstream style the data plane is told: "grpc", else "post".
 func (c *Config) cdnMode() string {
 	if c.CDNCarrier == "grpc" {
 		return "grpc"
 	}
-	return "packet"
+	return "post"
 }
 
 type Config struct {
@@ -212,7 +212,7 @@ type Config struct {
 	// One field, not a boolean plus a mode: that pair could express states that do not exist
 	// ("not http, but grpc") and made the code and the panel call the same thing different names.
 	CDNCarrier string `json:"cdn_carrier"`
-	// On "http" the upstream is packet-up: each
+	// On "http" the upstream is a POST ladder: each
 	// write is a short discrete POST — the most CDN-compatible, since a CDN that buffers
 	// request bodies still forwards short complete POSTs at once. "grpc" is a single
 	// full-duplex request wrapped as a real gRPC stream (Content-Type application/grpc +
@@ -222,7 +222,7 @@ type Config struct {
 	// plain stream-one was removed, it stalled through buffering CDNs. Only
 	// The server auto-detects the client's style per request (and serves h2c so the CDN can reach
 	// it over HTTP/2), so only the client side needs to be told.
-	// HTTPUpWorkers / HTTPUpBatchKB / HTTPUpRate size the packet-up upstream (cdn_carrier "http") for the CDN in front. The default suits Cloudflare, which does not mind ~70
+	// HTTPUpWorkers / HTTPUpBatchKB / HTTPUpRate size the POST-ladder upstream (cdn_carrier "http") for the CDN in front. The default suits Cloudflare, which does not mind ~70
 	// requests/sec from one address; a WAF-protected CDN needs fewer, larger POSTs or it blocks the
 	// source IP. HTTPUpRate is a ceiling on POSTs per second and is the portable one — a worker count
 	// means a different request rate on a fast path than on a slow one. All zero = compiled defaults.
@@ -596,12 +596,12 @@ func (c *Config) validate() error {
 		// SNI fragmentation splits the wss ClientHello, so it needs wss on a client. split_pos is a
 		// byte offset into the ClientHello (0 = auto: middle of the hostname); cap it so a runaway
 		// value can't push the split past a plausible ClientHello.
-		// The upstream shape only exists on a packet-up client; reject it elsewhere rather than
+		// The upstream shape only exists on an http-carrier client; reject it elsewhere rather than
 		// storing a setting that silently does nothing (the class of defect that made fake_desync on
 		// httpc look enabled for months).
 		if c.HTTPUpWorkers != 0 || c.HTTPUpBatchKB != 0 || c.HTTPUpRate != 0 {
 			if c.Role != "client" || c.CDNCarrier != "http" {
-				return errors.New("http_up_workers/http_up_batch_kb/http_up_rate apply to a packet-up httpc CLIENT only")
+				return errors.New("http_up_workers/http_up_batch_kb/http_up_rate apply to an http-carrier CLIENT only")
 			}
 			if c.HTTPUpWorkers < 0 || c.HTTPUpWorkers > 16 {
 				return errors.New("http_up_workers must be between 1 and 16 (0 = default)")
@@ -629,7 +629,7 @@ func (c *Config) validate() error {
 				return errors.New("split_ttl must be between 0 and 255")
 			}
 		}
-		// httpc upstream style: packet-up (default) or grpc. grpc is a single full-duplex
+		// httpc upstream style: post (default) or grpc. grpc is a single full-duplex
 		// request and needs HTTP/2 to the edge, so on a single-edge client it requires ws_tls
 		// (a pool is always wss; the server auto-detects).
 		switch c.CDNCarrier {
