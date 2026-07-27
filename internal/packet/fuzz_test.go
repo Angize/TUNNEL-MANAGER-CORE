@@ -41,9 +41,9 @@ func FuzzGrpcDeframe(f *testing.F) {
 
 // FuzzReadWSFrame: the WebSocket frame header/length/mask parser (client reads server frames here).
 func FuzzReadWSFrame(f *testing.F) {
-	f.Add([]byte{0x82, 0x03, 1, 2, 3})                                     // unmasked, len 3
-	f.Add([]byte{0x82, 0x83, 0xaa, 0xbb, 0xcc, 0xdd, 1, 2, 3})            // masked, len 3
-	f.Add([]byte{0x82, 0x7e, 0xff, 0xff})                                 // 16-bit extended length
+	f.Add([]byte{0x82, 0x03, 1, 2, 3})                                        // unmasked, len 3
+	f.Add([]byte{0x82, 0x83, 0xaa, 0xbb, 0xcc, 0xdd, 1, 2, 3})                // masked, len 3
+	f.Add([]byte{0x82, 0x7e, 0xff, 0xff})                                     // 16-bit extended length
 	f.Add([]byte{0x82, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}) // 64-bit extended length
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _, _ = readWSFrame(bufio.NewReader(bytes.NewReader(data)))

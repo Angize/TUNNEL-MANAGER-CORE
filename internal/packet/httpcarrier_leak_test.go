@@ -63,7 +63,7 @@ func TestHTTPCGrpcNoConnLeakOnRotation(t *testing.T) {
 			t.Fatalf("establishHTTPC: %v", err)
 		}
 		_, _ = conn.Write([]byte("prime")) // make the h2 conn fully live before we retire it
-		conn.Close()                        // the rotation teardown path: closeFn -> closeIdle -> forceClose
+		conn.Close()                       // the rotation teardown path: closeFn -> closeIdle -> forceClose
 	}
 
 	// Warm up so the http2 package's steady-state goroutines are already spun up before we baseline.

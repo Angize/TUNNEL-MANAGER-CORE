@@ -347,7 +347,7 @@ func TestSourceIPBind(t *testing.T) {
 		c.Close()
 	}()
 	b := &TCP{bindIP: "127.0.0.2"}
-	c, err := b.dialer(2 * time.Second).Dial("tcp", ln.Addr().String())
+	c, err := b.dialer(2*time.Second).Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("dial with bound source: %v", err)
 	}
@@ -402,8 +402,8 @@ func TestDoWithHeaderTimeout(t *testing.T) {
 	if el := time.Since(start); el > 2*time.Second {
 		t.Fatalf("stall path took %v (should be ~200ms)", el)
 	}
-	<-served     // the request did reach the server before we bailed
-	cancel()     // release the parked handler + the buffered background Do goroutine (no leak)
+	<-served // the request did reach the server before we bailed
+	cancel() // release the parked handler + the buffered background Do goroutine (no leak)
 }
 
 func TestHTTPCConnReadDeadline(t *testing.T) {
