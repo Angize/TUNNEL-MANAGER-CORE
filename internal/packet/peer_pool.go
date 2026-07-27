@@ -112,6 +112,14 @@ func (p *PeerPool) currentLocked() string {
 // size is the number of endpoints in the pool. It is fixed at construction, so no lock is needed.
 func (p *PeerPool) size() int { return len(p.addrs) }
 
+// all returns every endpoint the pool was built with, burned or not. addrs is fixed at construction
+// (burning only marks health), so the list is stable for the pool's lifetime.
+func (p *PeerPool) all() []string {
+	out := make([]string, len(p.addrs))
+	copy(out, p.addrs)
+	return out
+}
+
 // tierLocked ranks an endpoint for the least-bad fallback: 0 healthy, 1 suspect, 2 dead, with its
 // nextRetest as the tiebreak within a tier. Caller holds the lock.
 func (p *PeerPool) tierLocked(addr string) (tier int, next int64) {

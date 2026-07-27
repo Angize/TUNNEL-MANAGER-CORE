@@ -131,9 +131,10 @@ type UDP struct {
 	closeCh   chan struct{}
 	closeOnce sync.Once
 
-	st *coreStatus // client-only: precise self-heal event ring written to the status file (nil = off)
-	pp *PeerPool   // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
-	sp *PeerPool   // client-only: source-IP rotation pool (nil = fixed source; rebinds the socket on rotate)
+	st      *coreStatus         // client-only: precise self-heal event ring written to the status file (nil = off)
+	pp      *PeerPool           // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
+	poolIPs map[string]struct{} // client-only: the destination pool's IPs (4-byte keys), so a frame from the endpoint we just left is not mistaken for proof that the new one is alive; set once before Run
+	sp      *PeerPool           // client-only: source-IP rotation pool (nil = fixed source; rebinds the socket on rotate)
 }
 
 // SetPeerPool (client, direct transports) wires a destination-IP rotation pool: when the current
@@ -143,6 +144,9 @@ type UDP struct {
 func (b *UDP) SetPeerPool(pp *PeerPool) {
 	if b.isClient {
 		b.pp = pp
+		if pp != nil {
+			b.poolIPs = buildSrcAllow(pp.all()) // see provenFrom: tells "the endpoint we left" apart from "an unattributable source"
+		}
 	}
 }
 
@@ -159,8 +163,19 @@ const peerFailThreshold = 12
 const pinFailRelease = 2
 
 // rotatePeerUDP points the client at the next pool endpoint: burn+advance (proactive=false) or a
-// timed rotate (proactive=true). It resolves the endpoint and swaps b.peer, then clears the session
-// so the next loop re-handshakes against the new destination. No-op when the pool did not move.
+// timed rotate (proactive=true). It resolves the endpoint and swaps b.peer. No-op when the pool did
+// not move.
+//
+// A TIMED rotation keeps the AEAD session, so not one packet is dropped. Every endpoint in a
+// destination pool is an address of the SAME server process — the panel builds the pool from one
+// node's IP list — and the session is independent of the address, which is the same argument the
+// source-rotation path below already relies on. The client simply starts addressing the next IP; the
+// server receives it on another of its pool sockets and learnPeer promotes that socket to the reply
+// socket on the first authenticated frame. Frames still in flight from the endpoint we just left open
+// under the same keys, so they are delivered rather than lost.
+//
+// A FAILOVER rotation still clears: that endpoint stopped answering, so the handshake retransmit is
+// what drives burn+advance across the rest of the pool.
 func (b *UDP) rotatePeerUDP(proactive bool) {
 	if b.pp == nil {
 		return
@@ -174,8 +189,10 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 		return
 	}
 	b.peer.Store(ua)
-	b.session.Store(nil) // force a fresh handshake to the new destination
-	b.ci.Store(nil)
+	if !proactive {
+		b.session.Store(nil) // the endpoint failed — force a fresh handshake to the next one
+		b.ci.Store(nil)
+	}
 	// Give the jumped-to endpoint a FRESH staleness window and mark it unproven. This matters most for
 	// a PROACTIVE rotation onto an untested (assumed-healthy) endpoint that turns out to be dead: without
 	// the reset, lastRx stays recent from the old endpoint so clear-mode failover never fires and the
@@ -189,6 +206,14 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 	// ("udp · "+peer, peer=UDPAddr.String()). Only the DESTINATION path refreshes active; the source
 	// path (rotateSourceUDP) leaves it, since "active" names the destination, not the source.
 	b.st.setActive("udp · " + ua.String())
+	if proactive {
+		// Seamless: no session was cleared, so there is no re-handshake and nothing for a "reconnect"
+		// to pair with. event() records the jump WITHOUT arming wasDown — the same call the source
+		// rotation below uses, and for the same reason. Using down() here made every timed rotation
+		// surface in the panel as a drop plus a self-heal, which is what the operator was seeing.
+		b.st.event("down", "peer-rotate", "ip:"+addr)
+		return
+	}
 	b.st.down("peer-rotate", "ip:"+addr) // clears the session -> re-handshake -> reconnect pairs the down
 }
 
@@ -406,6 +431,25 @@ func (b *UDP) markRx() {
 	now := time.Now().UnixNano()
 	b.lastRx.Store(now)
 	b.hbRx.Store(now)
+}
+
+// provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for
+// about one RTT after a jump the endpoint we LEFT is still answering; those frames are ours and are
+// delivered, but they say nothing about the endpoint we just moved to — counting them as proof is what
+// let a blocked IP hide behind the one it replaced. A frame from any address that is NOT another pool
+// endpoint is unattributable (a server that replies from one fixed IP rather than the dialed one) and
+// still counts, so an unusual listen config degrades to the old behaviour instead of a rotation storm.
+func (b *UDP) provenFrom(ip net.IP) {
+	if ip != nil && len(b.poolIPs) > 0 {
+		if p := b.peer.Load(); p != nil && !p.IP.Equal(ip) {
+			if v4 := ip.To4(); v4 != nil {
+				if _, other := b.poolIPs[string(v4)]; other {
+					return
+				}
+			}
+		}
+	}
+	b.peerAnswered.Store(true)
 }
 
 // Dial (client role) binds an ephemeral UDP socket and targets peerAddr.
@@ -672,9 +716,9 @@ func (b *UDP) deliver(pkt []byte, addr *net.UDPAddr) {
 	if len(pkt) < 2 || pkt[0] != magic {
 		return
 	}
-	b.markRx()                 // the peer is answering (clear mode has no session to prove it)
-	b.peerAnswered.Store(true) // this endpoint has now replied since we pointed at it -> safe to heal its burn
-	if b.pp == nil {           // a pooled client owns its peer (mirror the crypto path); a server always learns it
+	b.markRx()            // the peer is answering (clear mode has no session to prove it)
+	b.provenFrom(addr.IP) // ...and, unless it came from an endpoint we left, the current one is alive
+	if b.pp == nil {      // a pooled client owns its peer (mirror the crypto path); a server always learns it
 		b.learnPeer(addr)
 	}
 	b.dispatch(pkt[1], iff(pkt[1] == typeData, pkt[2:], nil), addr)
@@ -733,7 +777,8 @@ func (b *UDP) handleCrypto(pkt []byte, addr *net.UDPAddr) {
 	if s := b.sealer(); s != nil {
 		if typ, session, seq, payload, oerr := b.openWith(s, pkt); oerr == nil && b.rp.ok(session, seq) {
 			// authenticated, fresh frame -> now safe to (re)learn the peer address
-			b.markRx() // the session is answering
+			b.markRx()            // the session is answering
+			b.provenFrom(addr.IP) // ...and, unless it came from an endpoint we left, the current one is alive
 			// The DESTINATION pool owns the client's peer: don't rebind it from a reply's source, so a
 			// client's own rotation isn't silently pulled off the endpoint its pool is driving. Servers
 			// (pp==nil) learn the client here — which lets them follow a client's SOURCE rotation and, on
@@ -787,6 +832,7 @@ func (b *UDP) tryHandshake(pkt []byte, addr *net.UDPAddr) {
 		// re-handshake regenerates a fresh ci in sendInit (ci==nil path).
 		b.ci.Store(nil)
 		b.markRx()              // server RESP arrived: genuine inbound (green on a real connect)
+		b.provenFrom(addr.IP)   // ...and it answered the endpoint we are addressing
 		b.st.reconnected("udp") // recovery after a self-heal (nil-safe; silent on first connect)
 		return
 	}
@@ -868,7 +914,8 @@ func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {
 // until a session exists, then pings on a jittered interval. If the session is
 // lost it starts a new handshake.
 func (b *UDP) clientLoop() {
-	failN := 0 // consecutive handshake retransmits with no session -> the peer may be dead
+	failN := 0        // consecutive handshake retransmits (or unanswered probes) -> the endpoint may be dead
+	unproven := false // the current destination has not answered since we jumped to it -> probe at 1s, not keepalive
 	rc := newRotationController(b.pp, b.sp)
 	if rc.active() {
 		go b.pinPollLoop(rc)
@@ -905,6 +952,7 @@ func (b *UDP) clientLoop() {
 			b.st.down("stale", "udp")
 		}
 		if b.sealer() == nil && b.cryptoOn {
+			unproven = false // the handshake path already ticks at 1s and drives its own failover
 			b.sendInit()
 			if failN++; rc.active() && failN >= peerFailThreshold {
 				rc.fail(b.rotatePeerUDP, b.rotateSourceUDP) // burn+advance dest; walk source once dests cycle
@@ -915,9 +963,14 @@ func (b *UDP) clientLoop() {
 			// via a completed handshake (failN>0 then a session); clear mode has no handshake, so use the
 			// data plane: peerAnswered is set when the CURRENT endpoint replies and cleared on rotation,
 			// so healing here can never falsely clear a just-jumped-to (unproven) endpoint's burn.
-			heal := failN > 0 || (!b.cryptoOn && rc.active() && b.peerAnswered.Load())
-			if heal {
-				healEvents(b.st, rc) // active endpoints alive — clear transient burns (and release a landed pin), emit any heal
+			// Heal only what the CURRENT endpoint has EARNED. "failN > 0" alone used to be proof: it could
+			// only be non-zero in crypto mode after handshake retransmits, and reaching this branch at all
+			// meant the handshake had just succeeded. Now that a timed rotation keeps the session, failN
+			// also counts unanswered probes on an endpoint we have merely jumped to — so the old signal
+			// cleared the burn of an endpoint that had proven nothing, and a blocked IP was un-burned on
+			// every visit and never dropped out of rotation. peerAnswered is the proof, in both modes.
+			if b.peerAnswered.Load() && (failN > 0 || (!b.cryptoOn && rc.active())) {
+				healEvents(b.st, rc) // this endpoint is answering — clear transient burns, release a landed pin, emit any heal
 			}
 			// BUG #35: clear mode has no handshake to fire st.reconnected(), so a self-heal down() (the
 			// clear-mode failover above, or a peer rotate/pin) would arm wasDown with no matching "up".
@@ -931,20 +984,39 @@ func (b *UDP) clientLoop() {
 			if !b.cryptoOn && b.peerAnswered.Load() {
 				b.st.reconnected("udp")
 			}
-			failN = 0
-			b.send(typePing, nil, b.peer.Load())
 			rc.proactive(b.rotatePeerUDP, b.rotateSourceUDP, time.Now()) // moving target on both sides
+			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the
+			// NEW destination sees, and it is what makes the server promote that socket as its reply
+			// source. Sending it first meant the ping went to the endpoint we were leaving and the
+			// server did not follow until the next data frame.
+			b.send(typePing, nil, b.peer.Load())
+			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session
+			// survives, no handshake failure will ever say so. Count unanswered ticks here — AFTER the
+			// jump, so the very next wait is already the 1s probe interval — on the same threshold the
+			// handshake path uses. Checking before the rotation cost a full keepalive first, which let
+			// sessionStale (a whole dead window) win the race and turned a blocked IP into a ~30s hole.
+			if unproven = b.cryptoOn && rc.active() && !b.peerAnswered.Load(); unproven {
+				if failN++; failN >= peerFailThreshold {
+					b.session.Store(nil) // not answering: drop back to the handshake path, which burns and advances
+					b.ci.Store(nil)
+					b.st.down("peer-dead", "udp")
+					rc.fail(b.rotatePeerUDP, b.rotateSourceUDP)
+					failN = 0
+				}
+			} else {
+				failN = 0
+			}
 			if b.cryptoOn && b.sealer() == nil {
-				// A proactive DESTINATION rotation just cleared the crypto session — loop back NOW to send
-				// the re-handshake init immediately, instead of first sleeping the 1s retransmit interval
-				// below, so the rotation gap is ~1 RTT rather than ~1s (matters for live streams). Clear
-				// mode has no session/handshake so this never fires there; a duplicated init is harmless.
+				// A FAILOVER rotation just cleared the crypto session — loop back NOW to send the
+				// re-handshake init immediately, instead of first sleeping the 1s retransmit interval
+				// below, so recovery is ~1 RTT rather than ~1s (matters for live streams). Clear mode has
+				// no session/handshake so this never fires there; a duplicated init is harmless.
 				continue
 			}
 		}
 		var wait time.Duration
-		if b.sealer() == nil && b.cryptoOn {
-			wait = time.Second // retransmit the handshake faster than keepalive
+		if (b.sealer() == nil && b.cryptoOn) || unproven {
+			wait = time.Second // retransmit the handshake — or re-probe an unproven endpoint — faster than keepalive
 		} else {
 			wait = keepaliveInterval(b.keepalive, b.psk)
 		}
