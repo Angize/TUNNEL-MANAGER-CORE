@@ -500,6 +500,8 @@ func tuneSession(s *kcp.UDPSession, mtu int) {
 	if mtu <= 0 {
 		mtu = kcpMTUDefault
 	}
+	//lint:ignore SA1019 kcp-go marks SetStreamMode deprecated without shipping a replacement: KCP.stream
+	// is unexported and defaults to message mode, so this call is the only way to select stream framing.
 	s.SetStreamMode(true)
 	s.SetNoDelay(0, 100, 0, 1)
 	s.SetWindowSize(64, 64)

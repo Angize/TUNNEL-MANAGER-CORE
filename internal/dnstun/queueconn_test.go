@@ -206,6 +206,8 @@ func TestKCPOverQueueReliableWithLoss(t *testing.T) {
 // (fast retransmit) so a lossy channel recovers quickly, stream mode (we frame our own
 // packets), and a small MTU befitting the tiny effective payload of a DNS message.
 func tuneKCP(s *kcp.UDPSession) {
+	//lint:ignore SA1019 kcp-go marks SetStreamMode deprecated without shipping a replacement: KCP.stream
+	// is unexported and defaults to message mode, so this call is the only way to select stream framing.
 	s.SetStreamMode(true)
 	s.SetNoDelay(1, 20, 2, 1)
 	s.SetWindowSize(256, 256)

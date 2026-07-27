@@ -39,6 +39,9 @@ import (
 	"time"
 
 	"golang.org/x/net/http2"
+	//lint:ignore SA1019 h2c is deprecated in favour of http.Server.Protocols (go1.24+). Swapping the
+	// CDN-facing cleartext listener is a behaviour change on the gRPC leg, not a lint fix — see the
+	// note at the h2c.NewHandler call site.
 	"golang.org/x/net/http2/h2c"
 
 	utls "github.com/refraction-networking/utls"
@@ -1008,6 +1011,13 @@ func (b *TCP) runHTTPCServer() {
 	// the origin with h2c when gRPC is enabled — that is the leg that STREAMS a full-duplex call
 	// instead of buffering the request body (which stalls stream-one over a plain HTTP/1.1 origin).
 	// h2c falls through to HTTP/1.1 for the POST ladder, so every mode shares this one plaintext listener.
+	//
+	// go1.24 added http.Server.Protocols with SetUnencryptedHTTP2, which is what x/net now points at.
+	// It is NOT a drop-in: h2c.NewHandler accepts both prior-knowledge h2c AND the HTTP/1.1
+	// `Upgrade: h2c` dance, and the replacement covers prior knowledge only. Which of the two an
+	// ArvanCloud or Cloudflare edge actually uses has to be measured before that is swapped, so this
+	// stays until someone does that measurement.
+	//lint:ignore SA1019 deliberate — see above.
 	srv := &http.Server{Handler: h2c.NewHandler(mux, &http2.Server{})}
 	b.httpSrv.Store(srv) // publish atomically so Close (another goroutine) sees it without a data race
 	if err := srv.Serve(b.ln); err != nil && !b.closed.Load() {
