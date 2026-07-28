@@ -121,14 +121,73 @@ func badTCPChecksum(seg []byte) {
 	seg[16] ^= 0xff // flip the high checksum byte -> guaranteed to differ from the correct checksum
 }
 
-// decoySNI returns n benign hostname bytes to overwrite the real SNI in the fake ClientHello — a
-// name a censor never blocks (the CDN's own domain), repeated/truncated so the SNI length field in
-// the record stays valid.
+// decoyApexes are the domains a decoy ClientHello may claim: real, ubiquitous CDN names a censor
+// does not block. Several lengths — and the shortest deliberately at 9 — so that every length from 9
+// up can be built by padding a leftmost label instead of by chopping a name in half.
+var decoyApexes = []string{"b-cdn.net", "fastly.net", "azureedge.net", "cloudflare.com", "cdn.jsdelivr.net"}
+
+// decoySNI returns exactly n bytes forming a benign, SYNTACTICALLY VALID hostname, to overwrite the
+// real SNI in the fake ClientHello. n is dictated by the real hostname's length, because the SNI
+// length field in the record has to stay valid.
+//
+// It used to be a raw modulo repeat of the 18-byte constant "www.cloudflare.com", so unless the real
+// host happened to be exactly 18 characters the decoy was a chopped or doubled string —
+// "www.cloudflare." (a trailing dot), "www.cloudflare.comw", "www.cloudflare.comwww.c". None of those
+// is a name any client ever sends, so a DPI that reassembled the overlap recorded a structurally
+// impossible SNI: an anomaly worth flagging, which is the exact opposite of the point. Padding the
+// LEFTMOST label instead is how real CDN hostnames grow ("assets-3f2.cdn.example.com"), so every
+// length lands on a name that could exist.
+//
+// What this does NOT fix: the core is not told which CDN is in front (cdn_profile is a panel concept
+// that the node does not forward — backlog B1), so a decoy sent to an ArvanCloud edge can still name
+// a different CDN. Choosing the apex to match the edge needs that plumbing first.
 func decoySNI(n int) []byte {
-	const base = "www.cloudflare.com"
-	out := make([]byte, n)
-	for i := range out {
-		out[i] = base[i%len(base)]
+	if n <= 0 {
+		return nil
+	}
+	// An exact-length whole apex is the most natural-looking result of all.
+	for _, a := range decoyApexes {
+		if len(a) == n {
+			return []byte(a)
+		}
+	}
+	// Otherwise take the longest apex that still leaves room for "<label>." in front of it.
+	apex := ""
+	for _, a := range decoyApexes {
+		if len(a)+2 <= n && len(a) > len(apex) {
+			apex = a
+		}
+	}
+	if apex == "" { // shorter than any apex plus a label: a bare label is still a valid host name
+		return decoyLabels(n)
+	}
+	out := make([]byte, 0, n)
+	out = append(out, decoyLabels(n-len(apex)-1)...)
+	out = append(out, '.')
+	return append(out, apex...)
+}
+
+// decoyLabels returns exactly n bytes of dot-separated DNS labels: letters only, no label longer
+// than the 63 bytes DNS allows, and never a leading, trailing or doubled dot (each of which would
+// make the name malformed — the very thing this is here to avoid).
+func decoyLabels(n int) []byte {
+	const fill = "assets" // letters only, so it is safe at any offset and reads like a CDN label
+	const maxLabel = 63
+	out := make([]byte, 0, n)
+	for len(out) < n {
+		seg := n - len(out)
+		if seg > maxLabel {
+			seg = maxLabel
+			if rem := n - len(out) - seg; rem < 2 { // leave room for "." plus a non-empty next label
+				seg = n - len(out) - 2
+			}
+		}
+		for i := 0; i < seg; i++ {
+			out = append(out, fill[len(out)%len(fill)])
+		}
+		if len(out) < n {
+			out = append(out, '.')
+		}
 	}
 	return out
 }

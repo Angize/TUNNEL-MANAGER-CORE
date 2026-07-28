@@ -51,6 +51,14 @@ import (
 // TestUserAgentMatchesTLSParrot fails the build if the two drift apart (e.g. after a uTLS bump).
 const chromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 
+// chromeAcceptEncoding is the Accept-Encoding the SAME Chrome sends. It belongs beside chromeUA
+// because it is part of one identity: Chrome has advertised zstd by default since 123, so a request
+// claiming Chrome 133 while offering only "gzip, deflate, br" is a pre-123 browser wearing a post-123
+// User-Agent. That is exactly the cross-check a CDN's bot management runs, and exactly the class of
+// tell this hand-built header block exists to avoid. TestAcceptEncodingMatchesUAMajor keeps the two
+// in step the next time the parrot moves.
+const chromeAcceptEncoding = "gzip, deflate, br, zstd"
+
 // maxPostBody caps a single upstream POST body so a hostile client can't force a huge alloc.
 const maxPostBody = 1 << 20
 
