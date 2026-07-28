@@ -564,14 +564,28 @@ func (b *TCP) SetStatusPath(path string) {
 func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 	d := &net.Dialer{Timeout: timeout}
 	if src := b.sourceIP(); src != "" { // rotation pool's current source, or the fixed bindIP
-		if ip := net.ParseIP(src); ip != nil {
+		// Tolerate an accidental "ip:port", exactly as config.go's validatePoolEndpoint promises it will
+		// ("tolerate an accidental ip:port") and as udp (rebindSourceTo) and raw/flux (hostOnly) already
+		// do. tcp was the one carrier that did not: ParseIP("10.0.0.5:0") is nil, and because everything
+		// below sits inside `if ip != nil`, not even the srcWarn line fired — the single path where a
+		// configured source is dropped with ZERO output while the tunnel quietly leaves from the kernel's
+		// default IP.
+		host := src
+		if h, _, e := net.SplitHostPort(src); e == nil {
+			host = h
+		}
+		if ip := net.ParseIP(host); ip != nil {
 			if canBindSource(ip) {
 				d.LocalAddr = &net.TCPAddr{IP: ip}
 			} else {
 				b.srcWarn.Do(func() {
-					log.Printf("core/tcp: source IP %s is not configured on this host — dialing from the kernel default instead", src)
+					log.Printf("core/tcp: source IP %s is not configured on this host — dialing from the kernel default instead", host)
 				})
 			}
+		} else {
+			b.srcWarn.Do(func() { // never silent again, whatever the string turns out to be
+				log.Printf("core/tcp: source %q is not a usable IP address — dialing from the kernel default instead", src)
+			})
 		}
 	}
 	return d
