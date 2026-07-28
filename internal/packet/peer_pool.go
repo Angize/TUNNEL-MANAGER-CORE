@@ -288,6 +288,29 @@ func (p *PeerPool) nextEndpoint(proactive bool) (addr string, moved bool) {
 	return p.fail()
 }
 
+// rejectCandidate UNDOES a rotation whose target the carrier could not actually adopt — the udp source
+// rebind failed because the new source IP is not on this host (removed from the interface but still in
+// the pool). nextEndpoint has already advanced cur onto that unbindable endpoint (and, on a failover,
+// burned prev), but the socket never left prev. So burn the unbindable candidate (rotation must skip it)
+// and restore cur to prev, clearing any burn the failover put on it — prev is the live, working source.
+// Without this the published Active named a source the datagram path never adopted and a healthy, in-use
+// source stayed burned (and later heal-cleared as if it had recovered). No-op safety: never burns prev.
+func (p *PeerPool) rejectCandidate(prev string) {
+	p.mu.Lock()
+	if bad := p.addrs[p.cur]; bad != prev {
+		p.burnLocked(bad) // the candidate can't bind on this host — pull it from rotation
+	}
+	for idx, a := range p.addrs {
+		if a == prev {
+			p.cur = idx
+			delete(p.health, prev) // prev is the live source: undo the failover burn / any stale mark
+			break
+		}
+	}
+	p.mu.Unlock()
+	p.writeStatus()
+}
+
 // healEvents emits the paired heal events after a datagram carrier's active endpoints prove alive again:
 // rc.success() clears any transient burn and returns the recovered destination/source IPs ("" when
 // nothing healed), which become "peer-retest"/"src-retest" events. Shared by udp/raw/flux, whose blocks
