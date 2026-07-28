@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // validRaw returns a minimal, valid raw-transport client config to mutate in tests.
 func validRaw() *Config {
@@ -265,6 +268,126 @@ func TestListenIPsValidated(t *testing.T) {
 	c.ListenIPs = []string{"203.0.113.9:70000"} // port out of range
 	if err := c.validate(); err == nil {
 		t.Error("listen_ips with an out-of-range port was accepted")
+	}
+}
+
+// TestListenIPsRejectedWhereItIsIgnored closes the class, not one line: listen_ips is validated in the
+// shared `case "server"` arm, but main.go hands it ONLY to the tcp and udp listeners. On every other
+// carrier the pool was checked, stored and advertised while the server bound cfg.Listen alone — and a
+// pooled RAW server is worse than cosmetic, since a bound AF_INET raw socket is demuxed by destination
+// and goes deaf to every pool IP but one.
+//
+// Each transport is asserted VALID without listen_ips first, so a base that is malformed for some other
+// reason fails loudly here instead of making the rejection below pass for the wrong reason; and the
+// error text must name listen_ips, so an unrelated rejection cannot be mistaken for this one.
+func TestListenIPsRejectedWhereItIsIgnored(t *testing.T) {
+	psk := CryptoCfg{Enabled: true, PSK: "a-sufficiently-long-preshared-key"}
+	srv := func(tr string) *Config {
+		return &Config{
+			Role: "server", Mode: "packet", Profile: "core", Transport: tr,
+			Listen: "0.0.0.0:9000", TunAddr: "10.200.0.1/24", Crypto: psk,
+		}
+	}
+	for _, tr := range []string{"raw", "flux", "ws", "dns", "spoof"} {
+		c := srv(tr)
+		switch tr {
+		case "dns":
+			c.DNSZone = "t.example.com" // the delegated zone this server is authoritative for
+		case "spoof":
+			c.RealPeer = "203.0.113.9" // the client's real IP to reply to
+		}
+		if err := c.validate(); err != nil {
+			t.Fatalf("%s: base server config is not valid, so this case proves nothing: %v", tr, err)
+		}
+		c.ListenIPs = []string{"203.0.113.9:9000", "198.51.100.7:9000"}
+		err := c.validate()
+		if err == nil {
+			t.Errorf("%s server accepted listen_ips, which its data path never reads", tr)
+			continue
+		}
+		if !strings.Contains(err.Error(), "listen_ips") {
+			t.Errorf("%s: rejected for the wrong reason (%v)", tr, err)
+		}
+	}
+	// The two carriers that DO consume it must keep working, including the "" (=udp) default.
+	for _, tr := range []string{"", "udp", "tcp"} {
+		c := srv(tr)
+		c.ListenIPs = []string{"203.0.113.9:9000", "198.51.100.7:9000"}
+		if err := c.validate(); err != nil {
+			t.Errorf("transport %q must still accept listen_ips: %v", tr, err)
+		}
+	}
+}
+
+// TestRawProtoOnlyOnBip guards that raw_proto is refused on the profiles that cannot honour it.
+// rawEffProto applies it to the bare "bip" profile only — every other profile's protocol number is
+// tied to its forged L4 header — so on icmp/udp/tcp/gre/esp the value validated, persisted and showed
+// as set while the wire carried the profile's native number: a whitelist evasion believed to be on.
+func TestRawProtoOnlyOnBip(t *testing.T) {
+	for _, p := range []string{"ipip", "gre", "icmp", "udp", "tcp", "esp"} {
+		c := validRaw()
+		c.RawProfile = p
+		if err := c.validate(); err != nil {
+			t.Fatalf("%s: base raw config is not valid, so this case proves nothing: %v", p, err)
+		}
+		c.RawProto = 58 // ICMPv6's number, the classic whitelist-evasion pick
+		err := c.validate()
+		if err == nil {
+			t.Errorf("raw_profile %q accepted raw_proto, which rawEffProto ignores for it", p)
+			continue
+		}
+		if !strings.Contains(err.Error(), "raw_proto") {
+			t.Errorf("%s: rejected for the wrong reason (%v)", p, err)
+		}
+	}
+	// bip honours it, and an UNSET profile is bip (applyDefaults runs after validate).
+	for _, p := range []string{"bip", ""} {
+		c := validRaw()
+		c.RawProfile = p
+		c.RawProto = 58
+		if err := c.validate(); err != nil {
+			t.Errorf("raw_profile %q must accept raw_proto: %v", p, err)
+		}
+	}
+	// The range check still applies on bip.
+	c := validRaw()
+	c.RawProfile = "bip"
+	c.RawProto = 256
+	if err := c.validate(); err == nil {
+		t.Error("out-of-range raw_proto accepted on bip")
+	}
+}
+
+// TestWSRotateSecsNonNegative guards the one rotation interval that had no check at all. A negative
+// ws_rotate_secs became a negative Duration in main.go and tcp.go's `if b.rotate > 0` then skipped the
+// rotation ticker entirely: the tunnel came up healthy and silently never rotated its edge. Its two
+// siblings, peer_rotate_secs and flux_rotate_secs, have always been range-checked.
+func TestWSRotateSecsNonNegative(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Role: "client", Mode: "packet", Profile: "core", Transport: "ws",
+			Peer: "203.0.113.9", TunAddr: "10.200.0.2/24", WSTLS: true, WSHost: "cdn.example.com",
+			Crypto: CryptoCfg{Enabled: true, PSK: "a-sufficiently-long-preshared-key"},
+		}
+	}
+	c := base()
+	if err := c.validate(); err != nil {
+		t.Fatalf("base ws config is not valid, so this test proves nothing: %v", err)
+	}
+	c.WSRotateSecs = -1
+	err := c.validate()
+	if err == nil {
+		t.Fatal("negative ws_rotate_secs accepted; it silently disables edge rotation")
+	}
+	if !strings.Contains(err.Error(), "ws_rotate_secs") {
+		t.Errorf("rejected for the wrong reason: %v", err)
+	}
+	for _, v := range []int{0, 60, 28800} { // 0 = rotate only on failure, and the node's own ceiling
+		c = base()
+		c.WSRotateSecs = v
+		if err := c.validate(); err != nil {
+			t.Errorf("ws_rotate_secs %d rejected: %v", v, err)
+		}
 	}
 }
 

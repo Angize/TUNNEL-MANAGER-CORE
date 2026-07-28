@@ -497,6 +497,16 @@ func (c *Config) validate() error {
 		if c.Listen == "" {
 			return errors.New("server role requires \"listen\"")
 		}
+		// Only the tcp and udp servers ever READ listen_ips (main.go hands it to their listeners; raw,
+		// flux, ws and dns are given cfg.Listen alone). Accepting it elsewhere validated a bind list the
+		// data path then discarded: the server bound ONE address while its config, its status file and
+		// the panel all described a pool. raw in particular CANNOT honour it — a bound AF_INET raw socket
+		// is demuxed by DESTINATION, so a pooled raw server has to bind 0.0.0.0 or go deaf to every other
+		// pool IP (which is why the node sends 0.0.0.0 for it). Transport "" is udp here: validate() runs
+		// BEFORE applyDefaults.
+		if len(c.ListenIPs) > 0 && c.Transport != "" && c.Transport != "udp" && c.Transport != "tcp" {
+			return errors.New("listen_ips is read only by the udp and tcp servers; transport \"" + c.Transport + "\" binds \"listen\" alone")
+		}
 		for _, la := range c.ListenIPs { // pooled server: each bind must be a valid IP:port (we bind these directly)
 			if err := validatePoolEndpoint("listen_ips", la, true); err != nil { // same ip:port check as a dest pool entry
 				return err
@@ -524,8 +534,18 @@ func (c *Config) validate() error {
 		if c.RawProfile != "" && !rawProfiles[c.RawProfile] {
 			return errors.New("raw_profile must be one of bip|ipip|gre|icmp|udp|tcp|esp")
 		}
-		if c.RawProto != 0 && (c.RawProto < 1 || c.RawProto > 255) {
-			return errors.New("raw_proto must be in 1..255 (0 = the profile's native protocol number)")
+		// rawEffProto honours raw_proto for the bare "bip" profile ONLY — every other profile's number is
+		// tied to its forged L4 header. Left unchecked the value validated, persisted and showed as set
+		// while the wire kept the profile's native number: a protocol-whitelist evasion the operator
+		// believed was on and was not. Reject it, the way this file already does for obfs+dns and for
+		// http_up_* off an http client. RawProfile "" is bip here: validate() runs BEFORE applyDefaults.
+		if c.RawProto != 0 {
+			if c.RawProfile != "" && c.RawProfile != "bip" {
+				return errors.New("raw_proto overrides the outer protocol number for the \"bip\" profile only (raw_profile \"" + c.RawProfile + "\" is tied to its forged header)")
+			}
+			if c.RawProto < 1 || c.RawProto > 255 {
+				return errors.New("raw_proto must be in 1..255 (0 = the profile's native protocol number)")
+			}
 		}
 		if !c.Crypto.Enabled {
 			return errors.New("raw transport requires crypto enabled (the AEAD both encrypts and authenticates each raw packet)")
@@ -662,6 +682,13 @@ func (c *Config) validate() error {
 		}
 		if c.CDNCarrier == "grpc" && c.Role == "client" && !c.WSTLS && len(c.WSEdgeIPs) == 0 {
 			return errors.New("cdn_carrier \"" + c.CDNCarrier + "\" requires ws_tls (needs HTTP/2 to the edge)")
+		}
+		// ws_rotate_secs is the proactive edge-rotation interval, and it was the one rotation knob with
+		// no check at all — peer_rotate_secs and flux_rotate_secs are both range-checked. A negative
+		// value reached main.go as a negative Duration and tcp.go's `if b.rotate > 0` then skipped the
+		// rotation ticker outright, so the tunnel came up healthy and simply never rotated its edge.
+		if c.WSRotateSecs < 0 {
+			return errors.New("ws_rotate_secs must be >= 0 (0 = rotate only on a failed edge)")
 		}
 		// Edge pool: a client+wss rotation set; every SNI's ECH must decode.
 		if len(c.WSEdgeIPs) > 0 || len(c.WSEdgeSNIs) > 0 {
