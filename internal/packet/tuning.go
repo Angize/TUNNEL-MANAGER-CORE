@@ -46,9 +46,10 @@ var (
 	probeTimeout = 5 * time.Second
 )
 
-// Category 3 — rotation:
-// defaultFluxRotate is the flux epoch length when the config leaves flux_rotate_secs unset.
-var defaultFluxRotate = 600 * time.Second
+// (There is no category 3. The flux epoch length is NOT tunable through this file — it is a per-tunnel
+// config field the panel always sends, and its last-resort fallback is a const in flux.go. It used to sit
+// here as a var, which read as a knob ApplyTuning could set: there has never been a TuningInput field for
+// it, so nothing could ever set it.)
 
 // TuningInput mirrors the config's `tuning` object but lives in this package (no import cycle). main
 // builds it from the loaded config and calls ApplyTuning ONCE at startup, before building carriers.
@@ -118,18 +119,24 @@ func ApplyTuning(t TuningInput) {
 	}
 }
 
-// suspectStep returns the i-th suspect backoff step, clamped to the LAST element when the (now
-// config-tunable) schedule is shorter than i+1. Callers that reference a fixed index must use this so
-// a short custom suspect_backoff (e.g. [30]) can't index out of range and panic the core. ApplyTuning
-// only ever installs a non-empty schedule, so len>=1 and the clamp always yields a valid element.
-func suspectStep(i int) int64 {
+// suspectStepAt returns the i-th suspect backoff step AND the index it actually used, clamped to the
+// LAST element when the (config-tunable) schedule is shorter than i+1 — so a short custom
+// suspect_backoff (e.g. [30]) can't index out of range and panic the core. ApplyTuning only ever
+// installs a non-empty schedule, so len>=1 and the clamp always yields a valid element.
+//
+// It returns the INDEX as well because a caller that enters the FSM at a fixed step must stamp
+// healthRec.fails with that same index: retestBackoff does fails++ and then reads
+// suspectBackoff[fails], so an entry whose fails disagrees with the step it entered on walks the
+// schedule from the wrong place — which is exactly how the data-plane backoff once ran backwards.
+// Returning both from one place is what keeps the pair from drifting again.
+func suspectStepAt(i int) (int, int64) {
 	if n := len(suspectBackoff); i >= n {
 		i = n - 1
 	}
 	if i < 0 {
-		return 0
+		i = 0
 	}
-	return suspectBackoff[i]
+	return i, suspectBackoff[i]
 }
 
 // tclamp clamps v to [lo, hi]. One generic over the integer widths the tuning knobs use (was two

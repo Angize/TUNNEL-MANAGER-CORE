@@ -189,13 +189,10 @@ func (p *wsPool) dataFailure(ip string) {
 			// leaving fails=0 makes the first failed retest schedule suspectBackoff[1] (=60s) AFTER the
 			// initial suspectBackoff[2] (=120s) — the wait SHRINKS instead of growing. The panel is wrong
 			// too: it derives the countdown length from fails alone (poolStepTotal), so fails=0 against a
-			// 120s remaining pins the bar at 0% for the first 90s. suspectStep clamps a short custom
-			// schedule to its last index, so clamp fails the same way to keep the pair consistent.
-			step := 2
-			if n := len(suspectBackoff); step >= n {
-				step = n - 1
-			}
-			p.ipHealth[ip] = &healthRec{state: stateSuspect, fails: step, nextRetest: p.now() + suspectBackoff[step]}
+			// 120s remaining pins the bar at 0% for the first 90s. suspectStepAt returns the clamped index
+			// WITH its value precisely so the two cannot drift apart here.
+			step, wait := suspectStepAt(2)
+			p.ipHealth[ip] = &healthRec{state: stateSuspect, fails: step, nextRetest: p.now() + wait}
 			p.dataFail[ip] = 0
 			burned = true
 			unpinned = p.releasePinLocked("ip", ip) // a pinned edge proven data-dead: release so we recover now
@@ -724,16 +721,6 @@ func (p *wsPool) altHealthyIP(exclude string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// probeNow forces an entry to be retested on the scheduler's next tick (backs a panel/node
-// "probe now" control). A no-op for an untracked (healthy) entry.
-func (p *wsPool) probeNow(kind, key string) {
-	p.mu.Lock()
-	if r := p.healthMap(kind)[key]; r != nil {
-		r.nextRetest = p.now()
-	}
-	p.mu.Unlock()
 }
 
 // probeAllNow pulls EVERY suspect/dead entry's retest forward to now, so the scheduler

@@ -58,9 +58,13 @@ var fluxDportPool = []uint16{443, 3478, 19302, 5349, 8801}
 // Binding header so the flow parses as WebRTC signalling, not just generic UDP.
 var fluxStunDports = []uint16{3478, 19302, 5349}
 
-// defaultFluxRotate (default in tuning.go): the epoch length when the config leaves
-// flux_rotate_secs unset. Ten minutes trades rotation agility against how often the (cheap)
-// statistical shape churns; "rotate now" from the panel bumps the epoch out of band.
+// defaultFluxRotate is the LAST-RESORT epoch length for fluxEpochAt, so a non-positive rotate cannot
+// divide by zero. It is not a tuning knob and not the value a real tunnel runs on: config.applyDefaults
+// resolves flux_rotate_secs to a concrete number (600 when omitted) before any carrier is built, and the
+// panel always sends one explicitly — both ends must compute the SAME epoch from the clock alone, so the
+// value has to be in the config rather than in each side's defaults. Ten minutes trades rotation agility
+// against how often the (cheap) statistical shape churns; "rotate now" bumps the epoch out of band.
+const defaultFluxRotate = 600 * time.Second
 
 // fluxShape is the per-epoch carrier descriptor. It is a pure function of
 // (PSK, epoch, shapeProfile): both ends derive the same one from the clock alone.

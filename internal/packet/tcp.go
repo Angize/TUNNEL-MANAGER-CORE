@@ -253,7 +253,11 @@ func (cf *connFramer) readFrame() (typ byte, session uint64, seq uint64, payload
 		var lb [2]byte
 		cf.readKS.XORKeyStream(lb[:], hdr[:]) // unmask length; advances keystream
 		n := int(binary.BigEndian.Uint16(lb[:]))
-		if n < 1 || n > maxFrame {
+		// Only the FLOOR is a real check. The ceiling is structural: n came from a uint16, and maxFrame
+		// IS the uint16 ceiling, so `n > maxFrame` could never be true — it only read as if a bound were
+		// being enforced here. (The plain path below floors at 2 and asserts no ceiling either; the write
+		// path's `n > maxFrame` stays, because there n is an int that really can overflow the prefix.)
+		if n < 1 {
 			return 0, 0, 0, nil, errDesync
 		}
 		buf := make([]byte, n)
