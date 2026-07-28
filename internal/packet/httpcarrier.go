@@ -59,6 +59,26 @@ const chromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (
 // in step the next time the parrot moves.
 const chromeAcceptEncoding = "gzip, deflate, br, zstd"
 
+// grpcUA is the User-Agent presented in grpc mode. A gRPC call is not something a browser can make —
+// Content-Type: application/grpc and TE: trailers are both forbidden to browser fetch/XHR — so the
+// browser identity the POST ladder wears was self-contradictory there: a request claiming to be Chrome
+// while carrying headers Chrome is not allowed to send, and missing grpc-accept-encoding, which every
+// real gRPC client does send. Any gRPC-aware WAF has an obvious anomaly to key on, and the operator
+// only sees the session failing with `http/grpc: got HTTP 4xx`.
+//
+// This has to move together with the TLS fingerprint, or it just relocates the contradiction: a
+// grpc-go User-Agent under a Chrome JA3 is the same lie told the other way round. grpc-go rides Go's
+// crypto/tls, so grpc mode presents Go's own ClientHello (uEdgeHandshake's goFingerprint path) — the
+// two layers then tell one story. TestGrpcIdentityIsNotABrowser keeps them together.
+//
+// Bump this when it drifts far from what real fleets run; an implausibly old — or invented — version
+// is its own tell. It must be a version that actually shipped.
+const grpcUA = "grpc-go/1.65.0"
+
+// grpcAcceptEncoding is the message-compression list grpc-go advertises with the gzip compressor
+// registered, which is the common deployment. Its ABSENCE was part of the tell.
+const grpcAcceptEncoding = "gzip"
+
 // maxPostBody caps a single upstream POST body so a hostile client can't force a huge alloc.
 const maxPostBody = 1 << 20
 
@@ -187,6 +207,25 @@ func (c *httpcConn) SetDeadline(t time.Time) error {
 }
 func (c *httpcConn) LocalAddr() net.Addr  { return c.la }
 func (c *httpcConn) RemoteAddr() net.Addr { return c.ra }
+
+// browserHeaders dresses a POST-ladder request as an ordinary page fetch, matching the Chrome
+// ClientHello uEdgeHandshake presents on that path.
+func browserHeaders(r *http.Request) {
+	r.Header.Set("User-Agent", chromeUA)
+	r.Header.Set("Accept", "*/*")
+	r.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	r.Header.Set("Cache-Control", "no-store")
+}
+
+// grpcHeaders dresses a grpc-mode request as what it actually is: a gRPC call from a gRPC client.
+// None of the browser headers belong here — Accept-Language and Cache-Control on a request that also
+// carries Content-Type: application/grpc is a combination no client in the world produces, because a
+// browser is forbidden from setting those gRPC headers at all. The call-shaped headers themselves
+// (content-type, te, grpc-accept-encoding) are set on the request in dialHTTPCGrpc.
+func grpcHeaders(r *http.Request) {
+	r.Header.Set("User-Agent", grpcUA)
+	r.Header.Set("grpc-accept-encoding", grpcAcceptEncoding)
+}
 
 func randSID() string {
 	var b [16]byte
@@ -559,12 +598,20 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 	var rt http.RoundTripper
 	var closeIdle func()
 	if b.wsTLS && b.httpcTLS == nil {
-		// Production TLS: uTLS with a Chrome fingerprint (see uEdgeHandshake), same as the ws
-		// carrier — the HTTP-carrier handshake must not look like Go's crypto/tls either. the POST ladder rides
-		// http/1.1 (force that ALPN); grpc/stream ride h2 (keep Chrome's [h2, http/1.1] so the edge
-		// picks h2). We do the TLS ourselves via DialTLSContext so the transport never runs its own.
+		// Production TLS, done here via DialTLSContext so the transport never runs its own.
+		//
+		// The POST ladder wears the ws carrier's Chrome fingerprint and rides http/1.1 (force that
+		// ALPN): those requests really are shaped like page fetches, so a browser identity fits.
+		//
+		// grpc mode does NOT. A gRPC call carries headers a browser is forbidden to send, so a Chrome
+		// ClientHello in front of it is the tell, not the disguise — it advertises a browser making a
+		// call no browser can make. It presents Go's own ClientHello instead, matching the grpc-go
+		// User-Agent the request carries, and offers only h2 (grpc-go offers exactly ["h2"], where
+		// Chrome would offer [h2, http/1.1]).
 		var alpn []string
-		if !h2 {
+		if h2 {
+			alpn = []string{"h2"}
+		} else {
 			alpn = []string{"http/1.1"}
 		}
 		dialTLS := func(ctx context.Context) (net.Conn, error) {
@@ -572,7 +619,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 			if err != nil {
 				return nil, err
 			}
-			uc, err := uEdgeHandshake(b.fragWrap(c, host), host, ech, alpn) // split the ClientHello SNI when enabled
+			uc, err := uEdgeHandshake(b.fragWrap(c, host), host, ech, alpn, h2) // split the ClientHello SNI when enabled
 			if err != nil {
 				c.Close()
 				return nil, err
@@ -587,6 +634,10 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 				DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {
 					return dialTLS(ctx)
 				},
+				// grpc-go frames HTTP/2 itself and sends no Accept-Encoding; Go's transport would add
+				// "accept-encoding: gzip" on our behalf, which is another header no gRPC client sends.
+				// We also never want transparent decompression on a binary stream.
+				DisableCompression: true,
 			}
 			rt, closeIdle = h2t, func() { h2t.CloseIdleConnections(); forceClose() }
 		} else {
@@ -613,6 +664,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 				return track(c), nil
 			},
 			ForceAttemptHTTP2:   h2,
+			DisableCompression:  h2, // grpc: no Accept-Encoding, same as the production h2 transport
 			MaxIdleConns:        upIdleConns * 2,
 			MaxIdleConnsPerHost: upIdleConns,
 			IdleConnTimeout:     90 * time.Second,
@@ -632,11 +684,9 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 	base := scheme + "://" + host + httpcPath(path)
 	hc := &http.Client{Transport: rt}
 	ctx, cancel := context.WithCancel(context.Background())
-	setHdr := func(r *http.Request) {
-		r.Header.Set("User-Agent", chromeUA)
-		r.Header.Set("Accept", "*/*")
-		r.Header.Set("Accept-Language", "en-US,en;q=0.9")
-		r.Header.Set("Cache-Control", "no-store")
+	setHdr := browserHeaders
+	if b.httpcMode == "grpc" {
+		setHdr = grpcHeaders
 	}
 	// Only two modes: grpc (one full-duplex request) and post (default). Plain stream-one
 	// (octet-stream) was removed because it stalled through CDNs that buffer the origin leg.
@@ -779,7 +829,9 @@ func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Conte
 	setHdr(req)
 	req.Header.Set("Content-Type", "application/grpc")
 	req.Header.Set("TE", "trailers")
-	req.Header.Set("grpc-encoding", "identity")
+	// No grpc-encoding: grpc-go sets it only when it is actually compressing (callHdr.SendCompress),
+	// so "identity" on the wire is a small tell of a hand-rolled client. Nothing reads it — our own
+	// deframer takes the compressed flag from each message's 5-byte prefix, not from a header.
 	req.ContentLength = -1
 	resp, err := doWithHeaderTimeout(hc, req, httpcEstablishTimeout)
 	if err != nil {

@@ -2,7 +2,14 @@ package packet
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	crand "crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -73,23 +80,112 @@ func TestTLSToEdgeUsesChromeFingerprintALPNh1(t *testing.T) {
 	}
 }
 
-// The grpc/stream HTTP carrier passes alpn=nil to uEdgeHandshake so the ClientHello keeps Chrome's
-// h2 (the edge must negotiate HTTP/2). Verify the emitted hello is still Chrome (GREASE) and offers
-// h2 in ALPN.
-func TestUEdgeHandshakeH2ALPN(t *testing.T) {
-	cc := &chWriteConn{}
-	_, _ = uEdgeHandshake(cc, "cdn.example.com", nil, nil) // fails on read; inspect the ClientHello
-	if len(cc.hello) == 0 {
-		t.Fatal("no ClientHello was written")
+// helloSeenBy drives one uEdgeHandshake into a real crypto/tls server over a pipe and returns the
+// ClientHello the server parsed. Reading the parsed struct — rather than counting byte patterns in the
+// raw record — makes the GREASE check exact: the 32-byte client random and the key share would
+// otherwise produce the occasional accidental 0x?a?a pair.
+func helloSeenBy(t *testing.T, alpn []string, goFingerprint bool) *tls.ClientHelloInfo {
+	t.Helper()
+	// A real socket, not net.Pipe: the pipe is unbuffered and lock-step, so the alert each side sends
+	// once the self-signed cert is rejected has nowhere to go and both ends sit on their deadlines.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if greaseCount(cc.hello) < 2 {
-		t.Fatal("expected the Chrome fingerprint (GREASE) on the grpc/h2 path")
+	defer ln.Close()
+	var got *tls.ClientHelloInfo
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		s := tls.Server(c, &tls.Config{
+			GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
+				cp := *chi
+				got = &cp
+				return nil, nil
+			},
+			Certificates: []tls.Certificate{fpTestCert(t)},
+			NextProtos:   []string{"h2", "http/1.1"},
+		})
+		c.SetDeadline(time.Now().Add(5 * time.Second))
+		_ = s.Handshake() // fails on the self-signed cert; the hello has already been parsed
+	}()
+	cli, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
 	}
-	// Chrome's ALPN vector: the h2 entry immediately followed by http/1.1.
-	alpnH2 := []byte{0x02, 'h', '2', 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1'}
-	if !bytes.Contains(cc.hello, alpnH2) {
-		t.Fatal("grpc/h2 path must offer h2 in ALPN so the edge negotiates HTTP/2")
+	_, _ = uEdgeHandshake(cli, "cdn.example.com", nil, alpn, goFingerprint)
+	cli.Close()
+	<-done
+	if got == nil {
+		t.Fatal("the server never parsed a ClientHello")
 	}
+	return got
+}
+
+// hasGREASE reports whether any cipher suite is a GREASE value (RFC 8701: two identical bytes whose
+// low nibble is 0xa). Go's crypto/tls never emits GREASE; uTLS's Chrome parrot always does.
+func hasGREASE(suites []uint16) bool {
+	for _, cs := range suites {
+		if byte(cs>>8) == byte(cs) && cs&0x0f == 0x0a {
+			return true
+		}
+	}
+	return false
+}
+
+// TestGrpcPathUsesTheGoFingerprint pins the TLS half of the grpc identity.
+//
+// A gRPC call is not something a browser can make: Content-Type: application/grpc and TE: trailers are
+// both forbidden to browser fetch/XHR. So a Chrome ClientHello in FRONT of one is not camouflage — it
+// advertises a browser making a call no browser can make, which is exactly the cross-check a
+// gRPC-aware WAF runs. Real gRPC traffic reaching a CDN comes from gRPC clients, and grpc-go rides
+// Go's crypto/tls, so grpc mode presents Go's own ClientHello and offers h2 alone, matching the
+// grpc-go User-Agent the request carries. Changing only one of the two layers relocates the mismatch
+// instead of removing it, which is why this test and TestGrpcRequestIsNotABrowser belong together.
+func TestGrpcPathUsesTheGoFingerprint(t *testing.T) {
+	grpc := helloSeenBy(t, []string{"h2"}, true)
+	if hasGREASE(grpc.CipherSuites) {
+		t.Error("the grpc ClientHello carries GREASE — that is the browser fingerprint, in front of a call no browser can make")
+	}
+	if len(grpc.SupportedProtos) != 1 || grpc.SupportedProtos[0] != "h2" {
+		t.Errorf("grpc ALPN = %v, want [h2] alone (grpc-go offers only h2; [h2 http/1.1] is the browser's list)", grpc.SupportedProtos)
+	}
+
+	// The ws / POST-ladder path is unchanged: those requests really are shaped like page fetches, so
+	// the browser fingerprint fits there and must stay.
+	ws := helloSeenBy(t, []string{"http/1.1"}, false)
+	if !hasGREASE(ws.CipherSuites) {
+		t.Error("the ws path lost its Chrome fingerprint (no GREASE) — that path must stay browser-shaped")
+	}
+	if len(ws.SupportedProtos) != 1 || ws.SupportedProtos[0] != "http/1.1" {
+		t.Errorf("ws ALPN = %v, want [http/1.1]", ws.SupportedProtos)
+	}
+}
+
+// fpTestCert mints a throwaway self-signed leaf for the pipe server above.
+func fpTestCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), crand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(11), Subject: pkix.Name{CommonName: "cdn.example.com"},
+		DNSNames:  []string{"cdn.example.com"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(crand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
 // chromeSpec must build against the current pinned Chrome parrot (guards a uTLS bump that might

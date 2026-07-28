@@ -1136,7 +1136,7 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 		var uc net.Conn
 		// ALPN forced to http/1.1: the WebSocket upgrade that follows (wsClientHandshake) is
 		// HTTP/1.1, so the edge must not pick h2.
-		uc, err = uEdgeHandshake(b.fragWrap(conn, host), host, ech, []string{"http/1.1"}) // split the ClientHello's SNI when enabled
+		uc, err = uEdgeHandshake(b.fragWrap(conn, host), host, ech, []string{"http/1.1"}, false) // split the ClientHello's SNI when enabled
 		if err == nil {
 			if healed && live { // live self-heal: persist the fresh key and surface it (pool or single-edge)
 				b.noteECHSelfHeal(host, ech)
@@ -1166,7 +1166,7 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 // is set uTLS injects the real Encrypted ClientHello in place of Chrome's GREASE-ECH, keeping BOTH
 // the fingerprint and the hidden SNI. A stale ECH key surfaces as a *utls.ECHRejectionError with a
 // fresh RetryConfigList for the caller's self-heal. Shared by the ws (tlsToEdge) and HTTP carriers.
-func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string) (net.Conn, error) {
+func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFingerprint bool) (net.Conn, error) {
 	cfg := &utls.Config{ServerName: host}
 	var echPub []string
 	// echRejected records that the blanket-accept hook below actually fired, i.e. the edge rejected our
@@ -1192,13 +1192,26 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string) (net.
 			}
 		}
 	}
-	uc := utls.UClient(conn, cfg, utls.HelloCustom)
-	spec, err := chromeSpec(alpn)
-	if err != nil {
-		return nil, err
-	}
-	if err = uc.ApplyPreset(&spec); err != nil {
-		return nil, err
+	var uc *utls.UConn
+	var err error
+	if goFingerprint {
+		// grpc mode. A gRPC call is not something a browser can make, so a Chrome ClientHello under
+		// Content-Type: application/grpc + TE: trailers is a combination that exists nowhere — the
+		// browser identity is the anomaly here, not the camouflage. Real gRPC traffic to a CDN comes
+		// from gRPC clients, and grpc-go rides Go's own crypto/tls, so Go's ClientHello is the
+		// fingerprint that MATCHES the grpc-go User-Agent the request carries (see grpcUA). Changing
+		// only one of the two would just relocate the mismatch.
+		cfg.NextProtos = alpn // HelloGolang takes ALPN from the config, not from a spec
+		uc = utls.UClient(conn, cfg, utls.HelloGolang)
+	} else {
+		uc = utls.UClient(conn, cfg, utls.HelloCustom)
+		var spec utls.ClientHelloSpec
+		if spec, err = chromeSpec(alpn); err != nil {
+			return nil, err
+		}
+		if err = uc.ApplyPreset(&spec); err != nil {
+			return nil, err
+		}
 	}
 	conn.SetDeadline(time.Now().Add(handshakeTimeout))
 	if err = uc.Handshake(); err != nil {
