@@ -37,10 +37,11 @@ func TestDesyncWireEmission(t *testing.T) {
 	tv := syscall.Timeval{Sec: 2}
 	_ = syscall.SetsockoptTimeval(rfd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 
-	// Sender: the real Raw desync path. SetDesync opens the dedicated fake socket itself
-	// (spoofFd is -1 here), so this also exercises that fd-open branch.
+	// Sender: the real Raw desync path. A directLink has no fd to borrow (fakeFD() == -1), so
+	// SetDesync opens the dedicated fake socket itself, exercising that fd-open branch too.
 	lo := net.IPv4(127, 0, 0, 1)
-	r := &Raw{isClient: true, proto: proto, spoofFd: -1, fakeFd: -1, pktFd: -1}
+	r := &Raw{isClient: true, proto: proto, fakeFd: -1}
+	r.link = &directLink{r: r}
 	r.localIP.Store(&net.IPAddr{IP: lo})
 	r.SetDesync(true, ttl, count, "ttl") // valid checksum so loopback delivers the decoys
 	if !r.desync.on || r.fakeFd < 0 {
