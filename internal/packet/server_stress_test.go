@@ -55,7 +55,7 @@ func TestHTTPCServerMalformedBlast(t *testing.T) {
 			r, _ := http.NewRequest("POST", fmt.Sprintf("%s/?s=%032d&seq=0", base, 0)+"ZZZ", nil)
 			return r
 		},
-		func(i int) *http.Request { // valid-format sid, POST with NON-numeric seq -> 400
+		func(i int) *http.Request { // valid-format sid the GET never opened, POST -> 404 (no session to create)
 			r, _ := http.NewRequest("POST", fmt.Sprintf("%s/?s=%032x&seq=notanumber", base, i), bytes.NewReader([]byte("x")))
 			return r
 		},
