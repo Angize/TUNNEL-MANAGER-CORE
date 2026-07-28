@@ -16,15 +16,15 @@ func TestApplyTuning(t *testing.T) {
 		dft                int
 		im, ims, ssm, ssmn int64
 		plt                int32
-		ml, pto, fr        time.Duration
+		ml, pto            time.Duration
 	}{suspectBackoff, deadRetest, pinTTL, dataGoodWindow, dataFailThreshold,
 		idleMult, idleMinSecs, sessionStaleMult, sessionStaleMinSecs, pingLossThreshold,
-		minLiveness, probeTimeout, defaultFluxRotate}
+		minLiveness, probeTimeout}
 	defer func() {
 		suspectBackoff, deadRetest, pinTTL, dataGoodWindow, dataFailThreshold = save.sb, save.dr, save.pt, save.dgw, save.dft
 		idleMult, idleMinSecs, sessionStaleMult, sessionStaleMinSecs = save.im, save.ims, save.ssm, save.ssmn
 		pingLossThreshold = save.plt
-		minLiveness, probeTimeout, defaultFluxRotate = save.ml, save.pto, save.fr
+		minLiveness, probeTimeout = save.ml, save.pto
 	}()
 
 	// A zero input must be a no-op: every default survives.
@@ -50,7 +50,7 @@ func TestApplyTuning(t *testing.T) {
 		t.Errorf("dead-detect: im=%d ims=%d ssm=%d ssmn=%d plt=%d", idleMult, idleMinSecs, sessionStaleMult, sessionStaleMinSecs, pingLossThreshold)
 	}
 	if minLiveness != 12*time.Second || probeTimeout != 7*time.Second {
-		t.Errorf("durations: minLiveness=%v probeTimeout=%v flux=%v", minLiveness, probeTimeout, defaultFluxRotate)
+		t.Errorf("durations: minLiveness=%v probeTimeout=%v", minLiveness, probeTimeout)
 	}
 	// idleFor / the stale window now track the tuned multipliers.
 	if got := idleFor(10 * time.Second); got != 60*time.Second { // 6×10s=60s, above the 30s floor
@@ -61,17 +61,23 @@ func TestApplyTuning(t *testing.T) {
 	}
 
 	// Regression: a SHORT custom suspect_backoff must not panic the fixed-index caller (ws_pool used a
-	// literal suspectBackoff[2]). suspectStep clamps to the last element instead of indexing out of range.
+	// literal suspectBackoff[2]). suspectStepAt clamps to the last element instead of indexing out of
+	// range — and returns the index it used, which the caller stamps into healthRec.fails.
 	ApplyTuning(TuningInput{SuspectBackoff: []int64{7}})
-	if got := suspectStep(2); got != 7 { // len==1 -> clamped to [0]
-		t.Errorf("suspectStep(2) on a 1-element schedule = %d, want 7 (clamped)", got)
+	if i, got := suspectStepAt(2); got != 7 || i != 0 { // len==1 -> clamped to [0]
+		t.Errorf("suspectStepAt(2) on a 1-element schedule = (%d, %d), want (0, 7) clamped", i, got)
 	}
-	if got := suspectStep(0); got != 7 {
-		t.Errorf("suspectStep(0) = %d, want 7", got)
+	if i, got := suspectStepAt(0); got != 7 || i != 0 {
+		t.Errorf("suspectStepAt(0) = (%d, %d), want (0, 7)", i, got)
 	}
 	ApplyTuning(TuningInput{SuspectBackoff: []int64{5, 10, 20}})
-	if got := suspectStep(2); got != 20 {
-		t.Errorf("suspectStep(2) = %d, want 20", got)
+	if i, got := suspectStepAt(2); got != 20 || i != 2 {
+		t.Errorf("suspectStepAt(2) = (%d, %d), want (2, 20)", i, got)
+	}
+	// The returned index must be the one that indexes the returned value — that pairing is what keeps
+	// healthRec.fails and nextRetest from drifting apart (the backwards-backoff bug).
+	if i, got := suspectStepAt(2); suspectBackoff[i] != got {
+		t.Errorf("suspectStepAt(2) returned index %d and value %d, but suspectBackoff[%d]=%d", i, got, i, suspectBackoff[i])
 	}
 
 	// Out-of-range values clamp instead of taking effect verbatim.

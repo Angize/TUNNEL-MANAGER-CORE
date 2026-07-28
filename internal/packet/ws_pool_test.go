@@ -397,18 +397,19 @@ func TestStatusSnapshotStates(t *testing.T) {
 	}
 }
 
-// dueRetests reports only entries whose backoff has elapsed; probeNow pulls one forward so the
-// scheduler picks it up on the next tick, paired with a healthy partner on the other axis.
-func TestDueRetestsAndProbeNow(t *testing.T) {
+// dueRetests reports only entries whose backoff has elapsed; once it has, the entry becomes due and is
+// paired with a healthy partner on the other axis. probeAllNow is the operator's way to pull that
+// forward (the panel's control arrives as a signal, which carries no key).
+func TestDueRetestsAndProbeAllNow(t *testing.T) {
 	p, now := clockPool([]string{"a", "b"}, snis("x", "y"), true, "")
 	p.markSuspect("ip", "a", "test") // due at now+30
 	if due := p.dueRetests(); len(due) != 0 {
 		t.Fatalf("nothing should be due yet, got %v", due)
 	}
-	p.probeNow("ip", "a")
+	p.probeAllNow()
 	due := p.dueRetests()
 	if len(due) != 1 || due[0].kind != "ip" || due[0].key != "a" {
-		t.Fatalf("probeNow should make a due, got %v", due)
+		t.Fatalf("probeAllNow should make the suspect due, got %v", due)
 	}
 	if due[0].ip != "a" {
 		t.Fatalf("retest spec should dial the entry itself, got %q", due[0].ip)
@@ -416,7 +417,7 @@ func TestDueRetestsAndProbeNow(t *testing.T) {
 	if p.sniHealth[due[0].sni.host] != nil {
 		t.Fatalf("retest partner SNI must be healthy, got %q", due[0].sni.host)
 	}
-	// After the backoff elapses on the clock, it is due without probeNow too.
+	// After the backoff elapses on the clock, it is due with no operator action at all.
 	p2, now2 := clockPool([]string{"a"}, snis("x"), true, "")
 	p2.markSuspect("ip", "a", "test")
 	*now2 = *now + 31
@@ -632,7 +633,7 @@ func TestDataPlaneFaultBurn(t *testing.T) {
 	// length from fails alone, and retestBackoff steps FORWARD from fails — so a mismatched fails=0
 	// both mis-sizes the bar and makes the next failed retest run the backoff backwards.
 	if got := p.ipHealth["a"].fails; got != 2 {
-		t.Fatalf("data-plane suspect fails=%d, want 2 (must match suspectStep(2))", got)
+		t.Fatalf("data-plane suspect fails=%d, want 2 (must match suspectStepAt(2))", got)
 	}
 	if step := suspectBackoff[p.ipHealth["a"].fails]; step != p.ipHealth["a"].nextRetest-1000 {
 		t.Fatalf("published fails/nextRetest inconsistent: suspectBackoff[%d]=%d but remaining=%d",
@@ -670,7 +671,7 @@ func TestDataPlaneFaultBurn(t *testing.T) {
 // TestDataPlaneSuspectBackoffMonotonic closes the class behind the backwards-backoff bug: a data-plane
 // suspect enters at step 2 (the longer 120s wait), so the NEXT failed retest must schedule step 3 (300s)
 // — a LONGER wait — not step 1 (60s). It ran backwards because the suspect record was created with the
-// zero fails value while its nextRetest came from suspectStep(2); retestBackoff does fails++ then reads
+// zero fails value while its nextRetest came from suspectStepAt(2); retestBackoff does fails++ then reads
 // suspectBackoff[fails], so fails=0 made the first failed retest land on suspectBackoff[1] < the initial
 // suspectBackoff[2]. The fix stamps fails to match the entry step.
 func TestDataPlaneSuspectBackoffMonotonic(t *testing.T) {
