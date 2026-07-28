@@ -846,10 +846,12 @@ type httpcSession struct {
 	upMu    sync.Mutex        // orders upstream POSTs by seq before writing to the upstream pipe
 	nextSeq uint64            // next seq we expect to hand to upW
 	pend    map[uint64][]byte // out-of-order chunks waiting for the gap to fill
+	pendLen int               // bytes currently held in pend — bounded by maxPendBytes()
 }
 
 // httpcGetOrCreate returns the session for sid, creating it (with a fresh upstream pipe and a
-// watchdog that reaps a session whose GET never arrives) on first sight.
+// watchdog that reaps a session whose GET never arrives) on first sight. ONLY the downstream GET
+// may create: see httpcLookup.
 func (b *TCP) httpcGetOrCreate(sid string) *httpcSession {
 	b.httpcMu.Lock()
 	defer b.httpcMu.Unlock()
@@ -861,6 +863,30 @@ func (b *TCP) httpcGetOrCreate(sid string) *httpcSession {
 	b.httpcSessions[sid] = s
 	time.AfterFunc(handshakeTimeout, func() { s.reapIfUnserved(b, sid) })
 	return s
+}
+
+// httpcLookup returns an EXISTING session, or nil. The upstream POST path uses this instead of
+// httpcGetOrCreate: a real client opens the downstream GET first and only builds its upstream
+// sender once that GET's response head has arrived (dialHTTPCPost), so by the time it can post a
+// chunk the session always exists. Letting a POST create one meant anyone who could reach the
+// origin — by scanning it directly, or through the CDN — could allocate a pipe plus a whole
+// out-of-order buffer per invented session id, with no handshake and no cap on how many.
+func (b *TCP) httpcLookup(sid string) *httpcSession {
+	b.httpcMu.Lock()
+	defer b.httpcMu.Unlock()
+	return b.httpcSessions[sid]
+}
+
+// maxPendBytes bounds the out-of-order upstream buffer of ONE session. The 1024-entry gap guard
+// alone bounded the entry COUNT, not the bytes, so with maxPostBody at 1 MiB a single session could
+// hold ~1 GiB. A legitimate client can only ever have upWorkers batches of at most maxUpBatch bytes
+// in flight at once (newHTTPCUp), so twice that covers any real reordering; the 4 MiB floor keeps a
+// deliberately tuned-down client (1 worker × 8 KiB) from clipping itself on a lossy path.
+func maxPendBytes() int {
+	if n := 2 * upWorkers * maxUpBatch; n > 4<<20 {
+		return n
+	}
+	return 4 << 20
 }
 
 // reapIfUnserved closes a session that never had a downstream GET bind (serve start) within the
@@ -885,16 +911,24 @@ func (s *httpcSession) deliver(seq uint64, data []byte) {
 	if seq < s.nextSeq {
 		return // already delivered / duplicate
 	}
-	if len(s.pend) > 1024 { // runaway gap (a lost POST) — let the client fail + re-dial
+	// Runaway gap (a lost POST) — let the client fail + re-dial. Bounded on BOTH axes: the entry
+	// count, and the bytes those entries hold. A chunk is up to maxPostBody, so the count alone let
+	// a stranger park ~1 GiB here by posting sparse seqs that never fill the gap at nextSeq.
+	if len(s.pend) > 1024 || s.pendLen+len(data) > maxPendBytes() {
 		return
 	}
+	if old, ok := s.pend[seq]; ok {
+		s.pendLen -= len(old) // a re-POST of a seq still waiting: replaces, doesn't add
+	}
 	s.pend[seq] = data
+	s.pendLen += len(data)
 	for {
 		d, ok := s.pend[s.nextSeq]
 		if !ok {
 			break
 		}
 		delete(s.pend, s.nextSeq)
+		s.pendLen -= len(d)
 		s.nextSeq++
 		if len(d) > 0 {
 			if _, err := s.upW.Write(d); err != nil {
@@ -956,8 +990,15 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 		b.serveHTTPCGrpc(w, r)
 		return
 	}
-	s := b.httpcGetOrCreate(sid)
 	if r.Method == http.MethodPost {
+		// An upstream chunk is only ever accepted for a session the downstream GET already opened.
+		// An unknown id gets the same plain 404 a probe sees, so nothing is allocated for a caller
+		// that has not been through the GET — the only path that can create a session.
+		s := b.httpcLookup(sid)
+		if s == nil {
+			http.Error(w, "Not Found", http.StatusNotFound)
+			return
+		}
 		seq, err := strconv.ParseUint(r.URL.Query().Get("seq"), 10, 64)
 		if err != nil {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
@@ -984,6 +1025,7 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
+	s := b.httpcGetOrCreate(sid) // the GET is the only path that may create a session
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "", http.StatusInternalServerError)
