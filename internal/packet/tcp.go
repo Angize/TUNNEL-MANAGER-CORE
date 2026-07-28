@@ -397,6 +397,10 @@ type TCP struct {
 	bindIP   string      // client: source IP to dial FROM (empty = kernel default); tcp/ws/http only
 	srcWarn  sync.Once   // one line when the pinned source is not a local address (see dialer)
 	probing  atomic.Bool // a retest batch is in flight; keeps the retest tick free for the operator pin
+	// lastSrc is the source the dialer last BOUND to (raw pool entry, so it compares to a pin key).
+	// Releasing a source pin is conditioned on it, so a pin is never consumed by a connection that
+	// leaves from somewhere else. Written in dialer(), read at the pin-release site.
+	lastSrc atomic.Pointer[string]
 
 	// TCP-segment injection desync (client, optional): after each kernel TCP connect we inject a
 	// few decoy TCP segments on the real 4-tuple (low-TTL, so they die before the edge/server) to
@@ -447,6 +451,22 @@ func (b *TCP) dialTarget() string {
 		return b.pp.current()
 	}
 	return b.addr
+}
+
+// directPinInForce reports whether an operator pin is live on either DIRECT pool. The ws edge pool
+// keeps its own pin state and has its own guard in dialLoopWarm.
+func (b *TCP) directPinInForce() bool {
+	return (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned())
+}
+
+// lastSourceUsed returns the source the dialer most recently BOUND to (the raw pool entry, so it
+// compares directly against a pin key), so releasing a source pin can be conditioned on where the
+// connection actually leaves from rather than on the pool's state at some later moment.
+func (b *TCP) lastSourceUsed() string {
+	if s := b.lastSrc.Load(); s != nil {
+		return *s
+	}
+	return ""
 }
 
 // SetSourcePool (client, direct tcp/cover only) wires a source-IP rotation pool: the local IP the
@@ -571,7 +591,9 @@ func (b *TCP) SetStatusPath(path string) {
 // keeps the tunnel up on the kernel's default source, and the log names the real cause.
 func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 	d := &net.Dialer{Timeout: timeout}
-	if src := b.sourceIP(); src != "" { // rotation pool's current source, or the fixed bindIP
+	src := b.sourceIP() // rotation pool's current source, or the fixed bindIP
+	b.lastSrc.Store(&src)
+	if src != "" {
 		// Tolerate an accidental "ip:port", exactly as config.go's validatePoolEndpoint promises it will
 		// ("tolerate an accidental ip:port") and as udp (rebindSourceTo) and raw/flux (hostOnly) already
 		// do. tcp was the one carrier that did not: ParseIP("10.0.0.5:0") is nil, and because everything
@@ -1781,6 +1803,18 @@ func (b *TCP) dialLoop() {
 		// A timed rotation parks the next carrier here, already connected and handshaked, so this
 		// iteration costs neither a connect nor a handshake — that is what removes the rotation gap.
 		w := b.takeWarm()
+		if w != nil && b.directPinInForce() {
+			// A parked rotation carrier resolved its endpoint at BUILD time (buildWarm -> dialCarrier ->
+			// dialTarget -> pp.current()), i.e. before this pin existed, and the adoption path below
+			// reuses that connection verbatim without re-consulting the pool. Adopting it under a pin
+			// published the ROTATION's endpoint as active, logged a peer-rotate naming it, and then
+			// released the pin as if it had landed: the panel reported the operator's jump as done while
+			// the tunnel sat on a different IP, with nothing in the log naming the pin. Drop it and dial
+			// fresh — dialCarrier re-reads current(), which forces the pinned endpoint.
+			log.Printf("core/tcp: dropping the pre-built rotation carrier — an operator pin is pending")
+			w.conn.Close()
+			w = nil
+		}
 		var conn net.Conn
 		var label, combo string
 		var cf *connFramer
@@ -1872,14 +1906,17 @@ func (b *TCP) dialLoop() {
 			// non-warm loop must too. No-op when no pin is in force (single-locked, no TOCTOU).
 			b.pool.pinApplied(label, strings.TrimPrefix(combo, label+" · "))
 		} else {
-			// Direct pp/sp: we just connected on the current endpoints, so release any operator pin that
-			// has now landed (a pin behaves as "jump here and keep trying until connected"). pinLanded is
-			// single-locked and a no-op when no pin is in force — no TOCTOU between the check and clear.
+			// Direct pp/sp: release an operator pin that has now landed (a pin behaves as "jump here and
+			// keep trying until connected"). pinLandedOn is single-locked and a no-op when no pin is in
+			// force — no TOCTOU between the check and clear — and it COMPARES: a pin is only ever
+			// consumed by a carrier that actually came up on it, never by one that resolved its endpoint
+			// before the pin existed. `label` is dialCarrier's target, i.e. the pool entry we are on;
+			// lastSrc is what the dialer really bound to.
 			if b.pp != nil {
-				b.pp.pinLanded()
+				b.pp.pinLandedOn(label)
 			}
 			if b.sp != nil {
-				b.sp.pinLanded()
+				b.sp.pinLandedOn(b.lastSourceUsed())
 			}
 		}
 		// Proactive rotation: after b.rotate, advance the pool and drop this connection
@@ -2500,6 +2537,23 @@ func (b *TCP) dialLoopWarm() {
 			activeBuilding = false
 			if active != nil || b.closed.Load() {
 				wc.conn.Close()
+				continue
+			}
+			if b.pool != nil && !b.pool.pinMatches(wc.label, strings.TrimPrefix(wc.combo, wc.label+" · ")) {
+				// This dial resolved its edge BEFORE the pin. It can only get here through one window:
+				// the outage-adopt arm above hands a ready standby to setActive and deliberately leaves
+				// the in-flight active dial to be "harmlessly dropped when it lands" — but it leaves
+				// activeBuilding set, so a pin arriving in that window found dialActiveAsync already
+				// building and silently started nothing. The active then died (rotate1 drops it for the
+				// pin), and this stale result was adopted on the pre-pin edge. Because that edge does not
+				// match, pinApplied did not clear the pin either, so proactive rotation stayed frozen for
+				// the rest of pinTTL: "I pinned it, it switched to the wrong edge, then rotation went
+				// quiet for half a minute". Discard it and dial again — activeBuilding is already false
+				// above, so this starts exactly one fresh dial, and warmEstablish reads current(), which
+				// forces the pinned edge.
+				log.Printf("core/tcp: discarding a pre-pin active dial on %s — re-dialing on the pinned edge", wc.label)
+				wc.conn.Close()
+				dialActiveAsync()
 				continue
 			}
 			// Consume any stale manual-switch flag: a pin placed mid-outage (while active==nil) set it

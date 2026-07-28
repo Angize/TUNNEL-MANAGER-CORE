@@ -809,6 +809,22 @@ func (p *wsPool) pinApplied(ip, host string) {
 	}
 }
 
+// pinMatches reports whether a carrier that came up on (ip, host) satisfies EVERY axis of the live
+// pin — the read-only twin of pinApplied, for deciding whether a connection may become the active at
+// all. A dial that resolved its edge before the pin existed does not satisfy it, and adopting such a
+// connection lands the operator somewhere they did not pick. True when no pin is in force.
+func (p *wsPool) pinMatches(ip, host string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pinIP != "" && p.pinIP != ip {
+		return false
+	}
+	if p.pinSNI != "" && p.pinSNI != host {
+		return false
+	}
+	return true
+}
+
 // cmdPath is the sidecar file the node writes a "select edge" request into (JSON {kind,key}).
 // Empty when the pool has no status path (nothing to poll).
 func (p *wsPool) cmdPath() string {
