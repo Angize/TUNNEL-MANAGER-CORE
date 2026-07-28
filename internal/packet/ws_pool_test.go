@@ -628,6 +628,16 @@ func TestDataPlaneFaultBurn(t *testing.T) {
 	if p.ipHealth["a"].nextRetest != 1000+suspectBackoff[2] {
 		t.Fatalf("data-plane suspect should use the longer backoff, got nextRetest=%d", p.ipHealth["a"].nextRetest)
 	}
+	// fails MUST match the step used for nextRetest (step 2). The panel derives the countdown-bar
+	// length from fails alone, and retestBackoff steps FORWARD from fails — so a mismatched fails=0
+	// both mis-sizes the bar and makes the next failed retest run the backoff backwards.
+	if got := p.ipHealth["a"].fails; got != 2 {
+		t.Fatalf("data-plane suspect fails=%d, want 2 (must match suspectStep(2))", got)
+	}
+	if step := suspectBackoff[p.ipHealth["a"].fails]; step != p.ipHealth["a"].nextRetest-1000 {
+		t.Fatalf("published fails/nextRetest inconsistent: suspectBackoff[%d]=%d but remaining=%d",
+			p.ipHealth["a"].fails, step, p.ipHealth["a"].nextRetest-1000)
+	}
 
 	// dataSuccess resets the per-IP counter.
 	p.dataFailure("c")
@@ -654,6 +664,39 @@ func TestDataPlaneFaultBurn(t *testing.T) {
 	p3.dataFailure("a")
 	if p3.ipHealth["a"] != nil {
 		t.Fatal("data fault burned an edge with autoBurn off")
+	}
+}
+
+// TestDataPlaneSuspectBackoffMonotonic closes the class behind the backwards-backoff bug: a data-plane
+// suspect enters at step 2 (the longer 120s wait), so the NEXT failed retest must schedule step 3 (300s)
+// — a LONGER wait — not step 1 (60s). It ran backwards because the suspect record was created with the
+// zero fails value while its nextRetest came from suspectStep(2); retestBackoff does fails++ then reads
+// suspectBackoff[fails], so fails=0 made the first failed retest land on suspectBackoff[1] < the initial
+// suspectBackoff[2]. The fix stamps fails to match the entry step.
+func TestDataPlaneSuspectBackoffMonotonic(t *testing.T) {
+	p, now := clockPool([]string{"a", "b"}, snis("x"), true, "")
+	p.dataSuccess("b") // arm the recent-good outage guard
+	for i := 0; i < dataFailThreshold; i++ {
+		p.dataFailure("a")
+	}
+	r := p.ipHealth["a"]
+	if r == nil || r.state != stateSuspect {
+		t.Fatalf("'a' should be a data-plane suspect after %d short deaths", dataFailThreshold)
+	}
+	first := r.nextRetest - *now // the initial wait (step 2 = 120s)
+	if first != suspectBackoff[2] {
+		t.Fatalf("initial data-suspect wait = %d, want suspectBackoff[2]=%d", first, suspectBackoff[2])
+	}
+
+	// A failed background retest walks the FSM one step. It must grow the wait, not shrink it.
+	*now += first // arrive at the retest instant
+	p.retestResult("ip", "a", false)
+	second := p.ipHealth["a"].nextRetest - *now
+	if second != suspectBackoff[3] {
+		t.Fatalf("after a failed retest the wait = %d, want suspectBackoff[3]=%d (forward step)", second, suspectBackoff[3])
+	}
+	if second <= first {
+		t.Fatalf("data-plane retest backoff ran BACKWARDS: %d -> %d (must be monotonic increasing)", first, second)
 	}
 }
 
