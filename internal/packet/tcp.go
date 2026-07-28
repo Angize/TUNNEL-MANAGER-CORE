@@ -1168,11 +1168,15 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 // fresh RetryConfigList for the caller's self-heal. Shared by the ws (tlsToEdge) and HTTP carriers.
 func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string) (net.Conn, error) {
 	cfg := &utls.Config{ServerName: host}
-	var echPub string
+	var echPub []string
+	// echRejected records that the blanket-accept hook below actually fired, i.e. the edge rejected our
+	// ECH and uTLS therefore SKIPPED certificate verification entirely. Written by the hook, which uTLS
+	// calls synchronously on this goroutine inside Handshake — no other goroutine touches it.
+	echRejected := false
 	if len(ech) > 0 {
 		cfg.EncryptedClientHelloConfigList = ech
-		echPub = echPublicName(ech) // the SNI the edge presents a cert for when it REJECTS our ECH
-		if echPub != "" {
+		echPub = echPublicNames(ech) // the SNIs the edge may present a cert for when it REJECTS our ECH
+		if len(echPub) > 0 {
 			// G1 self-heal on ECH REJECTION-with-cert-mismatch. When our ECH key is stale, the edge
 			// completes the OUTER handshake against the ECH public-name cert (e.g. cloudflare-ech.com),
 			// not `host`. uTLS's default reject path verifies THAT cert against `host`, fails with
@@ -1182,7 +1186,10 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string) (net.
 			// outer peer certs, and returns *utls.ECHRejectionError with the fresh key. We can't verify
 			// here — uTLS calls this hook BEFORE it populates ConnectionState.PeerCertificates — so the
 			// real authentication happens just below, once Handshake returns and the certs are readable.
-			cfg.EncryptedClientHelloRejectionVerify = func(utls.ConnectionState) error { return nil }
+			cfg.EncryptedClientHelloRejectionVerify = func(utls.ConnectionState) error {
+				echRejected = true
+				return nil
+			}
 		}
 	}
 	uc := utls.UClient(conn, cfg, utls.HelloCustom)
@@ -1202,12 +1209,23 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string) (net.
 		// downgraded to a plain error so the self-heal never adopts attacker-supplied ECH configs (which
 		// would let a MITM decrypt the redial's inner ClientHello and unmask the real SNI).
 		var echErr *utls.ECHRejectionError
-		if echPub != "" && errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
+		if len(echPub) > 0 && errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
 			if verr := verifyECHPublicName(uc.ConnectionState().PeerCertificates, echPub); verr != nil {
-				return nil, fmt.Errorf("ech-reject: outer cert not valid for %s: %w", echPub, verr)
+				return nil, fmt.Errorf("ech-reject: outer cert not valid for %v: %w", echPub, verr)
 			}
 		}
 		return nil, err
+	}
+	// A SUCCESSFUL handshake that went through the blanket-accept hook means uTLS skipped certificate
+	// verification and then let us through anyway — we would be holding a TLS session nobody
+	// authenticated. That cannot happen with the uTLS we build against: it refuses to offer anything
+	// below TLS 1.3 once an ECH config list is set (so there is no downgrade that reaches the hook and
+	// then completes), and a rejected ECH always ends in alertECHRequired + *ECHRejectionError before
+	// the handshake is marked complete. But nothing in OUR code made that true, and a uTLS bump could
+	// take it away silently — the hook is a hole held shut by someone else's invariant. Fail closed.
+	if echRejected {
+		uc.Close()
+		return nil, errors.New("ech-reject: handshake completed with an unverified outer certificate")
 	}
 	conn.SetDeadline(time.Time{})
 	return uc, nil
@@ -1217,23 +1235,33 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string) (net.
 // other-versioned config in the list is skipped. Kept in sync with utls' extensionEncryptedClientHello.
 const echConfigVersion uint16 = 0xfe0d
 
-// echPublicName parses an ECHConfigList and returns the public_name of its first usable config — the
-// SNI the edge presents a certificate for when it REJECTS our (stale) ECH. Empty on any parse failure
-// (the reject-verify hook is then left unset, falling back to uTLS' default behaviour). The wire layout
-// mirrors utls' parseECHConfig exactly: ECHConfigList = u16-len-prefixed configs; each config = u16
-// version + u16-len-prefixed contents; contents = config_id(u8) kem_id(u16) public_key(u16) suites(u16)
-// max_name_len(u8) public_name(u8) ... .
-func echPublicName(list []byte) string {
+// echPublicNames parses an ECHConfigList and returns the public_name of EVERY usable config — the
+// SNIs the edge may present a certificate for when it REJECTS our (stale) ECH. Empty on any parse
+// failure (the reject-verify hook is then left unset, falling back to uTLS' default behaviour). The
+// wire layout mirrors utls' parseECHConfig exactly: ECHConfigList = u16-len-prefixed configs; each
+// config = u16 version + u16-len-prefixed contents; contents = config_id(u8) kem_id(u16)
+// public_key(u16) suites(u16) max_name_len(u8) public_name(u8) ... .
+//
+// ALL of them, not just the first: uTLS picks the first config it can actually USE (pickECHConfig
+// also requires a supported KEM/AEAD/KDF, a syntactically valid DNS name and no mandatory extension),
+// and those support sets live in an internal package we cannot import. Returning the first
+// version-matching name instead meant that on a multi-config list where uTLS skipped an earlier
+// config, we verified the reject against a name the edge never presented and refused a legitimate
+// self-heal. Accepting any name from the list is not a weakening: the list is OUR configured ECH
+// record, so every name in it is one we already trust to belong to the ECH provider — and the
+// certificate still has to chain to a public root and be valid for that name.
+func echPublicNames(list []byte) []string {
 	s := cryptobyte.String(list)
 	var configs cryptobyte.String
 	if !s.ReadUint16LengthPrefixed(&configs) {
-		return ""
+		return nil
 	}
+	var names []string
 	for !configs.Empty() {
 		var version uint16
 		var contents cryptobyte.String
 		if !configs.ReadUint16(&version) || !configs.ReadUint16LengthPrefixed(&contents) {
-			return ""
+			return nil
 		}
 		if version != echConfigVersion {
 			continue // different-versioned config: skip its (already consumed) contents
@@ -1244,21 +1272,32 @@ func echPublicName(list []byte) string {
 		if !contents.ReadUint8(&configID) || !contents.ReadUint16(&kemID) ||
 			!contents.ReadUint16LengthPrefixed(&publicKey) || !contents.ReadUint16LengthPrefixed(&cipherSuites) ||
 			!contents.ReadUint8(&maxNameLen) || !contents.ReadUint8LengthPrefixed(&publicName) {
-			return ""
+			return nil
 		}
 		if name := string(publicName); name != "" {
-			return name
+			names = append(names, name)
 		}
 	}
-	return ""
+	return names
 }
 
-// verifyECHPublicName checks the OUTER (ECH-reject) certificate chains to a public root for the ECH
-// public name, so a network attacker can't feed the core forged RetryConfigs by presenting any random
-// cert. This gates the fresh-key HARVEST before the redial: without it a MITM could inject its own ECH
-// config and decrypt the redial's inner ClientHello (unmasking the real SNI). nil roots -> system roots.
-func verifyECHPublicName(certs []*x509.Certificate, publicName string) error {
-	return verifyOuterCert(certs, publicName, nil)
+// verifyECHPublicName checks the OUTER (ECH-reject) certificate chains to a public root for one of the
+// ECH public names, so a network attacker can't feed the core forged RetryConfigs by presenting any
+// random cert. This gates the fresh-key HARVEST before the redial: without it a MITM could inject its
+// own ECH config and decrypt the redial's inner ClientHello (unmasking the real SNI).
+func verifyECHPublicName(certs []*x509.Certificate, publicNames []string) error {
+	if len(publicNames) == 0 {
+		return errors.New("ech-reject: no ECH public name to verify against")
+	}
+	var last error
+	for _, n := range publicNames {
+		if err := verifyOuterCert(certs, n, nil); err == nil {
+			return nil
+		} else {
+			last = err
+		}
+	}
+	return last
 }
 
 // verifyOuterCert is verifyECHPublicName with an injectable trust anchor (nil -> system roots), so the
