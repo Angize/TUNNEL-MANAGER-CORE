@@ -181,6 +181,9 @@ func (d *Device) readGSO() ([][]byte, error) {
 
 // Write injects one L3 packet. With GSO the kernel expects a virtio-net header
 // prefix; a zero header means "one complete packet, checksums done".
+// Write hands one L3 packet to the kernel. There is no GRO here — the write side never coalesces — so
+// with GSO on this pays one allocation and one copy per packet just to prepend the virtio header. That
+// is the cost side of the knob, and it is why the offload is a read-side win, not a symmetric one.
 func (d *Device) Write(pkt []byte) (int, error) {
 	if !d.gso {
 		return d.wr(pkt)

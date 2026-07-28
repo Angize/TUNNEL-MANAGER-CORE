@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -94,8 +95,11 @@ type Config struct {
 	// (e.g. "t.example.com"). DNSResolvers is the client's list of recursive resolvers to query
 	// (host or "host:port", :53 default) — typically DOMESTIC resolvers, so the client never sends
 	// a packet to the server IP and a destination whitelist can't see the tunnel. The server binds
-	// Listen (":53") as the authoritative responder. v1 uses the first resolver; multi-resolver
-	// failover/scan is a later step.
+	// Listen (":53") as the authoritative responder. EVERY resolver in the list is used: the client
+	// round-robins across them query by query (dnstransport.go), which also spreads the query volume
+	// so no single resolver sees the whole tunnel. What is NOT there is health tracking — there is no
+	// burn/retest FSM for resolvers, so a dead one keeps costing a query timeout on its share of every
+	// round. Listing a resolver you are unsure of therefore has a standing cost.
 	DNSZone      string   `json:"dns_zone"`
 	DNSResolvers []string `json:"dns_resolvers"`
 
@@ -196,10 +200,14 @@ type Config struct {
 	// middle of the cleartext hostname; naturally a no-op under ECH, where the SNI is encrypted).
 	SNISplit bool `json:"sni_split"`
 	SplitPos int  `json:"split_pos"`
-	// SNIMode picks how the split is sent: "split" (default) = two in-order segments; "disorder"
-	// additionally sends the head segment at a low TTL (SplitTTL) so it expires in transit and a
-	// reassembling DPI sees the ClientHello out of order, while the kernel retransmits it so the
-	// server still gets the real bytes. SplitTTL is the disorder head TTL (0 = default).
+	// SNIMode picks how the split is sent. THREE modes are accepted (validate() below):
+	//   "split"    (default) two in-order segments;
+	//   "disorder" additionally sends the head segment at a low TTL (SplitTTL) so it expires in transit
+	//              and a reassembling DPI sees the ClientHello out of order, while the kernel
+	//              retransmits it so the server still gets the real bytes;
+	//   "fake"     injects a decoy ClientHello carrying a substituted SNI, killed before the server by
+	//              a bad TCP checksum, so the DPI ingests the decoy and the server never sees it.
+	// SplitTTL is the disorder head TTL (0 = default).
 	SNIMode  string `json:"sni_mode"`
 	SplitTTL int    `json:"split_ttl"`
 	// CDNCarrier picks the SHAPE the CDN-frontable carrier takes on the wire. All three share the
@@ -770,7 +778,10 @@ func (c *Config) validate() error {
 		switch c.Transport {
 		case "", "udp", "raw", "flux", "spoof":
 		default:
-			return errors.New("fec is only supported on the datagram carriers (udp, raw, flux, spoof) — not tcp/ws")
+			// Name the carrier the operator actually configured. The old text listed "tcp/ws" only, so a
+			// dns tunnel was rejected by a message that never mentioned dns — and the operator reasonably
+			// concluded the error belonged to some other tunnel.
+			return fmt.Errorf("fec is not supported on the %s carrier — only on the datagram carriers (udp, raw, flux, spoof)", c.Transport)
 		}
 		if c.FecData < 0 || c.FecParity < 0 {
 			return errors.New("fec_data / fec_parity must be >= 0 (0 defaults to 10 / 3)")

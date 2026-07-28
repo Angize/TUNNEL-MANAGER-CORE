@@ -302,13 +302,9 @@ func main() {
 		}
 		if ok {
 			s.SetDeadAfter(cfg.DeadAfterSecs)
-			// Log the EFFECTIVE deadline: the carrier clamps dead_after_secs up to >=2×keepalive
-			// (deadWindow), so logging cfg.DeadAfterSecs verbatim would misreport a clamped value.
-			effDead := cfg.DeadAfterSecs
-			if floor := 2 * cfg.Keepalive; effDead < floor {
-				effDead = floor
-			}
-			log.Printf("tnl-core: self-heal deadline set to %ds (>=2×keepalive)", effDead)
+			// Log the EFFECTIVE deadline — the one the carrier will really enforce, floor and all.
+			effDead, floorNote := effectiveDeadAfter(cfg.Transport, cfg.Keepalive, cfg.DeadAfterSecs)
+			log.Printf("tnl-core: self-heal deadline set to %ds (%s)", effDead, floorNote)
 		}
 	}
 	// Datagram transports (udp/raw/flux): wire a status-file event ring so the client's precise
@@ -450,6 +446,28 @@ func coverTag(cover bool) string {
 		return " tls"
 	}
 	return ""
+}
+
+// effectiveDeadAfter resolves the dead window a carrier will REALLY enforce for the operator's
+// dead_after_secs, plus a short note naming the floor that applied — so the startup log cannot promise
+// a number the carrier then overrides.
+//
+// Every carrier floors the override, but not by the same rule: udp/tcp/raw/flux clamp up to 2×keepalive,
+// while dns applies its own ABSOLUTE floor (dnstun's dead floor) because that carrier is high-loss and
+// its window must survive several dropped pings. Logging 2×keepalive for dns was wrong in BOTH
+// directions — with keepalive=15/dead_after=10 it printed 30s against a real 20s, and with
+// keepalive=5/dead_after=10 it printed 10s against the same real 20s. An operator asking why a dns
+// tunnel self-heals when it does was reading a number nothing enforced.
+func effectiveDeadAfter(transport string, keepaliveSecs, deadAfterSecs int) (int, string) {
+	floor, note := 2*keepaliveSecs, "≥2×keepalive"
+	if transport == "dns" {
+		floor = packet.DNSDeadFloorSecs()
+		note = fmt.Sprintf("≥%ds, the dns carrier floor", floor)
+	}
+	if deadAfterSecs < floor {
+		return floor, note
+	}
+	return deadAfterSecs, note
 }
 
 // spoofLogTag names which outer field(s) a spoof carrier forges, for the startup log.

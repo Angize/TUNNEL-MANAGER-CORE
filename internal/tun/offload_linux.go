@@ -1,6 +1,12 @@
 //go:build linux
 
-// GSO/GRO offload for the TUN device. When enabled, the interface is opened with
+// GSO offload for the TUN device — GSO ONLY. Despite how the knob has been labelled, there is no GRO
+// anywhere in this core: the net→tun direction never coalesces packets, it writes them one at a time
+// (Device.Write), and with the knob on it pays an extra allocation and copy per packet to prepend the
+// virtio header. So the knob buys read-side syscalls and costs a little on the write side; naming it
+// "GSO/GRO" promised a second half that does not exist.
+//
+// When enabled, the interface is opened with
 // a virtio-net header and TCP/UDP segmentation offload, so the kernel hands the
 // core ONE large "super-packet" (up to 64 KiB) instead of dozens of MTU-sized
 // packets on bulk transfers. readGSO splits that super-packet back into ordinary

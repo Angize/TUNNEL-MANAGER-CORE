@@ -45,6 +45,13 @@ var (
 	keepaliveDeadFloor = 20 * time.Second
 )
 
+// DeadFloor reports the ABSOLUTE floor this carrier applies to its dead window, including to an
+// operator's dead_after_secs override (resolveKeepalive below). Exported so the startup log can report
+// the deadline the carrier will really use: every other carrier floors at 2×keepalive, and reporting
+// that number for dns misstated it in BOTH directions (keepalive=15/dead=10 logged 30s against a real
+// 20s; keepalive=5/dead=10 logged 10s against the same real 20s).
+func DeadFloor() time.Duration { return keepaliveDeadFloor }
+
 // SessionConfig carries the crypto parameters both ends share (from the tunnel config), the KCP MTU the
 // transport can carry in one datagram (MTU<=0 falls back to kcpMTUDefault), and the client keepalive
 // interval (0 falls back to defaultKeepalive).
