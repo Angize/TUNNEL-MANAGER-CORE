@@ -198,7 +198,7 @@ func wsClientHandshake(conn net.Conn, host, path string, deadline time.Time) (*b
 		"Upgrade: websocket\r\n" +
 		"Origin: https://" + host + "\r\n" +
 		"Sec-WebSocket-Version: 13\r\n" +
-		"Accept-Encoding: gzip, deflate, br\r\n" +
+		"Accept-Encoding: " + chromeAcceptEncoding + "\r\n" +
 		"Accept-Language: en-US,en;q=0.9\r\n" +
 		"Sec-WebSocket-Key: " + key + "\r\n" +
 		"Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n\r\n"
