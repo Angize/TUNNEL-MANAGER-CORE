@@ -86,23 +86,37 @@ func TestECHRejectionNeverYieldsAUsableConn(t *testing.T) {
 		}
 	}()
 
-	ech := buildECHConfigListN(t, echTestConfig{name: "public.example", key: x25519Pub(t)})
-	raw, err := net.Dial("tcp", ln.Addr().String())
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	defer raw.Close()
+	// BOTH fingerprints. The hook is installed from the ECH config, not from the parrot, so the browser
+	// path (ws / POST ladder) and the Go path (grpc) are equally exposed to it — and the grpc path is
+	// the newer one, so it is exactly the case a later change would forget.
+	for _, tc := range []struct {
+		name          string
+		alpn          []string
+		goFingerprint bool
+	}{
+		{"browser-parrot", []string{"http/1.1"}, false},
+		{"go-parrot", []string{"h2"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ech := buildECHConfigListN(t, echTestConfig{name: "public.example", key: x25519Pub(t)})
+			raw, err := net.Dial("tcp", ln.Addr().String())
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer raw.Close()
 
-	conn, err := uEdgeHandshake(raw, "edge.example", ech, nil)
-	if conn != nil {
-		conn.Close()
+			conn, err := uEdgeHandshake(raw, "edge.example", ech, tc.alpn, tc.goFingerprint)
+			if conn != nil {
+				conn.Close()
+			}
+			if err == nil {
+				t.Fatal("an ECH rejection produced a usable connection: the reject hook skipped certificate " +
+					"verification and nothing downstream caught it — every CDN-fronted carrier is MITM-able")
+			}
+			if conn != nil {
+				t.Fatalf("uEdgeHandshake returned both a connection and an error (%v) — the conn must be nil", err)
+			}
+			t.Logf("ECH rejection refused as expected: %v", err)
+		})
 	}
-	if err == nil {
-		t.Fatal("an ECH rejection produced a usable connection: the reject hook skipped certificate " +
-			"verification and nothing downstream caught it — every CDN-fronted carrier is MITM-able")
-	}
-	if conn != nil {
-		t.Fatalf("uEdgeHandshake returned both a connection and an error (%v) — the conn must be nil", err)
-	}
-	t.Logf("ECH rejection refused as expected: %v", err)
 }
