@@ -15,6 +15,20 @@ func validRaw() *Config {
 	}
 }
 
+// validSpoof returns a minimal, valid spoof-transport client config (forges a source) to mutate.
+func validSpoof() *Config {
+	return &Config{
+		Role:      "client",
+		Mode:      "packet",
+		Profile:   "core",
+		Transport: "spoof",
+		Peer:      "203.0.113.9",
+		TunAddr:   "10.200.0.2/24",
+		SpoofSrc:  "192.0.2.7",
+		Crypto:    CryptoCfg{Enabled: true, PSK: "a-sufficiently-long-preshared-key"},
+	}
+}
+
 func TestRawTransportValidAndDefaults(t *testing.T) {
 	c := validRaw()
 	if err := c.validate(); err != nil {
@@ -59,57 +73,85 @@ func TestRawTransportRejectsCover(t *testing.T) {
 }
 
 func TestSpoofValidation(t *testing.T) {
-	c := validRaw()
-	c.SpoofSrc = "192.0.2.7"
-	if err := c.validate(); err != nil {
-		t.Errorf("valid spoof_src_ip rejected: %v", err)
+	// A client forging a source is valid; a bogus IP is rejected.
+	if err := validSpoof().validate(); err != nil {
+		t.Errorf("valid spoof client rejected: %v", err)
 	}
-	c = validRaw()
+	c := validSpoof()
 	c.SpoofSrc = "not-an-ip"
 	if err := c.validate(); err == nil {
 		t.Error("bogus spoof_src_ip accepted")
 	}
-	c = validRaw()
-	c.RawProfile = "gre"
-	c.SpoofSrc = "192.0.2.7"
-	if err := c.validate(); err == nil {
-		t.Error("spoofing accepted on a non-bip profile")
-	}
-	c = validRaw()
-	c.RealPeer = "198.51.100.9"
-	if err := c.validate(); err != nil {
-		t.Errorf("valid real_peer_ip rejected: %v", err)
-	}
 
-	// spoof_dst_ip (decoy): valid on a client, rejected when malformed or on a non-bip profile.
-	c = validRaw()
+	// A client forging a decoy destination is valid; a bogus IP is rejected.
+	c = validSpoof()
+	c.SpoofSrc = ""
 	c.SpoofDst = "185.51.200.10"
 	if err := c.validate(); err != nil {
-		t.Errorf("valid spoof_dst_ip rejected: %v", err)
+		t.Errorf("valid spoof_dst client rejected: %v", err)
 	}
-	c = validRaw()
+	c = validSpoof()
+	c.SpoofSrc = ""
 	c.SpoofDst = "nope"
 	if err := c.validate(); err == nil {
 		t.Error("bogus spoof_dst_ip accepted")
 	}
-	c = validRaw()
-	c.RawProfile = "udp"
-	c.SpoofDst = "185.51.200.10"
+
+	// A client that forges nothing is just raw bip — rejected.
+	c = validSpoof()
+	c.SpoofSrc = ""
+	c.SpoofDst = ""
 	if err := c.validate(); err == nil {
-		t.Error("spoof_dst_ip accepted on a non-bip profile")
+		t.Error("spoof client with neither spoof_src nor spoof_dst accepted")
 	}
-	// A decoy server must know the client's real IP to reply to (real_peer_ip).
-	c = validRaw()
+
+	// Crypto is mandatory.
+	c = validSpoof()
+	c.Crypto = CryptoCfg{Enabled: false}
+	if err := c.validate(); err == nil {
+		t.Error("spoof transport without crypto accepted")
+	}
+
+	// raw_proto out of range is rejected; in range is accepted.
+	c = validSpoof()
+	c.RawProto = 300
+	if err := c.validate(); err == nil {
+		t.Error("spoof raw_proto=300 accepted")
+	}
+	c = validSpoof()
+	c.RawProto = 58
+	if err := c.validate(); err != nil {
+		t.Errorf("spoof raw_proto=58 rejected: %v", err)
+	}
+
+	// Rotation is not allowed on the spoof carrier.
+	c = validSpoof()
+	c.PeerIPs = []string{"203.0.113.9", "203.0.113.10"}
+	if err := c.validate(); err == nil {
+		t.Error("spoof accepted a peer_ips rotation pool")
+	}
+	c = validSpoof()
+	c.SrcIPs = []string{"192.0.2.7", "192.0.2.8"}
+	if err := c.validate(); err == nil {
+		t.Error("spoof accepted a src_ips rotation pool")
+	}
+
+	// A server must know the client's real IP to reply to (real_peer_ip), with or without a decoy.
+	c = validSpoof()
 	c.Role = "server"
 	c.Listen = "0.0.0.0:9000"
 	c.Peer = ""
-	c.SpoofDst = "185.51.200.10"
+	c.SpoofSrc = ""
 	if err := c.validate(); err == nil {
-		t.Error("spoof_dst_ip on a server without real_peer_ip accepted")
+		t.Error("spoof server without real_peer_ip accepted")
 	}
 	c.RealPeer = "198.51.100.9"
 	if err := c.validate(); err != nil {
-		t.Errorf("decoy server with real_peer_ip rejected: %v", err)
+		t.Errorf("spoof server with real_peer_ip rejected: %v", err)
+	}
+	c.SpoofDst = "185.51.200.10" // decoy server, still needs real_peer (already set)
+	if err := c.validate(); err != nil {
+		t.Errorf("decoy spoof server with real_peer_ip rejected: %v", err)
 	}
 }
 

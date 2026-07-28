@@ -1,6 +1,6 @@
 //go:build !linux
 
-// The raw transport uses Linux raw IPv4 sockets (CAP_NET_RAW). On other
+// The raw and spoof transports use Linux raw IPv4 sockets (CAP_NET_RAW). On other
 // platforms the constructors fail cleanly so the rest of the core still builds
 // and runs (the raw profile codec in rawprofile.go stays portable and tested).
 package packet
@@ -21,15 +21,23 @@ var errRawUnsupported = errors.New("raw transport requires Linux (raw IPv4 socke
 func (r *Raw) Run() error   { return errRawUnsupported }
 func (r *Raw) Close() error { return nil }
 
-func DialRaw(string, *tun.Device, time.Duration, bool, bool, string, string, string, string, string, bool, int, int, int) (*Raw, error) {
+func DialRaw(string, *tun.Device, time.Duration, bool, bool, string, string, string, bool, int, int, int) (*Raw, error) {
 	return nil, errRawUnsupported
 }
 
-func ListenRaw(string, *tun.Device, time.Duration, bool, bool, string, string, string, string, string, bool, int, int, int) (*Raw, error) {
+func ListenRaw(string, *tun.Device, time.Duration, bool, bool, string, string, string, bool, int, int, int) (*Raw, error) {
 	return nil, errRawUnsupported
 }
 
-// ProbeSpoof reports no capability off Linux (the raw transport is Linux-only).
+func DialSpoof(string, *tun.Device, time.Duration, bool, bool, string, string, string, string, bool, int, int, int) (*Raw, error) {
+	return nil, errRawUnsupported
+}
+
+func ListenSpoof(string, *tun.Device, time.Duration, bool, bool, string, string, string, string, bool, int, int, int) (*Raw, error) {
+	return nil, errRawUnsupported
+}
+
+// ProbeSpoof reports no capability off Linux (the raw/spoof transports are Linux-only).
 func ProbeSpoof() SpoofProbe {
 	return SpoofProbe{Reason: "raw transport requires Linux (raw IPv4 sockets)"}
 }

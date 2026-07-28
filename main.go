@@ -145,14 +145,28 @@ func main() {
 	case "raw":
 		switch cfg.Role {
 		case "server":
-			b, err = packet.ListenRaw(cfg.Listen, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.RealPeer, cfg.SpoofDst, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto)
+			b, err = packet.ListenRaw(cfg.Listen, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/raw:%s%s%s) on %s", cfg.RawProfile, obfsTag, fecTag, cfg.Listen)
 			}
 		case "client":
-			b, err = packet.DialRaw(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.SpoofSrc, cfg.SpoofDst, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto)
+			b, err = packet.DialRaw(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/raw:%s%s%s) %s", cfg.RawProfile, obfsTag, fecTag, cfg.Peer)
+			}
+		}
+	case "spoof":
+		spoofTag := spoofLogTag(cfg)
+		switch cfg.Role {
+		case "server":
+			b, err = packet.ListenSpoof(cfg.Listen, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RealPeer, cfg.SpoofDst, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto)
+			if err == nil {
+				log.Printf("tnl-core: listening (core/spoof:%s%s%s) on %s", spoofTag, obfsTag, fecTag, cfg.Listen)
+			}
+		case "client":
+			b, err = packet.DialSpoof(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.SpoofSrc, cfg.SpoofDst, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto)
+			if err == nil {
+				log.Printf("tnl-core: dialing (core/spoof:%s%s%s) %s", spoofTag, obfsTag, fecTag, cfg.Peer)
 			}
 		}
 	case "flux":
@@ -436,4 +450,18 @@ func coverTag(cover bool) string {
 		return " tls"
 	}
 	return ""
+}
+
+// spoofLogTag names which outer field(s) a spoof carrier forges, for the startup log.
+func spoofLogTag(cfg *Config) string {
+	switch {
+	case cfg.SpoofSrc != "" && cfg.SpoofDst != "":
+		return "src+dst"
+	case cfg.SpoofDst != "":
+		return "dst" // decoy destination (server side carries only this + real_peer)
+	case cfg.SpoofSrc != "":
+		return "src"
+	default:
+		return "src" // server for a src-only client carries neither field, only real_peer
+	}
 }
