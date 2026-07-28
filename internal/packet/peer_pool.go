@@ -387,9 +387,29 @@ func (p *PeerPool) selectEntry(key string) bool {
 // race the pin's own TTL expiry between a check and the clear (the isPinned()+pinApplied(current())
 // two-call form could), and it needs no current() call: while pinned, current() forces the pinned
 // endpoint, so a success is by definition on it. No-op when no pin is in force.
+// It is for carriers that re-resolve current() at connect time (udp/raw/flux all re-point at
+// current() in their adopt path and then re-handshake), where "we connected" and "we connected on the
+// pin" are the same statement. tcp is NOT one of those — see pinLandedOn.
 func (p *PeerPool) pinLanded() {
 	p.mu.Lock()
 	changed := p.pinnedLocked()
+	if changed {
+		p.pinKey, p.pinUntil = "", 0
+	}
+	p.mu.Unlock()
+	if changed {
+		p.writeStatus()
+	}
+}
+
+// pinLandedOn releases a live manual pin ONLY when the carrier really came up on the pinned endpoint.
+// tcp needs the comparison because dialLoop can adopt a carrier the rotation timer PRE-BUILT, whose
+// endpoint was resolved before the pin existed. Releasing the pin then reported the operator's jump as
+// complete while the tunnel sat somewhere else — and, worse, resumed normal rotation as if the pick
+// had been honoured. wsPool.pinApplied has always compared; this is its direct-pool twin.
+func (p *PeerPool) pinLandedOn(addr string) {
+	p.mu.Lock()
+	changed := p.pinnedLocked() && p.pinKey == addr
 	if changed {
 		p.pinKey, p.pinUntil = "", 0
 	}
