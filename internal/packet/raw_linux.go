@@ -310,7 +310,10 @@ func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs, cry
 	if err != nil {
 		return nil, err
 	}
-	applyConnSockBuf(conn) // this IPConn is the normal (non-decoy) raw RX/TX socket
+	// The socket buffers are NOT sized here. Whether this IPConn is the data path at all is decided by
+	// the link the caller installs afterwards: a spoof DECOY server reads via AF_PACKET and writes via
+	// IP_HDRINCL, so it never touches this conn — and sizing it there pinned a multi-MiB receive buffer
+	// on a socket nothing ever drains. ListenRaw and the non-decoy ListenSpoof branch size it themselves.
 	// server: learn which of our IPs each frame targeted, to answer from it (dest-pool rotation).
 	// A failure is survivable but must never be silent — it degrades to the pre-v2.48.23 behaviour.
 	if err := enablePktinfoDst(conn); err != nil {
@@ -334,13 +337,15 @@ func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bo
 }
 
 // ListenRaw (server role) binds a raw carrier of the profile's protocol and learns the peer from the
-// first authenticated frame. No IP spoofing — see ListenSpoof; a raw server always uses a directLink.
+// first authenticated frame. No IP spoofing — see ListenSpoof; a raw server always uses a directLink,
+// so its IPConn IS the data path in both directions and gets the configured socket buffers.
 func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
 	r, err := listenRawBase(listenIP, dev, ka, obfs, cryptoOn, psk, cipher, profile, rawProto)
 	if err != nil {
 		return nil, err
 	}
 	r.link = &directLink{r: r}
+	applyConnSockBuf(r.conn) // a directLink server sends AND receives on this conn
 	r.initFec(fec, fecData, fecParity)
 	return r, nil
 }
