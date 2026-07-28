@@ -184,7 +184,18 @@ func (p *wsPool) dataFailure(ip string) {
 	if recentGood && hasAlt {
 		p.dataFail[ip]++
 		if p.dataFail[ip] >= dataFailThreshold && p.ipHealth[ip] == nil {
-			p.ipHealth[ip] = &healthRec{state: stateSuspect, nextRetest: p.now() + suspectStep(2)}
+			// A data-plane suspect starts on a LONGER backoff (step 2), but fails MUST match that step
+			// or the FSM runs backwards: retestBackoff does fails++ then reads suspectBackoff[fails], so
+			// leaving fails=0 makes the first failed retest schedule suspectBackoff[1] (=60s) AFTER the
+			// initial suspectBackoff[2] (=120s) — the wait SHRINKS instead of growing. The panel is wrong
+			// too: it derives the countdown length from fails alone (poolStepTotal), so fails=0 against a
+			// 120s remaining pins the bar at 0% for the first 90s. suspectStep clamps a short custom
+			// schedule to its last index, so clamp fails the same way to keep the pair consistent.
+			step := 2
+			if n := len(suspectBackoff); step >= n {
+				step = n - 1
+			}
+			p.ipHealth[ip] = &healthRec{state: stateSuspect, fails: step, nextRetest: p.now() + suspectBackoff[step]}
 			p.dataFail[ip] = 0
 			burned = true
 			unpinned = p.releasePinLocked("ip", ip) // a pinned edge proven data-dead: release so we recover now
