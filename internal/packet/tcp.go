@@ -503,6 +503,14 @@ func (b *TCP) SetDesync(on bool, ttl, count int, mode string) {
 	if !b.isClient || !on {
 		return
 	}
+	// Say the cap out loud, here, at the one place that knows it applies. Every decoy on THIS carrier
+	// rides the real connection's 4-tuple, so specsTCP clamps the TTL to injectMaxTTL — while a higher
+	// fake_ttl was accepted by config.go, stored by the node, echoed back by the panel's edit form and
+	// printed verbatim by main's "fake-desync on (… ttl=N …)" line. Every layer reported a hop budget
+	// the wire never carried. The clamp is right; the silence was not.
+	if ttl > injectMaxTTL {
+		log.Printf("core/tcp: fake_ttl=%d is capped to %d on this carrier — its decoys ride the real connection's 4-tuple, so one that reached the server would draw an RST", ttl, injectMaxTTL)
+	}
 	b.dsOn, b.dsTTL, b.dsCount, b.dsMode = true, ttl, count, mode
 }
 

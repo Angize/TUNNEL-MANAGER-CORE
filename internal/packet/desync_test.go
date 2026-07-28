@@ -172,6 +172,20 @@ func TestSpecsTCP(t *testing.T) {
 			t.Fatalf("specsTCP decoy %d: ttl 64 should clamp to %d, got %d", i, injectMaxTTL, s.ttl)
 		}
 	}
+	// Pin the wire to the ceiling TCP.SetDesync announces (TestSetDesyncReportsTheCappedTTL). If the
+	// two ever drift, the log goes back to describing a hop budget the wire does not carry — which is
+	// the defect that made the cap invisible in the first place, one layer down.
+	for _, ttl := range []int{1, 4, injectMaxTTL, injectMaxTTL + 1, 30, 255} {
+		want := ttl
+		if want > injectMaxTTL {
+			want = injectMaxTTL
+		}
+		for i, s := range newDesyncCfg(true, ttl, 3, "both").specsTCP() {
+			if s.ttl != want {
+				t.Errorf("fake_ttl=%d decoy %d: wire ttl %d, want %d", ttl, i, s.ttl, want)
+			}
+		}
+	}
 }
 
 // TestBuildTCPSeg checks the crafted segment has the right ports/flags and a VALID TCP checksum

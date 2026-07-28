@@ -649,8 +649,12 @@ func (c *Config) validate() error {
 			if c.HTTPUpWorkers < 0 || c.HTTPUpWorkers > 16 {
 				return errors.New("http_up_workers must be between 1 and 16 (0 = default)")
 			}
+			// The message used to name 8 as the floor while the predicate accepted 1..7, which
+			// SetHTTPUpstream then raises to 8 (tclamp). The clamp is the safe direction and rejecting a
+			// working config to satisfy a sentence would be the wrong trade, so the sentence is what
+			// changes: say the range that is actually enforced, and say what happens below 8.
 			if c.HTTPUpBatchKB < 0 || c.HTTPUpBatchKB > 512 {
-				return errors.New("http_up_batch_kb must be between 8 and 512 (0 = default)")
+				return errors.New("http_up_batch_kb must be between 0 and 512 (0 = default; a value below 8 is raised to 8)")
 			}
 			if c.HTTPUpRate < 0 || c.HTTPUpRate > 1000 {
 				return errors.New("http_up_rate must be between 1 and 1000 POSTs/sec (0 = unpaced)")
