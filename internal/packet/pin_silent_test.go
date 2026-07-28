@@ -48,11 +48,13 @@ func TestOperatorPinIsSilentOnEveryCarrier(t *testing.T) {
 		pin  func(st *coreStatus)
 	}{
 		{"raw/dest", func(st *coreStatus) {
-			r := &Raw{profile: "bip", spoofFd: -1, pktFd: -1, fakeFd: -1, st: st, pp: dstPool()}
+			r := &Raw{profile: "bip", fakeFd: -1, st: st, pp: dstPool()}
+			r.link = &directLink{r: r}
 			r.adoptPeerRaw()
 		}},
 		{"raw/source", func(st *coreStatus) {
-			r := &Raw{profile: "bip", spoofFd: -1, pktFd: -1, fakeFd: -1, st: st, sp: srcPool()}
+			r := &Raw{profile: "bip", fakeFd: -1, st: st, sp: srcPool()}
+			r.link = &directLink{r: r}
 			r.adoptSourceRaw()
 		}},
 		{"flux/dest", func(st *coreStatus) {

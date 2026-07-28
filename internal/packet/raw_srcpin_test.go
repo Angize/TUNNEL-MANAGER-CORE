@@ -18,7 +18,7 @@ func TestRawPinnedSrc(t *testing.T) {
 	ip := func(s string) net.IP { return net.ParseIP(s).To4() }
 
 	t.Run("client with a source pool pins the pool's current source", func(t *testing.T) {
-		r := &Raw{spoofFd: -1, pktFd: -1, fakeFd: -1,
+		r := &Raw{fakeFd: -1,
 			sp: NewPeerPool([]string{"10.9.9.1", "10.9.9.2"}, false, 0, "")}
 		r.localIP.Store(&net.IPAddr{IP: ip("10.9.9.1")})
 		if got := r.pinnedSrc(); !got.Equal(ip("10.9.9.1")) {
@@ -32,7 +32,7 @@ func TestRawPinnedSrc(t *testing.T) {
 	})
 
 	t.Run("client with no source pool pins nothing", func(t *testing.T) {
-		r := &Raw{spoofFd: -1, pktFd: -1, fakeFd: -1}
+		r := &Raw{fakeFd: -1}
 		r.localIP.Store(&net.IPAddr{IP: ip("10.0.0.5")}) // set by DialRaw from routeLocalIP
 		if got := r.pinnedSrc(); got != nil {
 			t.Fatalf("a single-source client must keep the kernel's choice, got %v", got)
@@ -40,7 +40,7 @@ func TestRawPinnedSrc(t *testing.T) {
 	})
 
 	t.Run("server pins the IP the client dialed", func(t *testing.T) {
-		r := &Raw{spoofFd: -1, pktFd: -1, fakeFd: -1}
+		r := &Raw{fakeFd: -1}
 		d := ip("94.183.210.134")
 		r.replySrc.Store(&d)
 		if got := r.pinnedSrc(); !got.Equal(d) {
@@ -49,7 +49,7 @@ func TestRawPinnedSrc(t *testing.T) {
 	})
 
 	t.Run("server's reply source wins over a source pool", func(t *testing.T) {
-		r := &Raw{spoofFd: -1, pktFd: -1, fakeFd: -1,
+		r := &Raw{fakeFd: -1,
 			sp: NewPeerPool([]string{"10.9.9.1", "10.9.9.2"}, false, 0, "")}
 		r.localIP.Store(&net.IPAddr{IP: ip("10.9.9.1")})
 		d := ip("94.183.210.134")
@@ -60,7 +60,7 @@ func TestRawPinnedSrc(t *testing.T) {
 	})
 
 	t.Run("nothing known pins nothing", func(t *testing.T) {
-		r := &Raw{spoofFd: -1, pktFd: -1, fakeFd: -1}
+		r := &Raw{fakeFd: -1}
 		if got := r.pinnedSrc(); got != nil {
 			t.Fatalf("want nil, got %v", got)
 		}
