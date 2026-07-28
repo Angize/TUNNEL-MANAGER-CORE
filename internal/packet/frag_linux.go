@@ -141,7 +141,7 @@ func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 	if !ok {
 		return f.writeDisorder(p, at)
 	}
-	inj, err := newL2Inject(ra.IP)
+	inj, err := newL2Inject()
 	if err != nil {
 		return f.writeDisorder(p, at)
 	}
@@ -154,7 +154,7 @@ func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 	seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), snd, rcv, tcpPshAck, 0xffff, fake)
 	badTCPChecksum(seg)                                                        // the SERVER drops the fake (bad L4 checksum); the DPI still ingests it
 	if ip := buildIP4Ext(src, dst, protoTCP, fakeTTL, false, seg); ip != nil { // normal TTL so the fake reaches the DPI; the checksum, not TTL, kills it before the server
-		_ = inj.send(ip)
+		_ = inj.sendTo(dst, ip)
 	}
 	return f.Conn.Write(p) // the real ClientHello, whole, at the same sequence (socket untouched)
 }

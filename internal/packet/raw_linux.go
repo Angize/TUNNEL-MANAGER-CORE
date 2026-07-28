@@ -155,17 +155,17 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 		r.fakeFd = fd
 	}
 	if d.usesBadsum() { // bad-checksum decoys must bypass IP_HDRINCL (which repairs the checksum)
-		if p := r.peer.Load(); p != nil {
-			if inj, err := newL2Inject(p.IP); err != nil {
-				// "both" still has its TTL decoys; "badsum" has none, so there desync becomes a no-op.
-				if d.mode == "both" {
-					log.Printf("raw: bad-checksum decoys disabled (AF_PACKET: %v) — the TTL decoys still fire", err)
-				} else {
-					log.Printf("raw: bad-checksum decoys disabled (AF_PACKET: %v) — fake-desync is now a no-op (mode=badsum has no TTL decoys)", err)
-				}
+		// The injector carries no peer — sendFakes passes the CURRENT destination per decoy — so it
+		// needs nothing from the tunnel state here and follows a destination rotation on its own.
+		if inj, err := newL2Inject(); err != nil {
+			// "both" still has its TTL decoys; "badsum" has none, so there desync becomes a no-op.
+			if d.mode == "both" {
+				log.Printf("raw: bad-checksum decoys disabled (AF_PACKET: %v) — the TTL decoys still fire", err)
 			} else {
-				r.inj = inj
+				log.Printf("raw: bad-checksum decoys disabled (AF_PACKET: %v) — fake-desync is now a no-op (mode=badsum has no TTL decoys)", err)
 			}
+		} else {
+			r.inj = inj
 		}
 	}
 	r.desync = d
@@ -221,8 +221,10 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 			// Bad-checksum decoy: inject at L2 so the forged checksum survives (IP_HDRINCL
 			// would repair it). Best-effort — a cold next-hop neighbour just drops this one;
 			// the injector has its own fd guard, so it is safe against a concurrent Close.
+			// Pass the SAME dst the decoy's IPv4 header carries, so after a destination rotation
+			// the frame goes to the gateway that serves the new destination, not the startup one.
 			if r.inj != nil {
-				_ = r.inj.send(out)
+				_ = r.inj.sendTo(dst, out)
 			}
 			continue
 		}

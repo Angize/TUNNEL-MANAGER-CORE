@@ -35,7 +35,7 @@ func (b *TCP) sendTCPFakes(conn net.Conn) {
 	if src == nil || dst == nil {
 		return // an IPv6 4-tuple — the raw IPv4 injector can't mirror it
 	}
-	inj, err := newL2Inject(ra.IP)
+	inj, err := newL2Inject()
 	if err != nil {
 		b.dsFailOnce.Do(func() {
 			log.Printf("tcp: desync decoys disabled (AF_PACKET: %v) — the carrier needs CAP_NET_RAW", err)
@@ -47,7 +47,7 @@ func (b *TCP) sendTCPFakes(conn net.Conn) {
 	for _, sp := range d.specsTCP() {
 		seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), randSeq32(), randSeq32(), tcpPshAck, 0xffff, fakePayload())
 		if ip := buildIP4Ext(src, dst, protoTCP, sp.ttl, sp.badSum, seg); ip != nil {
-			_ = inj.send(ip)
+			_ = inj.sendTo(dst, ip)
 		}
 	}
 }
