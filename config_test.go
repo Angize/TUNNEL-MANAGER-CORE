@@ -5,6 +5,43 @@ import (
 	"testing"
 )
 
+// TestHTTPUpBatchMessageMatchesTheCheck guards that the rejection text names the range the predicate
+// actually enforces. The check accepts 0..512 and SetHTTPUpstream then raises anything below 8 to 8
+// (tclamp) — a safe direction, so the clamp stays. What could not stay is a message naming 8 as the
+// floor: an operator who set 4 got NO error, ran on 8, and if they later typo'd the value the error
+// they finally saw described a range the code does not enforce.
+func TestHTTPUpBatchMessageMatchesTheCheck(t *testing.T) {
+	base := func() *Config {
+		return &Config{
+			Role: "client", Mode: "packet", Profile: "core", Transport: "ws",
+			Peer: "203.0.113.9", TunAddr: "10.200.0.2/24", WSTLS: true, WSHost: "cdn.example.com",
+			CDNCarrier: "http",
+			Crypto:     CryptoCfg{Enabled: true, PSK: "a-sufficiently-long-preshared-key"},
+		}
+	}
+	// Everything the predicate accepts must validate, including the 1..7 window that gets raised.
+	for _, v := range []int{1, 4, 7, 8, 128, 512} {
+		c := base()
+		c.HTTPUpBatchKB = v
+		if err := c.validate(); err != nil {
+			t.Errorf("http_up_batch_kb=%d rejected: %v", v, err)
+		}
+	}
+	// And the message for a value it does reject must not claim a floor it never enforces.
+	c := base()
+	c.HTTPUpBatchKB = 513
+	err := c.validate()
+	if err == nil {
+		t.Fatal("http_up_batch_kb=513 accepted")
+	}
+	if !strings.Contains(err.Error(), "http_up_batch_kb") {
+		t.Fatalf("rejected for the wrong reason: %v", err)
+	}
+	if strings.Contains(err.Error(), "between 8") {
+		t.Errorf("the message names 8 as the floor while 1..7 validate cleanly: %q", err.Error())
+	}
+}
+
 // validRaw returns a minimal, valid raw-transport client config to mutate in tests.
 func validRaw() *Config {
 	return &Config{

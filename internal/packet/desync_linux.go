@@ -20,12 +20,8 @@ package packet
 
 import "crypto/rand"
 
-// injectMaxTTL caps the TTL of a kernel-TCP inject decoy (tcp/cover/ws). Unlike a raw/flux decoy
-// (sent to a peer we don't hold a live kernel connection to), an inject decoy rides a REAL
-// connection's 4-tuple — a well-formed segment that reached the server would draw an RST or a
-// challenge-ACK that could disturb the real flow. Clamping the TTL here guarantees the decoy
-// expires on the path (where the DPI still ingests it) no matter how high the operator set fake_ttl.
-const injectMaxTTL = 8
+// injectMaxTTL lives in desync.go: the untagged carrier code reports the cap, so it cannot be
+// declared in a linux-only file.
 
 // desyncCfg holds the client-side fake-packet-desync parameters. The zero value is off.
 type desyncCfg struct {
