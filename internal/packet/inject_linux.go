@@ -37,30 +37,53 @@ type l2route struct {
 	dst     [6]byte
 }
 
-// l2inject injects raw IPv4 packets to a peer over AF_PACKET. The route is resolved lazily and
-// cached (rt), and re-resolved after a send failure; until the next hop is resolvable, send()
-// returns an error and transmits nothing. mu also serializes send() against close() so Sendto
-// never runs on a closed (or kernel-reused) fd.
+// l2inject injects raw IPv4 packets over AF_PACKET. The DESTINATION is supplied per send, not
+// frozen at construction: the route (egress interface + next-hop MAC) is resolved lazily, cached
+// in rt, and re-resolved whenever the destination changes or a send fails. Until the next hop is
+// resolvable, sendTo returns an error and transmits nothing. mu also serializes sendTo() against
+// close() so Sendto never runs on a closed (or kernel-reused) fd.
+//
+// Freezing the peer here was a real bug: a raw/flux tunnel with a rotating destination pool kept
+// injecting every bad-checksum decoy over the FIRST destination's next hop, forever. The decoy's
+// IPv4 header carried the new destination while the Ethernet frame went to the old gateway, so on
+// a host whose destinations take different routes the decoys never reached the DPI on the new path
+// — silently, because handing a frame to the NIC succeeds and nothing re-resolves on success.
 type l2inject struct {
 	mu   sync.Mutex
 	fd   int
-	peer net.IP
-	rt   *l2route
+	peer net.IP   // the destination rt was resolved FOR (nil until the first successful resolve)
+	rt   *l2route // cached route for peer; nil forces a re-resolve
+	// resolve overrides the route resolver in tests (nil => resolveL2, the real /proc + netlink one).
+	resolve func(net.IP) (*l2route, error)
 }
 
 // newL2Inject opens the AF_PACKET SOCK_RAW send socket. Protocol 0 means it receives nothing
 // (we only transmit), so it never floods its RX queue. It needs CAP_NET_RAW, which the raw/
-// flux carriers already hold.
-func newL2Inject(peer net.IP) (*l2inject, error) {
-	p := peer.To4()
-	if p == nil {
-		return nil, fmt.Errorf("l2: peer %v is not IPv4", peer)
-	}
+// flux carriers already hold. No peer: sendTo carries the destination.
+func newL2Inject() (*l2inject, error) {
 	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, 0)
 	if err != nil {
 		return nil, err
 	}
-	return &l2inject{fd: fd, peer: p}, nil
+	return &l2inject{fd: fd}, nil
+}
+
+// routeTo returns the cached Ethernet route for peer, resolving (and caching) it when the cache is
+// empty or was resolved for a DIFFERENT destination. Caller holds l.mu.
+func (l *l2inject) routeTo(peer net.IP) (*l2route, error) {
+	if l.rt != nil && l.peer.Equal(peer) {
+		return l.rt, nil // steady state: one IP compare per decoy, no syscall
+	}
+	resolve := l.resolve
+	if resolve == nil {
+		resolve = resolveL2
+	}
+	rt, err := resolve(peer)
+	if err != nil {
+		return nil, err
+	}
+	l.peer, l.rt = peer, rt
+	return rt, nil
 }
 
 func (l *l2inject) close() {
@@ -72,28 +95,29 @@ func (l *l2inject) close() {
 	}
 }
 
-// send injects one IPv4 packet (full IP header + payload) toward the peer, prepending the
-// resolved Ethernet header. The route is resolved lazily on first use and cached, and is
-// re-resolved after a send failure. Returns an error (sending nothing) when the socket is
-// closed or the next hop isn't resolvable yet.
-func (l *l2inject) send(ipPkt []byte) error {
+// sendTo injects one IPv4 packet (full IP header + payload) toward peer, prepending the Ethernet
+// header for peer's next hop. peer must be the SAME destination the packet's IPv4 header carries,
+// so the frame is handed to the gateway that actually serves it. The route is resolved lazily,
+// cached, and re-resolved when the destination changes or after a send failure. Returns an error
+// (sending nothing) when the socket is closed or the next hop isn't resolvable yet.
+func (l *l2inject) sendTo(peer net.IP, ipPkt []byte) error {
+	p := peer.To4()
+	if p == nil {
+		return fmt.Errorf("l2: peer %v is not IPv4", peer)
+	}
 	// Hold the mutex across the whole send — including the Sendto syscall — so a concurrent
 	// close() cannot close (and the kernel reuse) the fd mid-send. close() takes the same
 	// mutex, so it waits for any in-flight send to finish; Sendto makes no callback into
 	// l2inject, so there is no deadlock.
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	rt, err := l.routeTo(p)
+	if err != nil {
+		return err
+	}
 	if l.fd < 0 {
 		return fmt.Errorf("l2: injector closed")
 	}
-	if l.rt == nil {
-		rt, err := resolveL2(l.peer)
-		if err != nil {
-			return err
-		}
-		l.rt = rt
-	}
-	rt := l.rt
 
 	frame := make([]byte, 14+len(ipPkt))
 	copy(frame[0:6], rt.dst[:])
