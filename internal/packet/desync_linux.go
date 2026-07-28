@@ -109,10 +109,20 @@ func (d desyncCfg) specsTCP() []fakeSpec {
 // fakePayload returns a random-length, random-content payload sized like a small
 // handshake/keepalive frame. Our real frames are AEAD ciphertext (indistinguishable from
 // random on the wire), so a random decoy of a plausible size resembles a real flow packet.
-// fakeSeqGap offsets a decoy's sequence/counter far past the live stream's, so a decoy can never land
+// fakeSeqGap offsets a decoy's sequence/counter away from the live stream's, so a decoy can never land
 // inside the real frame's sequence space and be mistaken for it by the peer (which drops it anyway on
 // the AEAD) or, worse, by a middlebox reassembling the flow.
-const fakeSeqGap = 1 << 20
+//
+// The low 15 bits matter as much as the size. The icmp profile stamps only uint16(seq), and the old
+// value 1<<20 is exactly 16×2^16 — so modulo the 16-bit field the offset was ZERO and every decoy
+// carried the live stream's own (id, seq): decoy 0 aliased the frame just sent and decoy 1 the very next
+// one. A middlebox that tracks icmp echoes by (id, seq) could then treat the real frame as a duplicate
+// of the decoy it had already seen. The gap must therefore be far from 0 modulo 2^16 as well as large
+// in the full 32-bit space that the tcp and esp profiles use.
+//
+// 1<<20 + 1<<15 keeps the 32-bit distance and puts the decoy exactly HALF the 16-bit space away, which
+// is the furthest a wrapping 16-bit counter can be from the live value in either direction.
+const fakeSeqGap = 1<<20 + 1<<15
 
 func fakePayload() []byte {
 	var lb [1]byte

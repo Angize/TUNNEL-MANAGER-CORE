@@ -232,3 +232,46 @@ func TestDecoySeqDistinct(t *testing.T) {
 		}
 	}
 }
+
+// TestDecoySeqNeverAliasesTheLiveStream closes the half TestDecoySeqDistinct above does NOT cover: that
+// test only proves the decoys of a batch differ from EACH OTHER, so it stayed green while every decoy
+// carried the live stream's own on-wire sequence.
+//
+// The icmp profile stamps `uint16(seq)`, and fakeSeqGap used to be 1<<20 — exactly 16×2^16, i.e. zero
+// modulo the 16-bit field. So decoy 0 went out with the sequence of the frame just sent and decoy 1 with
+// the very next one, sharing the PSK-derived icmp id: a middlebox tracking echoes by (id, seq) could take
+// the real frame for a duplicate of a decoy it had already seen. The gap has to be far from zero modulo
+// 2^16 as well as large in the 32-bit space.
+func TestDecoySeqNeverAliasesTheLiveStream(t *testing.T) {
+	const live = 41000
+	r := &Raw{proto: protoICMP}
+	r.seq.Store(live)
+
+	// The frames around this handshake: the one just sent (live) and the next ones the stream will send
+	// (writeOut does r.seq.Add(1) per frame). No decoy of the batch may collide with any of them.
+	window := map[uint16]int{}
+	for n := 0; n < 64; n++ {
+		window[uint16(live+uint32(n))] = n
+	}
+	for i := 0; i < 8; i++ {
+		lo := uint16(r.decoySeq(i))
+		if n, clash := window[lo]; clash {
+			t.Fatalf("icmp decoy %d stamps on-wire seq %d, which is the live stream's frame +%d — "+
+				"a middlebox tracking (id, seq) can take the real frame for a duplicate", i, lo, n)
+		}
+	}
+
+	// State the property directly, so a future change to fakeSeqGap cannot quietly reintroduce it: the
+	// offset must not vanish in the 16-bit field the icmp profile actually puts on the wire.
+	if fakeSeqGap%(1<<16) == 0 {
+		t.Fatalf("fakeSeqGap=%d is a multiple of 2^16, so uint16(seq+gap)==uint16(seq): the icmp "+
+			"profile gets no offset at all", fakeSeqGap)
+	}
+
+	// The tcp profile uses the full uint32, so the gap must still be large there.
+	rt := &Raw{proto: protoTCP}
+	rt.tcpBytes.Store(9000)
+	if d := rt.decoySeq(0) - (rt.tcpISN + rt.tcpBytes.Load()); d < 1<<16 {
+		t.Fatalf("tcp decoy offset %d is too small to stay clear of the live byte stream", d)
+	}
+}

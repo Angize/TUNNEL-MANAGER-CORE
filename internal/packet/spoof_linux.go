@@ -102,11 +102,15 @@ func ListenSpoof(listenIP string, dev *tun.Device, ka time.Duration, obfs, crypt
 		// decoy = the AF_PACKET receive filter; spoofSrc = dip so replies leave AS the decoy.
 		r.link = &forgedLink{r: r, spoofFd: fd, pktFd: pfd, spoofSrc: dip, decoy: dip,
 			fixedPeer: fixedPeer, antiLeak: addAntiLeak(r.proto, dip)} // anti-leak best-effort; stops the kernel forwarding the decoy dst
+		// NO applyConnSockBuf here on purpose: this link receives via pktFd and sends via spoofFd, so
+		// r.conn is never read and never written. Sizing it pinned the whole sock_buf (4 MiB by default)
+		// on a socket nothing drains — and the kernel would keep queuing matching frames into it forever.
 	} else {
 		// The client forges only its SOURCE (no decoy): we receive on the normal conn and forge
 		// nothing on our replies, but the reply target is the configured real peer, not the wire
 		// source, and the source filter must be off (a forged source can't be filtered by).
 		r.link = &forgedLink{r: r, spoofFd: -1, pktFd: -1, fixedPeer: fixedPeer}
+		applyConnSockBuf(r.conn) // this branch DOES send and receive on the conn
 	}
 	r.initFec(fec, fecData, fecParity)
 	return r, nil
