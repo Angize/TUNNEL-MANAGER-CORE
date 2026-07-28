@@ -313,7 +313,7 @@ func TestTCPSourceIPUsesPool(t *testing.T) {
 	if got := b.sourceIP(); got != "10.0.0.5" {
 		t.Fatalf("with source pool: sourceIP = %q, want the pool's current", got)
 	}
-	if !b.rotateSourceTCP(true) { // proactive rotate should move in a 2-entry pool
+	if _, moved := b.rotateSourceTCP(true); !moved { // proactive rotate should move in a 2-entry pool
 		t.Fatal("rotateSourceTCP should report moved=true")
 	}
 	if got := b.sourceIP(); got != "10.0.0.6" {
@@ -368,6 +368,43 @@ func TestUDPSourcePoolBindsInitialSource(t *testing.T) {
 	got := b.conn.Load().LocalAddr().(*net.UDPAddr).IP
 	if !got.Equal(net.IPv4(127, 0, 0, 2)) {
 		t.Fatalf("SetSourcePool should bind the initial source to SrcIPs[0]=127.0.0.2, got %v", got)
+	}
+	b.conn.Load().Close()
+}
+
+// TestUDPSourceRebindFailureKeepsSocketAndPool closes the class behind #32: when a source rotation
+// advances onto an IP that is no longer on the interface, the rebind fails — and the pool must NOT be
+// left claiming that IP active while the socket still egresses from the previous one. Before the fix,
+// nextEndpoint had already burned the (healthy, in-use) previous source and pointed the status file at
+// the unbindable one, so the panel showed the wrong active source and a live IP was falsely burned.
+func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
+	c0, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("initial ListenUDP: %v", err)
+	}
+	b := &UDP{isClient: true}
+	b.conn.Store(c0)
+	// 127.0.0.1 is bindable; 192.0.2.1 (TEST-NET-1) is never on this host, so a rebind onto it fails.
+	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "192.0.2.1"}, true, 0, ""))
+	sockBefore := b.conn.Load()
+	gen0 := b.rebindGen.Load()
+
+	b.rotateSourceUDP(false) // failover rotate: burns 127.0.0.1, advances onto 192.0.2.1, bind FAILS
+
+	if b.conn.Load() != sockBefore {
+		t.Fatal("the socket was swapped even though the rebind failed")
+	}
+	if b.rebindGen.Load() != gen0 {
+		t.Fatal("rebindGen advanced on a failed rebind — netToTun would treat a live socket as swapped")
+	}
+	if got := b.sp.current(); got != "127.0.0.1" {
+		t.Fatalf("pool active = %q after a failed rebind; the socket never left 127.0.0.1", got)
+	}
+	if b.sp.health["127.0.0.1"] != nil {
+		t.Fatal("the healthy, in-use source 127.0.0.1 was burned by a rotation that never took effect")
+	}
+	if b.sp.health["192.0.2.1"] == nil {
+		t.Fatal("the unbindable candidate 192.0.2.1 was not burned — rotation will retry it every beat")
 	}
 	b.conn.Load().Close()
 }

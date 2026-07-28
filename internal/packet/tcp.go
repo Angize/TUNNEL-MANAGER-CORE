@@ -464,23 +464,30 @@ func (b *TCP) sourceIP() string {
 	return b.bindIP
 }
 
-// rotateSourceTCP advances the source pool so the NEXT dial binds to a new local IP, returning whether
-// it actually moved (the proactive timer uses that to decide whether to force a re-dial). It performs
-// no teardown itself — the caller (a dead dial, or the proactive timer that closes the conn) drives
-// the re-dial that picks up sourceIP(). No-op / false without a source pool.
-func (b *TCP) rotateSourceTCP(proactive bool) bool {
+// rotateSourceTCP advances the source pool so the NEXT dial binds to a new local IP, returning the new
+// source and whether it actually moved (the proactive timer uses moved to decide whether to force a
+// re-dial). It performs no teardown itself — the caller (a dead dial, or the proactive timer that closes
+// the conn) drives the re-dial that picks up sourceIP(). No-op / ("", false) without a source pool.
+//
+// FAILOVER (proactive=false) publishes the src-rotate event NOW: the tunnel really is moving off a dead
+// source, paired with the destination burn. The PROACTIVE timer (proactive=true) publishes NOTHING here
+// and carries the returned addr to the adoption site, where the warm carrier actually goes live on the
+// new source — announcing it before make-before-break proved the move described a rotation a failed warm
+// build never made (the source mirror of the destination fix in #179, whose comment says exactly this).
+func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
 	if b.sp == nil {
-		return false
+		return "", false
 	}
-	addr, moved := b.sp.nextEndpoint(proactive)
+	addr, moved = b.sp.nextEndpoint(proactive)
 	if moved {
 		log.Printf("core/tcp: rotated source to %s", addr)
-		// Surface the source rotation in the panel event ring, like the datagram carriers. A source
-		// rotation keeps the session (no reconnect to pair), so it is a plain event() not a down().
-		// nil-safe: a no-op on a ws edge pool (b.st==nil there) or the server.
-		b.st.event("down", "src-rotate", "ip:"+addr)
+		if !proactive {
+			// A failover source rotation keeps the session (no reconnect to pair), so it is a plain
+			// event() not a down(). nil-safe: a no-op on a ws edge pool (b.st==nil there) or the server.
+			b.st.event("down", "src-rotate", "ip:"+addr)
+		}
 	}
-	return moved
+	return addr, moved
 }
 
 // SetDesync (client, optional) turns on TCP-segment injection desync for the tcp/cover/ws
@@ -1580,6 +1587,10 @@ type warmDial struct {
 	conn  net.Conn
 	label string
 	combo string
+	// srcAddr is the source IP a PROACTIVE beat rotated onto for this carrier ("" when the source did
+	// not move). It rides here so the src-rotate event is published at the adoption site — where this
+	// carrier goes live — instead of in the timer, mirroring how `label` defers the dest peer-rotate.
+	srcAddr string
 }
 
 // buildWarm dials and handshakes the destination pool's CURRENT endpoint (the rotation timer has
@@ -1589,7 +1600,7 @@ type warmDial struct {
 //
 // Failures are attributed exactly like a primary dial (dialCarrier(true) + burn on a failed
 // handshake), so a rotation onto a blocked IP still burns it.
-func (b *TCP) buildWarm(burn func()) bool {
+func (b *TCP) buildWarm(burn func(), srcAddr string) bool {
 	if b.closed.Load() {
 		return false
 	}
@@ -1613,7 +1624,7 @@ func (b *TCP) buildWarm(burn func()) bool {
 		stale.conn.Close()
 	}
 	select {
-	case b.warmNext <- &warmDial{cf: cf, conn: conn, label: label, combo: combo}:
+	case b.warmNext <- &warmDial{cf: cf, conn: conn, label: label, combo: combo, srcAddr: srcAddr}:
 		return true
 	default:
 		conn.Close() // another build won the slot (overlapping timers) — drop this one
@@ -1669,13 +1680,18 @@ func (b *TCP) dialLoop() {
 		}
 		return addr, true
 	}
-	// burnDest is burnQuiet for the path where the live session really died: the carrier is gone, so
-	// the endpoint the pool advanced onto IS where the tunnel is heading and the re-dial pairs the
-	// down(). Surface it in the panel event ring like the datagram carriers. nil-safe (ws-pool/server).
-	burnDest := func() {
+	// burnDest is burnQuiet plus a refresh of the active label: the carrier is gone, so the endpoint the
+	// pool advanced onto IS where the tunnel is heading. announce=true also writes a "peer-rotate" down —
+	// used on the dial/handshake-failure paths, where this IS the only event for the drop. announce=false
+	// burns SILENTLY (active only, no event): the post-serve death path already emits a single precise
+	// classified down() for the drop below, so a "peer-rotate" down here too double-counted every short
+	// death (two 'down's, one 'up' per drop). nil-safe (ws-pool/server).
+	burnDest := func(announce bool) {
 		if addr, burned := burnQuiet(); burned {
 			b.st.setActive(b.stTag + " · " + addr)
-			b.st.down("peer-rotate", "ip:"+addr)
+			if announce {
+				b.st.down("peer-rotate", "ip:"+addr)
+			}
 		}
 	}
 	succeedBoth := func() {
@@ -1721,6 +1737,12 @@ func (b *TCP) dialLoop() {
 				b.st.setActive(b.stTag + " · " + label)
 				b.st.event("down", "peer-rotate", "ip:"+label)
 			}
+			if w.srcAddr != "" {
+				// A proactive source rotation is announced HERE — where the warm carrier actually goes
+				// live on the new source — not in the timer, so a failed warm build never logs a source
+				// move that did not happen (the source mirror of the dest peer-rotate just above).
+				b.st.event("down", "src-rotate", "ip:"+w.srcAddr)
+			}
 		} else {
 			var err error
 			conn, label, combo, err = b.dialCarrier(true) // primary dial: attribute failures. logs the transport failure itself
@@ -1728,7 +1750,7 @@ func (b *TCP) dialLoop() {
 				if b.pool != nil {
 					b.pool.advance() // rotate to the next combo for the retry
 				} else {
-					burnDest() // direct-tcp: this endpoint won't connect -> burn + advance (dest, then source)
+					burnDest(true) // direct-tcp: this endpoint won't connect -> burn + advance (dest, then source)
 				}
 				backoff = nextReconnectDelay(backoff)
 				if b.sleep(backoff) {
@@ -1749,7 +1771,7 @@ func (b *TCP) dialLoop() {
 				if b.pool != nil {
 					b.pool.advance() // rotate to the next combo; edge health stays for attributeFailure/dataFailure
 				} else {
-					burnDest() // direct-tcp: this endpoint answers TCP but won't carry the tunnel -> burn + advance
+					burnDest(true) // direct-tcp: this endpoint answers TCP but won't carry the tunnel -> burn + advance
 				}
 				backoff = nextReconnectDelay(backoff)
 				if b.sleep(backoff) {
@@ -1865,8 +1887,11 @@ func (b *TCP) dialLoop() {
 						moved = true // the endpoint itself is read back at the adoption site, once it is real
 					}
 				}
-				if b.rotateSourceTCP(true) { // advances the source pool; re-dial applies the new LocalAddr
+				// srcMovedTo is announced at the adoption site, not here (see rotateSourceTCP / #179).
+				srcMovedTo := ""
+				if a, m := b.rotateSourceTCP(true); m { // advances the source pool; re-dial applies the new LocalAddr
 					moved = true
+					srcMovedTo = a
 				}
 				if !moved {
 					rot.Reset(iv) // every other endpoint burned this beat — re-arm so rotation resumes once one heals
@@ -1877,7 +1902,7 @@ func (b *TCP) dialLoop() {
 				// and only then drop this one: dialLoop adopts the parked carrier without dialing, and
 				// the changeover costs no connect and no handshake. Measured on the shipped code, closing
 				// first cost 0.20-0.25s of blackout at every rotation.
-				if !b.buildWarm(func() { burnQuiet() }) {
+				if !b.buildWarm(func() { burnQuiet() }, srcMovedTo) {
 					// The endpoint we advanced onto will not come up. KEEP the healthy connection —
 					// trading it for a dead one is exactly what make-before-break exists to prevent —
 					// and re-arm; burnQuiet already burned it, so the next beat picks a different one.
@@ -1939,7 +1964,7 @@ func (b *TCP) dialLoop() {
 				deliberate = true
 				succeedBoth()
 			} else if time.Since(connectedAt) < minLiveness {
-				burnDest()
+				burnDest(false) // burn+advance SILENTLY: the classified down() below is the drop's single event
 			} else {
 				succeedBoth()
 			}

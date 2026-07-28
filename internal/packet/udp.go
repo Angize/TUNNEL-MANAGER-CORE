@@ -264,6 +264,7 @@ func (b *UDP) rotateSourceUDP(proactive bool) {
 	if b.sp == nil {
 		return
 	}
+	prev := b.sp.current() // the source the socket is on now — fall back here if the new one can't bind
 	addr, moved := b.sp.nextEndpoint(proactive)
 	if !moved {
 		return
@@ -274,7 +275,13 @@ func (b *UDP) rotateSourceUDP(proactive bool) {
 		// reconnect. Use event() not down(): log the rotation but do NOT arm wasDown (which would leave a
 		// phantom pending recovery that a later unrelated re-handshake would mis-pair). Carry the new IP.
 		b.st.event("down", "src-rotate", "ip:"+host)
+		return
 	}
+	// The pool advanced onto a source that will not bind on this host (the IP was removed from the
+	// interface but not from the pool). The socket never left prev, so undo the pool move: otherwise the
+	// status file names a source the datagram path never adopted, the healthy in-use source stays burned,
+	// and a later success() heal-clears the never-tried IP. No src-rotate event either — nothing moved.
+	b.sp.rejectCandidate(prev)
 }
 
 // rebindSourceTo opens a fresh socket on the given source IP (bare or ip:port) and swaps it in for the
