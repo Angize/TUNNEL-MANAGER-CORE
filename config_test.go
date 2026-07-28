@@ -63,6 +63,35 @@ func TestRawTransportRequiresCrypto(t *testing.T) {
 	}
 }
 
+// TestFakeDesyncBothNeedsTwo guards that fake_mode="both" with fake_count=1 is rejected: specs()
+// alternates ttl/badsum, so a single decoy is ONLY the ttl half and the badsum half the operator
+// asked for silently never fires.
+func TestFakeDesyncBothNeedsTwo(t *testing.T) {
+	c := validRaw()
+	c.FakeDesync = true
+	c.FakeMode = "both"
+	c.FakeCount = 1
+	if err := c.validate(); err == nil {
+		t.Error("fake_mode=both with fake_count=1 was accepted (the badsum half never fires)")
+	}
+	c.FakeCount = 2
+	if err := c.validate(); err != nil {
+		t.Errorf("fake_mode=both with fake_count=2 rejected: %v", err)
+	}
+	c.FakeCount = 0 // 0 defaults to 2, so it must pass
+	if err := c.validate(); err != nil {
+		t.Errorf("fake_mode=both with fake_count=0 (defaults to 2) rejected: %v", err)
+	}
+	// "ttl" and "badsum" with a single decoy are fine — only "both" needs two.
+	for _, m := range []string{"ttl", "badsum"} {
+		c.FakeMode = m
+		c.FakeCount = 1
+		if err := c.validate(); err != nil {
+			t.Errorf("fake_mode=%s with fake_count=1 rejected: %v", m, err)
+		}
+	}
+}
+
 func TestRawTransportRejectsCover(t *testing.T) {
 	c := validRaw()
 	c.Cover = true

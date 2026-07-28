@@ -204,3 +204,31 @@ func TestFakePayload(t *testing.T) {
 		}
 	}
 }
+
+// TestDecoySeqDistinct guards that the decoys of ONE batch carry DISTINCT sequence numbers: previously
+// every decoy read the same r.seq/r.tcpBytes, so a batch was N byte-for-byte-header packets (and on
+// icmp, N identical id+seq echo requests — a cheap signature). Pure over the seq state, no socket.
+func TestDecoySeqDistinct(t *testing.T) {
+	for _, proto := range []int{protoICMP, protoTCP, protoBIP} {
+		r := &Raw{proto: proto}
+		r.seq.Store(500)
+		r.tcpBytes.Store(9000)
+		seen := map[uint32]bool{}
+		for i := 0; i < 8; i++ {
+			s := r.decoySeq(i)
+			if seen[s] {
+				t.Fatalf("proto %d: decoy %d repeats seq %d — a batch must not carry identical sequences", proto, i, s)
+			}
+			seen[s] = true
+			// icmp stamps uint16(seq); check the low 16 bits stay distinct too (that is what is on the wire).
+			if proto == protoICMP {
+				lo := uint16(s)
+				for j := 0; j < i; j++ {
+					if uint16(r.decoySeq(j)) == lo {
+						t.Fatalf("icmp decoy %d and %d share the on-wire uint16 seq %d", i, j, lo)
+					}
+				}
+			}
+		}
+	}
+}

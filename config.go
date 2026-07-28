@@ -821,6 +821,13 @@ func (c *Config) validate() error {
 		default:
 			return errors.New("fake_mode must be \"ttl\", \"badsum\", or \"both\"")
 		}
+		// "both" alternates ttl/badsum decoys (specs(): even index ttl, odd index badsum), so a single
+		// decoy is ONLY the ttl half — the badsum half never fires. That silently drops half the defence
+		// the operator asked for, so require at least two. (fake_count 0 defaults to 2, so only an
+		// explicit 1 is rejected.)
+		if c.FakeMode == "both" && c.FakeCount == 1 {
+			return errors.New("fake_mode \"both\" needs fake_count >= 2 (one decoy cannot be both a low-TTL and a bad-checksum packet)")
+		}
 	}
 	if c.Cover && c.Transport != "tcp" {
 		return errors.New("cover (TLS) requires transport \"tcp\"")

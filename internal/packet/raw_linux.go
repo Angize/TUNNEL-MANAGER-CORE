@@ -157,7 +157,12 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 	if d.usesBadsum() { // bad-checksum decoys must bypass IP_HDRINCL (which repairs the checksum)
 		if p := r.peer.Load(); p != nil {
 			if inj, err := newL2Inject(p.IP); err != nil {
-				log.Printf("raw: bad-checksum decoys disabled (AF_PACKET: %v) — TTL decoys still active", err)
+				// "both" still has its TTL decoys; "badsum" has none, so there desync becomes a no-op.
+				if d.mode == "both" {
+					log.Printf("raw: bad-checksum decoys disabled (AF_PACKET: %v) — the TTL decoys still fire", err)
+				} else {
+					log.Printf("raw: bad-checksum decoys disabled (AF_PACKET: %v) — fake-desync is now a no-op (mode=badsum has no TTL decoys)", err)
+				}
 			} else {
 				r.inj = inj
 			}
@@ -170,6 +175,17 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 // handshake. Each decoy shares the real flow's src/dst/proto (mirroring writeOut's forge
 // choices, so a DPI sees them as the same flow) with a per-decoy TTL/checksum and random
 // payload. Guarded by sendMu/sendDown exactly like writeOut so Close can't race the fd shut.
+// decoySeq is the per-decoy carrier sequence for decoy index i in one batch: the live stream's
+// current sequence, offset by fakeSeqGap so a decoy never collides with a real frame, plus i so the
+// decoys of one batch are distinct from each other (a real ping/tcp stream increments per packet).
+// Pure over (proto, seq/tcpBytes, i) so its distinctness is unit-testable without a socket.
+func (r *Raw) decoySeq(i int) uint32 {
+	if r.proto == protoTCP {
+		return r.tcpISN + r.tcpBytes.Load() + fakeSeqGap + uint32(i)
+	}
+	return r.seq.Load() + fakeSeqGap + uint32(i)
+}
+
 func (r *Raw) sendFakes(to *net.IPAddr) {
 	if !r.desync.on || to == nil {
 		return
@@ -181,18 +197,20 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 	src, dst := r.link.header(r.srcIP(), to)
 	var sa syscall.SockaddrInet4
 	copy(sa.Addr[:], to.IP.To4())
-	for _, sp := range r.desync.specs() {
+	for i, sp := range r.desync.specs() {
 		// Wrap the decoy in the SAME profile header the real frames carry. Sending fakePayload() bare
 		// only worked for bip/ipip, whose encap is a no-op; on icmp/gre/udp/tcp/esp it put random bytes
 		// where the carrier header belongs, so the decoy was not a well-formed packet of the protocol it
 		// claims in the IPv4 header. That inverts the whole point: a DPI cannot be desynced by something
 		// it discards as malformed, and a stream of proto-1 packets that are not valid ICMP is itself a
 		// cheap signature. Decoys take their own sequence space so they never collide with a real frame.
-		var dseq, dack uint32
+		// The per-decoy +i (in decoySeq) keeps the decoys in ONE batch distinct: without it every decoy
+		// of a batch carried an identical seq (and, on icmp, an identical id+seq) — two byte-for-byte-
+		// header echo requests in a row is itself a signature, and a real ping stream increments its seq.
+		dseq := r.decoySeq(i)
+		var dack uint32
 		if r.proto == protoTCP {
-			dseq, dack = r.tcpISN+r.tcpBytes.Load()+fakeSeqGap, r.tcpAck
-		} else {
-			dseq = r.seq.Load() + fakeSeqGap
+			dack = r.tcpAck
 		}
 		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, dseq, dack, r.spi)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
