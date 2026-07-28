@@ -71,11 +71,11 @@ type Config struct {
 	// forged header). Range 1..255.
 	RawProto int `json:"raw_proto"`
 
-	// SpoofSrc (client) forges the outer IPv4 source address of raw-transport packets
+	// SpoofSrc (client) forges the outer IPv4 source address of "spoof"-transport packets
 	// so per-source/stateful egress filters can't pin the real IP. RealPeer (server)
 	// is the client's REAL IP: with a forged source the server cannot learn where to
-	// reply, so it is told here (the AEAD still authenticates every frame). Raw + bip +
-	// crypto only; needs CAP_NET_RAW. Both empty = no spoofing.
+	// reply, so it is told here (the AEAD still authenticates every frame). Transport
+	// "spoof" + crypto only; needs CAP_NET_RAW. Both empty = no spoofing.
 	SpoofSrc string `json:"spoof_src_ip"`
 	RealPeer string `json:"real_peer_ip"`
 
@@ -85,8 +85,8 @@ type Config struct {
 	// still routing to the real server; the server therefore cannot receive on an ordinary
 	// AF_INET raw socket (the kernel drops packets whose dst isn't local) and instead reads
 	// with AF_PACKET, and replies with the decoy as the source. A server using SpoofDst
-	// must also set RealPeer (the forged source hides the client's real IP). Raw + bip +
-	// crypto only; needs CAP_NET_RAW. Empty = no destination spoofing.
+	// must also set RealPeer (the forged source hides the client's real IP). Transport
+	// "spoof" + crypto only; needs CAP_NET_RAW. Empty = no destination spoofing.
 	SpoofDst string `json:"spoof_dst_ip"`
 
 	// DNS-tunnel carrier (Transport=="dns"): the reliable AEAD/KCP session rides inside DNS
@@ -522,23 +522,38 @@ func (c *Config) validate() error {
 		if !c.Crypto.Enabled {
 			return errors.New("raw transport requires crypto enabled (the AEAD both encrypts and authenticates each raw packet)")
 		}
-		if (c.SpoofSrc != "" || c.RealPeer != "" || c.SpoofDst != "") && c.RawProfile != "" && c.RawProfile != "bip" {
-			return errors.New("IP spoofing is only supported on the raw \"bip\" profile for now")
+	case "spoof":
+		// Standalone IP-spoofing carrier: a bip-like raw-IP datapath that forges the outer source
+		// and/or destination. NO rotation of any kind. Crypto is mandatory (the AEAD authenticates
+		// every forged-header frame, and there is no other integrity on a raw IP packet). rawProto
+		// (1..255) overrides the outer IP protocol number like a bip carrier does.
+		if !c.Crypto.Enabled {
+			return errors.New("spoof transport requires crypto enabled (the AEAD authenticates every forged-header frame)")
+		}
+		if c.RawProto != 0 && (c.RawProto < 1 || c.RawProto > 255) {
+			return errors.New("raw_proto must be in 1..255 (0 = the bip default 253)")
 		}
 		if c.SpoofSrc != "" && net.ParseIP(c.SpoofSrc).To4() == nil {
 			return errors.New("spoof_src_ip must be an IPv4 address")
 		}
-		if c.RealPeer != "" && net.ParseIP(c.RealPeer).To4() == nil {
-			return errors.New("real_peer_ip must be an IPv4 address")
-		}
 		if c.SpoofDst != "" && net.ParseIP(c.SpoofDst).To4() == nil {
 			return errors.New("spoof_dst_ip must be an IPv4 address")
 		}
-		// A server that expects decoy-destination packets receives them via AF_PACKET and
-		// replies with the decoy as source, so it can never learn the client's real address
-		// from the wire — RealPeer must supply it.
-		if c.SpoofDst != "" && c.Role == "server" && c.RealPeer == "" {
-			return errors.New("spoof_dst_ip on a server requires real_peer_ip (the client's real IP to reply to)")
+		if c.RealPeer != "" && net.ParseIP(c.RealPeer).To4() == nil {
+			return errors.New("real_peer_ip must be an IPv4 address")
+		}
+		switch c.Role {
+		case "client":
+			// The client is the one that forges. A carrier that forges nothing is just raw bip.
+			if c.SpoofSrc == "" && c.SpoofDst == "" {
+				return errors.New("spoof transport requires at least one of spoof_src_ip / spoof_dst_ip on the client")
+			}
+		case "server":
+			// The client's real IP is never on the wire (its source is forged, or a decoy dst hides
+			// the flow), so the server must be told where to reply.
+			if c.RealPeer == "" {
+				return errors.New("spoof server requires real_peer_ip (the client's real IP to reply to)")
+			}
 		}
 	case "flux":
 		// The polymorphic carrier rides raw sockets and rotates its protocol from
@@ -668,7 +683,7 @@ func (c *Config) validate() error {
 			}
 		}
 	default:
-		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", \"flux\", \"ws\", or \"dns\"")
+		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", \"flux\", \"spoof\", \"ws\", or \"dns\"")
 	}
 	// PeerIPs is the DESTINATION rotation pool for the direct transports. It is a client-side
 	// dial-layer feature: a server listens (it does not dial), and ws has its own edge pool, so
@@ -750,12 +765,12 @@ func (c *Config) validate() error {
 	}
 	if c.Fec {
 		// FEC repairs lost datagrams from parity — it only makes sense on the datagram
-		// carriers (udp / raw / flux). On tcp/ws the stream is already reliable, so FEC
+		// carriers (udp / raw / flux / spoof). On tcp/ws the stream is already reliable, so FEC
 		// there is wasted bandwidth that fights TCP's own retransmit/congestion control.
 		switch c.Transport {
-		case "", "udp", "raw", "flux":
+		case "", "udp", "raw", "flux", "spoof":
 		default:
-			return errors.New("fec is only supported on the datagram carriers (udp, raw, flux) — not tcp/ws")
+			return errors.New("fec is only supported on the datagram carriers (udp, raw, flux, spoof) — not tcp/ws")
 		}
 		if c.FecData < 0 || c.FecParity < 0 {
 			return errors.New("fec_data / fec_parity must be >= 0 (0 defaults to 10 / 3)")
@@ -778,14 +793,14 @@ func (c *Config) validate() error {
 		}
 	}
 	if c.FakeDesync {
-		// Desync is delivered two ways: raw/flux build the whole IPv4 header, so they forge decoy
+		// Desync is delivered two ways: raw/flux/spoof build the whole IPv4 header, so they forge decoy
 		// packets directly; tcp/ws own a kernel TCP connection, so they INJECT decoy TCP segments
 		// on its 4-tuple via AF_PACKET (see tcp_inject_linux.go). Plain udp has no such hook. It is
 		// a client-side mechanism; a server that carries the same fields simply ignores them.
 		switch c.Transport {
-		case "raw", "flux", "tcp", "ws":
+		case "raw", "flux", "spoof", "tcp", "ws":
 		default:
-			return errors.New("fake_desync is supported on the raw, flux, tcp and ws carriers (not plain udp)")
+			return errors.New("fake_desync is supported on the raw, flux, spoof, tcp and ws carriers (not plain udp)")
 		}
 		// ws is only half true: the injector mirrors the connection's real 4-tuple, and an httpc
 		// session has no single kernel socket to mirror — its conn is synthetic, so the *net.TCPAddr

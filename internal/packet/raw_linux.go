@@ -244,10 +244,12 @@ func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs, cryptoOn 
 	}
 }
 
-// DialRaw (client role) opens a raw socket of the profile's protocol and targets
-// peerIP. peerIP may be a plain IPv4 or an "ip:port" (the port is ignored — raw
-// IP has no ports of its own; the tcp/udp profiles carry synthetic ones).
-func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile, spoofSrc, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
+// dialRawBase opens the client-side raw socket for profile+rawProto and targets peerIP, returning a
+// Raw with everything wired EXCEPT the ipLink (the caller sets it) and FEC. Shared by DialRaw (which
+// adds a directLink) and DialSpoof (which adds a forgedLink); the datapath is identical, only the
+// addressing layer differs. peerIP may be a plain IPv4 or an "ip:port" (the port is ignored — raw IP
+// has no ports of its own; the tcp/udp profiles carry synthetic ones).
+func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, rawProto int) (*Raw, error) {
 	proto, ok := rawEffProto(profile, rawProto)
 	if !ok {
 		return nil, fmt.Errorf("raw: unknown profile %q", profile)
@@ -260,46 +262,20 @@ func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bo
 	if err != nil {
 		return nil, err
 	}
-	applyConnSockBuf(conn) // this IPConn is the normal (non-spoof) raw RX/TX socket
+	applyConnSockBuf(conn) // this IPConn is the normal raw RX/TX socket
 	r := newRaw(conn, dev, ka, obfs, cryptoOn, psk, cipher, profile, true)
 	r.proto = proto
 	r.peer.Store(&net.IPAddr{IP: ip})
 	if lip := routeLocalIP(ip); lip != nil {
 		r.localIP.Store(&net.IPAddr{IP: lip})
 	}
-	var spoofSrcIP, spoofDstIP net.IP
-	if spoofSrc != "" { // forge the outer source; conn still receives replies at our real IP
-		if spoofSrcIP = parseIP4(spoofSrc); spoofSrcIP == nil {
-			conn.Close()
-			return nil, fmt.Errorf("raw: spoof_src_ip %q is not an IPv4 address", spoofSrc)
-		}
-	}
-	if spoofDst != "" { // forge the outer destination to the decoy; routing still targets the real peer
-		if spoofDstIP = parseIP4(hostOnly(spoofDst)); spoofDstIP == nil {
-			conn.Close()
-			return nil, fmt.Errorf("raw: spoof_dst_ip %q is not an IPv4 address", spoofDst)
-		}
-		// The server answers AS the decoy, so replies don't come from the real peer —
-		// pin the peer and skip the source filter (the AEAD authenticates).
-	}
-	if spoofSrcIP != nil || spoofDstIP != nil { // any forged field needs the IP_HDRINCL socket
-		fd, err := openHdrincl(proto)
-		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("raw: spoof socket: %w", err)
-		}
-		r.link = &forgedLink{r: r, spoofFd: fd, pktFd: -1, spoofSrc: spoofSrcIP, spoofDst: spoofDstIP}
-	} else {
-		r.link = &directLink{r: r}
-	}
-	r.initFec(fec, fecData, fecParity)
 	return r, nil
 }
 
-// ListenRaw (server role) binds a raw socket of the profile's protocol and waits
-// to learn the peer from the first authenticated frame. listenIP may be empty,
-// "0.0.0.0", a plain IPv4, or an "ip:port" (the port is ignored).
-func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile, realPeer, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
+// listenRawBase binds the server-side raw socket for profile+rawProto, returning a Raw with the
+// receive socket wired EXCEPT the ipLink and FEC (the caller sets them). Shared by ListenRaw and
+// ListenSpoof. listenIP may be empty, "0.0.0.0", a plain IPv4, or an "ip:port" (the port is ignored).
+func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, rawProto int) (*Raw, error) {
 	proto, ok := rawEffProto(profile, rawProto)
 	if !ok {
 		return nil, fmt.Errorf("raw: unknown profile %q", profile)
@@ -322,45 +298,29 @@ func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoO
 	}
 	r := newRaw(conn, dev, ka, obfs, cryptoOn, psk, cipher, profile, false)
 	r.proto = proto
-	var fixedPeer net.IP
-	if realPeer != "" { // client forges its source, so we can't learn it — reply to this real IP
-		if fixedPeer = parseIP4(hostOnly(realPeer)); fixedPeer == nil {
-			conn.Close()
-			return nil, fmt.Errorf("raw: real_peer_ip %q is not an IPv4 address", realPeer)
-		}
-		r.peer.Store(&net.IPAddr{IP: fixedPeer})
-		if lip := routeLocalIP(fixedPeer); lip != nil {
-			r.localIP.Store(&net.IPAddr{IP: lip})
-		}
+	return r, nil
+}
+
+// DialRaw (client role) opens a raw carrier of the profile's protocol toward peerIP. No IP spoofing —
+// that is the separate "spoof" transport (DialSpoof); a raw carrier always uses an unforged directLink.
+func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
+	r, err := dialRawBase(peerIP, dev, ka, obfs, cryptoOn, psk, cipher, profile, rawProto)
+	if err != nil {
+		return nil, err
 	}
-	if spoofDst != "" { // clients aim at this decoy; receive it via AF_PACKET and answer AS it
-		dip := parseIP4(hostOnly(spoofDst))
-		if dip == nil {
-			conn.Close()
-			return nil, fmt.Errorf("raw: spoof_dst_ip %q is not an IPv4 address", spoofDst)
-		}
-		fd, err := openHdrincl(proto)
-		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("raw: spoof socket: %w", err)
-		}
-		pfd, err := openAfpacket()
-		if err != nil {
-			syscall.Close(fd)
-			conn.Close()
-			return nil, fmt.Errorf("raw: AF_PACKET socket: %w", err)
-		}
-		// decoy = the AF_PACKET receive filter; spoofSrc = dip so replies leave AS the decoy.
-		r.link = &forgedLink{r: r, spoofFd: fd, pktFd: pfd, spoofSrc: dip, decoy: dip,
-			fixedPeer: fixedPeer, antiLeak: addAntiLeak(proto, dip)} // anti-leak best-effort; stops the kernel forwarding the decoy dst
-	} else if fixedPeer != nil {
-		// The client forges only its SOURCE (no decoy): we receive on the normal conn and forge
-		// nothing on our replies, but the reply target is the configured real peer, not the wire
-		// source, and the source filter must be off (a forged source can't be filtered by).
-		r.link = &forgedLink{r: r, spoofFd: -1, pktFd: -1, fixedPeer: fixedPeer}
-	} else {
-		r.link = &directLink{r: r}
+	r.link = &directLink{r: r}
+	r.initFec(fec, fecData, fecParity)
+	return r, nil
+}
+
+// ListenRaw (server role) binds a raw carrier of the profile's protocol and learns the peer from the
+// first authenticated frame. No IP spoofing — see ListenSpoof; a raw server always uses a directLink.
+func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
+	r, err := listenRawBase(listenIP, dev, ka, obfs, cryptoOn, psk, cipher, profile, rawProto)
+	if err != nil {
+		return nil, err
 	}
+	r.link = &directLink{r: r}
 	r.initFec(fec, fecData, fecParity)
 	return r, nil
 }
