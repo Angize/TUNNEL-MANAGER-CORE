@@ -131,7 +131,12 @@ func (f *Flux) SetDesync(on bool, ttl, count int, mode string) {
 	if d.usesBadsum() { // bad-checksum decoys must bypass IP_HDRINCL (which repairs the checksum)
 		if p := f.peer.Load(); p != nil {
 			if inj, err := newL2Inject(p.IP); err != nil {
-				log.Printf("flux: bad-checksum decoys disabled (AF_PACKET: %v) — TTL decoys still active", err)
+				// "both" still has its TTL decoys; "badsum" has none, so there desync becomes a no-op.
+				if d.mode == "both" {
+					log.Printf("flux: bad-checksum decoys disabled (AF_PACKET: %v) — the TTL decoys still fire", err)
+				} else {
+					log.Printf("flux: bad-checksum decoys disabled (AF_PACKET: %v) — fake-desync is now a no-op (mode=badsum has no TTL decoys)", err)
+				}
 			} else {
 				f.inj = inj
 			}
