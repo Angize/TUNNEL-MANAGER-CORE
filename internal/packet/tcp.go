@@ -1591,6 +1591,10 @@ type warmDial struct {
 	// not move). It rides here so the src-rotate event is published at the adoption site — where this
 	// carrier goes live — instead of in the timer, mirroring how `label` defers the dest peer-rotate.
 	srcAddr string
+	// dstMoved records whether the DESTINATION pool actually advanced on the beat that built this
+	// carrier. A beat fires when EITHER pool moves, so without this the adoption site announced a
+	// destination rotation on a source-only beat — naming an endpoint the tunnel never left.
+	dstMoved bool
 }
 
 // buildWarm dials and handshakes the destination pool's CURRENT endpoint (the rotation timer has
@@ -1600,7 +1604,7 @@ type warmDial struct {
 //
 // Failures are attributed exactly like a primary dial (dialCarrier(true) + burn on a failed
 // handshake), so a rotation onto a blocked IP still burns it.
-func (b *TCP) buildWarm(burn func(), srcAddr string) bool {
+func (b *TCP) buildWarm(burn func(), srcAddr string, dstMoved bool) bool {
 	if b.closed.Load() {
 		return false
 	}
@@ -1624,7 +1628,7 @@ func (b *TCP) buildWarm(burn func(), srcAddr string) bool {
 		stale.conn.Close()
 	}
 	select {
-	case b.warmNext <- &warmDial{cf: cf, conn: conn, label: label, combo: combo, srcAddr: srcAddr}:
+	case b.warmNext <- &warmDial{cf: cf, conn: conn, label: label, combo: combo, srcAddr: srcAddr, dstMoved: dstMoved}:
 		return true
 	default:
 		conn.Close() // another build won the slot (overlapping timers) — drop this one
@@ -1733,7 +1737,12 @@ func (b *TCP) dialLoop() {
 			// pool `label` is dialCarrier's target, i.e. pp.current() at build time). event() rather
 			// than down(): the changeover is seamless, so arming a "reconnect" would make every timed
 			// rotation read in the panel as a drop plus a self-heal. Mirrors rotatePeerUDP.
-			if b.pp != nil {
+			// Only when the DESTINATION really advanced. A beat fires when either pool moves, so gating
+			// this on `b.pp != nil` alone announced a destination rotation — naming the endpoint the
+			// tunnel is still on — every time the SOURCE rotated and the destination did not (the common
+			// steady state once every other destination is burned, i.e. exactly when an operator is
+			// reading the log to find out what is blocked).
+			if b.pp != nil && w.dstMoved {
 				b.st.setActive(b.stTag + " · " + label)
 				b.st.event("down", "peer-rotate", "ip:"+label)
 			}
@@ -1881,12 +1890,16 @@ func (b *TCP) dialLoop() {
 					rot.Reset(iv) // an operator pin freezes rotation for its window — re-arm, never freeze for the life of the conn
 					return
 				}
-				moved := false
+				// dstMoved is carried to the adoption site, not just folded into `moved`: a beat fires
+				// when EITHER pool advances, so announcing a destination rotation off `moved` alone
+				// described a destination move on a source-only beat.
+				dstMoved := false
 				if b.pp != nil {
 					if _, m := b.pp.rotateOnce(); m {
-						moved = true // the endpoint itself is read back at the adoption site, once it is real
+						dstMoved = true // the endpoint itself is read back at the adoption site, once it is real
 					}
 				}
+				moved := dstMoved
 				// srcMovedTo is announced at the adoption site, not here (see rotateSourceTCP / #179).
 				srcMovedTo := ""
 				if a, m := b.rotateSourceTCP(true); m { // advances the source pool; re-dial applies the new LocalAddr
@@ -1902,7 +1915,7 @@ func (b *TCP) dialLoop() {
 				// and only then drop this one: dialLoop adopts the parked carrier without dialing, and
 				// the changeover costs no connect and no handshake. Measured on the shipped code, closing
 				// first cost 0.20-0.25s of blackout at every rotation.
-				if !b.buildWarm(func() { burnQuiet() }, srcMovedTo) {
+				if !b.buildWarm(func() { burnQuiet() }, srcMovedTo, dstMoved) {
 					// The endpoint we advanced onto will not come up. KEEP the healthy connection —
 					// trading it for a dead one is exactly what make-before-break exists to prevent —
 					// and re-arm; burnQuiet already burned it, so the next beat picks a different one.

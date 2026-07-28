@@ -66,7 +66,7 @@ func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 	}
 
 	burns := 0
-	if b.buildWarm(func() { burns++ }, b.sourceIP()) {
+	if b.buildWarm(func() { burns++ }, b.sourceIP(), true) {
 		t.Fatal("buildWarm reported success against an endpoint that closes before a single core frame")
 	}
 	if burns != 1 {

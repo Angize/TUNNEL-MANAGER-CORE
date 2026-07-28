@@ -163,3 +163,77 @@ func hasKind(events []coreEvent, kind string) bool {
 	}
 	return false
 }
+
+// TestSourceOnlyRotationDoesNotAnnounceTheDestination closes #28 by driving the REAL dialLoop: a timed
+// rotation whose SOURCE pool moved while the destination pool could not must publish `src-rotate` only.
+//
+// The beat fires when EITHER pool advances, but the adoption site gated its destination announcement on
+// `b.pp != nil` alone — so every source-only beat also logged `peer-rotate` naming the endpoint the
+// tunnel had never left, and moved the status file's `active` onto it. That is the steady state once the
+// other destinations are burned, i.e. exactly when an operator is reading the log to find out what is
+// blocked.
+//
+// The destination pool here has ONE endpoint (rotateOnce cannot move), the source pool has two loopback
+// aliases (it can), and the server is real, so the warm build succeeds and the carrier is really adopted.
+func TestSourceOnlyRotationDoesNotAnnounceTheDestination(t *testing.T) {
+	const psk = "e2e-shared-pre-shared-key-1234567890"
+	const cipher = "aes-256-gcm"
+	srvDev, _ := tunPair(t, "sorsrv")
+	cliDev, _ := tunPair(t, "sorcli")
+	ka := time.Second
+
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	srv, err := ListenTCP([]string{addr}, srvDev, ka, false, true, psk, cipher, false, "")
+	if err != nil {
+		t.Fatalf("ListenTCP: %v", err)
+	}
+	cli, err := DialTCP(addr, cliDev, ka, false, true, psk, cipher, false, "")
+	if err != nil {
+		t.Fatalf("DialTCP: %v", err)
+	}
+	statusPath := filepath.Join(t.TempDir(), "core.status")
+	// One destination (cannot rotate) + two bindable sources on a 1s beat (will rotate).
+	cli.SetPeerPool(NewPeerPool([]string{addr}, true, 0, ""))
+	cli.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, true, time.Second, ""))
+	cli.SetStatusPath(statusPath)
+
+	go srv.Run()
+	go cli.Run()
+	t.Cleanup(func() { cli.Close(); srv.Close() })
+
+	// Wait for a source rotation to be adopted (the beat is 1s; give it room on a loaded box).
+	deadline := time.Now().Add(20 * time.Second)
+	var events []coreEvent
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(statusPath); err == nil {
+			events = coreStatusEvents(t, statusPath)
+			for _, e := range events {
+				if e.Code == "src-rotate" {
+					deadline = time.Time{} // got one
+					break
+				}
+			}
+		}
+		if deadline.IsZero() {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !deadline.IsZero() {
+		t.Fatalf("no source rotation was adopted within the budget; events=%+v", events)
+	}
+
+	for _, e := range events {
+		if e.Code == "peer-rotate" {
+			t.Fatalf("a source-only rotation announced a DESTINATION rotation (%q/%q) — the tunnel never "+
+				"left that endpoint; events=%+v", e.Code, e.Detail, events)
+		}
+	}
+}
