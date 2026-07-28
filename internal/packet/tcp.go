@@ -1037,6 +1037,34 @@ func (b *TCP) publishServerConn(cf *connFramer) {
 	}
 }
 
+// reelectDownstream (server) re-points the downstream at another AUTHENTICATED connection once the
+// live one has died and been dropped from authConns. Without it b.cur simply stayed nil: publishServerConn
+// only claims an EMPTY downstream (so a second connection never steals it just by connecting) and
+// handleFrame is the only other writer, deliberately moving it on a DATA frame and never on ping/pong.
+// So with a warm standby — or a parked destination-rotation carrier — up, every server->client packet
+// was dropped until the client happened to send DATA. Inside the tunnel a TCP flow recovers in
+// milliseconds off its own ACKs, but a one-way download (UDP video, a large file the client is only
+// receiving) stayed dark for as long as the client had nothing to send.
+//
+// CAS on nil, so a connection handleFrame elected meanwhile is never displaced — the client's own
+// choice always wins, and the promotion still flips the server within one frame. The newest survivor
+// is preferred: that is the warm standby the client is about to promote. A pick the client has already
+// abandoned costs one failed write, whose onConnErr runs this again, so a stale pick self-corrects.
+//
+// The heartbeat invariant is untouched: b.lastRx is client-only (Run wires the heartbeat inside
+// `if b.isClient`), so electing a downstream on the server cannot stamp a tunnel liveness mark.
+func (b *TCP) reelectDownstream() {
+	b.authMu.Lock()
+	var pick *connFramer
+	if n := len(b.authConns); n > 0 {
+		pick = b.authConns[n-1]
+	}
+	b.authMu.Unlock()
+	if pick != nil {
+		b.cur.CompareAndSwap(nil, pick)
+	}
+}
+
 // removeAuthConn drops a connection from the server's authenticated set (called from onConnErr).
 // A no-op on the client, whose authConns is always empty.
 func (b *TCP) removeAuthConn(cf *connFramer) {
@@ -2703,6 +2731,9 @@ func (b *TCP) onConnErr(cf *connFramer, err error) {
 	cf.conn.Close()
 	b.cur.CompareAndSwap(cf, nil) // only clear downstream if THIS conn was the target
 	b.removeAuthConn(cf)          // server: drop from the authenticated set (no-op on the client)
+	if !b.isClient {
+		b.reelectDownstream() // ...and hand downstream to a surviving authenticated conn, if any
+	}
 	if !b.closed.Load() {
 		log.Printf("core/tcp: connection closed: %v", err)
 	}
