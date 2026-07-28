@@ -86,6 +86,12 @@ func (d *DNS) SetDeadAfter(secs int) {
 	}
 }
 
+// DNSDeadFloorSecs is the ABSOLUTE floor (seconds) the dns carrier applies to dead_after_secs — it does
+// NOT use the 2×keepalive floor the other carriers do. main.go needs this to log the deadline that will
+// really be in force; keeping the lookup here means main.go asks the carrier package rather than
+// re-deriving a number that lives in dnstun.
+func DNSDeadFloorSecs() int { return int(dnstun.DeadFloor() / time.Second) }
+
 func (d *DNS) Run() error {
 	go d.tunToNet()
 	backoff := dnsBackoffMin
