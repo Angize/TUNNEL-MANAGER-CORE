@@ -190,6 +190,17 @@ func sendViaConn(r *Raw, pkt []byte, to *net.IPAddr) {
 			// reply then leaves from the host default, the peer's source filter drops it, and the tunnel
 			// blackholes. #151 made the setsockopt and missing-cmsg cases loud; this was the third.
 			r.sendErr.note("raw/pinned-source", err)
+			if rawChecksumBindsSource(r.profile) {
+				// ...except on udp/tcp, where the carrier header's checksum was computed over the
+				// pinned source (rawEncap -> l4Checksum's pseudo-header). Sending these bytes from a
+				// different source puts a segment with a WRONG L4 checksum on the wire, on every packet,
+				// for as long as the source is gone. Our own receiver would not notice — a raw socket
+				// does not verify the L4 checksum — but a stateful firewall or NAT on the path drops
+				// them, and a "TCP" flow whose every segment fails its checksum is about as clear a
+				// tunnel signature as there is. The degraded send is only worth making when the bytes
+				// stay VALID, so here we drop and let the inner stream retransmit.
+				return
+			}
 		}
 	}
 	if _, err := r.conn.WriteToIP(pkt, to); err != nil {
