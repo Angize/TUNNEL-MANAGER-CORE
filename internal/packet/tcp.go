@@ -425,6 +425,12 @@ type TCP struct {
 	dsMode     string
 	dsFailOnce sync.Once  // logs an AF_PACKET/capability failure at most once (fired per connect)
 	dsSend     desyncSend // outcome of the decoy TRANSMITS — opening the injector succeeding says nothing about them
+	// dsWatch is a TEST SEAM, nil in production: sendTCPFakes calls it with the conn it is about to
+	// mirror, before the dsOn gate. The property that matters here is WHEN the decoys go out relative
+	// to the cover/WebSocket handshake, and that is not observable from the byte stream — the decoys
+	// leave through AF_PACKET, not through conn. Calling it ahead of the dsOn gate also lets a test
+	// assert the ordering without switching real packet injection on (the box runs the suite as root).
+	dsWatch func(net.Conn)
 
 	ln      net.Listener               // server: primary/first listener (ws/http use only this)
 	lns     []net.Listener             // server: ALL bound listeners; a pooled direct-TCP server binds one per selected IP so it accepts on exactly the IPs the client rotates through (lns[0]==ln)
@@ -1441,6 +1447,10 @@ func (b *TCP) establishWS(attribute bool) (net.Conn, string, string, error) {
 		attrib()
 		return nil, dialAddr, "", err
 	}
+	// Decoys go out on the bare 4-tuple, BEFORE the wss handshake and the WebSocket upgrade below.
+	// They used to be sent from handshakeAndPrime, which runs after both, so on this carrier the DPI
+	// had already seen the ClientHello and the Upgrade before the first decoy arrived.
+	b.sendTCPFakes(conn)
 	if b.wsTLS {
 		tc, terr := b.tlsToEdge(conn, dialAddr, host, ech, true) // live carrier: a self-heal is panel-worthy
 		if terr != nil {
@@ -2241,6 +2251,10 @@ func (b *TCP) dialCarrier(attribute bool) (net.Conn, string, string, error) {
 		log.Printf("core/tcp: dial %s failed: %v", target, err)
 		return nil, target, "", err
 	}
+	// Decoys go out on the bare 4-tuple, BEFORE the TLS cover handshake below. They used to be sent
+	// from handshakeAndPrime, which runs after it — so with cover on, the DPI had already seen the
+	// whole ClientHello before the first decoy arrived. Only plain tcp happened to be correct.
+	b.sendTCPFakes(c)
 	if b.cover { // wrap in a Chrome-fingerprinted TLS session carrying the auth token
 		tconn, cerr := tlscover.ClientConn(c, b.coverSNI, b.psk, time.Now().Add(handshakeTimeout))
 		if cerr != nil {
@@ -2258,9 +2272,11 @@ func (b *TCP) dialCarrier(attribute bool) (net.Conn, string, string, error) {
 // On any failure the returned error is non-nil and the caller closes conn. On success the framer
 // is fully established and ready for serve/readLoop.
 func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
-	// Desync the DPI as early as possible: inject decoy TCP segments on the freshly-connected
-	// 4-tuple before our own handshake bytes flow. Best-effort, kernel connection untouched.
-	b.sendTCPFakes(conn)
+	// The decoy injection is NOT here. It has to land on the freshly-connected 4-tuple before ANY of
+	// our own bytes flow, and by this point conn may already be a TLS-cover or WebSocket session — its
+	// handshake is done, so the DPI has seen it. It now runs in dialCarrier/establishWS, on the bare
+	// TCP conn each of them just dialled. Every path here is reached through dialCarrier (dialLoop,
+	// warmEstablish, and the single-edge retest dial), so each connection is still covered exactly once.
 	cf := b.newFramer(conn)
 	conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	if b.cryptoOn { // ephemeral handshake first: establishes the session sealer
