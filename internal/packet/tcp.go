@@ -2391,6 +2391,22 @@ func (b *TCP) dialLoopWarm() {
 		standbyBuilding = true
 		go dialWorker(true, ready)
 	}
+	// dropStandby retires the held standby so requestStandby can build a fresh one — it is a hard
+	// no-op while one is held, so anything that makes the held standby the WRONG one has to clear it
+	// here first. standbyBuilding is cleared unconditionally, including the standby==nil-but-still-
+	// dialing case: leaving it set makes every later requestStandby() a permanent no-op, which stops
+	// proactive rotation (it works by promoting a READY standby) for good.
+	dropStandby := func() {
+		if standby != nil {
+			standby.conn.Close()
+			standby = nil
+			standbyLabel = ""
+			standbyCombo = ""
+			b.standby.Store(nil)
+			b.standbyConn.Store(nil)
+		}
+		standbyBuilding = false
+	}
 	// promote swaps the warm standby into the active slot and retires the old active. Returns
 	// false when there is no standby ready to promote.
 	promote := func() bool {
@@ -2526,21 +2542,7 @@ func (b *TCP) dialLoopWarm() {
 				if manual {
 					// Re-dial the ACTIVE from current() so it lands on the exact edge the operator
 					// selected. Drop the stale standby (wrong edge) so it is rebuilt off the new one.
-					if standby != nil {
-						standby.conn.Close()
-						standby = nil
-						standbyLabel = ""
-						standbyCombo = ""
-						b.standby.Store(nil)
-						b.standbyConn.Store(nil)
-					}
-					// Clear standbyBuilding UNCONDITIONALLY — including when standby==nil but a build is
-					// still IN FLIGHT (the exact state after a failover left us on the last healthy edge
-					// with the next standby still dialing). Leaving it set made every later requestStandby()
-					// a permanent no-op, so the warm standby never rebuilt and proactive rotation — which
-					// works by promoting a READY standby — stopped for good until a manual rebuild. That is
-					// the "rotation just stopped and pinning couldn't fix it" report.
-					standbyBuilding = false
+					dropStandby()
 					log.Printf("core/tcp: manual pin/rotate — re-dialing active on the selected edge")
 					dialActiveAsync() // warmEstablish(false) -> current() -> the pinned edge; non-blocking, requestStandby fires on activeReady
 				} else if promote() {
@@ -2651,6 +2653,22 @@ func (b *TCP) dialLoopWarm() {
 			// non-warm loop. Compared on the COMBO, not the label: the label is only the IP, so an SNI-only
 			// rotation on the same IP is a real rotation and must not be skipped.
 			if standby != nil && standbyCombo == activeCombo {
+				// This standby was built when nothing distinct was healthy (aimStandby degrades to a plain
+				// step then), so promoting it would retire a healthy carrier and immediately rebuild an
+				// identical one. Skipping is right — but ONLY skipping left the stale standby held forever,
+				// and requestStandby() is a hard no-op while one is held. So once the pool healed there was
+				// no way to build a standby on the edge that came back: every later tick landed here, and
+				// proactive rotation stayed frozen for the life of the connection — the "rotation just
+				// stopped" report, which no pin or probe could clear. Retire it as soon as the pool can
+				// actually offer another edge and the NEXT tick rotates for real. While nothing else is
+				// healthy we still just skip: rebuilding every interval would be a periodic dial train to
+				// the same edge, a signature in its own right.
+				if b.pool != nil && b.pool.hasHealthyEdgeOtherThan(activeCombo) {
+					log.Printf("core/tcp: the pool healed — retiring the same-edge warm standby (%s) so the next rotation is real", activeCombo)
+					dropStandby()
+					requestStandby()
+					continue
+				}
 				log.Printf("core/tcp: proactive rotation skipped — the only warm standby is the same edge (%s)", activeCombo)
 				continue
 			}
