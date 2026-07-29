@@ -42,9 +42,12 @@ import (
 )
 
 const (
-	authMagic  = "TNLR"     // 4 bytes; marks a genuine token after decryption
-	authWindow = 120        // seconds a token stays valid (replay bound)
-	maxRelays  = 256        // concurrent probe→dest relays cap
+	authMagic  = "TNLR"            // 4 bytes; marks a genuine token after decryption
+	authWindow = 120               // seconds a token stays valid (replay bound)
+	maxRelays  = 256               // concurrent probe→dest relays cap
+	maxWaiting = 256               // probes queued for a relay slot
+	relayWait  = 10 * time.Second  // how long a queued probe waits for a slot
+	relayIdle  = 120 * time.Second // no byte either way for this long ⇒ tear the relay down
 )
 
 // ErrProbe means the connection was not an authenticated client and has been
@@ -135,6 +138,8 @@ type Server struct {
 	psk   string
 	dest  string // host:port of the real site to borrow
 	relay chan struct{}
+	queue chan struct{}
+	idle  time.Duration // relay idle bound; a field only so tests can shorten it
 
 	mu   sync.Mutex
 	seen map[[32]byte]int64 // session-id token -> expiry (anti-replay)
@@ -148,7 +153,8 @@ func NewServer(psk, destHost string) (*Server, error) {
 		return nil, err
 	}
 	return &Server{cert: cert, psk: psk, dest: net.JoinHostPort(destHost, "443"),
-		relay: make(chan struct{}, maxRelays), seen: map[[32]byte]int64{}}, nil
+		relay: make(chan struct{}, maxRelays), queue: make(chan struct{}, maxWaiting),
+		idle: relayIdle, seen: map[[32]byte]int64{}}, nil
 }
 
 // Handle reads the ClientHello and either returns a TLS conn (authenticated
@@ -212,33 +218,73 @@ func (sv *Server) firstSight(token []byte) bool {
 
 // proxyToDest relays raw<->dest (prepending the buffered ClientHello) in a
 // detached goroutine, bounded by the relay cap.
+//
+// A full relay pool must not close the connection on the spot: an instant FIN
+// straight after the ClientHello is exactly the distinguisher Handle refuses to
+// hand a censor. So a probe QUEUES for a slot instead — queueing costs only the
+// conn we have already accepted — and the relays themselves are bounded by an
+// IDLE timeout, so slots recycle instead of being pinned by connections nobody
+// speaks on. Only a flood deeper than maxWaiting is still dropped outright;
+// there is no bounded-memory answer to that one.
 func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 	select {
-	case sv.relay <- struct{}{}:
+	case sv.queue <- struct{}{}:
 	default:
-		raw.Close() // too many probes in flight; shed
+		raw.Close()
 		return
 	}
 	go func() {
+		defer func() { <-sv.queue }()
+		t := time.NewTimer(relayWait)
+		defer t.Stop()
+		select {
+		case sv.relay <- struct{}{}:
+		case <-t.C:
+			raw.Close()
+			return
+		}
 		defer func() { <-sv.relay }()
 		dst, err := net.DialTimeout("tcp", sv.dest, 8*time.Second)
 		if err != nil {
 			raw.Close()
 			return
 		}
-		_ = raw.SetDeadline(time.Time{})
-		if _, err := dst.Write(hello); err != nil {
+		// Both legs re-arm their deadline before every single read and write, so
+		// this is an IDLE bound and never a lifetime cap — a slow real download
+		// through the cover is untouched, while a silent connection releases its
+		// slot instead of waiting on dest's keepalive to decide for us. It also
+		// supersedes the handshake deadline Handle left on raw.
+		ri, di := &idleConn{Conn: raw, idle: sv.idle}, &idleConn{Conn: dst, idle: sv.idle}
+		if _, err := di.Write(hello); err != nil {
 			dst.Close()
 			raw.Close()
 			return
 		}
 		done := make(chan struct{}, 2)
-		go func() { io.Copy(dst, raw); done <- struct{}{} }()
-		go func() { io.Copy(raw, dst); done <- struct{}{} }()
+		go func() { io.Copy(di, ri); done <- struct{}{} }()
+		go func() { io.Copy(ri, di); done <- struct{}{} }()
 		<-done
 		dst.Close()
 		raw.Close()
 	}()
+}
+
+// idleConn re-arms its deadline before each operation. It embeds the net.Conn
+// INTERFACE on purpose: that keeps ReadFrom/WriteTo off the wrapper, so io.Copy
+// cannot splice past these methods and skip the deadlines.
+type idleConn struct {
+	net.Conn
+	idle time.Duration
+}
+
+func (c *idleConn) Read(b []byte) (int, error) {
+	_ = c.Conn.SetReadDeadline(time.Now().Add(c.idle))
+	return c.Conn.Read(b)
+}
+
+func (c *idleConn) Write(b []byte) (int, error) {
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(c.idle))
+	return c.Conn.Write(b)
 }
 
 // readClientHello reads exactly one TLS handshake record (the ClientHello),
