@@ -50,16 +50,33 @@ var rawProfiles = map[string]int{
 	"esp":  protoESP,
 }
 
-// Fixed, plausible ports for the tcp/udp profiles (source ephemeral -> :443).
+// Fixed, plausible ports for the tcp/udp profiles: the client's 51820 (inside Linux's
+// 32768-60999 ephemeral range, so an ordinary source port) talking to the server's :443.
 const (
-	rawSrcPort = 51820
-	rawDstPort = 443
+	rawClientPort = 51820
+	rawServerPort = 443
 	// rawTCPWindow is the advertised window on the synthetic tcp profile. A fixed 0xffff
 	// paired with a zero ACK reads as a forged segment to a stateful DPI; a realistic,
 	// steady-state window plus a non-zero ACK (set in wire()) make it look like a live
 	// established flow instead. 64240 is a very common Linux advertised window.
 	rawTCPWindow = 0xFAF0 // 64240
 )
+
+// rawPorts returns the (source, destination) port pair THIS end stamps on a tcp/udp carrier
+// packet. A conversation reverses — the client sends ephemeral->443 and the server answers
+// 443->ephemeral — and two ends both sending 51820->443, as this carrier used to, is not one:
+//
+//   - no stateful middlebox pairs the two halves up, so the downstream direction arrives as an
+//     unsolicited NEW inbound flow. A NAT or a stateful firewall in front of the client drops it,
+//     which is the whole download direction gone.
+//   - a pair of half-flows aimed at each other, neither ever answering the other, is a signature
+//     in its own right — the opposite of what a carrier profile exists to do.
+func rawPorts(isClient bool) (sport, dport uint16) {
+	if isClient {
+		return rawClientPort, rawServerPort
+	}
+	return rawServerPort, rawClientPort
+}
 
 // rawChecksumBindsSource reports whether this profile's carrier header carries a checksum computed
 // over the OUTER SOURCE address, so the bytes rawEncap produced are only valid if the packet really
@@ -104,7 +121,8 @@ func rawEffProto(profile string, rawProto int) (int, bool) {
 // bytes to hand the raw socket (the kernel prepends the outer IPv4 header, so we
 // do NOT include it here). src/dst are the tunnel endpoint IPs, needed for the
 // TCP checksum; isClient selects the direction-dependent fields (ICMP echo
-// request vs reply); id/seq make the ICMP/TCP headers look like a live flow; spi
+// request vs reply, and the tcp/udp port pair — see rawPorts, a flow that never
+// reverses is not a flow); id/seq make the ICMP/TCP headers look like a live flow; spi
 // is the per-session ESP Security Parameters Index (esp profile only).
 func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id uint16, seq, ack, spi uint32) []byte {
 	switch rawProfiles[profile] {
@@ -132,9 +150,10 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoUDP:
+		sp, dp := rawPorts(isClient)
 		h := make([]byte, 8+len(payload))
-		binary.BigEndian.PutUint16(h[0:2], rawSrcPort)
-		binary.BigEndian.PutUint16(h[2:4], rawDstPort)
+		binary.BigEndian.PutUint16(h[0:2], sp)
+		binary.BigEndian.PutUint16(h[2:4], dp)
 		binary.BigEndian.PutUint16(h[4:6], uint16(len(h)))
 		copy(h[8:], payload)
 		cs := l4Checksum(src, dst, protoUDP, h)
@@ -145,10 +164,12 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoTCP:
-		// A PSH|ACK data segment on the raw carrier's fixed ports (seq advances by payload bytes like a
-		// real stream; ack is a non-zero peer ISN, not the tell-tale 0). Identical byte layout to the
-		// desync injector, so both share buildTCPSeg (tcpseg.go).
-		return buildTCPSeg(src, dst, rawSrcPort, rawDstPort, seq, ack, tcpPshAck, rawTCPWindow, payload)
+		// A PSH|ACK data segment on the raw carrier's fixed ports, in this end's direction (seq
+		// advances by payload bytes like a real stream; ack is a non-zero peer ISN, not the
+		// tell-tale 0). Identical byte layout to the desync injector, so both share buildTCPSeg
+		// (tcpseg.go).
+		sp, dp := rawPorts(isClient)
+		return buildTCPSeg(src, dst, sp, dp, seq, ack, tcpPshAck, rawTCPWindow, payload)
 
 	case protoESP:
 		// IPsec ESP (RFC 4303): [SPI 4B][seq 4B] then the sealed frame as the "encrypted

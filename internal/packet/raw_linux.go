@@ -635,8 +635,10 @@ const rawSendMark = 0x746e6c01 // "tnl\x01"
 //	      rule is server-only, and it must not match the server's own replies: see rawSendMark.
 //	udp   BOTH kernels answer with an ICMP port-unreachable that QUOTES the packet (nothing is
 //	      bound to the synthetic port). Our frames are UDP, never ICMP — no exemption needed.
-//	tcp   BOTH kernels answer with a RST. Ours are PSH|ACK and always leave from rawSrcPort,
-//	      so the kernel's reset (rawDstPort -> rawSrcPort) cannot match our traffic.
+//	tcp   BOTH kernels answer with a RST. A reset REVERSES the segment it could not deliver, and
+//	      since the carrier's flow reverses too (rawPorts), the kernel's reset leaves on exactly
+//	      the port pair OUR OWN frames use at this end — so the ports do not separate the two and
+//	      the RST flag is the whole discriminator. Ours are PSH|ACK.
 //
 // The switch keys off the PROFILE, not the effective protocol number: a bip carrier that
 // overrides raw_proto to 1/6/17 carries no well-formed L4 header for that protocol, so there is
@@ -655,8 +657,11 @@ func rawDropMatches(peer net.IP, profile string, isClient, marked bool) [][]stri
 	case "udp":
 		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "port-unreachable"}}
 	case "tcp":
+		// The peer's frames arrive as rawPorts(!isClient); our kernel resets by swapping them,
+		// which is rawPorts(isClient) — the same pair we send on. Only the flag tells them apart.
+		psp, pdp := rawPorts(!isClient)
 		return [][]string{{"-d", d, "-p", "tcp",
-			"--sport", strconv.Itoa(rawDstPort), "--dport", strconv.Itoa(rawSrcPort),
+			"--sport", strconv.Itoa(int(pdp)), "--dport", strconv.Itoa(int(psp)),
 			"--tcp-flags", "RST", "RST"}}
 	}
 	return nil // bip / ipip / gre / esp: no kernel handler answers those protocol numbers

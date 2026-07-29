@@ -126,19 +126,31 @@ func ourFrame(profile string, isClient, marked bool) nfPacket {
 	return p
 }
 
-// kernelAnswers is the MEASURED behaviour this fix exists to suppress: 10 crafted carrier packets
-// per profile in a veth namespace pair, both directions observed with tcpdump.
+// kernelAnswers is the MEASURED behaviour this fix exists to suppress: crafted carrier packets per
+// profile in a veth namespace pair, both directions observed with tcpdump. It returns what THIS
+// end's kernel emits when the PEER's frames arrive, so it is a function of our role.
 //
-//	icmp  the receiving kernel mirrored all 10 echo requests back, carrying our own ciphertext
+//	icmp  the receiving kernel mirrored every echo request back, carrying our own ciphertext
 //	      (length 72). The other direction is silent: our echo replies provoke nothing.
-//	udp   both kernels answered with "udp port 443 unreachable", which QUOTES the packet.
-//	tcp   both kernels answered with a RST from 443 to 51820.
+//	udp   both kernels answered with an icmp port-unreachable, which QUOTES the packet. It names
+//	      whatever port the peer aimed at, so the rule cannot and does not key on ports.
+//	tcp   both kernels answered with a RST.
 //
 // The kernel's answer carries no mark of ours (mark 0) — that is the whole basis of the icmp rule.
-var kernelAnswers = map[string][]nfPacket{
-	"icmp": {{what: "the kernel mirroring our ciphertext back (icmp echo reply)", proto: protoICMP, icmpType: 0}},
-	"udp":  {{what: "the kernel's icmp port-unreachable quoting our datagram", proto: protoICMP, icmpType: 3}},
-	"tcp":  {{what: "the kernel's RST", proto: protoTCP, icmpType: -1, sport: rawDstPort, dport: rawSrcPort, rst: true}},
+func kernelAnswers(profile string, isClient bool) []nfPacket {
+	switch profile {
+	case "icmp":
+		return []nfPacket{{what: "the kernel mirroring our ciphertext back (icmp echo reply)", proto: protoICMP, icmpType: 0}}
+	case "udp":
+		return []nfPacket{{what: "the kernel's icmp port-unreachable quoting our datagram", proto: protoICMP, icmpType: 3}}
+	case "tcp":
+		// Derived from the physics, not from the rule: a kernel that cannot deliver a segment
+		// resets by REVERSING it, so build the answer out of the frame the PEER sends us.
+		psp, pdp := rawPorts(!isClient)
+		return []nfPacket{{what: "the kernel's RST", proto: protoTCP, icmpType: -1,
+			sport: int(pdp), dport: int(psp), rst: true}}
+	}
+	return nil
 }
 
 var leakPeer = net.IPv4(203, 0, 113, 7)
@@ -167,15 +179,15 @@ func TestRawAntiLeakNeverMatchesOurOwnFrames(t *testing.T) {
 // TestRawAntiLeakSuppressesEveryMeasuredKernelAnswer is the other half: every answer the kernel was
 // MEASURED to send must be matched by a rule we install, on the side that sends it.
 func TestRawAntiLeakSuppressesEveryMeasuredKernelAnswer(t *testing.T) {
-	for profile, answers := range kernelAnswers {
-		for _, ans := range answers {
-			// icmp is the one asymmetric case: only the server receives echo requests, so only the
-			// server's kernel answers, and only the server installs the rule.
-			roles := []bool{true, false}
-			if profile == "icmp" {
-				roles = []bool{false}
-			}
-			for _, isClient := range roles {
+	for _, profile := range []string{"icmp", "udp", "tcp"} {
+		// icmp is the one asymmetric case: only the server receives echo requests, so only the
+		// server's kernel answers, and only the server installs the rule.
+		roles := []bool{true, false}
+		if profile == "icmp" {
+			roles = []bool{false}
+		}
+		for _, isClient := range roles {
+			for _, ans := range kernelAnswers(profile, isClient) {
 				covered := false
 				for _, m := range rawDropMatches(leakPeer, profile, isClient, true) {
 					if ruleMatches(t, m, ans) {
@@ -207,6 +219,33 @@ func TestRawIcmpRuleIsSkippedWithoutTheMark(t *testing.T) {
 		if got := rawDropMatches(leakPeer, "icmp", true, marked); len(got) != 0 {
 			t.Fatalf("an icmp CLIENT (marked=%v) installed %v; nothing answers its echo replies", marked, got)
 		}
+	}
+}
+
+// TestRawPortedProfilesReverseTheFlow: any carrier header that has L4 ports must put the client's
+// and the server's on the wire the other way round. Both ends sending an identical (sport,dport) is
+// not a conversation anything pairs up — the downstream direction reads as an unsolicited new flow,
+// so a NAT or stateful firewall in front of the client drops it — and two half-flows aimed at each
+// other are a signature in their own right. Read out of rawEncap via ourFrame, so it is the real
+// encapsulation being measured and not a restatement of the constants.
+func TestRawPortedProfilesReverseTheFlow(t *testing.T) {
+	ported := 0
+	for profile := range rawProfiles {
+		c, s := ourFrame(profile, true, false), ourFrame(profile, false, false)
+		if c.sport == 0 && c.dport == 0 && s.sport == 0 && s.dport == 0 {
+			continue // this carrier header has no L4 ports
+		}
+		ported++
+		if c.sport == c.dport {
+			t.Fatalf("raw/%s: both ends of the pair are port %d, so reversing it is vacuous", profile, c.sport)
+		}
+		if c.sport != s.dport || c.dport != s.sport {
+			t.Fatalf("raw/%s: the client sends %d->%d and the server sends %d->%d — a real flow reverses, and a middlebox drops the half it cannot pair",
+				profile, c.sport, c.dport, s.sport, s.dport)
+		}
+	}
+	if ported != 2 { // udp and tcp; anything else means ourFrame stopped reading a profile's ports
+		t.Fatalf("measured %d profiles carrying L4 ports, want 2 (udp, tcp) — ourFrame is no longer reading them, so this test proves nothing", ported)
 	}
 }
 
