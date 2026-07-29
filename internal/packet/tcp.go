@@ -323,12 +323,20 @@ type TCP struct {
 	stTag  string        // carrier label prefix ("tcp"/"cover"/"ws"/"http") for setActive on a direct-pool rotation; set alongside st
 	lastRx atomic.Int64  // client: unix-nano of the last authenticated INBOUND frame on the LIVE carrier — feeds the status-file heartbeat (v2.48.3). Advanced only by readLoop while cf==b.cur, and by adoptRx from the carrier's own rxAt when it goes live; never stamp it for a frame we sent (a carrier that reconnects forever behind a CDN would read "alive" while nothing flows, v2.48.5), nor for a carrier that is not the tunnel's — a warm standby or a parked rotation carrier keeps its proof in cf.rxAt until it is promoted/adopted
 
-	// lastData is the unix-nano of the last real DATA frame moved in EITHER direction (never ping/pong).
-	// It drives opportunistic keepalive: when data moved within the last keepalive period the standalone
-	// ping is redundant (the data already proved the peer live and, via tunLoop's write-liveness deadline
-	// refresh, kept the connection off the idle-reaper), so an ACTIVE tunnel emits no periodic beacon.
-	// Stamped by tunLoop (outbound) and handleFrame's typeData case (inbound).
-	lastData atomic.Int64
+	// lastRxData is the unix-nano of the last real DATA frame that ARRIVED (never ping/pong, and never
+	// anything we sent). It drives opportunistic keepalive: an inbound frame is itself proof the peer is
+	// alive and answering, so the standalone ping is redundant for that period and an ACTIVE tunnel
+	// emits no periodic beacon.
+	//
+	// INBOUND ONLY — that restriction IS the feature. tunLoop used to stamp this on every successful
+	// outbound write too, which made a RECEIVE-direction blackhole undetectable: the inner TCP
+	// retransmits, so outbound data never stops on its own; the stamp then suppressed the keepalive
+	// ping, and tunLoop's write-liveness refresh pushed the read deadline forward — so BOTH
+	// dead-detection paths were held open forever. b.lastRx froze (the panel dot went red) while the
+	// core never reconnected, never failed over and never logged a line. A write proves only that our
+	// own socket accepted bytes; only a frame FROM the peer may say the peer is alive.
+	// Stamped by handleFrame's typeData case, and nowhere else.
+	lastRxData atomic.Int64
 
 	// warmNext holds a connection that was fully dialled and handshaked BEFORE the live one was
 	// dropped, so a timed destination rotation costs no outage: dialLoop adopts it instead of dialing.
@@ -2820,7 +2828,7 @@ func (b *TCP) handleFrame(cf *connFramer, typ byte, payload []byte) {
 	case typePong:
 		// keepalive ack
 	case typeData:
-		b.lastData.Store(time.Now().UnixNano()) // real inbound data -> the keepalive ping is redundant this interval
+		b.lastRxData.Store(time.Now().UnixNano()) // real INBOUND data -> the keepalive ping is redundant this interval
 		// Downstream follows upstream DATA (server only): the connection the client most
 		// recently sent a real data frame on becomes the TUN->client target, so a warm standby
 		// (which only sends keepalive pings) never steals downstream, and a promotion flips the
@@ -2952,11 +2960,15 @@ func (b *TCP) tunLoop() error {
 			b.onConnErr(cf, err)
 			continue
 		}
-		// Write succeeded: real DATA moved. Stamp it so the client suppresses the now-redundant keepalive
-		// ping, and treat the write as LIVENESS by pushing this conn's read deadline forward. A one-way
-		// flow (server->client download, or client->server upload) reads nothing back, so without this the
-		// silent side's readLoop would idle-reap a healthy, actively-used connection once we stop pinging.
-		b.lastData.Store(time.Now().UnixNano())
+		// Write succeeded: real DATA moved OUTBOUND. Treat that as liveness for the IDLE REAPER only —
+		// a one-way flow (server->client download, or client->server upload) reads nothing back, so
+		// without this the silent side's readLoop would idle-reap a healthy, actively-used connection.
+		//
+		// It deliberately does NOT stamp b.lastRxData. A successful write means our own socket accepted
+		// the bytes; it says nothing about whether the peer received them, so it must never suppress the
+		// keepalive ping. While it did, a receive-direction blackhole could not be detected at all: the
+		// ping that would have gone unanswered was never sent, and this very deadline refresh kept the
+		// idle reaper from firing either. See the b.lastRxData field comment.
 		cf.conn.SetReadDeadline(time.Now().Add(b.idle))
 	}
 }
@@ -2990,10 +3002,11 @@ func (b *TCP) keepaliveLoop() {
 		case <-b.closeCh:
 			return
 		case <-time.After(keepaliveInterval(b.keepalive, b.psk)):
-			// Opportunistic: skip the ACTIVE connection's keepalive when real data moved within the last
-			// period. The data already proved the peer live and (via tunLoop's write-liveness deadline
-			// refresh) kept the connection off the idle-reaper, so a busy tunnel emits no standalone
-			// beacon. The warm standby carries no data, so it is always pinged below.
+			// Opportunistic: skip the ACTIVE connection's keepalive when real data ARRIVED within the
+			// last period — that frame already proved the peer is alive and answering, so a busy tunnel
+			// emits no standalone beacon. Outbound data must not count (see recentData): it is the ping,
+			// not the data we send, that detects a peer which has stopped answering. The warm standby
+			// carries no data, so it is always pinged below.
 			if cf := b.cur.Load(); cf != nil && !b.recentData() {
 				if ok, err := b.pingOne(cf); !ok {
 					if b.warmStandby {
@@ -3037,14 +3050,16 @@ func (b *TCP) pingOne(cf *connFramer) (ok bool, err error) {
 	return true, nil
 }
 
-// recentData reports whether a real DATA frame moved (in OR out) within the last keepalive period.
-// When it did, the standalone keepalive ping is redundant — the data already proved the peer live and
-// tunLoop's write-liveness refresh kept the connection off the idle-reaper — so the client suppresses
-// the ping and an active tunnel emits no periodic beacon. The base keepalive (not the jittered
-// interval) is the window; a never-yet-used connection (lastData==0) keeps the normal keepalive so it
-// is not idle-reaped before any data flows.
+// recentData reports whether a real DATA frame ARRIVED within the last keepalive period. When one did,
+// the standalone keepalive ping is redundant — the inbound frame already proved the peer is alive and
+// answering — so the client suppresses the ping and an active tunnel emits no periodic beacon. The base
+// keepalive (not the jittered interval) is the window; a connection that has received nothing yet
+// (lastRxData==0) keeps the normal keepalive so it is not idle-reaped before any data flows.
+//
+// Only INBOUND data may suppress the ping. Counting outbound data here is what made a receive-direction
+// blackhole invisible — see the b.lastRxData field.
 func (b *TCP) recentData() bool {
-	last := b.lastData.Load()
+	last := b.lastRxData.Load()
 	if last == 0 {
 		return false
 	}

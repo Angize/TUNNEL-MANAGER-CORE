@@ -79,18 +79,31 @@ func TestKeepaliveIntervalPerTunnelStable(t *testing.T) {
 
 // recentData gates the opportunistic keepalive: true suppresses the active connection's ping. A
 // fresh connection (no data yet) must NOT suppress — otherwise it could be idle-reaped before the
-// first packet; recent data must suppress; data older than the keepalive window must resume pinging.
+// first packet; recent INBOUND data must suppress; data older than the keepalive window must resume
+// pinging.
+//
+// This drives the real inbound path (handleFrame) rather than storing the stamp by hand, because the
+// question that matters is WHO is allowed to stamp it. That an outbound write must NOT stamp it is the
+// other half of the same invariant and is proven end-to-end by
+// TestReceiveBlackholeIsDetectedWhileOutboundDataFlows — this test says nothing about it.
 func TestRecentData(t *testing.T) {
-	b := &TCP{keepalive: 15 * time.Second}
+	dev, _ := tunPair(t, "recentdata")
+	b := &TCP{keepalive: 15 * time.Second, dev: dev}
 	if b.recentData() {
 		t.Fatal("no data yet: recentData must be false so a fresh conn keeps its keepalive")
 	}
-	b.lastData.Store(time.Now().UnixNano())
+	b.handleFrame(&connFramer{}, typeData, []byte{0x45, 0x00, 0x00, 0x14})
 	if !b.recentData() {
-		t.Fatal("data just moved: recentData must be true so the redundant ping is suppressed")
+		t.Fatal("an inbound DATA frame must set recentData: the peer just proved it is answering, " +
+			"so the standalone ping is redundant for this period")
 	}
-	b.lastData.Store(time.Now().Add(-2 * b.keepalive).UnixNano())
+	b.lastRxData.Store(time.Now().Add(-2 * b.keepalive).UnixNano())
 	if b.recentData() {
 		t.Fatal("data older than one keepalive: recentData must be false so pinging resumes")
+	}
+	// A ping or a pong is not data and must never suppress the ping that detects a dead peer.
+	b.handleFrame(&connFramer{}, typePong, nil)
+	if b.recentData() {
+		t.Fatal("a pong is not DATA: it must not extend the suppression window")
 	}
 }
