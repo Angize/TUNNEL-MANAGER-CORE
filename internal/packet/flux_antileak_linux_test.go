@@ -3,56 +3,9 @@ package packet
 import (
 	"net"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
-
-// fluxLeakRecorder stands in for addFluxDrop: it records every install and every removal, in order,
-// and can be made slow so a caller that waits for iptables is visible as elapsed time. Nothing here
-// reaches the host firewall.
-type fluxLeakRecorder struct {
-	mu     sync.Mutex
-	ev     []string
-	delay  time.Duration
-	tookTo chan struct{}
-}
-
-func (r *fluxLeakRecorder) install(peer net.IP, carrier string) func() {
-	r.mu.Lock()
-	if r.tookTo != nil {
-		close(r.tookTo)
-		r.tookTo = nil
-	}
-	r.mu.Unlock()
-	if r.delay > 0 {
-		time.Sleep(r.delay)
-	}
-	ip := peer.String()
-	r.mu.Lock()
-	r.ev = append(r.ev, "add "+ip)
-	r.mu.Unlock()
-	return func() {
-		r.mu.Lock()
-		r.ev = append(r.ev, "del "+ip)
-		r.mu.Unlock()
-	}
-}
-
-func (r *fluxLeakRecorder) events() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]string(nil), r.ev...)
-}
-
-func evIndex(ev []string, want string) int {
-	for i, e := range ev {
-		if e == want {
-			return i
-		}
-	}
-	return -1
-}
 
 // TestFluxRotationPreScopesAntiLeak drives the REAL rotation and pin entry points and asserts that
 // the anti-leak rule is re-scoped there — on the rotation timer's own goroutine — instead of being
@@ -63,9 +16,10 @@ func evIndex(ev []string, want string) int {
 // with ICMP unreachables — the exact leak the rule exists to prevent — until one of them reached
 // learnPeer, which fixed it by forking 10 to 16 iptables processes on the AF_PACKET receive goroutine.
 func TestFluxRotationPreScopesAntiLeak(t *testing.T) {
-	rec := &fluxLeakRecorder{}
+	rec := &leakRecorder{}
 	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, false, 0, "")
-	f := &Flux{carrier: "udp", pp: pool, closeCh: make(chan struct{}), dropInstall: rec.install}
+	f := &Flux{carrier: "udp", pp: pool, closeCh: make(chan struct{})}
+	f.leak.init(f.closeCh, rec.install)
 	f.localIP.Store(&net.IPAddr{IP: net.ParseIP("10.9.9.9")}) // learnLocalIP must not resolve a route
 
 	first := hostOnly(pool.current())
@@ -121,8 +75,9 @@ func TestFluxRotationPreScopesAntiLeak(t *testing.T) {
 // process per rule (8 for the raw carrier, 5 for udp/stun) twice over. Before the fix it ran inline.
 func TestFluxLearnPeerNeverBlocksOnIptables(t *testing.T) {
 	installing := make(chan struct{})
-	rec := &fluxLeakRecorder{delay: 750 * time.Millisecond, tookTo: installing}
-	f := &Flux{carrier: "raw", closeCh: make(chan struct{}), dropInstall: rec.install}
+	rec := &leakRecorder{delay: 750 * time.Millisecond, tookTo: installing}
+	f := &Flux{carrier: "raw", closeCh: make(chan struct{})}
+	f.leak.init(f.closeCh, rec.install)
 	f.localIP.Store(&net.IPAddr{IP: net.ParseIP("10.9.9.9")})
 
 	start := time.Now()

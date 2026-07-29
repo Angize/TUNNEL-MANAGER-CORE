@@ -91,6 +91,10 @@ type Raw struct {
 	fecDec *fecDecoder                // non-nil when FEC is on: reassembles + reconstructs blocks on receive
 	rxAddr atomic.Pointer[net.IPAddr] // src of the packet currently feeding fecDec (deliver reads it)
 
+	// leak owns the filter-OUTPUT DROP rules that stop the receiving kernel answering this
+	// profile's carrier packets (icmp echo reply / udp port-unreachable / tcp RST). Wired only for
+	// an unforged link, by DialRaw/ListenRaw; see rawDropMatches and antileak_linux.go.
+	leak     antiLeaker
 	sendMu   sync.RWMutex // senders RLock around a bare-fd Sendto (the link's spoofFd or the desync fakeFd); Close write-locks before closing either
 	sendDown bool         // set under sendMu.Lock in Close: no more Sendto on the (about-to-be-closed) fds
 
@@ -334,6 +338,7 @@ func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bo
 	}
 	r.link = &directLink{r: r}
 	r.initFec(fec, fecData, fecParity)
+	r.wireAntiLeak()
 	return r, nil
 }
 
@@ -348,6 +353,7 @@ func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoO
 	r.link = &directLink{r: r}
 	applyConnSockBuf(r.conn) // a directLink server sends AND receives on this conn
 	r.initFec(fec, fecData, fecParity)
+	r.wireAntiLeak() // no peer yet — learnPeer scopes it on the first authenticated frame
 	return r, nil
 }
 
@@ -393,7 +399,8 @@ func (r *Raw) Close() error {
 	r.sendMu.Lock()
 	r.sendDown = true
 	r.sendMu.Unlock()
-	r.link.close()     // anti-leak rule + spoofFd + pktFd (decoy server); no-op for a directLink
+	r.leak.teardown()  // closeCh is already closed above, so any in-flight re-scope bails out first
+	r.link.close()     // decoy-dst anti-leak rule + spoofFd + pktFd (decoy server); no-op for a directLink
 	if r.fakeFd >= 0 { // dedicated desync socket (only set when the link had no fd to borrow)
 		syscall.Close(r.fakeFd)
 	}
@@ -603,6 +610,120 @@ func openAfpacket() (int, error) {
 	return fd, nil
 }
 
+// rawSendMark tags the raw carrier's OWN outgoing packets (SO_MARK on its socket) so the icmp
+// anti-leak rule can tell them from the kernel's answer. It is needed for exactly one profile:
+// on icmp the server's downstream frames ARE echo replies to the peer, byte-for-byte the same
+// shape as the mirrored reply the kernel generates for the client's echo requests — and the
+// kernel copies the request's id, so nothing inside the packet distinguishes them. Measured in a
+// veth namespace pair: the rule without this exemption dropped all 10 of the server's own frames
+// (and returned EPERM on every send), i.e. it black-holed the download.
+const rawSendMark = 0x746e6c01 // "tnl\x01"
+
+// rawDropMatches returns the filter-OUTPUT match arguments for the answers this profile provokes
+// from the receiving kernel, or nil for a profile no kernel handler answers.
+//
+// Why OUTPUT and not the inbound suppression flux uses: flux taps at AF_PACKET, before netfilter,
+// so it can drop the frame on the way IN. The raw carrier reads a net.ListenIP socket, which the
+// kernel delivers in ip_protocol_deliver_rcu — after PREROUTING *and* INPUT — so an inbound DROP
+// takes our own receive down with it (measured: raw-PREROUTING and filter-INPUT each took the
+// receiver from 10 frames to 0). The kernel's answer has to be suppressed on its way OUT instead.
+//
+// Measured per profile, 10 crafted carrier packets each, both directions observed:
+//
+//	icmp  the SERVER's kernel mirrors every echo request back — carrying our own ciphertext.
+//	      The client's kernel answers nothing (our downstream frames are echo replies), so the
+//	      rule is server-only, and it must not match the server's own replies: see rawSendMark.
+//	udp   BOTH kernels answer with an ICMP port-unreachable that QUOTES the packet (nothing is
+//	      bound to the synthetic port). Our frames are UDP, never ICMP — no exemption needed.
+//	tcp   BOTH kernels answer with a RST. Ours are PSH|ACK and always leave from rawSrcPort,
+//	      so the kernel's reset (rawDstPort -> rawSrcPort) cannot match our traffic.
+//
+// The switch keys off the PROFILE, not the effective protocol number: a bip carrier that
+// overrides raw_proto to 1/6/17 carries no well-formed L4 header for that protocol, so there is
+// no coherent answer to suppress (and no coherent rule to write).
+func rawDropMatches(peer net.IP, profile string, isClient, marked bool) [][]string {
+	d := peer.String()
+	switch profile {
+	case "icmp":
+		if isClient || !marked {
+			// No mark means we cannot exempt our own downstream frames, and the rule would then
+			// silently black-hole them. Leaking is bad; going dark is worse.
+			return nil
+		}
+		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "echo-reply",
+			"-m", "mark", "!", "--mark", fmt.Sprintf("%#x", rawSendMark)}}
+	case "udp":
+		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "port-unreachable"}}
+	case "tcp":
+		return [][]string{{"-d", d, "-p", "tcp",
+			"--sport", strconv.Itoa(rawDstPort), "--dport", strconv.Itoa(rawSrcPort),
+			"--tcp-flags", "RST", "RST"}}
+	}
+	return nil // bip / ipip / gre / esp: no kernel handler answers those protocol numbers
+}
+
+// addRawDrop installs rawDropMatches for peer, best-effort, and returns a func that removes
+// exactly the rules that went in (nil if none did).
+func addRawDrop(peer net.IP, profile string, isClient, marked bool) func() {
+	var added [][]string
+	for _, m := range rawDropMatches(peer, profile, isClient, marked) {
+		args := append([]string{"-A", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
+		if out, err := exec.Command("iptables", args...).CombinedOutput(); err != nil {
+			log.Printf("raw: anti-leak rule not installed (the peer's kernel may answer our carrier packets): %v: %s", err, strings.TrimSpace(string(out)))
+			continue
+		}
+		added = append(added, m)
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	log.Printf("raw: anti-leak scoped to %s (%d OUTPUT rule(s), profile %s)", peer, len(added), profile)
+	return func() {
+		for _, m := range added {
+			del := append([]string{"-D", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
+			_ = exec.Command("iptables", del...).Run()
+		}
+	}
+}
+
+// setSendMark stamps rawSendMark on everything this socket sends, so the icmp anti-leak rule can
+// exempt it. Needs CAP_NET_ADMIN (raw sockets themselves only need CAP_NET_RAW), so it can fail
+// on a container that has one capability and not the other — the caller must then skip the rule.
+func setSendMark(conn *net.IPConn) error {
+	sc, err := conn.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var serr error
+	if err := sc.Control(func(fd uintptr) {
+		serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_MARK, rawSendMark)
+	}); err != nil {
+		return err
+	}
+	return serr
+}
+
+// wireAntiLeak wires the kernel anti-leak for a plain (unforged) raw carrier: the profiles whose
+// packets the receiving kernel answers get an OUTPUT DROP scoped to the current peer, re-scoped on
+// every destination rotation and pin. A spoofing link is deliberately NOT wired — its answers go to
+// the forged address, not to us, and its decoy destination has its own rule (addAntiLeak).
+func (r *Raw) wireAntiLeak() {
+	marked := false
+	if r.profile == "icmp" && !r.isClient {
+		if err := setSendMark(r.conn); err != nil {
+			log.Printf("raw: SO_MARK could not be set (%v) — the icmp anti-leak rule is OFF, so the kernel will keep mirroring our frames back to the peer", err)
+		} else {
+			marked = true
+		}
+	}
+	r.leak.init(r.closeCh, func(peer net.IP) func() {
+		return addRawDrop(peer, r.profile, r.isClient, marked)
+	})
+	if p := r.peer.Load(); p != nil { // client: the peer is known at dial, so scope it now
+		r.leak.scope(p.IP)
+	}
+}
+
 // addAntiLeak installs a best-effort iptables rule that drops the decoy-destined
 // packets in the raw table's PREROUTING chain, so the kernel does not try to forward
 // or answer them. AF_PACKET taps the frame before this chain runs, so our receive path
@@ -805,6 +926,11 @@ func (r *Raw) learnPeer(addr *net.IPAddr) {
 		r.peer.Store(addr)
 	}
 	r.learnLocalIP(addr.IP)
+	// ASYNC: this runs on the receive goroutine, which IS the data path. A rotation/pin has normally
+	// already re-scoped to this peer, so the common case is the atomic-load fast path and nothing
+	// happens; the hand-off covers what a rotation cannot know up front — the server learning its
+	// client at all, and then following that client's SOURCE rotation.
+	r.leak.scopeAsync(addr.IP)
 }
 
 // learnLocalIP records, once, the local source IP the kernel routes toward peer — the tcp profile's
@@ -1082,6 +1208,10 @@ func (r *Raw) rotatePeerRaw(proactive bool) {
 		return
 	}
 	r.peer.Store(&net.IPAddr{IP: ip})
+	// Pre-scope on THIS goroutine (the rotation timer), before a single frame goes to the new
+	// endpoint: the one we just left stays admitted for the frames still in flight, so a rule left
+	// behind on it would leak on the new one until an inbound frame reached learnPeer.
+	r.leak.scope(ip)
 	r.st.setActive("raw:" + r.profile + " · " + ip.String()) // refresh the frozen active descriptor to the new destination (matches SetStatusPath)
 	if !proactive {
 		r.session.Store(nil) // the endpoint failed — force a fresh handshake to the next one
@@ -1114,6 +1244,7 @@ func (r *Raw) adoptPeerRaw() {
 		return
 	}
 	r.peer.Store(&net.IPAddr{IP: ip})
+	r.leak.scope(ip)                                         // pre-scope on the pin poller, exactly as rotatePeerRaw does
 	r.st.setActive("raw:" + r.profile + " · " + ip.String()) // refresh the frozen active descriptor to the new destination (matches SetStatusPath)
 	r.session.Store(nil)
 	r.ci.Store(nil)
