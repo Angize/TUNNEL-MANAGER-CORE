@@ -1473,7 +1473,12 @@ func (b *TCP) probeEdgeFull(ip string, sni wsSNIEntry) bool {
 		if host == "" {
 			host = ip
 		}
-		conn, err := b.dialHTTPCOnce(ip, host, sni.ech, sni.path)
+		// probeTimeout is the operator's edge-probe budget, and until now the httpc branch ignored it
+		// entirely: a hardcoded 10s dial, an unbounded TLS handshake and a fixed 30s header wait meant a
+		// probe could run ~50s where probe_timeout_secs said 5. The ws branch below has always honoured
+		// it. Every retest and every differential-probe arm runs through here, so the knob decided
+		// nothing about how fast a blocked http/grpc edge is judged.
+		conn, err := b.dialHTTPCOnce(ip, host, sni.ech, sni.path, probeTimeout)
 		if err != nil {
 			// Retry ONCE with the fresh key on a stale-ECH rejection, exactly as the live path
 			// (establishHTTPC) and the ws probe (tlsToEdge, which has this built in) already do.
@@ -1491,7 +1496,7 @@ func (b *TCP) probeEdgeFull(ip string, sni wsSNIEntry) bool {
 			log.Printf("core/http: ECH-SELFHEAL[probe] for %s (%s) — stale key rejected, retrying with the fresh one", host, ip)
 			// Deliberately NOT persisted here: this mirrors tlsToEdge's live=false probe contract, where
 			// a probe proves reachability but does not publish a key. The live dial persists it.
-			if conn, err = b.dialHTTPCOnce(ip, host, echErr.RetryConfigList, sni.path); err != nil {
+			if conn, err = b.dialHTTPCOnce(ip, host, echErr.RetryConfigList, sni.path, probeTimeout); err != nil {
 				return false
 			}
 		}

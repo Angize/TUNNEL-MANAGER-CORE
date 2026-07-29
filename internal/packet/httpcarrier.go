@@ -82,14 +82,18 @@ const grpcAcceptEncoding = "gzip"
 // maxPostBody caps a single upstream POST body so a hostile client can't force a huge alloc.
 const maxPostBody = 1 << 20
 
-// httpcEstablishTimeout bounds the wait for the establishing request's response HEADERS (the
-// downstream GET, or the grpc POST). TCP dial and the TLS handshake are each already bounded
-// (10s + TLSHandshakeTimeout); this covers the otherwise-unbounded wait for the edge to START
-// streaming. A CDN that completes TCP+TLS but never streams the origin leg (a throttled origin,
-// a half-open grpc call, a stale-ECH edge that Cloudflare still TLS-terminates) must not block
-// establishment forever — that stall is what freezes rotation and manual pin. Generous, because
+// httpcHeaderWait bounds the wait for an establishing request's response HEADERS (the downstream
+// GET, or the grpc POST) — the phase the TCP dial and TLS timeouts do NOT cover. A CDN that
+// completes TCP+TLS but never streams the origin leg (a throttled origin, a half-open grpc call, a
+// stale-ECH edge that Cloudflare still TLS-terminates) must not block establishment forever; that
+// stall is what freezes rotation and manual pin. Generous relative to the connect budget, because
 // it also covers the bounded TCP+TLS phases; a healthy edge flushes headers immediately.
-const httpcEstablishTimeout = 3 * handshakeTimeout
+//
+// It is DERIVED from the caller's connect budget rather than fixed, so the same 1:1:3 shape applies
+// whether the establish is a live dial (budget = handshakeTimeout, i.e. the previous fixed 10s/10s/
+// 30s exactly) or a probe (budget = probeTimeout). Before that, an http/grpc probe ignored
+// probe_timeout_secs completely and could run ~50s where the operator had asked for 5.
+func httpcHeaderWait(budget time.Duration) time.Duration { return 3 * budget }
 
 // strAddr is a net.Addr for an HTTP-carrier conn (there is no single socket behind it).
 type strAddr string
@@ -582,7 +586,7 @@ func (b *TCP) establishHTTPC(attribute bool) (net.Conn, string, string, error) {
 	if err != nil {
 		return nil, "", "", err
 	}
-	conn, err := b.dialHTTPCOnce(dialAddr, host, ech, path)
+	conn, err := b.dialHTTPCOnce(dialAddr, host, ech, path, handshakeTimeout)
 	// In-band ECH self-heal (mirrors the ws carrier's tlsToEdge): Cloudflare rotates the ECH key
 	// periodically, and once the config we hold goes stale EVERY edge rejects ECH ("tls: server
 	// rejected ECH") until a rebuild — the exact production stall. The rejection carries a fresh
@@ -595,7 +599,7 @@ func (b *TCP) establishHTTPC(attribute bool) (net.Conn, string, string, error) {
 			ech = echErr.RetryConfigList
 			log.Printf("core/http: ECH self-heal for %s (%s) — stale key rejected, retrying with fresh key %s",
 				host, dialAddr, base64.StdEncoding.EncodeToString(ech))
-			conn, err = b.dialHTTPCOnce(dialAddr, host, ech, path)
+			conn, err = b.dialHTTPCOnce(dialAddr, host, ech, path, handshakeTimeout)
 			if err == nil { // self-heal succeeded: persist the fresh key and surface it (pool or single-edge)
 				b.noteECHSelfHeal(host, ech)
 			}
@@ -604,7 +608,7 @@ func (b *TCP) establishHTTPC(attribute bool) (net.Conn, string, string, error) {
 	// Attribute the outcome to the health FSM here (one place for both modes): a failure runs
 	// the differential probe to decide IP vs SNI vs transient; a success clears both axes.
 	// attribute is FALSE on the warm-standby build path: that differential probe fires several full
-	// establishes (each bounded by httpcEstablishTimeout), and running it in the single standby-build
+	// establishes (each bounded by its own connect budget), and running it in the single standby-build
 	// goroutine blocks it for that whole time with standbyBuilding still set — so requestStandby()
 	// no-ops, the standby never becomes ready, and proactive rotation silently freezes while the open
 	// active keeps the tunnel up (the exact "rotation stopped after hours, tunnel still up" report).
@@ -630,14 +634,14 @@ func (b *TCP) establishHTTPC(attribute bool) (net.Conn, string, string, error) {
 // ECH rejection can be retried with a fresh config — each attempt needs its own transport, since
 // the ECH lives in tr.TLSClientConfig. On error, everything this attempt allocated is already torn
 // down by the dialHTTPC* helper (ctx cancelled, pipes/bodies closed).
-func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net.Conn, error) {
+func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budget time.Duration) (net.Conn, error) {
 	single := b.httpcMode == "grpc" // one full-duplex request over h2
 	h2 := single && b.wsTLS         // grpc over wss rides HTTP/2 to the edge
 
 	// rawDial always targets the fixed edge, regardless of the request URL host, so the Host/SNI
 	// stays the fronting domain while we connect to a specific (clean) CDN IP.
 	rawDial := func(ctx context.Context) (net.Conn, error) {
-		return b.dialer(10*time.Second).DialContext(ctx, "tcp", dialAddr)
+		return b.dialer(budget).DialContext(ctx, "tcp", dialAddr)
 	}
 
 	// Track every underlying TCP conn this attempt dials so teardown can FORCE them shut. The h2
@@ -695,11 +699,19 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 			if err != nil {
 				return nil, err
 			}
+			// Bound the handshake on the socket itself. Transport.TLSHandshakeTimeout does NOT apply
+			// when the caller supplies DialTLSContext — the transport is not the one handshaking — and
+			// uEdgeHandshake sets no deadline of its own, so BOTH real-TLS paths here (h2 and the
+			// http/1.1 one below) had no bound at all: an edge that completes TCP and then stalls
+			// mid-ClientHello parked the dial indefinitely. Cleared on success, because from that
+			// point h2 owns the conn and a lingering deadline would kill the live stream.
+			_ = c.SetDeadline(time.Now().Add(budget))
 			uc, err := uEdgeHandshake(b.fragWrap(c, host), host, ech, alpn, h2) // split the ClientHello SNI when enabled
 			if err != nil {
 				c.Close()
 				return nil, err
 			}
+			_ = c.SetDeadline(time.Time{})
 			track(c) // remember the raw fd so teardown can force it shut (h2 won't on its own)
 			return uc, nil
 		}
@@ -744,7 +756,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 			MaxIdleConns:        upIdleConns * 2,
 			MaxIdleConnsPerHost: upIdleConns,
 			IdleConnTimeout:     90 * time.Second,
-			TLSHandshakeTimeout: handshakeTimeout,
+			TLSHandshakeTimeout: budget,
 		}
 		if b.wsTLS {
 			tr.TLSClientConfig = b.httpcTLS
@@ -770,9 +782,9 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string) (net
 	var err error
 	switch b.httpcMode {
 	case "grpc":
-		conn, err = b.dialHTTPCGrpc(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)
+		conn, err = b.dialHTTPCGrpc(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr, budget)
 	default:
-		conn, err = b.dialHTTPCPost(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)
+		conn, err = b.dialHTTPCPost(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr, budget)
 	}
 	if err != nil {
 		// A FAILED establish (dial ok but header timeout / non-200 / write error) has cancelled the
@@ -894,7 +906,7 @@ func (g *grpcDeframingReader) Close() error {
 
 // dialHTTPCGrpc (grpc) is stream-one dressed as a gRPC call: one full-duplex POST with
 // Content-Type application/grpc and gRPC message framing on both directions.
-func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request)) (net.Conn, error) {
+func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request), budget time.Duration) (net.Conn, error) {
 	pr, pw := io.Pipe()
 	req, err := http.NewRequestWithContext(ctx, "POST", base+"?s="+sid, pr)
 	if err != nil {
@@ -909,7 +921,7 @@ func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Conte
 	// so "identity" on the wire is a small tell of a hand-rolled client. Nothing reads it — our own
 	// deframer takes the compressed flag from each message's 5-byte prefix, not from a header.
 	req.ContentLength = -1
-	resp, err := doWithHeaderTimeout(hc, req, httpcEstablishTimeout)
+	resp, err := doWithHeaderTimeout(hc, req, httpcHeaderWait(budget))
 	if err != nil {
 		cancel()
 		pw.Close()
@@ -932,14 +944,14 @@ func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Conte
 
 // dialHTTPCPost (post) opens the long-lived downstream GET and starts the POST-ladder
 // upstream sender for a fresh session, returning a net.Conn over the pair.
-func (b *TCP) dialHTTPCPost(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request)) (net.Conn, error) {
+func (b *TCP) dialHTTPCPost(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request), budget time.Duration) (net.Conn, error) {
 	greq, err := http.NewRequestWithContext(ctx, "GET", base+"?s="+sid, nil)
 	if err != nil { // a malformed host/path would otherwise nil-deref inside doWithHeaderTimeout's goroutine
 		cancel()
 		return nil, err
 	}
 	setHdr(greq)
-	gresp, err := doWithHeaderTimeout(hc, greq, httpcEstablishTimeout)
+	gresp, err := doWithHeaderTimeout(hc, greq, httpcHeaderWait(budget))
 	if err != nil {
 		cancel()
 		return nil, err
