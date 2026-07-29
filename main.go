@@ -307,9 +307,10 @@ func main() {
 			log.Printf("tnl-core: self-heal deadline set to %ds (%s)", effDead, floorNote)
 		}
 	}
-	// Datagram transports (udp/raw/flux): wire a status-file event ring so the client's precise
-	// self-heal events reach the node/panel system log. Only the client writes it; the transports
-	// that don't implement it (tcp/ws) simply ignore this.
+	// Wire the status file: a liveness heartbeat (hb) plus this carrier's resolved dead window (dw),
+	// and an event ring carrying the client's precise self-heal reasons into the node/panel system
+	// log. EVERY client carrier implements it now — dns was the last one that did not, which left the
+	// panel deciding its dot from traffic flow alone. Only the client writes it.
 	if cfg.Role == "client" && cfg.StatusPath != "" {
 		if s, ok := b.(interface{ SetStatusPath(string) }); ok {
 			s.SetStatusPath(cfg.StatusPath)

@@ -39,6 +39,13 @@ type DNS struct {
 	curT    dnstun.WireTransport
 	conn    atomic.Pointer[net.Conn] // the live session for the long-lived tun→net loop (nil between sessions)
 
+	// Client-only liveness, the same pair every other carrier publishes. hbRx is the unix-nano of the
+	// last packet that came OUT of the session — i.e. authenticated, since dnstun opens it under the
+	// AEAD sealer — and st republishes it into the status file the node/panel read. Both are nil/zero
+	// on the server and until SetStatusPath wires them; coreStatus is nil-safe throughout.
+	hbRx atomic.Int64
+	st   *coreStatus
+
 	closeCh   chan struct{}
 	closeOnce sync.Once
 }
@@ -86,6 +93,69 @@ func (d *DNS) SetDeadAfter(secs int) {
 	}
 }
 
+// SetStatusPath (client, optional) wires the status file every OTHER carrier already writes: an
+// events ring plus the two numbers a reader needs to age a tunnel — hb (the last authenticated
+// inbound frame) and dw (the dead window this carrier really enforces).
+//
+// dns was the one client carrier with none of it. main.go probes for this method with a type
+// assertion, the assertion failed, and the "writing status/events to …" line lives in the successful
+// branch — so the file was never created and nothing said why. Downstream that is a dot the panel
+// cannot decide: with no hb it has only traffic flow to go on, so a healthy but IDLE dns tunnel ages
+// into yellow, and a genuinely dead one never goes red at all, because instant-red is gated on a
+// published dead window (_dw > 0) that did not exist. Call before Run().
+func (d *DNS) SetStatusPath(path string) {
+	if path == "" || !d.isClient {
+		return
+	}
+	d.st = newCoreStatus(path, "dns · "+d.zone)
+}
+
+// heartbeat republishes the live session's liveness into the status file, paced off dw exactly as
+// the shared heartbeat() does for the other carriers. It is a carrier-local loop only because the
+// number has to be PULLED from whatever session is live right now: dns re-dials into a brand new
+// session on every recovery, and the shared helper reads one fixed atomic.
+//
+// The source is the SESSION's lastRx, not the packets this carrier reads. An idle dns tunnel carries
+// no data at all — its proof of life is the keepalive pong, which dnstun consumes internally and
+// never yields as a packet. Stamping only what netToTun read would freeze hb on a healthy tunnel and
+// recreate, from the other side, the exact false-red this whole file is about.
+func (d *DNS) heartbeat(dwSecs int64) {
+	if d.st == nil {
+		return
+	}
+	t := time.NewTicker(hbPeriod(dwSecs))
+	defer t.Stop()
+	for {
+		if cp := d.conn.Load(); cp != nil {
+			// Forward only. Between sessions there is nothing to read, and a fresh session's zero
+			// must never drag the published heartbeat backwards into a false death.
+			if lc, ok := (*cp).(interface{ LastRx() int64 }); ok {
+				if v := lc.LastRx(); v > d.hbRx.Load() {
+					d.hbRx.Store(v)
+				}
+			}
+		}
+		d.st.beat(d.hbRx.Load() / int64(time.Second))
+		select {
+		case <-d.closeCh:
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// deadWin is the window after which a silent session counts as dead. dns does NOT use the shared
+// 2×keepalive floor — dnstun applies its own absolute floor, because this carrier is high-loss and
+// its window has to survive several dropped polls. Publishing the SAME number the session enforces
+// is the point: a reader that re-derived its own multiplier would age hb against a window nothing
+// applies (see effectiveDeadAfter, which had that exact bug in the startup log).
+func (d *DNS) deadWin() time.Duration {
+	if d.cfg.DeadAfter > 0 && d.cfg.DeadAfter > dnstun.DeadFloor() {
+		return d.cfg.DeadAfter
+	}
+	return dnstun.DeadFloor()
+}
+
 // DNSDeadFloorSecs is the ABSOLUTE floor (seconds) the dns carrier applies to dead_after_secs — it does
 // NOT use the 2×keepalive floor the other carriers do. main.go needs this to log the deadline that will
 // really be in force; keeping the lookup here means main.go asks the carrier package rather than
@@ -94,6 +164,11 @@ func DNSDeadFloorSecs() int { return int(dnstun.DeadFloor() / time.Second) }
 
 func (d *DNS) Run() error {
 	go d.tunToNet()
+	if d.isClient {
+		dw := int64(d.deadWin().Seconds())
+		d.st.setDW(dw) // publish the window a reader must age hb against...
+		go d.heartbeat(dw)
+	}
 	backoff := dnsBackoffMin
 	for {
 		select {
@@ -103,6 +178,11 @@ func (d *DNS) Run() error {
 		}
 		conn, err := d.connect()
 		if err != nil {
+			// Deliberately NO down event here. The retry loop backs off from 1s to 30s, so one per
+			// attempt would append an event a second at first and evict the real history out of a
+			// capped ring. The session death below already recorded the outage exactly once, and a
+			// tunnel that has never connected is legible without any event at all: dw is published
+			// while hb stays 0, which is precisely the "never connected" state the panel reads.
 			log.Printf("core/dns: connect: %v", err)
 			if d.sleep(backoff) {
 				return nil
@@ -111,6 +191,7 @@ func (d *DNS) Run() error {
 			continue
 		}
 		log.Printf("core/dns: session established (%s zone=%s)", d.role(), d.zone)
+		d.st.reconnected("dns") // silent on the first connect; pairs a preceding down
 		backoff = dnsBackoffMin
 		d.conn.Store(&conn)
 		d.netToTun(conn) // blocks until the session dies
@@ -120,6 +201,7 @@ func (d *DNS) Run() error {
 		if d.isDone() {
 			return nil
 		}
+		d.st.down("session-dead", "dns") // the session ended on its own -> the next connect is a recovery
 	}
 }
 
