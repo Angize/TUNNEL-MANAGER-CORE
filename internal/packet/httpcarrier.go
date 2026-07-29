@@ -108,7 +108,8 @@ type httpcConn struct {
 	up    *httpcUp // client only: POST-ladder upstream sender (nil on the server)
 
 	wmu     sync.Mutex
-	wdl     atomic.Int64 // unix-nanos write deadline (0 = none); honoured by Write, unlike a no-op setter
+	wdl     atomic.Int64 // unix-nanos write deadline (0 = none); ENFORCED by Write, not merely recorded
+	setWD   func(time.Time) error
 	mu      sync.Mutex
 	closed  bool
 	closeFn func()
@@ -118,9 +119,49 @@ type httpcConn struct {
 
 func (c *httpcConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
+// armWrite makes the pending write deadline BITE for the duration of one write, and returns the
+// func that disarms it again.
+//
+// Recording a deadline and then testing it at the top of Write is not a deadline: connFramer arms
+// now+writeTimeout immediately before every framed write, so the test compares now against a moment
+// 30s in the future and always passes — and then the write underneath parks with no bound at all.
+// Every httpc writer is a park-forever writer: an h2 ResponseWriter whose flow-control window has
+// filled, or an io.Pipe whose reader (Go's h2 transport) has stopped draining the request body.
+//
+// So the deadline has to reach something that can interrupt a write ALREADY in flight:
+//
+//	server (both modes): http.ResponseController.SetWriteDeadline with a past instant — HTTP/1 expires
+//	                     the socket deadline, x/net/http2 resets the stream (onWriteTimeout). It fails
+//	                     only THIS write, rather than touching a ResponseWriter whose handler may be gone.
+//	client grpc:         an io.Pipe offers no such handle, so the conn is closed — which is what a write
+//	                     error causes here anyway (onConnErr re-dials), and the exact shape
+//	                     SetReadDeadline already uses.
+//
+// It fires from a timer rather than by pushing now+30s down on every write, because the deadline
+// underneath OUTLIVES the write that set it: an h2 stream left holding a 30s write deadline is reset
+// 30s later even if nothing is being written, so a tunnel whose keepalive is longer than writeTimeout
+// would be torn down on schedule while perfectly healthy. Armed per write, disarmed on return.
+//
+// The client POST ladder never reaches this: it returns at the top of Write and is bounded inside
+// httpcUp instead (the enqueue and the request each carry the deadline).
+func (c *httpcConn) armWrite() func() {
+	dl := c.wdl.Load()
+	if dl == 0 {
+		return func() {}
+	}
+	t := time.AfterFunc(time.Until(time.Unix(0, dl)), func() {
+		if c.setWD != nil {
+			_ = c.setWD(time.Unix(0, 1)) // in the past: fails the write in flight, nothing else
+			return
+		}
+		c.Close()
+	})
+	return func() { t.Stop() }
+}
+
 func (c *httpcConn) Write(p []byte) (int, error) {
 	if c.up != nil { // client: each write becomes a short POST with a seq
-		return c.up.write(p)
+		return c.up.write(p, c.wdl.Load())
 	}
 	// Two independent guards, cheapest-and-most-definitive first.
 	c.mu.Lock()
@@ -132,17 +173,14 @@ func (c *httpcConn) Write(p []byte) (int, error) {
 		// reached a dead ResponseWriter, which is undefined behaviour rather than a clean error.
 		return 0, net.ErrClosed
 	}
-	// SERVER: c.w is the long-lived GET's ResponseWriter. If the client stops reading, the h2 flow
-	// -control window fills and this Write parks — with no deadline of its own, forever, holding the
-	// goroutine that drains the TUN. connFramer arms a write deadline before every framed write
-	// expecting exactly this to be bounded (wsconn honours it); on httpc the setter used to be a bare
-	// `return nil`, so the protection silently did not exist here.
 	if dl := c.wdl.Load(); dl != 0 && time.Now().UnixNano() > dl {
 		return 0, os.ErrDeadlineExceeded
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	disarm := c.armWrite()
 	n, err := c.w.Write(p)
+	disarm()
 	if err == nil && c.flush != nil {
 		c.flush()
 	}
@@ -193,6 +231,8 @@ func (c *httpcConn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
+// SetWriteDeadline records the deadline; armWrite is what enforces it, per write. It cannot be
+// pushed to the layer below here, because that layer keeps it after this write is over — see armWrite.
 func (c *httpcConn) SetWriteDeadline(t time.Time) error {
 	if t.IsZero() {
 		c.wdl.Store(0)
@@ -354,14 +394,21 @@ type httpcUp struct {
 	seq    uint64        // batch sequence; assigned only by the single batcher goroutine, so no atomic needed
 	ch     chan []byte   // raw upstream byte chunks from write()
 	work   chan seqChunk // coalesced, seq-tagged batches ready to POST
-	minGap time.Duration // snapshot of upMinGap: read once here, never from the batcher goroutine
-	fail   func()
-	once   sync.Once
+	// The upstream shape is snapshotted here, never read from the goroutines: SetHTTPUpstream writes
+	// these globals, and a batcher looping on the live maxBatch (or a worker reading the live timeout)
+	// is a data race against it — the queue sizes below are already fixed at construction anyway, so
+	// re-reading the cap mid-flight could only ever disagree with them.
+	minGap   time.Duration // snapshot of upMinGap
+	maxBatch int           // snapshot of maxUpBatch
+	postTO   time.Duration // snapshot of upPostTimeout
+	fail     func()
+	once     sync.Once
 }
 
 func newHTTPCUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string, setHdr func(*http.Request), fail func()) *httpcUp {
 	u := &httpcUp{hc: hc, ctx: ctx, urlFor: urlFor, setHdr: setHdr, fail: fail,
-		ch: make(chan []byte, upChanCap), work: make(chan seqChunk, upWorkCap), minGap: upMinGap}
+		ch: make(chan []byte, upChanCap), work: make(chan seqChunk, upWorkCap),
+		minGap: upMinGap, maxBatch: maxUpBatch, postTO: upPostTimeout}
 	go u.batcher()
 	for i := 0; i < upWorkers; i++ {
 		go u.worker()
@@ -369,14 +416,33 @@ func newHTTPCUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string
 	return u
 }
 
-func (u *httpcUp) write(p []byte) (int, error) {
+// write queues one upstream chunk, honouring the caller's write deadline (unix-nanos, 0 = none).
+//
+// The deadline matters because this enqueue is a park-forever operation whenever the far edge stops
+// answering: the workers block in post, work (cap 1) fills, the batcher blocks, ch fills, and the
+// send below never completes. It is reached from connFramer.writeFrame UNDER cf.mu, so parking here
+// parks the tunnel's TUN reader and its keepalive loop with it — the whole tunnel freezes on one
+// tarpitting edge, and the dot stays green as long as anything is still arriving downstream.
+func (u *httpcUp) write(p []byte, deadline int64) (int, error) {
 	b := make([]byte, len(p))
 	copy(b, p)
+	if deadline == 0 {
+		select {
+		case u.ch <- b:
+			return len(p), nil
+		case <-u.ctx.Done():
+			return 0, io.ErrClosedPipe
+		}
+	}
+	t := time.NewTimer(time.Until(time.Unix(0, deadline)))
+	defer t.Stop()
 	select {
 	case u.ch <- b:
 		return len(p), nil
 	case <-u.ctx.Done():
 		return 0, io.ErrClosedPipe
+	case <-t.C:
+		return 0, os.ErrDeadlineExceeded
 	}
 }
 
@@ -405,10 +471,10 @@ func (u *httpcUp) batcher() {
 			}
 		}
 	drain:
-		for len(buf) < maxUpBatch {
+		for len(buf) < u.maxBatch {
 			select {
 			case more := <-u.ch:
-				if len(buf)+len(more) > maxUpBatch {
+				if len(buf)+len(more) > u.maxBatch {
 					carry = more // next batch starts with it; order is preserved either way
 					break drain
 				}
@@ -455,8 +521,18 @@ func (u *httpcUp) worker() {
 	}
 }
 
+// upPostTimeout bounds ONE upstream POST end to end. Without it the only bound on hc.Do is the
+// session ctx, i.e. none: an edge that completes TCP+TLS, accepts the body and then simply never
+// answers holds a worker forever, and upWorkers of those hold the whole ladder. It is the same
+// number connFramer promises per framed write, since a POST is how that write reaches the wire.
+// Generous on purpose — a failed POST fails the conn and forces a re-dial, so tripping it on a
+// merely slow path would cost more than the stall it prevents.
+var upPostTimeout = writeTimeout
+
 func (u *httpcUp) post(sc seqChunk) error {
-	req, err := http.NewRequestWithContext(u.ctx, "POST", u.urlFor(sc.seq), bytes.NewReader(sc.data))
+	ctx, cancel := context.WithTimeout(u.ctx, u.postTO)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", u.urlFor(sc.seq), bytes.NewReader(sc.data))
 	if err != nil {
 		return err
 	}
@@ -1001,6 +1077,24 @@ func (s *httpcSession) close(b *TCP, sid string) {
 	})
 }
 
+// newHTTPCServerConn builds the server side of one httpc session over a ResponseWriter. Both server
+// shapes (the downstream GET and the full-duplex grpc request) go through here so the write deadline
+// is wired from exactly one place: a conn built without setWD silently reverts to a recorded-but-
+// unenforced deadline, and nothing about the resulting conn looks wrong.
+//
+// rd/wr are the session's byte streams, which differ per shape (the GET reads the reassembled POST
+// ladder and writes the response body raw; grpc reads and writes gRPC-framed over the one request),
+// while w is the ResponseWriter underneath both — the only handle able to interrupt a parked write.
+func newHTTPCServerConn(w http.ResponseWriter, rd io.Reader, wr io.Writer, flush func(), remote string, closeFn func()) *httpcConn {
+	return &httpcConn{
+		r: rd, w: wr, flush: flush,
+		setWD:   http.NewResponseController(w).SetWriteDeadline,
+		ra:      strAddr(remote),
+		la:      strAddr("http-server"),
+		closeFn: closeFn,
+	}
+}
+
 // serveHTTPCGrpc handles a gRPC-framed full-duplex request: the single request IS the session, the
 // body carries gRPC message framing and the response
 // presents as gRPC (Content-Type application/grpc + a grpc-status trailer on clean close), so a
@@ -1016,12 +1110,7 @@ func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Trailer", "grpc-status") // announced now, set after the body on clean close
 	w.WriteHeader(http.StatusOK)
 	fl.Flush() // send the response head now so the client's request returns and the duplex opens
-	conn := &httpcConn{
-		r:     &grpcDeframingReader{r: r.Body},
-		w:     &grpcFramingWriter{w: w},
-		flush: fl.Flush,
-		ra:    strAddr(r.RemoteAddr), la: strAddr("http-server"),
-	}
+	conn := newHTTPCServerConn(w, &grpcDeframingReader{r: r.Body}, &grpcFramingWriter{w: w}, fl.Flush, r.RemoteAddr, nil)
 	b.handleServerConn(conn) // the request lifetime IS the session; blocks until it ends
 	conn.Close()
 	w.Header().Set("grpc-status", "0") // OK (trailer)
@@ -1088,11 +1177,7 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no") // ask any nginx/CDN in front not to buffer
 	w.WriteHeader(http.StatusOK)
 	fl.Flush()
-	conn := &httpcConn{
-		r: s.upR, w: w, flush: fl.Flush,
-		ra: strAddr(r.RemoteAddr), la: strAddr("http-server"),
-		closeFn: func() { s.close(b, sid) },
-	}
+	conn := newHTTPCServerConn(w, s.upR, w, fl.Flush, r.RemoteAddr, func() { s.close(b, sid) })
 	// Drive the authenticated core session once (the GET owns the downstream writer).
 	s.start.Do(func() {
 		close(s.served) // tell the reap watchdog a downstream GET bound in time — don't kill this live session at 10s
