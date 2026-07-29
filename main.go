@@ -280,14 +280,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("tnl-core: transport: %v", err)
 	}
-	// Pin the client's outbound source IP to this node's own registered IP when set, so on a
-	// multi-IP host the peer/CDN sees that IP instead of the kernel's default primary. Only the
-	// TCP-family carriers (tcp/ws/http) implement it; others ignore it.
-	if cfg.Role == "client" && cfg.BindIP != "" {
-		if s, ok := b.(interface{ SetSourceIP(string) }); ok {
-			s.SetSourceIP(cfg.BindIP)
-			log.Printf("tnl-core: binding outbound source IP to %s", cfg.BindIP)
-		}
+	switch pinSource(b, cfg) {
+	case pinByBind:
+		log.Printf("tnl-core: binding outbound source IP to %s", cfg.BindIP)
+	case pinByPool:
+		log.Printf("tnl-core: binding outbound source IP to %s (pinned as a one-entry source pool — %s has no separate bind)", cfg.BindIP, cfg.Transport)
+	case pinUnsupported:
+		log.Printf("core: WARNING carrier %s ignores bind_ip — it can pin neither a source IP nor a source pool, so this tunnel egresses from whatever source the kernel routes it out of", cfg.Transport)
 	}
 	// Per-tunnel self-heal deadline (client): when set, tighten the carrier's dead-detection window so
 	// this tunnel re-establishes/fails over faster than the default (~3×keepalive / 60s idle backstop).
@@ -446,6 +445,57 @@ func coverTag(cover bool) string {
 		return " tls"
 	}
 	return ""
+}
+
+// How pinSource wired (or did not wire) the client's outbound source. Returned rather than logged in
+// place so main prints one honest line and the decision itself is testable without a real carrier.
+const (
+	pinNone        = ""            // nothing to do: server role, or no bind_ip
+	pinByBind      = "bind"        // the carrier pins a source itself (SetSourceIP: tcp/ws/http)
+	pinByPool      = "pool"        // pinned as a one-entry source pool (udp/raw/flux)
+	pinBySrcIPs    = "src_ips"     // an explicit source pool supersedes bind_ip
+	pinBySpoof     = "spoof_src"   // a forged source already owns the source field
+	pinUnsupported = "unsupported" // the carrier can pin neither, so the kernel chooses
+)
+
+// pinSource pins the client's outbound source IP to this node's own registered IP when bind_ip is
+// set, so on a multi-IP host the peer/CDN sees THAT address instead of whatever the route's default
+// source happens to be. The node stamps bind_ip from local_ip on every client core tunnel, so this
+// runs on effectively all of them.
+//
+// SetSourceIP is a TCP-family method (tcp/ws/http re-dial with a LocalAddr). udp/raw/flux have no
+// such method — they pin a source through the source POOL, whose gate is deliberately len>=1 so a
+// LONE entry is a fixed source that never rotates. bind_ip therefore becomes a one-entry pool there
+// rather than nothing: the same request, expressed the way those carriers already implement it.
+//
+// Doing nothing was the bug, and it was silent in both directions: the type assertion had no else,
+// and the "binding outbound source IP" line lived inside its successful branch. So on udp/raw/flux
+// the kernel picked the route's default source and NOTHING said the operator's chosen node address
+// was unused — on a host whose other addresses are burned, that is the entire point of the knob.
+func pinSource(b any, cfg *Config) string {
+	if cfg.Role != "client" || cfg.BindIP == "" {
+		return pinNone
+	}
+	switch s := b.(type) {
+	case interface{ SetSourceIP(string) }:
+		s.SetSourceIP(cfg.BindIP)
+		return pinByBind
+	case interface{ SetSourcePool(*packet.PeerPool) }:
+		if len(cfg.SrcIPs) > 0 {
+			return pinBySrcIPs // wired further down, and it supersedes bind_ip per the field doc
+		}
+		if cfg.SpoofSrc != "" {
+			// A forged source already owns the source field. SetSourcePool refuses a pool here and
+			// says so, naming a pool the operator never configured; bind_ip is simply moot.
+			return pinBySpoof
+		}
+		// No auto-burn and no rotate: a fixed source must stay fixed, and burning the only entry
+		// would leave the pool with nothing to fall back to. No status path either — the panel's
+		// source box belongs to a pool the operator chose, not to this.
+		s.SetSourcePool(packet.NewPeerPool([]string{cfg.BindIP}, false, 0, ""))
+		return pinByPool
+	}
+	return pinUnsupported
 }
 
 // effectiveDeadAfter resolves the dead window a carrier will REALLY enforce for the operator's
