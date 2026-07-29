@@ -116,6 +116,16 @@ type sessionConn struct {
 	closeOnce sync.Once
 }
 
+// LastRx exposes that stamp (unix-nano, 0 until the peer first answers) so the carrier can publish
+// the SAME liveness number this session self-heals on. It has to come from here rather than from the
+// packets the carrier reads: an idle dns tunnel carries no data at all, and its proof of life is the
+// keepalive pong — which is consumed in here and never surfaces as a packet. A carrier that stamped
+// only what it read would freeze the heartbeat on a perfectly healthy tunnel.
+//
+// Discovered through this interface (not the concrete type) by the packet carrier, since DialSession
+// and ServeSession both return a plain net.Conn.
+func (sc *sessionConn) LastRx() int64 { return sc.lastRx.Load() }
+
 // stagedSession is one server-side staged candidate: the client's init ephemeral (so a retransmit of
 // the SAME init is re-answered from resp without re-deriving), its derived sealer, and that cached
 // handshake response.
