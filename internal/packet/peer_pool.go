@@ -45,9 +45,17 @@ type PeerPool struct {
 	// connect -> pinLanded clears it, ~1 handshake), after which normal rotation resumes. pinUntil is only a
 	// CEILING for a pick that never connects (a dead IP): once it lapses, current() stops forcing the pick so
 	// the tunnel recovers on a live endpoint. So a healthy pin is held for ~one handshake, not the whole TTL.
-	pinKey   string       // operator "make active" endpoint; current() forces it until it lands OR pinUntil lapses
-	pinUntil int64        // unix-secs ceiling for a NOT-YET-LANDED pin only; a landed pin releases well before this
-	now      func() int64 // injectable clock (unix seconds); overridden in tests
+	pinKey   string // operator "make active" endpoint; current() forces it until it lands OR pinUntil lapses
+	pinUntil int64  // unix-secs ceiling for a NOT-YET-LANDED pin only; a landed pin releases well before this
+	// chosen is the endpoint an ADVANCE deliberately moved onto, which currentLocked then returns
+	// instead of re-selecting. The two have different rules on purpose and a reader must not overrule
+	// the rotation: an advance re-admits a burned endpoint whose backoff is DUE (that re-admission IS
+	// the retest — the direct transports have no out-of-band prober, see the type comment), and a
+	// failover deliberately steps OFF the endpoint it just burned even when every candidate is burned.
+	// currentLocked's own passes do neither. Empty until the first advance; maintained only by
+	// commitLocked/pickLocked, so it can never be left pointing at an endpoint cur is not on.
+	chosen string
+	now    func() int64 // injectable clock (unix seconds); overridden in tests
 }
 
 // NewPeerPool builds a pool from the candidate endpoints. addrs must be non-empty (the caller only
@@ -72,13 +80,30 @@ func (p *PeerPool) current() string {
 	return p.currentLocked()
 }
 
+// commitLocked moves cur to idx as a DELIBERATE choice — an advance, or a rejected candidate being
+// undone — so currentLocked hands that endpoint back instead of re-selecting (see the chosen field).
+// pickLocked is the same move WITHOUT the commit, for currentLocked's own selection passes and for a
+// pin (whose own key governs while it is live, and where normal selection must resume once it lapses).
+// Every write to p.cur goes through one of the two, so chosen can never go stale. Both return the
+// endpoint, for callers that hand it straight back.
+func (p *PeerPool) commitLocked(idx int) string {
+	p.cur = idx
+	p.chosen = p.addrs[idx]
+	return p.chosen
+}
+
+func (p *PeerPool) pickLocked(idx int) string {
+	p.cur = idx
+	p.chosen = ""
+	return p.addrs[idx]
+}
+
 func (p *PeerPool) currentLocked() string {
 	if p.pinKey != "" {
 		if p.now() < p.pinUntil {
 			for idx, a := range p.addrs {
 				if a == p.pinKey {
-					p.cur = idx
-					return a
+					return p.pickLocked(idx)
 				}
 			}
 			p.pinKey, p.pinUntil = "", 0 // pinned endpoint was removed from the pool -> forget it
@@ -88,25 +113,42 @@ func (p *PeerPool) currentLocked() string {
 	}
 	n := len(p.addrs)
 	now := p.now()
+	// Pass 0: the endpoint an advance deliberately chose. The passes below re-select under DIFFERENT
+	// rules, so without this a reader silently walks the pool straight back off the rotation's choice —
+	// and tcp re-asks current() for BOTH the dial (dialTarget) and the source bind (sourceIP) instead of
+	// consuming the address nextEndpoint returned. Two ways it bit:
+	//
+	//	rotation  advanceEligibleLocked re-admits a burned endpoint whose backoff is DUE; pass 1 refuses
+	//	          a burned endpoint while any healthy one exists. So the timer tore a healthy connection
+	//	          down and rebuilt it to the SAME endpoint every interval, forever — with a peer-rotate
+	//	          event and a status file naming an endpoint the tunnel was not on, while the due one was
+	//	          never dialled, so it never healed and "probe now" had nothing to trigger.
+	//	failover  advanceFailLocked steps off the endpoint it just burned (bestIdxLocked(p.cur) excludes
+	//	          it); pass 3 does not (bestIdxLocked(-1)). With every candidate burned and none due — a
+	//	          total outage, exactly when walking the list matters — the re-dial went straight back to
+	//	          the endpoint that had just failed.
+	//
+	// udp/raw/flux use the address nextEndpoint returns, so they never saw either; this makes current()
+	// agree with them.
+	if p.chosen != "" && p.addrs[p.cur] == p.chosen {
+		return p.chosen
+	}
 	// Pass 1: a fully-healthy endpoint, scanning forward from cur (consecutive picks vary).
 	for k := 0; k < n; k++ {
 		idx := (p.cur + k) % n
 		if p.health[p.addrs[idx]] == nil {
-			p.cur = idx
-			return p.addrs[idx]
+			return p.pickLocked(idx)
 		}
 	}
 	// Pass 2: none healthy — a DUE burned endpoint (its retest time arrived) gets a live retry.
 	for k := 0; k < n; k++ {
 		idx := (p.cur + k) % n
 		if r := p.health[p.addrs[idx]]; r != nil && r.nextRetest <= now {
-			p.cur = idx
-			return p.addrs[idx]
+			return p.pickLocked(idx)
 		}
 	}
 	// Pass 3: nothing healthy or due — the least-bad endpoint (never dead-end).
-	p.cur = p.bestIdxLocked(-1)
-	return p.addrs[p.cur]
+	return p.pickLocked(p.bestIdxLocked(-1))
 }
 
 // size is the number of endpoints in the pool. It is fixed at construction, so no lock is needed.
@@ -199,18 +241,18 @@ func (p *PeerPool) advanceFailLocked() {
 	for k := 1; k <= n; k++ { // healthy, starting past cur so we move off it
 		idx := (p.cur + k) % n
 		if p.health[p.addrs[idx]] == nil {
-			p.cur = idx
+			p.commitLocked(idx)
 			return
 		}
 	}
 	for k := 1; k <= n; k++ { // else a due burned endpoint
 		idx := (p.cur + k) % n
 		if r := p.health[p.addrs[idx]]; r != nil && r.nextRetest <= now {
-			p.cur = idx
+			p.commitLocked(idx)
 			return
 		}
 	}
-	p.cur = p.bestIdxLocked(p.cur) // else least-bad among the others
+	p.commitLocked(p.bestIdxLocked(p.cur)) // else least-bad among the others
 }
 
 // advanceEligibleLocked moves cur to another ELIGIBLE endpoint (healthy or due) for a proactive rotate,
@@ -226,7 +268,7 @@ func (p *PeerPool) advanceEligibleLocked() bool {
 			break
 		}
 		if r := p.health[p.addrs[idx]]; r == nil || r.nextRetest <= now {
-			p.cur = idx
+			p.commitLocked(idx)
 			return true
 		}
 	}
@@ -302,8 +344,8 @@ func (p *PeerPool) rejectCandidate(prev string) {
 	}
 	for idx, a := range p.addrs {
 		if a == prev {
-			p.cur = idx
 			delete(p.health, prev) // prev is the live source: undo the failover burn / any stale mark
+			p.commitLocked(idx)    // the socket never left prev, so prev IS the deliberate endpoint
 			break
 		}
 	}
@@ -367,10 +409,10 @@ func (p *PeerPool) selectEntry(key string) bool {
 	ok := false
 	for idx, a := range p.addrs {
 		if a == key {
-			p.cur = idx
 			p.pinKey = key
 			p.pinUntil = p.now() + pinTTL
 			delete(p.health, key)
+			p.pickLocked(idx) // the pin key governs while it is live; normal selection resumes once it lapses
 			ok = true
 			break
 		}
