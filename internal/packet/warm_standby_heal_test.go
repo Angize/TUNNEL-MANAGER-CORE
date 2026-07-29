@@ -27,7 +27,7 @@ func TestWarmStandbyResumesRotationAfterThePoolHeals(t *testing.T) {
 	cliDev, _ := tunPair(t, "whcli")
 	ka := time.Second
 	addr := freeTCPPort(t)
-	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher)
+	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher, "")
 	if err != nil {
 		t.Fatalf("ListenWS: %v", err)
 	}

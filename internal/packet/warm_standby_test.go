@@ -80,7 +80,7 @@ func TestServerDownstreamFollowsData(t *testing.T) {
 	const cipher = "aes-256-gcm"
 	srvDev, srvCtrl := tunPair(t, "sdf")
 	addr := freeTCPPort(t)
-	srv, err := ListenWS(addr, srvDev, time.Second, false, true, psk, cipher)
+	srv, err := ListenWS(addr, srvDev, time.Second, false, true, psk, cipher, "")
 	if err != nil {
 		t.Fatalf("ListenWS: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestWarmStandbyManualPinRebuildsStandby(t *testing.T) {
 	cliDev, _ := tunPair(t, "wpcli")
 	ka := time.Second
 	addr := freeTCPPort(t)
-	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher)
+	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher, "")
 	if err != nil {
 		t.Fatalf("ListenWS: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestNonWarmPinReleasesOnLanding(t *testing.T) {
 	cliDev, _ := tunPair(t, "nwpcli")
 	ka := time.Second
 	addr := freeTCPPort(t)
-	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher)
+	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher, "")
 	if err != nil {
 		t.Fatalf("ListenWS: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestWarmStandbyFailover(t *testing.T) {
 	cliDev, cliCtrl := tunPair(t, "wcli")
 	ka := time.Second
 	addr := freeTCPPort(t)
-	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher)
+	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher, "")
 	if err != nil {
 		t.Fatalf("ListenWS: %v", err)
 	}

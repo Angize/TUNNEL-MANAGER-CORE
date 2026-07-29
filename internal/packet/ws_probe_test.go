@@ -1,0 +1,156 @@
+package packet
+
+import (
+	"net"
+	"strings"
+	"testing"
+	"time"
+)
+
+// wsRawReq is one hand-built HTTP request, so a test can send exactly what a prober would rather than
+// whatever a client library happens to produce. Empty fields are omitted from the request entirely,
+// which is how a probe differs from our client in the first place.
+type wsRawReq struct {
+	path, upgrade, connection, version, key string
+}
+
+// ours is the request wsClientHandshake really sends (same header values), against path p.
+func ours(p string) wsRawReq {
+	return wsRawReq{path: p, upgrade: "websocket", connection: "Upgrade", version: "13",
+		key: "dGhlIHNhbXBsZSBub25jZQ=="} // RFC 6455 §1.3's own example key: 16 bytes, base64
+}
+
+func (r wsRawReq) String() string {
+	lines := []string{"GET " + r.path + " HTTP/1.1", "Host: cdn.example.com"}
+	for _, kv := range [][2]string{
+		{"Connection", r.connection}, {"Upgrade", r.upgrade},
+		{"Sec-WebSocket-Version", r.version}, {"Sec-WebSocket-Key", r.key},
+	} {
+		if kv[1] != "" {
+			lines = append(lines, kv[0]+": "+kv[1])
+		}
+	}
+	return strings.Join(lines, "\r\n") + "\r\n\r\n"
+}
+
+// wsProbe sends one raw request to a wsServerHandshake bound to wantPath and returns the raw bytes the
+// server wrote back, plus the handshake's own error.
+func wsProbe(t *testing.T, wantPath string, req wsRawReq) (raw string, hsErr error) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	errCh := make(chan error, 1)
+	go func() {
+		c, aerr := ln.Accept()
+		if aerr != nil {
+			errCh <- aerr
+			return
+		}
+		_, herr := wsServerHandshake(c, wantPath, time.Now().Add(2*time.Second))
+		errCh <- herr
+		time.Sleep(100 * time.Millisecond) // let the client drain before the conn goes away
+		c.Close()
+	}()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	if _, err := c.Write([]byte(req.String())); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var sb strings.Builder
+	buf := make([]byte, 512)
+	for !strings.Contains(sb.String(), "\r\n\r\n") {
+		n, rerr := c.Read(buf)
+		sb.Write(buf[:n])
+		if rerr != nil {
+			break
+		}
+	}
+	return sb.String(), <-errCh
+}
+
+// TestWSServerAnswers101OnlyForAWellFormedUpgradeOnItsOwnPath is the probe-resistance guard for the
+// ws origin.
+//
+// The server used to answer 101 Switching Protocols to ANY request carrying `Upgrade: websocket`:
+// req.URL.Path was never read (ws_path was pure client-side decoration), Sec-WebSocket-Version was
+// never checked, and an ABSENT Sec-WebSocket-Key hashed to a constant, perfectly valid Accept that was
+// returned anyway. So `curl -H 'Upgrade: websocket' http://origin/` — the third case below, which is a
+// request no real WebSocket client can produce — identified the origin as a tunnel in one shot.
+//
+// The cases are written as what a prober would actually send, and the assertion is on the RAW bytes
+// the server wrote, because "did it answer 101" is the whole question.
+func TestWSServerAnswers101OnlyForAWellFormedUpgradeOnItsOwnPath(t *testing.T) {
+	const secret = "/media/stream"
+
+	accept := []struct {
+		name string
+		path string
+		req  wsRawReq
+	}{
+		{"our own client, exact path", secret, ours(secret)},
+		{"default path when ws_path is unset", "", ours("/")},
+		{"a query string an edge may append", secret, ours(secret + "?cb=91723")},
+		{"Connection list header with an extra token", secret,
+			func() wsRawReq { r := ours(secret); r.connection = "keep-alive, Upgrade"; return r }()},
+		{"lower-case Upgrade value", secret,
+			func() wsRawReq { r := ours(secret); r.upgrade = "WebSocket"; return r }()},
+	}
+	for _, c := range accept {
+		raw, err := wsProbe(t, c.path, c.req)
+		if err != nil || !strings.HasPrefix(raw, "HTTP/1.1 101 ") {
+			t.Fatalf("%s: must still upgrade, got err=%v resp=%q", c.name, err, raw)
+		}
+	}
+
+	reject := []struct {
+		name string
+		req  wsRawReq
+	}{
+		// Deliberately on the RIGHT path, so this fails on the header checks alone: even a prober who
+		// already knows ws_path cannot get an upgrade out of a bare Upgrade header.
+		{"the one-line fingerprint: an Upgrade header and nothing else",
+			wsRawReq{path: secret, upgrade: "websocket"}},
+		{"right shape, wrong path", ours("/")},
+		{"right shape, path guessed one character off", ours(secret + "x")},
+		{"no Sec-WebSocket-Key (used to hash to a constant Accept)",
+			func() wsRawReq { r := ours(secret); r.key = ""; return r }()},
+		{"Sec-WebSocket-Key that is not 16 bytes",
+			func() wsRawReq { r := ours(secret); r.key = "c2hvcnQ="; return r }()},
+		{"Sec-WebSocket-Key that is not base64 at all",
+			func() wsRawReq { r := ours(secret); r.key = "!!!!not-base64!!!!"; return r }()},
+		{"an obsolete protocol version",
+			func() wsRawReq { r := ours(secret); r.version = "8"; return r }()},
+		{"no Connection: Upgrade",
+			func() wsRawReq { r := ours(secret); r.connection = ""; return r }()},
+		{"a plain browser GET", wsRawReq{path: secret}},
+	}
+	var seen string
+	for _, c := range reject {
+		raw, err := wsProbe(t, secret, c.req)
+		if err != errNotWS {
+			t.Fatalf("%s: want errNotWS, got %v", c.name, err)
+		}
+		if strings.Contains(raw, "101") {
+			t.Fatalf("%s: the server UPGRADED for it — this request identifies the origin as a tunnel", c.name)
+		}
+		if !strings.HasPrefix(raw, "HTTP/1.1 404 ") {
+			t.Fatalf("%s: want a plain 404, got %q", c.name, raw)
+		}
+		// Every rejection must be byte-identical. A per-reason response would replace the old
+		// fingerprint with a finer one: a prober could tell "wrong path on a tunnel" from "no such
+		// page on a web server", which is exactly what has to stay indistinguishable.
+		if seen == "" {
+			seen = raw
+		} else if raw != seen {
+			t.Fatalf("%s: rejection response differs from the others (%q vs %q) — the reason is an oracle",
+				c.name, raw, seen)
+		}
+	}
+}

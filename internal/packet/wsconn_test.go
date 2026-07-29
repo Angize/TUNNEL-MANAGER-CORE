@@ -27,7 +27,7 @@ func TestWSConnRoundTrip(t *testing.T) {
 			return
 		}
 		defer c.Close()
-		r, err := wsServerHandshake(c, time.Now().Add(2*time.Second))
+		r, err := wsServerHandshake(c, "/tunnel", time.Now().Add(2*time.Second))
 		if err != nil {
 			srvDone <- nil
 			return
@@ -117,7 +117,7 @@ func TestWSServerRejectsNonWS(t *testing.T) {
 			return
 		}
 		defer c.Close()
-		if _, err := wsServerHandshake(c, time.Now().Add(2*time.Second)); err != errNotWS {
+		if _, err := wsServerHandshake(c, "", time.Now().Add(2*time.Second)); err != errNotWS {
 			t.Errorf("expected errNotWS, got %v", err)
 		}
 	}()

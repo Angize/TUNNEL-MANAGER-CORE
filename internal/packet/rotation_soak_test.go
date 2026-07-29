@@ -19,7 +19,7 @@ func newWarmSoakClient(t *testing.T, rotate time.Duration) (*TCP, *wsPool, *os.F
 	cliDev, cliCtrl := tunPair(t, "soakcli")
 	ka := time.Second
 	addr := freeTCPPort(t)
-	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher)
+	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher, "")
 	if err != nil {
 		t.Fatalf("ListenWS: %v", err)
 	}
