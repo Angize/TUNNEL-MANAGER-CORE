@@ -411,7 +411,8 @@ type TCP struct {
 	dsTTL      int
 	dsCount    int
 	dsMode     string
-	dsFailOnce sync.Once // logs an AF_PACKET/capability failure at most once (fired per connect)
+	dsFailOnce sync.Once  // logs an AF_PACKET/capability failure at most once (fired per connect)
+	dsSend     desyncSend // outcome of the decoy TRANSMITS — opening the injector succeeding says nothing about them
 
 	ln      net.Listener               // server: primary/first listener (ws/http use only this)
 	lns     []net.Listener             // server: ALL bound listeners; a pooled direct-TCP server binds one per selected IP so it accepts on exactly the IPs the client rotates through (lns[0]==ln)
@@ -550,7 +551,7 @@ func (b *TCP) SetSNISplit(on bool, pos int, mode string, ttl int) {
 // returns conn unchanged. host is the SNI, used for auto split-point location.
 func (b *TCP) fragWrap(conn net.Conn, host string) net.Conn {
 	if b.sniSplit {
-		return newFragConn(conn, host, b.splitPos, b.sniMode, b.splitTTL)
+		return newFragConn(conn, host, b.splitPos, b.sniMode, b.splitTTL, &b.dsSend)
 	}
 	return conn
 }
