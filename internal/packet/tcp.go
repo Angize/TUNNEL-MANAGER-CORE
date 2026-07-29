@@ -313,7 +313,7 @@ type TCP struct {
 	// speaks wss:// to a CDN edge; the server stays plain (the CDN terminates TLS).
 	ws     bool
 	wsHost string // client: Host header + TLS SNI (the fronting/origin domain)
-	wsPath string // client: request path (default "/")
+	wsPath string // client: the request path to ask for; ws server: the ONLY path it answers 101 on (default "/")
 	wsTLS  bool   // client: TLS to the edge before the WebSocket upgrade
 	wsECH  []byte // client: ECHConfigList — when set, the SNI is encrypted (hidden)
 
@@ -777,15 +777,17 @@ func ListenHTTPC(listenAddr string, dev *tun.Device, keepalive time.Duration, ob
 }
 
 // ListenWS (server role) accepts WebSocket connections (plain HTTP upgrade; a CDN
-// in front terminates TLS and forwards the WebSocket to us). A non-WS request gets
-// a plausible 404 and is dropped, so the port looks like an ordinary web endpoint.
-func ListenWS(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string) (*TCP, error) {
+// in front terminates TLS and forwards the WebSocket to us). Anything that is not a
+// well-formed upgrade for wsPath gets a plausible 404 and is dropped, so the port
+// looks like an ordinary web endpoint. wsPath is the operator's ws_path, which both
+// ends carry ("" means "/", matching config.applyDefaults).
+func ListenWS(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher, wsPath string) (*TCP, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, err
 	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
-		ws: true, idle: idleFor(keepalive), addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
+		ws: true, wsPath: wsPath, idle: idleFor(keepalive), addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns)}, nil
 }
 
@@ -1022,7 +1024,7 @@ func (b *TCP) handleServerConn(conn net.Conn) {
 		// (httpc is excluded: its conn already carries core frames — the HTTP GET/POST pair
 		// or the single full-duplex request replaced the WS upgrade — so a ws handshake here
 		// would misread the client's core handshake as an HTTP request and drop the session.)
-		r, werr := wsServerHandshake(conn, time.Now().Add(handshakeTimeout))
+		r, werr := wsServerHandshake(conn, b.wsPath, time.Now().Add(handshakeTimeout))
 		if werr != nil {
 			conn.Close()
 			return

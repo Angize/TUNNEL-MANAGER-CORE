@@ -193,7 +193,7 @@ func main() {
 				}
 				break
 			}
-			b, err = packet.ListenWS(cfg.Listen, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher)
+			b, err = packet.ListenWS(cfg.Listen, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/ws%s) on %s", obfsTag, cfg.Listen)
 			}

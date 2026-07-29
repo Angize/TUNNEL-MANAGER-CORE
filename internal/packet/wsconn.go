@@ -235,19 +235,71 @@ func wsClientHandshake(conn net.Conn, host, path string, deadline time.Time) (*b
 	return r, nil
 }
 
-// wsServerHandshake reads the HTTP request and, if it is a WebSocket upgrade,
-// answers 101 and returns the buffered reader for framing. A non-WS request (a
-// probe, a scanner, a browser) gets a plausible 404 and errNotWS, so the port
-// looks like an ordinary idle web endpoint rather than a tunnel.
-func wsServerHandshake(conn net.Conn, deadline time.Time) (*bufio.Reader, error) {
+// wsNotFound is the single response every rejected request gets, whatever the reason. Keeping it
+// byte-identical matters: a different status (or a different body) per rejection reason would just
+// replace the old fingerprint with a finer one — a prober could then tell "wrong path on a tunnel"
+// apart from "no such page on a web server", which is precisely what must stay indistinguishable.
+const wsNotFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+
+// headerListContains reports whether a comma-separated list header carries tok (case-insensitively).
+// Connection is a list header: our client sends exactly "Upgrade", but an intermediary is allowed to
+// append its own tokens, so an equality test would reject a legitimately proxied upgrade.
+func headerListContains(v, tok string) bool {
+	for _, p := range strings.Split(v, ",") {
+		if strings.EqualFold(strings.TrimSpace(p), tok) {
+			return true
+		}
+	}
+	return false
+}
+
+// wsUpgradeForUs reports whether req is a well-formed RFC 6455 upgrade aimed at OUR path. Anything
+// else is not ours to answer, whether it is hostile or merely lost.
+func wsUpgradeForUs(req *http.Request, wantPath string) bool {
+	if wantPath == "" {
+		wantPath = "/" // matches config.applyDefaults, which resolves an omitted ws_path to "/"
+	}
+	if req.URL == nil || req.URL.Path != wantPath {
+		return false
+	}
+	if !strings.EqualFold(req.Header.Get("Upgrade"), "websocket") ||
+		!headerListContains(req.Header.Get("Connection"), "upgrade") {
+		return false
+	}
+	if req.Header.Get("Sec-WebSocket-Version") != "13" {
+		return false
+	}
+	// RFC 6455 §4.1: the key is exactly 16 random bytes, base64-encoded. An ABSENT key used to hash
+	// to a perfectly valid constant Accept, which the server then returned — so a request carrying no
+	// key at all completed the upgrade.
+	k, err := base64.StdEncoding.DecodeString(req.Header.Get("Sec-WebSocket-Key"))
+	return err == nil && len(k) == 16
+}
+
+// wsServerHandshake reads the HTTP request and, if it is a WebSocket upgrade FOR US, answers 101 and
+// returns the buffered reader for framing. Everything else — a probe, a scanner, a browser, or a
+// WebSocket client that found the port but not the path — gets a plausible 404 and errNotWS, so the
+// port looks like an ordinary idle web endpoint rather than a tunnel.
+//
+// It used to answer 101 to ANY request carrying `Upgrade: websocket`: req.URL.Path was never read
+// (ws_path was pure client-side decoration), the version was never checked, and an absent
+// Sec-WebSocket-Key hashed to a constant Accept that was returned anyway. One
+// `curl -H 'Upgrade: websocket' http://origin/` identified the origin as a tunnel.
+//
+// wantPath is the operator's ws_path — both ends carry the same one (create, edit and rebuild all
+// funnel through the panel's _node_extra, and the node emits ws_path for both roles), so requiring it
+// turns the path into a second thing a prober must know on top of the address. The key and version
+// checks add no new dependency: the client already validates Sec-WebSocket-Accept against the key it
+// sent, so an edge that failed to pass the key through end-to-end could never have worked.
+func wsServerHandshake(conn net.Conn, wantPath string, deadline time.Time) (*bufio.Reader, error) {
 	conn.SetDeadline(deadline)
 	r := bufio.NewReaderSize(conn, readBufSize)
 	req, err := http.ReadRequest(r)
 	if err != nil {
 		return nil, err
 	}
-	if !strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
-		_, _ = conn.Write([]byte("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"))
+	if !wsUpgradeForUs(req, wantPath) {
+		_, _ = conn.Write([]byte(wsNotFound))
 		return nil, errNotWS
 	}
 	accept := wsAccept(req.Header.Get("Sec-WebSocket-Key"))
