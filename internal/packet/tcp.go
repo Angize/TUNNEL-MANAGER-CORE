@@ -786,7 +786,14 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, keepalive time.Duration, o
 // Run blocks until Close is called. The TUN reader runs for the whole lifetime;
 // the connection side either accepts (server) or dials-with-retry (client).
 func (b *TCP) Run() error {
-	go b.tunLoop()
+	// The TUN reader's death must REACH here. It used to be a fire-and-forget `go b.tunLoop()`: a TUN
+	// read error killed the reader and nothing noticed, while keepaliveLoop went on pinging and the
+	// pongs kept b.lastRx advancing — so the panel read GREEN with not one byte able to move, which is
+	// the worst failure this carrier can have. udp/raw/flux all hand this error back from Run, main
+	// logs it and exits, and systemd restarts the process onto a fresh TUN; tcp/ws/http silently did
+	// not. Buffered so neither sender can block once the other has won.
+	errc := make(chan error, 2)
+	go func() { errc <- b.tunLoop() }()
 	if b.isClient {
 		go b.keepaliveLoop()
 		go b.diagLoop() // low-rate goroutine-count heartbeat so a slow session leak is visible in the log
@@ -808,23 +815,28 @@ func (b *TCP) Run() error {
 		} else if b.pp != nil || b.sp != nil {
 			go b.peerPinPollLoop() // direct pp/sp pools: apply operator pins from the node's cmd file
 		}
-		if b.warmStandby && b.pool != nil {
-			b.dialLoopWarm() // make-before-break: active + warm standby
-		} else {
-			b.dialLoop()
-		}
+		// Each of these blocks until Close, so it moves onto its own goroutine and reports through the
+		// same channel — Run now returns for whichever reason comes first, the connection side ending
+		// or the TUN reader dying, instead of only ever the former.
+		go func() {
+			if b.warmStandby && b.pool != nil {
+				b.dialLoopWarm() // make-before-break: active + warm standby
+			} else {
+				b.dialLoop()
+			}
+			errc <- nil // the dial loop only ends on Close
+		}()
 	} else if b.httpc {
-		b.runHTTPCServer()
+		go func() { b.runHTTPCServer(); errc <- nil }()
 	} else {
 		// One accept loop per bound listener. A pooled direct-TCP server binds several of its own IPs
-		// (one listener each), so the extra listeners run in background goroutines and the first runs
-		// inline to keep Run blocking. ws/cover bind a single listener → this is a 1-element loop.
+		// (one listener each). ws/cover bind a single listener → this is a 1-element loop.
 		for i := 1; i < len(b.lns); i++ {
 			go b.acceptLoopOn(b.lns[i])
 		}
-		b.acceptLoopOn(b.lns[0])
+		go func() { b.acceptLoopOn(b.lns[0]); errc <- nil }()
 	}
-	return nil
+	return <-errc
 }
 
 // Close stops the carrier and unblocks Run.
@@ -2848,15 +2860,19 @@ func (b *TCP) onConnErr(cf *connFramer, err error) {
 // tunLoop reads L3 packets from TUN and writes them to whichever connection is
 // currently live. Packets that arrive while no connection is up are dropped
 // (the peer retransmits at the L4 layer).
-func (b *TCP) tunLoop() {
+func (b *TCP) tunLoop() error {
 	buf := make([]byte, maxDatagram)
 	for {
 		n, err := b.dev.Read(buf)
 		if err != nil {
-			if !b.closed.Load() {
-				log.Printf("core/tcp: tun read error: %v", err)
+			if b.closed.Load() {
+				return nil // deliberate shutdown: Close() is what made the read fail
 			}
-			return
+			// The device is gone and this carrier can never move another packet. Hand it back so Run
+			// returns and the process exits to be restarted, exactly as udp/raw/flux do — staying up
+			// here is what produced a green tunnel carrying nothing.
+			log.Printf("core/tcp: tun read error: %v", err)
+			return err
 		}
 		cf := b.cur.Load()
 		if cf == nil {
