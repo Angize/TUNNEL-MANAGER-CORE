@@ -61,6 +61,23 @@ const (
 	rawTCPWindow = 0xFAF0 // 64240
 )
 
+// rawChecksumBindsSource reports whether this profile's carrier header carries a checksum computed
+// over the OUTER SOURCE address, so the bytes rawEncap produced are only valid if the packet really
+// leaves from the source they were built for. udp and tcp do (the IPv4 pseudo-header is part of
+// l4Checksum); icmp's checksum covers the ICMP header and payload only, and bip/ipip/gre/esp carry
+// no checksum at all, so those are source-independent.
+//
+// It exists for exactly one decision — sendViaConn's fallback, when the pinned source cannot be used
+// (see there) — and TestRawChecksumBindsSourceMatchesTheEncapsulation derives the answer from
+// rawEncap itself, so a new profile cannot quietly disagree with this list.
+func rawChecksumBindsSource(profile string) bool {
+	switch rawProfiles[profile] {
+	case protoUDP, protoTCP:
+		return true
+	}
+	return false
+}
+
 // rawProtoFor returns the IP protocol number for a profile name.
 func rawProtoFor(profile string) (int, bool) {
 	p, ok := rawProfiles[profile]
