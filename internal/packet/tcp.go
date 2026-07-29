@@ -393,13 +393,17 @@ type TCP struct {
 	httpcSessions map[string]*httpcSession
 
 	isClient bool
-	addr     string      // server: listen addr; client: peer addr
-	bindIP   string      // client: source IP to dial FROM (empty = kernel default); tcp/ws/http only
-	srcWarn  sync.Once   // one line when the pinned source is not a local address (see dialer)
-	probing  atomic.Bool // a retest batch is in flight; keeps the retest tick free for the operator pin
-	// lastSrc is the source the dialer last BOUND to (raw pool entry, so it compares to a pin key).
-	// Releasing a source pin is conditioned on it, so a pin is never consumed by a connection that
-	// leaves from somewhere else. Written in dialer(), read at the pin-release site.
+	addr     string // server: listen addr; client: peer addr
+	bindIP   string // client: source IP to dial FROM (empty = kernel default); tcp/ws/http only
+	// srcWarned holds the sources already reported as unbindable, one line each. It was a single
+	// sync.Once, i.e. ONE line for the whole process: a source pool that rotated onto a second dead
+	// IP was then completely silent, and the operator had no way to tell one bad entry from several.
+	srcWarned sync.Map    // source string -> struct{}
+	probing   atomic.Bool // a retest batch is in flight; keeps the retest tick free for the operator pin
+	// lastSrc is the source the dialer really BOUND to — empty when no bind was applied (none
+	// configured, or the IP is not on this host). Releasing a source pin is conditioned on it, so a
+	// pin is never consumed by a connection that leaves from somewhere else. Written in dialer(),
+	// read at the pin-release site.
 	lastSrc atomic.Pointer[string]
 
 	// TCP-segment injection desync (client, optional): after each kernel TCP connect we inject a
@@ -462,7 +466,8 @@ func (b *TCP) directPinInForce() bool {
 
 // lastSourceUsed returns the source the dialer most recently BOUND to (the raw pool entry, so it
 // compares directly against a pin key), so releasing a source pin can be conditioned on where the
-// connection actually leaves from rather than on the pool's state at some later moment.
+// connection actually leaves from rather than on the pool's state at some later moment. Empty when
+// the last dial applied no bind at all — none was configured, or the IP was not on this host.
 func (b *TCP) lastSourceUsed() string {
 	if s := b.lastSrc.Load(); s != nil {
 		return *s
@@ -593,7 +598,12 @@ func (b *TCP) SetStatusPath(path string) {
 func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 	d := &net.Dialer{Timeout: timeout}
 	src := b.sourceIP() // rotation pool's current source, or the fixed bindIP
-	b.lastSrc.Store(&src)
+	// lastSrc records what the socket will really leave from, so it is set ONLY on the branch that
+	// installs LocalAddr. It used to be stamped here, before the checks below — so a source that was
+	// silently dropped was still reported as bound, and the source pin released against it: the panel
+	// showed the operator's jump as landed while the tunnel left from the kernel's default IP.
+	unbound := ""
+	b.lastSrc.Store(&unbound)
 	if src != "" {
 		// Tolerate an accidental "ip:port", exactly as config.go's validatePoolEndpoint promises it will
 		// ("tolerate an accidental ip:port") and as udp (rebindSourceTo) and raw/flux (hostOnly) already
@@ -605,21 +615,40 @@ func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 		if h, _, e := net.SplitHostPort(src); e == nil {
 			host = h
 		}
-		if ip := net.ParseIP(host); ip != nil {
-			if canBindSource(ip) {
-				d.LocalAddr = &net.TCPAddr{IP: ip}
-			} else {
-				b.srcWarn.Do(func() {
-					log.Printf("core/tcp: source IP %s is not configured on this host — dialing from the kernel default instead", host)
-				})
-			}
+		if ip := net.ParseIP(host); ip != nil && canBindSource(ip) {
+			d.LocalAddr = &net.TCPAddr{IP: ip}
+			b.lastSrc.Store(&src) // the raw pool entry, so it compares directly against a pin key
 		} else {
-			b.srcWarn.Do(func() { // never silent again, whatever the string turns out to be
-				log.Printf("core/tcp: source %q is not a usable IP address — dialing from the kernel default instead", src)
-			})
+			b.dropUnusableSource(src, host, ip != nil)
 		}
 	}
 	return d
+}
+
+// dropUnusableSource handles a configured source the socket cannot actually leave from: the IP is
+// no longer on any interface (a secondary address not re-added after a provider event), or the
+// string is not an IP at all. This dial still goes out on the kernel default rather than failing,
+// because dialLoop charges a failed dial to the DESTINATION and one bad source would otherwise burn
+// the whole destination pool one endpoint at a time while the peers are perfectly reachable.
+//
+// But it must not be a no-op beyond a log line, which is what it was: the entry stayed HEALTHY and
+// ACTIVE in the pool, so every rotation came straight back to it, the panel showed the tunnel
+// sourced from an IP it never leaves from, and the whole source-rotation feature was silently off.
+// Burning it is the honest report — the same thing udp's rejectCandidate does when its rebind fails
+// — and rotation then walks onto an IP that works. A pinned entry is left alone: fail() refuses to
+// burn under a pin, and with lastSrc empty the pin is never released against this dial either, so
+// it simply lapses on its TTL and normal rotation resumes.
+func (b *TCP) dropUnusableSource(src, host string, parsed bool) {
+	if _, dup := b.srcWarned.LoadOrStore(src, struct{}{}); !dup {
+		if parsed {
+			log.Printf("core/tcp: source IP %s is not configured on this host — dialing from the kernel default instead", host)
+		} else {
+			log.Printf("core/tcp: source %q is not a usable IP address — dialing from the kernel default instead", src)
+		}
+	}
+	if b.sp != nil {
+		b.sp.fail() // pull it from rotation so the NEXT dial gets a source that can actually bind
+	}
 }
 
 // canBindSource reports whether the kernel will let us bind an outbound socket to ip.
