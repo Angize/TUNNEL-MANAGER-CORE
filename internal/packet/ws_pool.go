@@ -447,6 +447,34 @@ func (p *wsPool) advance() bool {
 // so the panel logs nothing (the "rotation silently stopped" report) while edge diversity is lost.
 // Anchoring to "not the active IP" fixes it at the source. Falls back to a plain step when there is no
 // distinct healthy IP (single-IP pool, or every other IP burned) so the SNI axis still varies where it can.
+// hasHealthyEdgeOtherThan reports whether the pool can currently produce a HEALTHY (ip · sni) combo
+// that is not `combo`. It is read-only — no cursor movement, no status write — because it answers a
+// question the warm-standby manager asks on every rotation tick: the standby it holds was built on
+// the active's own edge (aimStandby degrades to a plain step when nothing distinct is healthy), so
+// has anything healed since? Without the question the manager could only choose between keeping that
+// standby forever — which froze proactive rotation for the life of the connection, because
+// requestStandby is a no-op while one is held — and rebuilding it every interval, which is a
+// perfectly periodic dial train to the same edge and a signature in its own right.
+//
+// It mirrors currentLocked's health rule (an edge is usable only when BOTH axes are unburned), not
+// aimStandby's IP-only anchor: an SNI-only move on the same IP is a real rotation, so a pool with one
+// healthy IP and two healthy domains must answer true.
+func (p *wsPool) hasHealthyEdgeOtherThan(combo string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, ip := range p.ips {
+		if p.ipHealth[ip] != nil {
+			continue
+		}
+		for _, sni := range p.snis {
+			if p.sniHealth[sni.host] == nil && ip+activeSep+sni.host != combo {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (p *wsPool) aimStandby() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
