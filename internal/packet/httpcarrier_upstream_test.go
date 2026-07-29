@@ -110,7 +110,7 @@ func TestUpMinGapPacesBurstsButNotAnIdleLink(t *testing.T) {
 	defer done()
 
 	t0 := time.Now()
-	if _, err := u.write(make([]byte, 100)); err != nil {
+	if _, err := u.write(make([]byte, 100), 0); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	r.waitPosts(t, 1, 3*time.Second)
@@ -122,7 +122,7 @@ func TestUpMinGapPacesBurstsButNotAnIdleLink(t *testing.T) {
 	// paid during the loop — timing only the wait afterwards measures nothing.
 	t1 := time.Now()
 	for i := 0; i < 400; i++ {
-		if _, err := u.write(make([]byte, 1400)); err != nil {
+		if _, err := u.write(make([]byte, 1400), 0); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
 	}
@@ -220,7 +220,7 @@ func TestXhUpPostsSmallWriteImmediately(t *testing.T) {
 	for i := range small {
 		small[i] = byte(i)
 	}
-	if _, err := u.write(small); err != nil {
+	if _, err := u.write(small, 0); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	r.waitPosts(t, 1, 3*time.Second)
@@ -249,7 +249,7 @@ func TestXhUpCoalescesAndReassemblesOutOfOrder(t *testing.T) {
 		for j := range c {
 			c[j] = byte(i + j)
 		}
-		if _, err := u.write(c); err != nil {
+		if _, err := u.write(c, 0); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
 		want = append(want, c...)
@@ -359,7 +359,7 @@ func TestXhUpPostsInParallel(t *testing.T) {
 	chunks := 20 * (maxUpBatch / 1400)
 	for i := 0; i < chunks; i++ {
 		c := make([]byte, 1400)
-		if _, err := u.write(c); err != nil {
+		if _, err := u.write(c, 0); err != nil {
 			t.Fatalf("write %d: %v", i, err)
 		}
 	}
