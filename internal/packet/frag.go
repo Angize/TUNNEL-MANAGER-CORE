@@ -47,6 +47,11 @@ type fragConn struct {
 	mu   sync.Mutex
 	sent bool
 	warn sync.Once // one line per conn when the chosen mode had to fall back to a plain split
+	// dsSend belongs to the CARRIER, not to this conn: sni_mode=fake injects once per dial, so a
+	// per-conn reporter would report once per reconnect — which on a failing tunnel is a line per
+	// retry. Never nil in production (fragWrap passes the carrier's); the zero value is usable, so
+	// a hand-built fragConn in a test is safe too.
+	dsSend *desyncSend
 }
 
 // degraded reports, exactly once per connection, that the operator's chosen SNI mode could not be
@@ -61,12 +66,16 @@ func (f *fragConn) degraded(why string) {
 }
 
 // newFragConn wraps c so its first write is split. host is the SNI (for auto split-point location),
-// pos an explicit offset (0 = auto), mode the fragmentation mode, ttl the disorder head-segment TTL.
-func newFragConn(c net.Conn, host string, pos int, mode string, ttl int) *fragConn {
+// pos an explicit offset (0 = auto), mode the fragmentation mode, ttl the disorder head-segment TTL,
+// ds the carrier's decoy-transmit reporter (nil is tolerated: a test conn reports into its own).
+func newFragConn(c net.Conn, host string, pos int, mode string, ttl int, ds *desyncSend) *fragConn {
 	if mode == "" {
 		mode = sniSplitMode
 	}
-	return &fragConn{Conn: c, host: host, pos: pos, mode: mode, ttl: ttl}
+	if ds == nil {
+		ds = &desyncSend{}
+	}
+	return &fragConn{Conn: c, host: host, pos: pos, mode: mode, ttl: ttl, dsSend: ds}
 }
 
 // Write splits only the first call; later writes pass through. The split point is the configured

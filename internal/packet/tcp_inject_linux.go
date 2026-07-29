@@ -47,7 +47,7 @@ func (b *TCP) sendTCPFakes(conn net.Conn) {
 	for _, sp := range d.specsTCP() {
 		seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), randSeq32(), randSeq32(), tcpPshAck, 0xffff, fakePayload())
 		if ip := buildIP4Ext(src, dst, protoTCP, sp.ttl, sp.badSum, seg); ip != nil {
-			_ = inj.sendTo(dst, ip)
+			b.dsSend.note("tcp", inj.sendTo(dst, ip))
 		}
 	}
 }

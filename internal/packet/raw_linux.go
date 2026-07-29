@@ -102,6 +102,7 @@ type Raw struct {
 	desync desyncCfg
 	fakeFd int
 	inj    *l2inject
+	dsSend desyncSend // outcome of the decoy TRANSMITS — opening fakeFd/inj says nothing about them
 
 	closeCh   chan struct{}
 	closeOnce sync.Once
@@ -224,7 +225,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 			// Pass the SAME dst the decoy's IPv4 header carries, so after a destination rotation
 			// the frame goes to the gateway that serves the new destination, not the startup one.
 			if r.inj != nil {
-				_ = r.inj.sendTo(dst, out)
+				r.dsSend.note("raw", r.inj.sendTo(dst, out))
 			}
 			continue
 		}
@@ -233,7 +234,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 		}
 		r.sendMu.RLock()
 		if !r.sendDown {
-			_ = syscall.Sendto(fd, out, 0, &sa)
+			r.dsSend.note("raw", syscall.Sendto(fd, out, 0, &sa))
 		}
 		r.sendMu.RUnlock()
 	}

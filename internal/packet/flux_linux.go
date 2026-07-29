@@ -94,6 +94,7 @@ type Flux struct {
 	sendErr     sendErrLog   // throttled data-plane send-failure logging (see sendlog.go)
 	desync      desyncCfg    // client-only fake-packet desync (decoys emitted before each handshake); zero value = off
 	inj         *l2inject    // AF_PACKET injector for bad-checksum decoys (IP_HDRINCL repairs the checksum); nil unless a badsum/both mode is on
+	dsSend      desyncSend   // outcome of the decoy TRANSMITS — opening inj/sendFd says nothing about them
 	closeCh     chan struct{}
 	closeOnce   sync.Once
 
@@ -179,13 +180,13 @@ func (f *Flux) sendFakes(to *net.IPAddr) {
 			// Pass the SAME destination the decoy's IPv4 header carries, so a rotated destination
 			// is framed for ITS next hop rather than the one resolved at startup.
 			if f.inj != nil {
-				_ = f.inj.sendTo(to.IP, out)
+				f.dsSend.note("flux", f.inj.sendTo(to.IP, out))
 			}
 			continue
 		}
 		f.sendMu.RLock()
 		if !f.sendDown {
-			_ = syscall.Sendto(f.sendFd, out, 0, &sa)
+			f.dsSend.note("flux", syscall.Sendto(f.sendFd, out, 0, &sa))
 		}
 		f.sendMu.RUnlock()
 	}
