@@ -461,6 +461,33 @@ func (p *PeerPool) pinLandedOn(addr string) {
 	}
 }
 
+// pinCannotLand is pinLandedOn's opposite: the carrier tried the operator's jump and the endpoint
+// turned out to be unusable outright — a source IP that is not configured on this host, which no
+// number of retries can fix. It clears the pin so current() stops forcing it and the pool moves on
+// at once.
+//
+// pinTTL is a ceiling for a pick that MIGHT still connect (a dead IP that could come back within the
+// window). Once "it cannot be used at all" is settled there is nothing left to wait for, and sitting
+// out the rest of the window just leaves the tunnel egressing from the kernel default while the panel
+// shows a jump in progress. A jump is a MOMENTARY move within the rotation, not a lock — so proving
+// it impossible ends it, exactly as landing on it ends it.
+//
+// Keyed, like pinLandedOn and wsPool.releasePinLocked, so it can never cancel a jump the operator has
+// since re-aimed somewhere else (the unkeyed releasePin below is for the different case where the
+// CURRENT pin is the one that keeps failing). Silent: no event, like every other pin transition.
+func (p *PeerPool) pinCannotLand(key string) bool {
+	p.mu.Lock()
+	cleared := p.pinnedLocked() && p.pinKey == key
+	if cleared {
+		p.pinKey, p.pinUntil = "", 0
+	}
+	p.mu.Unlock()
+	if cleared {
+		p.writeStatus()
+	}
+	return cleared
+}
+
 // releasePin drops a manual pin whose endpoint has been PROVEN blocked (repeated failovers that never
 // landed), so current() stops forcing the dead endpoint for the rest of pinTTL and the tunnel recovers on
 // a live endpoint at once. A transient outage never reaches here — it heals before the fail threshold —
