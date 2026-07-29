@@ -70,16 +70,21 @@ func TestUnusableSourceWarnsPerEntry(t *testing.T) {
 	}
 }
 
-// TestSourcePinSurvivesADialThatNeverBound is the end-to-end half: a real direct-tcp client against a
-// real in-process server, with the source pool PINNED to an IP that cannot be bound. The dial
-// succeeds (from the kernel default, over loopback) and reaches dialLoop's pin-release site.
+// TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed is the end-to-end half: a real direct-tcp
+// client against a real in-process server, with an operator jump aimed at a source IP that cannot be
+// bound. The dial succeeds (from the kernel default, over loopback) and reaches dialLoop's
+// pin-release site.
 //
-// The pin must NOT be consumed. It is an operator instruction to leave from a specific IP, and this
-// connection does not. Before the fix lastSrc held the REQUESTED source, so the comparison matched
-// its own input: the panel reported the jump as landed, released the pin, resumed rotation, and the
-// tunnel went on leaving from the kernel default. A pin that cannot land now simply lapses on its
-// TTL, which is exactly what pinUntil is for.
-func TestSourcePinSurvivesADialThatNeverBound(t *testing.T) {
+// A jump is a MOMENTARY move within the rotation, not a lock, and it ends one of two ways: the
+// carrier lands on it, or it is proven impossible. This is the second. Before the fix it ended the
+// FIRST way by mistake — lastSrc held the REQUESTED source, so the "did we land?" check compared its
+// own input and always matched: the panel reported the jump as done, rotation resumed, and the tunnel
+// went on leaving from the kernel default while the IP stayed green in the pool, so the next rotation
+// walked straight back onto it.
+//
+// The observable difference between "landed" and "abandoned" is the burn: an abandoned jump takes the
+// unusable IP out of rotation, a landed one leaves it active.
+func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 	const psk = "srcpin-unbindable-psk-0123456789"
 	const cipher = "aes-256-gcm"
 	srvDev, _ := tunPair(t, "supsrv")
@@ -116,7 +121,34 @@ func TestSourcePinSurvivesADialThatNeverBound(t *testing.T) {
 	if got := cli.lastSourceUsed(); got != "" {
 		t.Fatalf("the connection reports source %q, but %s cannot be bound — nothing was bound at all", got, unbindableSrc)
 	}
+	// Abandoned, not consumed-as-landed: the jump is over AND the IP is out of rotation.
+	waitFor(t, 5*time.Second, "the impossible jump was abandoned", func() bool { return !sp.isPinned() })
+	if sp.health[unbindableSrc] == nil {
+		t.Fatalf("%s was reported as a landed jump instead of an abandoned one: it stays active in the pool and the next rotation walks straight back onto it", unbindableSrc)
+	}
+	if got := sp.current(); got != "127.0.0.1" {
+		t.Fatalf("after abandoning the jump the pool is still on %s instead of a source that binds", got)
+	}
+}
+
+// TestAbandoningAJumpNeverCancelsADifferentOne: the operator can re-aim between the moment the dialer
+// reads the source and the moment it discovers the bind is impossible. Cancelling must therefore be
+// keyed — an unkeyed release would silently throw away the jump they just made.
+func TestAbandoningAJumpNeverCancelsADifferentOne(t *testing.T) {
+	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, true, 0, "")
+	if !sp.selectEntry("127.0.0.1") { // the operator has since aimed at a DIFFERENT entry
+		t.Fatal("selectEntry refused the jump")
+	}
+	if sp.pinCannotLand(unbindableSrc) {
+		t.Fatal("a stale discovery about another IP cancelled the operator's current jump")
+	}
 	if !sp.isPinned() {
-		t.Fatalf("the source pin was consumed by a connection that never left from %s: the panel shows the jump landed and rotation resumes, while the tunnel sources from the kernel default", unbindableSrc)
+		t.Fatal("the operator's jump to 127.0.0.1 was thrown away")
+	}
+	if !sp.pinCannotLand("127.0.0.1") {
+		t.Fatal("a jump proven impossible on its OWN key was not abandoned")
+	}
+	if sp.isPinned() {
+		t.Fatal("the jump is still forcing an endpoint that cannot be used")
 	}
 }

@@ -646,9 +646,18 @@ func (b *TCP) dropUnusableSource(src, host string, parsed bool) {
 			log.Printf("core/tcp: source %q is not a usable IP address — dialing from the kernel default instead", src)
 		}
 	}
-	if b.sp != nil {
-		b.sp.fail() // pull it from rotation so the NEXT dial gets a source that can actually bind
+	if b.sp == nil {
+		return
 	}
+	// An operator jump aimed HERE is over: we have just proven this IP cannot be used, and a jump is a
+	// momentary move within the rotation, not a lock. Ending it now instead of letting pinTTL run out
+	// also unblocks the burn below — fail() refuses to touch a pinned entry, so without this the pool
+	// spent the whole window forcing a source that could not bind, with the panel showing a jump still
+	// in progress and nothing explaining why.
+	if b.sp.pinCannotLand(src) {
+		log.Printf("core/tcp: manual jump to source %s abandoned — that IP is not configured on this host", src)
+	}
+	b.sp.fail() // pull it from rotation so the NEXT dial gets a source that can actually bind
 }
 
 // canBindSource reports whether the kernel will let us bind an outbound socket to ip.
