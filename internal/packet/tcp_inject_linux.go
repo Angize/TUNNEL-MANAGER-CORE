@@ -23,6 +23,9 @@ import (
 // The injector is one-shot per connect — the next-hop neighbour is guaranteed warm here (the
 // kernel just completed the 3-way handshake through it), so resolveL2 succeeds immediately.
 func (b *TCP) sendTCPFakes(conn net.Conn) {
+	if b.dsWatch != nil {
+		b.dsWatch(conn) // test seam; see the field comment. Before the dsOn gate on purpose.
+	}
 	if !b.dsOn || conn == nil {
 		return
 	}
