@@ -29,33 +29,45 @@ const (
 
 	vnetHdrLen = 10 // sizeof(struct virtio_net_hdr)
 
-	// virtio_net_hdr.gso_type
+	// virtio_net_hdr.gso_type. VIRTIO_NET_HDR_GSO_UDP (3) is LEGACY UFO — IP-fragmentation
+	// semantics, where the segments are IP fragments of one datagram, NOT one datagram each.
+	// Splitting it with segment() would build a stream of independent UDP datagrams that each
+	// claim the whole payload's header: silent corruption. The type that DOES mean "one UDP
+	// datagram per segment" is VIRTIO_NET_HDR_GSO_UDP_L4 (5), USO, added in Linux 6.2.
+	// Neither is requested today (see the TUNSETOFFLOAD flags above), so neither arrives — but
+	// naming 3 "UDP" and segmenting it left a mine for whoever adds TUN_F_USO4/USO6 to that
+	// ioctl expecting UDP upload to accelerate.
 	gsoNone  = 0
 	gsoTCPv4 = 1
-	gsoUDP   = 3
+	gsoUFO   = 3 // legacy UFO: IP fragments, NOT per-datagram — never segment this
 	gsoTCPv6 = 4
+	gsoUDPL4 = 5    // USO: one UDP datagram per segment
 	gsoECN   = 0x80 // OR'd into gso_type; masked off before dispatch
 
 	// virtio_net_hdr.flags
 	vnetNeedsCsum = 0x01
 )
 
-// splitGSO turns one virtio super-packet into ordinary L3 packets. gsoSize is the
-// segment payload size (MSS). Non-GSO packets return as a single element.
-func splitGSO(pkt []byte, gsoSize, gsoType int) [][]byte {
+// splitGSO turns one virtio super-packet into ordinary L3 packets. gsoSize is the segment payload
+// size (MSS). split reports whether the packet was really segmented: when it is false the caller
+// gets the super-packet back UNCHANGED and must treat it exactly like a non-GSO read — in
+// particular it still carries the virtio partial checksum when VIRTIO_NET_HDR_F_NEEDS_CSUM is set,
+// and it is still up to 64 KiB. Every "give it back as-is" path in here reports false, including
+// segment()'s own bail-outs, so no caller can mistake a pass-through for a finished segment.
+func splitGSO(pkt []byte, gsoSize, gsoType int) (segs [][]byte, split bool) {
 	switch gsoType &^ gsoECN {
 	case gsoTCPv4, gsoTCPv6:
 		return segment(pkt, gsoSize, true)
-	case gsoUDP:
+	case gsoUDPL4:
 		return segment(pkt, gsoSize, false)
-	default:
-		return [][]byte{pkt}
+	default: // gsoUFO and anything we never asked the kernel for
+		return [][]byte{pkt}, false
 	}
 }
 
 // segment splits a TCP (isTCP) or UDP super-packet into MTU-sized packets,
 // rebuilding each segment's headers and checksums. It supports IPv4 and IPv6.
-func segment(pkt []byte, gsoSize int, isTCP bool) [][]byte {
+func segment(pkt []byte, gsoSize int, isTCP bool) (segs [][]byte, split bool) {
 	v6 := pkt[0]>>4 == 6
 	var ipHdrLen int // offset at which the L4 header begins
 	if v6 {
@@ -65,7 +77,7 @@ func segment(pkt []byte, gsoSize int, isTCP bool) [][]byte {
 		// with the GSO type, pass the super-packet through unchanged.
 		l4Off, proto, ok := ipv6L4Offset(pkt)
 		if !ok || (isTCP && proto != 6) || (!isTCP && proto != 17) {
-			return [][]byte{pkt}
+			return [][]byte{pkt}, false
 		}
 		ipHdrLen = l4Off
 	} else {
@@ -76,18 +88,18 @@ func segment(pkt []byte, gsoSize int, isTCP bool) [][]byte {
 		minL4 = 20 // TCP: data-offset (ipHdrLen+12), flags (ipHdrLen+13) and seq all live within the fixed 20 bytes
 	}
 	if len(pkt) < ipHdrLen+minL4 {
-		return [][]byte{pkt}
+		return [][]byte{pkt}, false
 	}
 	l4Hdr := 8 // UDP
 	if isTCP {
 		l4Hdr = int(pkt[ipHdrLen+12]>>4) * 4
 		if l4Hdr < 20 {
-			return [][]byte{pkt} // malformed/short TCP data-offset
+			return [][]byte{pkt}, false // malformed/short TCP data-offset
 		}
 	}
 	hdrLen := ipHdrLen + l4Hdr
 	if len(pkt) <= hdrLen || gsoSize <= 0 {
-		return [][]byte{pkt}
+		return [][]byte{pkt}, false
 	}
 	payload := pkt[hdrLen:]
 
@@ -142,7 +154,7 @@ func segment(pkt []byte, gsoSize int, isTCP bool) [][]byte {
 		}
 		out = append(out, seg)
 	}
-	return out
+	return out, true
 }
 
 // writeL4Csum zeroes the L4 checksum field (offset +16 for TCP proto 6, +6 for UDP proto 17) then

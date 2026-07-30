@@ -8,12 +8,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -64,6 +66,36 @@ type Device struct {
 	q    [][]byte // segments not yet handed out; drained before the next read
 
 	nSuper, nSeg atomic.Uint64 // GSO diagnostic: super-packets split and segments produced
+	nUnsplit     atomic.Uint64 // GSO super-packets handed back unsegmented (unknown/legacy gso_type, or a header segment() would not parse)
+	nOversize    atomic.Uint64 // packets dropped by Read because they did not fit the caller's buffer
+
+	// Reporting state, touched ONLY by the single reader goroutine (readGSO), so no lock.
+	repAt   time.Time // when the counters were last logged
+	repSeen [4]uint64 // the values logged then: super, seg, unsplit, oversize
+}
+
+// gsoReportEvery bounds how often a running device logs its GSO counters. Before this the ONLY
+// evidence the knob did anything was one line printed at SHUTDOWN, so an operator who turned GSO on
+// had no way to tell "the kernel is coalescing" from "the knob is inert" without stopping the
+// tunnel. Ten minutes is quiet enough to live in the journal forever and often enough to answer the
+// question, and a report is skipped entirely when nothing moved — an idle tunnel stays silent.
+const gsoReportEvery = 10 * time.Minute
+
+// reportGSO logs the counters at most once per gsoReportEvery, and only when something changed
+// since the last line. The FIRST call always reports, so a tunnel that starts coalescing says so
+// immediately rather than ten minutes later. Called from readGSO only (single goroutine).
+func (d *Device) reportGSO() {
+	now := time.Now()
+	if !d.repAt.IsZero() && now.Sub(d.repAt) < gsoReportEvery {
+		return
+	}
+	cur := [4]uint64{d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), d.nOversize.Load()}
+	if !d.repAt.IsZero() && cur == d.repSeen {
+		return
+	}
+	d.repAt, d.repSeen = now, cur
+	log.Printf("tun %s: gso %d super-packets -> %d segments, %d unsplit, %d oversize dropped",
+		d.Name, cur[0], cur[1], cur[2], cur[3])
 }
 
 // Open creates the TUN interface, assigns addr (CIDR, e.g. "10.200.0.1/24"),
@@ -171,16 +203,27 @@ func (d *Device) Read(buf []byte) (int, error) {
 	if !d.gso {
 		return d.rd(buf)
 	}
-	for len(d.q) == 0 {
-		segs, err := d.readGSO()
-		if err != nil {
-			return 0, err
+	for {
+		for len(d.q) == 0 {
+			segs, err := d.readGSO()
+			if err != nil {
+				return 0, err
+			}
+			d.q = segs
 		}
-		d.q = segs
+		seg := d.q[0]
+		d.q = d.q[1:]
+		// A packet that does not fit is DROPPED, not truncated. copy() silently shortens, and
+		// the carrier would then have shipped a header claiming a length the body no longer has —
+		// a corrupt packet the far end cannot even diagnose. Only an unsegmentable super-packet
+		// can get here (a real segment is MSS-sized), so dropping costs one packet and is
+		// counted; truncating costs a byte stream that goes quietly wrong.
+		if len(seg) > len(buf) {
+			d.nOversize.Add(1)
+			continue
+		}
+		return copy(buf, seg), nil
 	}
-	n := copy(buf, d.q[0])
-	d.q = d.q[1:]
-	return n, nil
 }
 
 // readGSO reads one virtio super-packet and returns its L3 segments (one element
@@ -197,17 +240,28 @@ func (d *Device) readGSO() ([][]byte, error) {
 	gsoType := int(d.rbuf[1])
 	gsoSize := int(binary.LittleEndian.Uint16(d.rbuf[4:6]))
 	pkt := d.rbuf[vnetHdrLen:n]
-	if gsoType&^gsoECN == gsoNone {
+	segs, split := [][]byte{pkt}, false
+	if gsoType&^gsoECN != gsoNone {
+		segs, split = splitGSO(pkt, gsoSize, gsoType)
+	}
+	if !split {
+		// Either a plain packet or a super-packet splitGSO handed back untouched. BOTH still
+		// carry the kernel's DEFERRED (virtio partial) checksum when NEEDS_CSUM is set, so both
+		// have to be finalized — the old code only did it on the plain-packet branch, and every
+		// pass-through therefore left the partial sum sitting in the checksum field. The far end
+		// drops those on arrival: a silent hole in the stream, with nothing logged at either end.
 		if flags&vnetNeedsCsum != 0 {
 			finalizeCsum(pkt)
 		}
-		return [][]byte{pkt}, nil
+		if gsoType&^gsoECN != gsoNone {
+			d.nUnsplit.Add(1)
+		}
+		d.reportGSO()
+		return segs, nil
 	}
-	segs := splitGSO(pkt, gsoSize, gsoType)
-	if len(segs) > 1 {
-		d.nSuper.Add(1)
-		d.nSeg.Add(uint64(len(segs)))
-	}
+	d.nSuper.Add(1)
+	d.nSeg.Add(uint64(len(segs)))
+	d.reportGSO()
 	return segs, nil
 }
 
@@ -231,8 +285,11 @@ func (d *Device) Write(pkt []byte) (int, error) {
 
 // Close removes the interface (non-persistent).
 func (d *Device) Close() error {
-	if n := d.nSuper.Load(); d.gso && n > 0 {
-		fmt.Printf("tun %s: gso split %d super-packets into %d segments\n", d.Name, n, d.nSeg.Load())
+	if d.gso && (d.nSuper.Load() > 0 || d.nUnsplit.Load() > 0 || d.nOversize.Load() > 0) {
+		// log, not fmt: this is the closing entry of the same series reportGSO writes while the
+		// tunnel runs, so it belongs in the journal beside them and not on a stdout nobody reads.
+		log.Printf("tun %s: gso final: %d super-packets -> %d segments, %d unsplit, %d oversize dropped",
+			d.Name, d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), d.nOversize.Load())
 	}
 	return d.f.Close()
 }
