@@ -12,8 +12,12 @@
 //
 // A block is flushed when it fills (n data frames) or a short timer fires; a partial
 // block is zero-padded to n for the RS math but only its `count` real shards are sent
-// (the receiver synthesizes the pad shards as zeros). The receiver reconstructs a block
-// as soon as any n of its n+k shards arrive, then delivers the recovered sealed frames.
+// (the receiver synthesizes the pad shards as zeros).
+//
+// The code is SYSTEMATIC, so a data shard already carries its own payload: the receiver
+// delivers each one the moment it arrives and uses the parity only to fill the gaps,
+// reconstructing as soon as any n of the block's n+k shards are in. Nothing a receiver
+// physically got is ever held hostage to the rest of its block.
 package packet
 
 import (
@@ -203,14 +207,15 @@ type fecBlock struct {
 	done                  bool
 }
 
-// fecDecoder reassembles blocks and delivers recovered sealed frames via deliver().
+// fecDecoder reassembles blocks and delivers sealed frames via deliver(): each data shard as
+// it arrives, then the ones parity recovered once the block completes.
 type fecDecoder struct {
 	mu      sync.Mutex
 	blocks  map[uint32]*fecBlock
 	seq     uint64            // monotonic arrival counter stamped on each new block (the eviction key)
 	bytes   int               // total bytes buffered across all live blocks (budgeted by fecMaxBytes)
 	codecs  map[int]*fecCodec // keyed by n<<8|k
-	deliver func([]byte)      // called with each recovered sealed frame (in block order)
+	deliver func([]byte)      // called with each sealed frame, exactly once, in arrival order
 }
 
 func newFecDecoder(deliver func([]byte)) *fecDecoder {
@@ -326,6 +331,18 @@ func (d *fecDecoder) input(pkt []byte) {
 	b.present++
 	b.bytes += shardLen
 	d.bytes += shardLen
+	// A data shard IS its payload (the code is systematic), so hand it over the moment it
+	// arrives instead of holding it until the whole block can be reconstructed. Holding it is
+	// what made a block that never completes cost 100% of its payload rather than only the
+	// shards that were really lost: with FEC on, tunToNet never writes a frame itself, so the
+	// decoder is the ONLY path these frames have, and a discarded block is a hard hole in the
+	// stream. Above the geometry's repair budget (~17% loss at 10+3) that made FEC WORSE than
+	// no FEC at all. Delivering here also drops the up-to-a-whole-block delay the receiver used
+	// to add even when nothing was lost. Delivery order becomes wire-arrival order, i.e. exactly
+	// what the same carrier does with FEC off; parity fills the gaps below.
+	if typ == fecTypeData {
+		d.deliverShard(shard)
+	}
 	if b.present < n {
 		return
 	}
@@ -338,15 +355,25 @@ func (d *fecDecoder) input(pkt []byte) {
 		return
 	}
 	b.done = true
-	for i := 0; i < count; i++ { // unwrap each recovered data shard: [len:2][sealed]
-		s := data[i]
-		if len(s) < 2 {
-			continue
+	for i := 0; i < count; i++ {
+		if b.shards[i] != nil {
+			continue // this one arrived intact and was already delivered above
 		}
-		ln := int(binary.BigEndian.Uint16(s[:2]))
-		if 2+ln <= len(s) {
-			d.deliver(append([]byte(nil), s[2:2+ln]...))
-		}
+		d.deliverShard(data[i]) // recovered from parity — the only ones still owed
+	}
+}
+
+// deliverShard unwraps one data shard ([len:2][sealed], zero-padded to shardLen) and hands the
+// sealed frame to the carrier. A shard too short to hold its own length prefix, or one whose
+// declared length overruns it, is dropped: input runs pre-auth, so this is reached with attacker-
+// chosen bytes and the downstream AEAD is the real gate.
+func (d *fecDecoder) deliverShard(s []byte) {
+	if len(s) < 2 {
+		return
+	}
+	ln := int(binary.BigEndian.Uint16(s[:2]))
+	if 2+ln <= len(s) {
+		d.deliver(append([]byte(nil), s[2:2+ln]...))
 	}
 }
 
