@@ -119,6 +119,13 @@ type connFramer struct {
 	writeKS  *chacha20.Cipher
 	readKS   *chacha20.Cipher
 	saltSent bool
+	// saltPend holds the salt after sendSalt prepared it and before a frame has carried it. The salt
+	// used to get a conn.Write of its own, which on tcp+cover is one TLS record and on ws one
+	// WebSocket frame — a 24-byte record of exactly the same size on every connection, in both
+	// directions, immediately after the handshake. All of obfsSeal's random padding was bypassed for
+	// that one write. It now rides in the SAME write as the next frame, whose size is padded.
+	// Guarded by mu, like every other write-side field.
+	saltPend []byte
 
 	// rp is this connection's inbound anti-replay window. It is PER-CONNECTION (not
 	// shared across connections) so two briefly-overlapping connections during a
@@ -144,9 +151,14 @@ type connFramer struct {
 	rxAt atomic.Int64
 }
 
-// sendSalt emits our per-connection salt once and arms the write keystream.
-// The server calls it only AFTER it has authenticated the client's first frame,
-// so a peer that does not know the PSK gets zero bytes back (probe resistance).
+// sendSalt prepares our per-connection salt once and arms the write keystream. The server calls it
+// only AFTER it has authenticated the client's first frame, so a peer that does not know the PSK gets
+// zero bytes back (probe resistance).
+//
+// It does NOT write. The salt is queued in saltPend and leaves in the SAME conn.Write as the next
+// frame — see that field for why a write of its own was a fingerprint. Both callers send a frame
+// immediately after (the client's prime ping, the server's pong to it); flushSalt is the backstop for
+// any path that does not, so a peer can never be left waiting on a salt parked in a buffer.
 func (cf *connFramer) sendSalt() error {
 	if cf.saltSent {
 		return nil
@@ -160,14 +172,28 @@ func (cf *connFramer) sendSalt() error {
 		return err
 	}
 	cf.mu.Lock()
-	cf.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	_, werr := cf.conn.Write(salt)
-	if werr == nil {
-		cf.writeKS = ws
-		cf.saltSent = true
-	}
+	cf.writeKS = ws
+	cf.saltPend = salt
+	cf.saltSent = true
 	cf.mu.Unlock()
-	return werr
+	return nil
+}
+
+// flushSalt writes the salt on its own if nothing has carried it yet, and is a no-op otherwise. It is
+// the correctness backstop for sendSalt's deferral: the peer's ensureReadKS blocks on the salt before
+// it can read any frame, so the salt must never be able to sit in saltPend indefinitely. On every
+// path we have today a frame follows immediately and this writes nothing.
+func (cf *connFramer) flushSalt() error {
+	cf.mu.Lock()
+	defer cf.mu.Unlock()
+	if len(cf.saltPend) == 0 {
+		return nil
+	}
+	salt := cf.saltPend
+	cf.saltPend = nil
+	cf.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	_, err := cf.conn.Write(salt)
+	return err
 }
 
 // ensureReadKS reads the peer's salt (once) and arms the read keystream.
@@ -203,6 +229,13 @@ func (cf *connFramer) writeFrame(typ byte, payload []byte) error {
 		copy(out[2:], sealed)
 		cf.mu.Lock()
 		cf.writeKS.XORKeyStream(out[0:2], lb[:]) // mask length; advances keystream
+		if len(cf.saltPend) > 0 {
+			// First frame on this connection: the salt leaves in this same write, so obfs never emits
+			// a bare constant-size record. append allocates (saltPend has no spare capacity), so out
+			// and saltPend never alias.
+			out = append(cf.saltPend, out...)
+			cf.saltPend = nil
+		}
 		cf.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 		_, err = cf.conn.Write(out)
 		cf.mu.Unlock()
@@ -1080,6 +1113,12 @@ func (b *TCP) handleServerConn(conn net.Conn) {
 	b.publishServerConn(cf)
 	release() // authenticated: no longer occupies a pre-auth slot
 	b.handleFrame(cf, typ, payload)
+	if b.obfs {
+		// No-op on every path we have: the frame above is the client's prime ping, so handleFrame's
+		// pong already carried the salt. Here so a first frame that happens NOT to be answered can
+		// never leave the client blocked in ensureReadKS. See flushSalt.
+		_ = cf.flushSalt()
+	}
 	b.serve(cf)
 }
 
