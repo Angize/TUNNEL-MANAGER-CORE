@@ -69,6 +69,8 @@ const (
 	// an unauthenticated peer can spray unique (n,k) block headers; each cached codec pins a k×n
 	// GF(256) matrix that fecMaxBytes does NOT budget, so an unbounded cache is a memory-exhaustion
 	// DoS (~32k valid pairs -> hundreds of MB). 64 covers any legitimate config with wide headroom.
+	// The cap is enforced by evicting the least-recently-used entry, never by refusing to cache —
+	// see codec().
 	fecMaxCodecs = 64
 
 	// fecMaxShardLen caps the shard length a peer may declare in a block header. A real
@@ -207,39 +209,73 @@ type fecBlock struct {
 	done                  bool
 }
 
+// fecCodecEntry is one cached Reed-Solomon codec plus the decoder-local tick at which it was
+// last handed out — the LRU key.
+type fecCodecEntry struct {
+	c    *fecCodec
+	used uint64
+}
+
 // fecDecoder reassembles blocks and delivers sealed frames via deliver(): each data shard as
 // it arrives, then the ones parity recovered once the block completes.
 type fecDecoder struct {
-	mu      sync.Mutex
-	blocks  map[uint32]*fecBlock
-	seq     uint64            // monotonic arrival counter stamped on each new block (the eviction key)
-	bytes   int               // total bytes buffered across all live blocks (budgeted by fecMaxBytes)
-	codecs  map[int]*fecCodec // keyed by n<<8|k
-	deliver func([]byte)      // called with each sealed frame, exactly once, in arrival order
+	mu        sync.Mutex
+	blocks    map[uint32]*fecBlock
+	seq       uint64                 // monotonic arrival counter stamped on each new block (the eviction key)
+	bytes     int                    // total bytes buffered across all live blocks (budgeted by fecMaxBytes)
+	codecs    map[int]*fecCodecEntry // keyed by n<<8|k, bounded by fecMaxCodecs, LRU-evicted
+	codecTick uint64                 // monotonic use counter stamped on each codec hand-out (the LRU key)
+	deliver   func([]byte)           // called with each sealed frame, exactly once, in arrival order
 }
 
 func newFecDecoder(deliver func([]byte)) *fecDecoder {
-	return &fecDecoder{blocks: map[uint32]*fecBlock{}, codecs: map[int]*fecCodec{}, deliver: deliver}
+	return &fecDecoder{blocks: map[uint32]*fecBlock{}, codecs: map[int]*fecCodecEntry{}, deliver: deliver}
 }
 
+// codec returns the Reed-Solomon codec for one block geometry, building and caching it on first
+// use. Caller holds d.mu.
+//
+// The cache must stay bounded because input runs pre-auth: an unauthenticated peer can name any
+// (n,k) it likes and each cached codec pins a k×n GF(256) matrix that fecMaxBytes does not budget.
+// But a bound alone was a PERMANENT poison — nothing ever pruned d.codecs, so one cheap burst of
+// fecMaxCodecs distinct geometries, sent before the tunnel ever carries traffic, locked the cache
+// shut and the real geometry could never be cached again for the life of the process. FEC recovery
+// was then off for good, silently, with the panel still showing it on.
+//
+// Evicting the least-recently-used entry keeps the same bound and makes the attack unstickable:
+// the worst a sprayer can achieve is forcing the live geometry's codec to be rebuilt, which is one
+// k×n table of GF(256) divisions — at most 256 of them.
 func (d *fecDecoder) codec(n, k int) *fecCodec {
 	key := n<<8 | k
-	if c := d.codecs[key]; c != nil {
-		return c
+	d.codecTick++
+	if e := d.codecs[key]; e != nil {
+		e.used = d.codecTick
+		return e.c
 	}
-	// Refuse to cache a new codec past the cap: input runs pre-auth, so a hostile peer could otherwise
-	// spray unique (n,k) headers and pin an unbounded set of GF(256) matrices (unbudgeted by
-	// fecMaxBytes). A legit encoder needs only a tiny fixed set, so this never rejects real traffic; a
-	// refusal just skips FEC recovery for that block (the caller nil-checks and returns) — best-effort.
 	if len(d.codecs) >= fecMaxCodecs {
-		return nil
+		d.evictLRUCodecLocked()
 	}
 	c, err := newFECCodec(n, k)
 	if err != nil {
 		return nil
 	}
-	d.codecs[key] = c
+	d.codecs[key] = &fecCodecEntry{c: c, used: d.codecTick}
 	return c
+}
+
+// evictLRUCodecLocked drops the single least-recently-used cached codec, making room for one more.
+// Caller holds d.mu.
+func (d *fecDecoder) evictLRUCodecLocked() {
+	var oldKey int
+	var oldE *fecCodecEntry
+	for key, e := range d.codecs {
+		if oldE == nil || e.used < oldE.used {
+			oldKey, oldE = key, e
+		}
+	}
+	if oldE != nil {
+		delete(d.codecs, oldKey)
+	}
 }
 
 // input consumes one received wire packet (already stripped of the carrier header).
