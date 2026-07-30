@@ -12,6 +12,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -28,6 +29,39 @@ import (
 
 // version is stamped into logs so the panel can tell which core a node runs.
 const version = "0.1.0-core"
+
+// tunOpener is tun.Open. It exists so openTUN's fallback can be tested without a
+// TUN device, a kernel that lacks IFF_VNET_HDR, or root.
+type tunOpener func(name string, mtu int, addr string, gso bool) (*tun.Device, error)
+
+// openTUN opens the TUN and returns the gso setting the device ACTUALLY got.
+//
+// GSO is a throughput knob and the panel describes it as one ("اگر پشتیبانی نشود
+// بی‌اثر است"). It was not: on a kernel or container without IFF_VNET_HDR the
+// gso-specific ioctl failed, main called log.Fatalf, systemd restarted the unit and
+// the tunnel never came up at all — the whole link dead because a speed knob was on,
+// with nothing on the dashboard saying why.
+//
+// A gso-specific failure is now retried ONCE without gso. The retry is also what
+// makes the log honest: ErrGSOUnsupported cannot tell "no vnet-hdr here" from "no
+// CAP_NET_ADMIN" (same ioctl, and the errno does not distinguish them), so the
+// message is only written when the plain open actually succeeded. If it fails too,
+// gso was never the problem and the error reported is the SECOND one — the real cause.
+func openTUN(open tunOpener, name string, mtu int, addr string, gso bool) (*tun.Device, bool, error) {
+	dev, err := open(name, mtu, addr, gso)
+	if err == nil {
+		return dev, gso, nil
+	}
+	if !errors.Is(err, tun.ErrGSOUnsupported) {
+		return nil, false, err
+	}
+	plain, plainErr := open(name, mtu, addr, false)
+	if plainErr != nil {
+		return nil, false, plainErr
+	}
+	log.Printf("tnl-core: tun: gso is not available here (%v) — continuing without it", err)
+	return plain, false, nil
+}
 
 func main() {
 	cfgPath := flag.String("config", "", "path to core JSON config")
@@ -74,7 +108,7 @@ func main() {
 	// and registers it with the runtime netpoller, which can leave a subsequently
 	// opened TUN fd in a half-pollable state (reads fail with "not pollable" and
 	// the reader loop dies). Setting up the TUN first avoids that ordering hazard.
-	dev, err := tun.Open(cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO)
+	dev, gsoOn, err := openTUN(tun.Open, cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO)
 	if err != nil {
 		log.Fatalf("tnl-core: tun: %v", err)
 	}
@@ -100,7 +134,7 @@ func main() {
 			"inject into it. Enable crypto unless this is a trusted, isolated link.")
 	}
 	gsoTag := ""
-	if cfg.GSO {
+	if gsoOn {
 		gsoTag = " gso"
 	}
 	log.Printf("tnl-core %s: tun=%s addr=%s mtu=%d cipher=%s role=%s%s",

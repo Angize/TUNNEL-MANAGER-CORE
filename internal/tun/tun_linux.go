@@ -6,6 +6,7 @@ package tun
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,32 @@ import (
 	"syscall"
 	"unsafe"
 )
+
+// ErrGSOUnsupported wraps a failure of one of the two ioctls Open runs ONLY when gso
+// was asked for: TUNSETIFF with IFF_VNET_HDR, and TUNSETOFFLOAD. It means "the
+// gso-specific part of the open failed" — NOT "this kernel lacks gso". A missing
+// CAP_NET_ADMIN fails the very same ioctl, and nothing in the errno tells the two
+// apart. So a caller must not report "gso unavailable" on the strength of this error
+// alone; it has to prove it by opening again WITHOUT gso and seeing that succeed.
+// Nothing after these two ioctls is wrapped, so a busy interface name or a failing
+// `ip` command still propagates as the hard error it is.
+var ErrGSOUnsupported = errors.New("the gso-specific part of the tun open failed")
+
+// setIff and setOffload are seams. Production runs the ioctl; the gso-classification
+// test replaces them to fail a chosen one, which is the only way to reach the
+// ErrGSOUnsupported branches on a kernel that supports gso perfectly well.
+// They take ifr as a POINTER rather than a uintptr on purpose: the
+// unsafe.Pointer→uintptr conversion has to happen inside syscall.Syscall's own
+// argument list for the compiler's pointer-liveness rule to apply.
+var setIff = func(f *os.File, ifr *[ifReqSize]byte) syscall.Errno {
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), tunSetIff, uintptr(unsafe.Pointer(ifr)))
+	return errno
+}
+
+var setOffload = func(f *os.File, flags uintptr) syscall.Errno {
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), tunSetOffload, flags)
+	return errno
+}
 
 const (
 	iffTun    = 0x0001
@@ -56,17 +83,22 @@ func Open(name string, mtu int, addr string, gso bool) (*Device, error) {
 	var ifr [ifReqSize]byte
 	copy(ifr[:15], name) // leave room for NUL terminator
 	binary.LittleEndian.PutUint16(ifr[16:18], flags)
-	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), tunSetIff, uintptr(unsafe.Pointer(&ifr))); errno != 0 {
+	if errno := setIff(f, &ifr); errno != 0 {
 		f.Close()
+		if gso {
+			// IFF_VNET_HDR is the only thing this call does differently when gso is on,
+			// so the caller gets the chance to retry without it.
+			return nil, fmt.Errorf("TUNSETIFF (vnet-hdr): %w: %w", ErrGSOUnsupported, errno)
+		}
 		return nil, fmt.Errorf("TUNSETIFF: %w", errno)
 	}
 	real := strings.TrimRight(string(ifr[:16]), "\x00")
 
 	if gso {
 		off := uintptr(tunFCSUM | tunFTSO4 | tunFTSO6)
-		if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), tunSetOffload, off); errno != 0 {
+		if errno := setOffload(f, off); errno != 0 {
 			f.Close()
-			return nil, fmt.Errorf("TUNSETOFFLOAD (gso): %w", errno)
+			return nil, fmt.Errorf("TUNSETOFFLOAD (gso): %w: %w", ErrGSOUnsupported, errno)
 		}
 	}
 
