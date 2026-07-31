@@ -5,37 +5,41 @@ import (
 	"time"
 )
 
-// TestFakeModeHonoursSplitTTL is the regression test for split_ttl being live everywhere except the
-// packet.
+// TestFakeModeIgnoresSplitTTL pins that the fake decoy's TTL is NOT the disorder knob.
 //
-// In user terms: pick sni_mode=fake in the panel and it shows the «TTLِ سگمنتِ سرْ (split_ttl)» box.
-// The value is validated, stored, sent to the node, sent to the core, and printed at startup as
-// ttl=N — and then the fake path stamped a hardcoded 64 on the decoy. Every layer agreed on a number
-// that never reached the wire.
-func TestFakeModeHonoursSplitTTL(t *testing.T) {
-	// The operator's value wins.
-	f := newFragConn(nil, "example.com", 0, sniFakeMode, 5, nil)
-	if got := f.fakeSegTTL(); got != 5 {
-		t.Fatalf("decoy TTL = %d, want the configured 5 — split_ttl is accepted, shipped and logged, "+
-			"so it has to reach the packet", got)
+// This test previously asserted the opposite, and asserting the opposite is what shipped the bug.
+// The two modes want opposite values out of one stored number: disorder needs it LOW (default 4) so
+// the head segment expires before the server, fake needs it HIGH because its decoy is killed at the
+// server by a bad checksum and has to reach the on-path DPI first. The panel keeps ONE input for
+// both, so a tunnel that stored 4 for disorder and then switched to fake got a decoy that died en
+// route — the strongest SNI mode silently reduced to an expensive no-op.
+//
+// In user terms: picking «ClientHelloِ جعلی» must behave the same whatever number is sitting in the
+// TTL box from a previous mode.
+func TestFakeModeIgnoresSplitTTL(t *testing.T) {
+	for _, ttl := range []int{0, 1, 4, 5, 64, 255} {
+		f := newFragConn(nil, "example.com", 0, sniFakeMode, ttl, nil)
+		if got := f.fakeSegTTL(); got != fakeTTL {
+			t.Fatalf("split_ttl=%d gave the decoy TTL %d, want fake mode's own %d — a stored disorder "+
+				"value must not reach the decoy", ttl, got, fakeTTL)
+		}
 	}
-	// Unset keeps fake mode's own default, which is deliberately NOT the low disorder TTL: the decoy
-	// is killed at the server by its bad checksum and has to survive long enough to reach the DPI.
-	f = newFragConn(nil, "example.com", 0, sniFakeMode, 0, nil)
-	if got := f.fakeSegTTL(); got != fakeTTL {
-		t.Fatalf("unset split_ttl gave TTL %d, want fake mode's default %d", got, fakeTTL)
+	if fakeTTL <= disorderTTL {
+		t.Fatalf("fake mode's TTL (%d) must be well above the disorder TTL (%d) — the decoy has to "+
+			"outlive the hops disorder's head segment is meant to die within", fakeTTL, disorderTTL)
 	}
-	if fakeTTL == disorderTTL {
-		t.Fatalf("fake mode's default TTL must not be the low disorder TTL — the decoy would expire "+
-			"before the DPI it exists to feed (both are %d)", fakeTTL)
+	// disorder still reads it: the knob is not dead, it just belongs to one mode.
+	d := newFragConn(nil, "example.com", 0, sniDisorderMode, 5, nil)
+	if d.ttl != 5 {
+		t.Fatalf("disorder must still carry the operator's split_ttl, got %d", d.ttl)
 	}
-	// And it is plumbed from the carrier, not just settable by hand.
+	// And the carrier plumbs it through unchanged, so this is the whole path and not a helper.
 	b := &TCP{isClient: true, ws: true}
-	if !b.SetSNISplit(true, 0, sniFakeMode, 7) {
+	if !b.SetSNISplit(true, 0, sniFakeMode, 4) {
 		t.Fatal("a ws carrier must accept sni_split")
 	}
-	if got := b.fragWrap(nil, "example.com").(*fragConn).fakeSegTTL(); got != 7 {
-		t.Fatalf("the carrier plumbed TTL %d into the conn, want 7", got)
+	if got := b.fragWrap(nil, "example.com").(*fragConn).fakeSegTTL(); got != fakeTTL {
+		t.Fatalf("through the carrier, a stored split_ttl=4 produced decoy TTL %d, want %d", got, fakeTTL)
 	}
 }
 
