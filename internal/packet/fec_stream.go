@@ -207,6 +207,12 @@ type fecBlock struct {
 	bytes                 int    // bytes buffered for this block (for the decoder byte budget)
 	arrival               uint64 // decoder-local insertion order; the eviction key
 	done                  bool
+	// gaveOut marks data slots [0,count) that were handed to deliver() but NOT retained, because the
+	// decoder's byte budget was exhausted when they arrived. They are neither present (parity may
+	// still have to reconstruct the block around them) nor owed (the payload already went out), so
+	// the reconstruct loop must skip them or the peer gets the same frame twice. nil until one
+	// happens, which on a healthy tunnel is never.
+	gaveOut []bool
 }
 
 // fecCodecEntry is one cached Reed-Solomon codec plus the decoder-local tick at which it was
@@ -222,14 +228,16 @@ type fecDecoder struct {
 	mu        sync.Mutex
 	blocks    map[uint32]*fecBlock
 	seq       uint64                 // monotonic arrival counter stamped on each new block (the eviction key)
-	bytes     int                    // total bytes buffered across all live blocks (budgeted by fecMaxBytes)
+	bytes     int                    // total bytes buffered across all live blocks (budgeted by maxBytes)
+	maxBytes  int                    // the byte budget; fecMaxBytes in production, lowered by tests
 	codecs    map[int]*fecCodecEntry // keyed by n<<8|k, bounded by fecMaxCodecs, LRU-evicted
 	codecTick uint64                 // monotonic use counter stamped on each codec hand-out (the LRU key)
 	deliver   func([]byte)           // called with each sealed frame, exactly once, in arrival order
 }
 
 func newFecDecoder(deliver func([]byte)) *fecDecoder {
-	return &fecDecoder{blocks: map[uint32]*fecBlock{}, codecs: map[int]*fecCodecEntry{}, deliver: deliver}
+	return &fecDecoder{blocks: map[uint32]*fecBlock{}, codecs: map[int]*fecCodecEntry{},
+		maxBytes: fecMaxBytes, deliver: deliver}
 }
 
 // codec returns the Reed-Solomon codec for one block geometry, building and caching it on first
@@ -330,12 +338,12 @@ func (d *fecDecoder) input(pkt []byte) {
 		// fires and every new block is refused below — permanently disabling FEC recovery for an
 		// unauthenticated peer (pre-auth DoS). Drop oldest-by-arrival blocks until there is room
 		// (or nothing left to evict), THEN refuse only if still over budget.
-		for d.bytes+padBytes+shardLen > fecMaxBytes && len(d.blocks) > 0 {
+		for d.bytes+padBytes+shardLen > d.maxBytes && len(d.blocks) > 0 {
 			if !d.evictOldestLocked() {
 				break
 			}
 		}
-		if d.bytes+padBytes+shardLen > fecMaxBytes {
+		if d.bytes+padBytes+shardLen > d.maxBytes {
 			return
 		}
 		b = &fecBlock{n: n, k: k, count: count, shardLen: shardLen, shards: make([][]byte, n+k)}
@@ -360,7 +368,26 @@ func (d *fecDecoder) input(pkt []byte) {
 	if b.done || b.shards[slot] != nil {
 		return
 	}
-	if d.bytes+shardLen > fecMaxBytes {
+	if d.bytes+shardLen > d.maxBytes {
+		// Over the decoder's byte budget, so this shard cannot be RETAINED — but a data shard is its
+		// own payload (the code is systematic) and deliverShard copies straight out of the wire buffer,
+		// so handing it on costs no storage whatsoever. Only the b.shards[slot] retention does.
+		// Returning outright made the file-header promise above ("nothing a receiver physically got is
+		// ever held hostage to the rest of its block") false in exactly the case it was written for:
+		// under a pre-auth amplification flood, packets that arrived intact were thrown away by the FEC
+		// layer instead of being handed on — with FEC on, the decoder is the ONLY path these frames
+		// have, so that is a hard hole in the stream with no log, no counter and no event.
+		//
+		// No new pre-auth exposure: deliver() is already reached unbudgeted by every fecTypePass packet
+		// above, and by every in-budget data shard. gaveOut records the hand-over so the reconstruct
+		// loop below does not deliver the same frame a second time if parity later fills this slot.
+		if typ == fecTypeData {
+			if b.gaveOut == nil {
+				b.gaveOut = make([]bool, b.count)
+			}
+			b.gaveOut[slot] = true
+			d.deliverShard(shard)
+		}
 		return
 	}
 	b.shards[slot] = append([]byte(nil), shard...)
@@ -394,6 +421,9 @@ func (d *fecDecoder) input(pkt []byte) {
 	for i := 0; i < count; i++ {
 		if b.shards[i] != nil {
 			continue // this one arrived intact and was already delivered above
+		}
+		if b.gaveOut != nil && b.gaveOut[i] {
+			continue // arrived and was delivered, but the byte budget refused to retain it
 		}
 		d.deliverShard(data[i]) // recovered from parity — the only ones still owed
 	}
