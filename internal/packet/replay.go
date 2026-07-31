@@ -13,6 +13,28 @@ package packet
 
 const replayWindow = 64
 
+// MaxFecData is the largest fec_data the receiver can actually repair, and it is this window.
+//
+// The FEC decoder delivers intact data shards on ARRIVAL and parity-recovered ones LAST (that is what
+// makes a block that never completes cost only its lost shards instead of all of them). So a
+// recovered frame reaches the AEAD up to blocksize-1 sequence numbers behind the newest one already
+// delivered — and anything replayWindow or more behind is refused here as "too old to prove it is not
+// a replay". Past this size the parity is computed, transmitted and reconstructed, and then thrown
+// away by the replay guard: FEC costs its full bandwidth and repairs nothing, in silence.
+//
+// MEASURED, not reasoned: fec_data 63 and 64 recover, 65 and above are refused.
+//
+// ⚠ AT the bound there is no slack, and that is deliberate rather than overlooked. Keepalives ride the
+// same stream as fecTypePass frames, which the decoder hands straight to deliver(), so one landing
+// between a block's first shard and its recovery advances `top` by one more and pushes a fec_data=64
+// recovery exactly onto the edge. The cost is ONE recovered frame, on the order of a 15 ms block
+// window against a 15 s keepalive interval — nothing like the total, permanent loss above the bound,
+// which is what this constant exists to prevent. Subtracting a margin would be inventing a number
+// (why one keepalive and not two?), so the bound stays at the point where FEC stops working at all.
+//
+// The bound lives HERE, beside the window it comes from, so the two cannot drift apart.
+const MaxFecData = replayWindow
+
 // replayGuard tracks the highest sequence accepted for the current peer session
 // plus a bitmap of the preceding replayWindow-1 sequences. It is safe for
 // concurrent use by a single receive loop (the only caller), but the mutex-free

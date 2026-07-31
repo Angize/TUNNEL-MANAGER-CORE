@@ -8,6 +8,8 @@ import (
 	"net"
 	"os"
 	"strconv"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/packet"
 )
 
 // CryptoCfg controls confidentiality on the wire. When Enabled is false the
@@ -832,6 +834,15 @@ func (c *Config) validate() error {
 		}
 		if ed < 1 || ep < 1 || ed+ep > 255 {
 			return errors.New("effective fec_data (default 10) + fec_parity (default 3) must satisfy fec_data>=1, fec_parity>=1, fec_data+fec_parity<=255")
+		}
+		// ...and the receiver has to be able to REPAIR the block, which the sum rule says nothing
+		// about. The decoder delivers intact shards on arrival and recovered ones last, so a repaired
+		// frame arrives at the AEAD up to blocksize-1 sequences behind the newest — and the replay
+		// guard refuses anything a full window behind. Past that the parity is computed, sent,
+		// reconstructed and then silently discarded: full cost, no repair. Measured: 64 recovers, 65
+		// does not.
+		if ed > packet.MaxFecData {
+			return fmt.Errorf("fec_data must be at most %d: above that a parity-recovered frame lands outside the receiver's replay window and is discarded, so FEC would cost its full bandwidth and repair nothing", packet.MaxFecData)
 		}
 	}
 	if c.FakeDesync {
