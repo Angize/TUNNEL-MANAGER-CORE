@@ -252,13 +252,47 @@ func (c *httpcConn) SetDeadline(t time.Time) error {
 func (c *httpcConn) LocalAddr() net.Addr  { return c.la }
 func (c *httpcConn) RemoteAddr() net.Addr { return c.ra }
 
+// chromeClientHints is the Client Hints / Fetch Metadata block Chrome attaches to EVERY same-origin
+// fetch. The ws path hand-builds Chrome's full header set for exactly this reason; the POST ladder
+// sent four headers and nothing else, so a request claiming Chrome 133 arrived at the CDN without a
+// single sec-* header — something no Chrome has omitted since 89. The brand list and the platform
+// have to agree with chromeUA, or the block is a new contradiction rather than a fix;
+// TestClientHintsMatchTheUA pins that.
+var chromeClientHints = [][2]string{
+	{"sec-ch-ua", `"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"`},
+	{"sec-ch-ua-mobile", "?0"},
+	{"sec-ch-ua-platform", `"Windows"`},
+	{"Sec-Fetch-Dest", "empty"},
+	{"Sec-Fetch-Mode", "cors"},
+	{"Sec-Fetch-Site", "same-origin"},
+}
+
 // browserHeaders dresses a POST-ladder request as an ordinary page fetch, matching the Chrome
 // ClientHello uEdgeHandshake presents on that path.
+//
+// Accept-Encoding is set EXPLICITLY, and that is the point: left unset, Go's transport adds its own
+// "Accept-Encoding: gzip", so a request wearing a Chrome 133 User-Agent and a Chrome JA3 offered a
+// single encoding no browser has sent alone in a decade. Setting it also turns OFF Go's transparent
+// response decompression — which is why dialHTTPCPost now refuses a downstream that comes back
+// encoded instead of feeding compressed bytes into the framer.
+//
+// What is NOT fixed here, deliberately: header ORDER. net/http writes http/1.1 headers sorted, and
+// Chrome's order is its own. There is no hook to change that short of writing the request by hand
+// (which is what the ws path does, because it has to speak the upgrade itself). Claiming otherwise
+// in a comment would be worse than the gap.
 func browserHeaders(r *http.Request) {
 	r.Header.Set("User-Agent", chromeUA)
 	r.Header.Set("Accept", "*/*")
+	r.Header.Set("Accept-Encoding", chromeAcceptEncoding)
 	r.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	r.Header.Set("Cache-Control", "no-store")
+	for _, h := range chromeClientHints {
+		r.Header.Set(h[0], h[1])
+	}
+	if r.URL != nil && r.URL.Host != "" {
+		// Sec-Fetch-Site: same-origin is only coherent with an Origin that matches.
+		r.Header.Set("Origin", "https://"+r.URL.Host)
+	}
 }
 
 // grpcHeaders dresses a grpc-mode request as what it actually is: a gRPC call from a gRPC client.
@@ -960,6 +994,19 @@ func (b *TCP) dialHTTPCPost(hc *http.Client, closeIdle func(), ctx context.Conte
 		gresp.Body.Close()
 		cancel()
 		return nil, fmt.Errorf("httpc: down got HTTP %d (want 200)", gresp.StatusCode)
+	}
+	// The downstream body IS the data plane. browserHeaders sets Accept-Encoding explicitly (so the
+	// request stops advertising Go's lone "gzip" under a Chrome fingerprint), and that also disables
+	// Go's transparent decompression — so if an edge compresses this response anyway, the bytes
+	// reaching the framer are compressed and the tunnel carries garbage. Refuse instead, loudly and
+	// by name: the dial fails, the pool treats the edge as bad, and the operator gets a message that
+	// says which knob to turn rather than a tunnel that connects and delivers nothing. Our origin
+	// serves application/octet-stream, which no CDN compresses by default, so this should never fire.
+	if enc := gresp.Header.Get("Content-Encoding"); enc != "" {
+		gresp.Body.Close()
+		cancel()
+		return nil, fmt.Errorf("httpc: down came back %s-encoded — this edge compresses the downstream, "+
+			"which the carrier cannot decode; turn compression off for this path at the CDN", enc)
 	}
 	urlFor := func(seq uint64) string {
 		return base + "?s=" + sid + "&seq=" + strconv.FormatUint(seq, 10)
