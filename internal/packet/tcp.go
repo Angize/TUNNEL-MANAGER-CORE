@@ -1265,6 +1265,13 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 			if conn, err = b.dialer(10*time.Second).Dial("tcp", dialAddr); err != nil {
 				return nil, err
 			}
+			// A FRESH 4-tuple needs its own decoys. establishWS injected on the conn it dialled, and we
+			// closed that one five lines up — the connection this function goes on to hand back is a
+			// different one, and it was getting none at all. handshakeAndPrime's comment claims "each
+			// connection is still covered exactly once", which this path made false. The rule is simply:
+			// every TCP connection this carrier dials gets one pass, on the bare 4-tuple, before any of
+			// our own bytes flow.
+			b.sendTCPFakes(conn)
 			continue
 		}
 		break
@@ -1410,13 +1417,19 @@ func echPublicNames(list []byte) []string {
 // ECH public names, so a network attacker can't feed the core forged RetryConfigs by presenting any
 // random cert. This gates the fresh-key HARVEST before the redial: without it a MITM could inject its
 // own ECH config and decrypt the redial's inner ClientHello (unmasking the real SNI).
+// echVerifyRoots is a TEST SEAM and is nil in production, where nil means the system trust store.
+// The ECH self-heal REDIAL is only reachable through a rejection that carries retry configs, and this
+// verification stands between the rejection and that redial — so with no seam the redial path cannot be
+// driven by a test at all, which is how a connection that gets no desync decoys survived in it.
+var echVerifyRoots *x509.CertPool
+
 func verifyECHPublicName(certs []*x509.Certificate, publicNames []string) error {
 	if len(publicNames) == 0 {
 		return errors.New("ech-reject: no ECH public name to verify against")
 	}
 	var last error
 	for _, n := range publicNames {
-		if err := verifyOuterCert(certs, n, nil); err == nil {
+		if err := verifyOuterCert(certs, n, echVerifyRoots); err == nil {
 			return nil
 		} else {
 			last = err
