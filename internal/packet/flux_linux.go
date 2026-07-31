@@ -102,10 +102,15 @@ type Flux struct {
 
 // SetDeadAfter (client) tightens the session-stale deadline to the per-tunnel dead_after_secs so the
 // tunnel re-handshakes faster than the default (3×keepalive). No-op for secs<=0. Call before Run.
-func (f *Flux) SetDeadAfter(secs int) {
-	if secs > 0 {
-		f.deadAfterSecs = secs
+func (f *Flux) SetDeadAfter(secs int) bool {
+	if secs <= 0 {
+		return false
 	}
+	f.deadAfterSecs = secs
+	// The SERVER of a connectionless carrier holds no dead window at all — there is no connection to
+	// reap and clientLoop, the only reader of this value, never starts. Report that rather than let
+	// main print "self-heal deadline set to Ns" over a number nothing will ever consult.
+	return f.isClient
 }
 
 // SetStatusPath (client, optional) wires a status-file event ring so self-heal re-handshakes and

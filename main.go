@@ -518,7 +518,7 @@ func applyDeadAfter(b any, transport string, keepaliveSecs, deadAfterSecs int) b
 	if deadAfterSecs <= 0 {
 		return false // leave each carrier's default formula in place
 	}
-	s, ok := b.(interface{ SetDeadAfter(int) })
+	s, ok := b.(interface{ SetDeadAfter(int) bool })
 	if !ok {
 		// Say so. The comment here used to claim every carrier implements this, and *packet.DNS did
 		// not — so the assertion failed, the success log never printed, and a fleet-wide operator
@@ -526,7 +526,17 @@ func applyDeadAfter(b any, transport string, keepaliveSecs, deadAfterSecs int) b
 		log.Printf("core: WARNING carrier %s ignores dead_after_secs — it implements no SetDeadAfter", transport)
 		return false
 	}
-	s.SetDeadAfter(deadAfterSecs)
+	if !s.SetDeadAfter(deadAfterSecs) {
+		// The carrier took the value and will never read it. That happens on the SERVER of a
+		// connectionless carrier (udp/raw/flux/dns): there is no connection to reap, and the loop that
+		// consults the window only runs on a client. Removing the role gate here was right — tcp/ws
+		// servers DO enforce it — but it also meant this function printed "self-heal deadline set to
+		// Ns" on the carriers where nothing enforces anything, which is the same lie about a knob it
+		// was written to stop telling.
+		log.Printf("core: dead_after_secs is stored but not enforced on this end (%s server): a "+
+			"connectionless server holds no dead window — the CLIENT end reaps the session", transport)
+		return false
+	}
 	effDead, floorNote := effectiveDeadAfter(transport, keepaliveSecs, deadAfterSecs)
 	log.Printf("tnl-core: self-heal deadline set to %ds (%s)", effDead, floorNote)
 	return true

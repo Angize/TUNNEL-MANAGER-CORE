@@ -231,3 +231,43 @@ func TestGSOSplitPathStillWorks(t *testing.T) {
 		t.Fatalf("a clean split must not count an unsplit or an oversize drop")
 	}
 }
+
+// TestGSOFirstLineIsNotAllZeros is the regression test for the reporting rule reading backwards.
+//
+// reportGSO ran on the FIRST read, before the kernel could have coalesced anything, so the first line
+// an operator ever saw was `gso 0 super-packets -> 0 segments, 0 unsplit, 0 oversize dropped`. That
+// is precisely the reading that means "this knob is doing nothing" — and it also stamped the
+// reporting window, so a device that started coalescing one packet later stayed silent about it for
+// the next ten minutes. The operator turned the knob on, greped the journal, and was told it was
+// inert by a line that knew nothing yet.
+func TestGSOFirstLineIsNotAllZeros(t *testing.T) {
+	dev, peer := gsoPair(t)
+
+	var out bytes.Buffer
+	log.SetOutput(&out)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	// A plain, non-coalesced packet: nothing to report.
+	if _, err := peer.Write(vnetPacket(0, gsoNone, 0, tcp4(20))); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 65535)
+	if _, err := dev.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("the first read reported before anything could have happened: %q", out.String())
+	}
+
+	// The moment the kernel DOES coalesce, say so at once — not ten minutes later.
+	if _, err := peer.Write(vnetPacket(0, gsoTCPv4, 1000, tcp4(2500))); err != nil {
+		t.Fatal(err)
+	}
+	dev.q = nil
+	if _, err := dev.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "gso 1 super-packets -> 3 segments") {
+		t.Fatalf("the first real coalescing was not reported at once; log was %q", out.String())
+	}
+}

@@ -70,8 +70,9 @@ type Device struct {
 	nOversize    atomic.Uint64 // packets dropped by Read because they did not fit the caller's buffer
 
 	// Reporting state, touched ONLY by the single reader goroutine (readGSO), so no lock.
-	repAt   time.Time // when the counters were last logged
+	repAt   time.Time // when the reporting window last restarted
 	repSeen [4]uint64 // the values logged then: super, seg, unsplit, oversize
+	repSaid bool      // a line has been written at least once
 }
 
 // gsoReportEvery bounds how often a running device logs its GSO counters. Before this the ONLY
@@ -81,19 +82,46 @@ type Device struct {
 // question, and a report is skipped entirely when nothing moved — an idle tunnel stays silent.
 const gsoReportEvery = 10 * time.Minute
 
-// reportGSO logs the counters at most once per gsoReportEvery, and only when something changed
-// since the last line. The FIRST call always reports, so a tunnel that starts coalescing says so
-// immediately rather than ten minutes later. Called from readGSO only (single goroutine).
+// reportGSO logs the counters at most once per gsoReportEvery, and only when something changed.
+//
+// The rule is written around one failure: the FIRST call used to report unconditionally, which meant
+// the first line an operator ever saw was "gso 0 super-packets -> 0 segments" — printed milliseconds
+// after startup, before the kernel could coalesce anything, and reading exactly like the answer
+// "this knob is doing nothing". It also stamped the window, so the truth was then ten minutes away.
+//
+// So: silence on the first read, an IMMEDIATE line the first time a counter moves (the answer the
+// operator wants), at most one line per window after that, and exactly one "still nothing" line once
+// a full window has passed with no movement — because an inert knob deserves to be visible too, just
+// not before it is known. Called from readGSO only (single goroutine), so the state needs no lock.
 func (d *Device) reportGSO() {
 	now := time.Now()
-	if !d.repAt.IsZero() && now.Sub(d.repAt) < gsoReportEvery {
-		return
-	}
 	cur := [4]uint64{d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), d.nOversize.Load()}
-	if !d.repAt.IsZero() && cur == d.repSeen {
-		return
+	if d.repAt.IsZero() {
+		d.repAt = now
+		if cur == ([4]uint64{}) {
+			// FIRST read and nothing has happened yet. "gso 0 super-packets -> 0 segments" here is not
+			// evidence of anything — it is just too early — and it reads exactly like the answer THE
+			// KNOB IS INERT. Printing it milliseconds after startup told the operator the opposite of
+			// the truth and, because it stamped the window, put the real answer ten minutes away.
+			return
+		}
+		// Something already moved on the very first read: that IS the answer, so say it now.
+	} else {
+		moved := cur != d.repSeen
+		switch {
+		case moved && !d.repSaid:
+			// The counters moved for the FIRST time. This is the line the operator is looking for and
+			// it must not wait out a window.
+		case moved, !d.repSaid:
+			// A later movement, or the single "still nothing" line that makes an inert knob visible.
+			if now.Sub(d.repAt) < gsoReportEvery {
+				return
+			}
+		default:
+			return // nothing moved and we have already spoken: stay quiet
+		}
 	}
-	d.repAt, d.repSeen = now, cur
+	d.repAt, d.repSeen, d.repSaid = now, cur, true
 	log.Printf("tun %s: gso %d super-packets -> %d segments, %d unsplit, %d oversize dropped",
 		d.Name, cur[0], cur[1], cur[2], cur[3])
 }

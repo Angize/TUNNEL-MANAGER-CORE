@@ -22,11 +22,15 @@ func (c *sniCarrier) SetSNISplit(on bool, pos int, mode string, ttl int) bool {
 }
 
 type deadCarrier struct {
-	calls int
-	got   int
+	calls   int
+	got     int
+	applied bool // what the real carriers return: false on a server that will never read the value
 }
 
-func (c *deadCarrier) SetDeadAfter(secs int) { c.calls, c.got = c.calls+1, secs }
+func (c *deadCarrier) SetDeadAfter(secs int) bool {
+	c.calls, c.got = c.calls+1, secs
+	return c.applied
+}
 
 // TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt drives the REAL applySNISplit that main calls.
 //
@@ -86,7 +90,7 @@ func TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt(t *testing.T) {
 // The signature is the guard: applyDeadAfter takes no role, so the gate cannot come back without
 // changing it, and this test fails to compile if it does.
 func TestDeadAfterTakesNoRole(t *testing.T) {
-	c := &deadCarrier{}
+	c := &deadCarrier{applied: true}
 	buf := captureLog(t)
 	if !applyDeadAfter(c, "tcp", 10, 20) {
 		t.Error("applyDeadAfter refused a carrier that implements SetDeadAfter")
@@ -100,7 +104,7 @@ func TestDeadAfterTakesNoRole(t *testing.T) {
 	}
 
 	// 0 leaves each carrier's own default formula alone, and says nothing.
-	c = &deadCarrier{}
+	c = &deadCarrier{applied: true}
 	buf.Reset()
 	if applyDeadAfter(c, "tcp", 10, 0) {
 		t.Error("dead_after_secs=0 must not be applied")
@@ -118,5 +122,23 @@ func TestDeadAfterTakesNoRole(t *testing.T) {
 	out = buf.String()
 	if !strings.Contains(out, "ignores dead_after_secs") {
 		t.Fatalf("a carrier with no SetDeadAfter must be reported, got %q", out)
+	}
+	// A carrier that TAKES the value and will never read it — the server of a connectionless carrier —
+	// must not be reported as "set". That line was printed on udp/raw/flux/dns servers, where nothing
+	// consults the number, which is the same lie about a knob this function exists to stop telling.
+	inert := &deadCarrier{applied: false}
+	buf.Reset()
+	if applyDeadAfter(inert, "udp", 10, 20) {
+		t.Error("a carrier that will not enforce the value must not be reported as having set it")
+	}
+	out = buf.String()
+	if strings.Contains(out, "self-heal deadline set to") {
+		t.Fatalf("an inert carrier was reported as enforcing the deadline: %q", out)
+	}
+	if !strings.Contains(out, "not enforced on this end") {
+		t.Fatalf("an inert carrier must say so, got %q", out)
+	}
+	if inert.got != 20 {
+		t.Fatalf("the value must still be handed over (got %d) — only the CLAIM changes", inert.got)
 	}
 }

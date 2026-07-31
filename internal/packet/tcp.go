@@ -755,11 +755,12 @@ func deadWindow(keepalive time.Duration, deadAfterSecs int, def time.Duration) t
 // SetDeadAfter (client) tightens the carrier's dead-detection read-deadline to the per-tunnel
 // dead_after_secs, so the tunnel self-heals faster than the default (~3×keepalive ping-loss / 60s idle
 // backstop). No-op for secs<=0. Call before Run.
-func (b *TCP) SetDeadAfter(secs int) {
+func (b *TCP) SetDeadAfter(secs int) bool {
 	if secs <= 0 {
-		return
+		return false
 	}
 	b.idle = deadWindow(b.keepalive, secs, b.idle)
+	return true // both roles: b.idle IS the connection's read deadline on the server too
 }
 
 // DialTCP (client role) targets peerAddr and reconnects on drop. When cover is

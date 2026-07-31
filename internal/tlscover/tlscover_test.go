@@ -143,11 +143,12 @@ func TestCoverProbeSeesRealSite(t *testing.T) {
 }
 
 // TestCoverProbeIsNeverDroppedWhenTheRelayPoolIsFull is the whole class: no probe
-// may ever be closed on the spot because earlier probes hold the relay slots. It
-// takes BOTH halves of the fix to pass — the idle bound (so a connection nobody
-// speaks on gives its slot back; dest here never closes, so nothing else can) and
-// the queue (so the probe that arrives while the pool is still full waits for one
-// instead of getting an instant FIN right after its ClientHello).
+// may ever be closed on the spot because earlier probes hold the relay slots.
+//
+// ⚠ This test shrinks ONLY sv.relay and leaves sv.queue at its full size, so it
+// passes with or without a working queue — see the sibling below, which is the one
+// that actually exercises it. What this covers is the idle bound: dest never closes
+// here, so nothing but the idle timer can hand a slot back.
 func TestCoverProbeIsNeverDroppedWhenTheRelayPoolIsFull(t *testing.T) {
 	const psk = "reality-psk-abcdefghij"
 	dest := holdingDest(t, "real.example")
@@ -200,5 +201,48 @@ func TestCoverRelayBoundIsIdleNotLifetime(t *testing.T) {
 			t.Fatalf("the relay cut a BUSY connection at exchange %d: %v", i, err)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestCoverQueueIsNotJustTheRelayPoolAgain is the test the sibling above only looked
+// like. In production maxWaiting == maxRelays, and the queue token used to be held for
+// the goroutine's WHOLE life — relay included — so a goroutine in service still
+// occupied a waiting-room slot. The queue was therefore full exactly when the relay
+// pool was, every new probe hit the `default` arm, and it was CLOSED ON THE SPOT: the
+// instant FIN straight after the ClientHello that this carrier exists to never emit,
+// at exactly the concurrency it emitted it at before the queue was added.
+//
+// Shrinking BOTH semaphores to the same small number is what reproduces the production
+// relationship. The third probe must wait for a slot and then reach the real dest, not
+// get a connection reset.
+func TestCoverQueueIsNotJustTheRelayPoolAgain(t *testing.T) {
+	const psk = "reality-psk-abcdefghij"
+	dest := holdingDest(t, "real.example")
+	cov := coverServer(t, psk, dest, func(sv *Server) {
+		sv.relay = make(chan struct{}, 2)
+		sv.queue = make(chan struct{}, 2) // the production relationship: same size as the relay pool
+		sv.idle = 300 * time.Millisecond
+	})
+	probe := func() (*tls.Conn, error) {
+		return tls.Dial("tcp", cov, &tls.Config{InsecureSkipVerify: true, ServerName: "real.example"})
+	}
+
+	for i := 0; i < 2; i++ { // both relay slots taken by probes that then go silent
+		c, err := probe()
+		if err != nil {
+			t.Fatalf("filler probe %d: %v", i, err)
+		}
+		defer c.Close()
+	}
+
+	c, err := probe()
+	if err != nil {
+		t.Fatalf("a probe arriving on a full pool was dropped: %v — with the waiting room the same size "+
+			"as the pool, a goroutine that holds its queue token while relaying leaves no room to wait "+
+			"in, and the connection is closed straight after its ClientHello", err)
+	}
+	defer c.Close()
+	if cn := c.ConnectionState().PeerCertificates[0].Subject.CommonName; cn != "real.example" {
+		t.Fatalf("the queued probe saw cert CN %q — it did not reach the real dest", cn)
 	}
 }

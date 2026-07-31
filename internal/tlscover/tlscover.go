@@ -240,11 +240,26 @@ func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 		return
 	}
 	go func() {
-		defer func() { <-sv.queue }()
+		// LEAVE THE WAITING ROOM ON ENTERING SERVICE. Holding the queue token for the goroutine's whole
+		// life made the queue inert: every relaying goroutine also held a queue token, so with both caps
+		// at maxRelays the queue was full exactly when the relay pool was, and a new probe hit the
+		// `default` above and was CLOSED ON THE SPOT — the instant FIN this whole change exists to
+		// remove, at precisely the concurrency it removed it at before. The two semaphores only bound
+		// different things if a connection holds one at a time: maxWaiting queued PLUS maxRelays in
+		// service.
+		queued := true
+		leaveQueue := func() {
+			if queued {
+				queued = false
+				<-sv.queue
+			}
+		}
+		defer leaveQueue()
 		t := time.NewTimer(relayWait)
 		defer t.Stop()
 		select {
 		case sv.relay <- struct{}{}:
+			leaveQueue()
 		case <-t.C:
 			raw.Close()
 			return
