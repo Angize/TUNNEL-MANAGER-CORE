@@ -1,3 +1,10 @@
+//go:build linux
+
+// This file is linux-only because Device is: it wraps a TUN fd whose whole implementation
+// (TUNSETIFF, TUNSETOFFLOAD, the virtio-net header) lives in tun_linux.go. Without the tag the
+// package failed to compile for any other GOOS with "undefined: Device", so `GOOS=windows go build
+// ./...` — the cheapest way a developer on a non-linux box type-checks the tree — could not run at
+// all. Nothing changes on the fleet; the core only ever runs on linux.
 package tun
 
 import "os"
