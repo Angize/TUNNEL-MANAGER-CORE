@@ -2072,10 +2072,23 @@ func (b *TCP) dialLoop() {
 				b.st.setActive(b.stTag + " · " + label)
 				b.st.event("down", "peer-rotate", "ip:"+label)
 			}
-			if w.srcAddr != "" {
-				// A proactive source rotation is announced HERE — where the warm carrier actually goes
-				// live on the new source — not in the timer, so a failed warm build never logs a source
-				// move that did not happen (the source mirror of the dest peer-rotate just above).
+			// A proactive source rotation is announced HERE — where the warm carrier actually goes
+			// live on the new source — not in the timer, so a failed warm build never logs a source
+			// move that did not happen (the source mirror of the dest peer-rotate just above).
+			//
+			// Built-and-adopted is still not enough on its own: dialer() installs no LocalAddr when the
+			// source the beat rotated onto is not on this host (an IP removed from the interface but
+			// still in the pool), takes the dropUnusableSource branch, and the socket leaves from the
+			// KERNEL DEFAULT — while the connect and handshake succeed exactly as before, so the
+			// carrier is adopted and the event fired for an IP the tunnel never left from. That is the
+			// last corner of the same announce-before-it-is-true class #179/#189 closed. lastSourceUsed()
+			// is stamped only on the branch that really binds, and this is the identical comparison the
+			// pin release makes 80 lines below (pinLandedOn), against the identical raw pool string.
+			//
+			// It can only SUPPRESS: a rotation that burns its target and lands somewhere else instead
+			// goes unannounced rather than announced wrongly, and dropUnusableSource logs that case by
+			// name anyway.
+			if w.srcAddr != "" && b.lastSourceUsed() == w.srcAddr {
 				b.st.event("down", "src-rotate", "ip:"+w.srcAddr)
 			}
 		} else {
