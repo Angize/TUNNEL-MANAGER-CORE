@@ -169,11 +169,13 @@ func (d *DNS) heartbeat(dwSecs int64) {
 // its window has to survive several dropped polls. Publishing the SAME number the session enforces
 // is the point: a reader that re-derived its own multiplier would age hb against a window nothing
 // applies (see effectiveDeadAfter, which had that exact bug in the startup log).
+//
+// It is resolved by ASKING dnstun rather than by restating the rule here, which is what this function
+// used to do — and it restated it wrong. It kept the floor and dropped the keepaliveDeadMult×keepalive
+// term, so at the shipped defaults it published 20s while the session re-dialled at 45s: a healthy dns
+// tunnel went red on the dashboard, and the comment two lines above is exactly the promise it broke.
 func (d *DNS) deadWin() time.Duration {
-	if d.cfg.DeadAfter > 0 && d.cfg.DeadAfter > dnstun.DeadFloor() {
-		return d.cfg.DeadAfter
-	}
-	return dnstun.DeadFloor()
+	return dnstun.ResolveDeadWindow(d.cfg.Keepalive, d.cfg.DeadAfter)
 }
 
 // DNSDeadFloorSecs is the ABSOLUTE floor (seconds) the dns carrier applies to dead_after_secs — it does
