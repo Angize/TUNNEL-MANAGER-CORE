@@ -943,6 +943,20 @@ func (g *grpcDeframingReader) Read(p []byte) (int, error) {
 		if _, err := io.ReadFull(g.r, hdr[:]); err != nil {
 			return 0, err
 		}
+		// hdr[0] is gRPC's per-message COMPRESSED flag, and it was never examined — only hdr[1:5], the
+		// length, was. The comment beside the request headers asserted the opposite ("our own deframer
+		// takes the compressed flag from each message's 5-byte prefix"), which is how it stayed unread.
+		//
+		// This is the grpc twin of the POST ladder's Content-Encoding guard. The body IS the data
+		// plane: hand a compressed message to the framer and the AEAD opens garbage, the tunnel comes
+		// up and delivers nothing, and the failure is charged to the edge as a data-plane fault far
+		// from its cause. We advertise grpc-accept-encoding: gzip as camouflage (its absence was the
+		// tell), so an intermediary is invited to compress — and our own server never does, which makes
+		// a set flag someone else's doing by definition. Refuse it loudly and by name instead.
+		if hdr[0] != 0 {
+			return 0, fmt.Errorf("http/grpc: message came back compressed (flag %d) — this path compresses gRPC "+
+				"messages, which the carrier cannot decode; turn message compression off for it at the CDN", hdr[0])
+		}
 		msgLen := binary.BigEndian.Uint32(hdr[1:5])
 		if msgLen > grpcMaxMsg {
 			return 0, fmt.Errorf("http/grpc: message too large (%d)", msgLen)
@@ -983,8 +997,9 @@ func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Conte
 	req.Header.Set("Content-Type", "application/grpc")
 	req.Header.Set("TE", "trailers")
 	// No grpc-encoding: grpc-go sets it only when it is actually compressing (callHdr.SendCompress),
-	// so "identity" on the wire is a small tell of a hand-rolled client. Nothing reads it — our own
-	// deframer takes the compressed flag from each message's 5-byte prefix, not from a header.
+	// so "identity" on the wire is a small tell of a hand-rolled client. Nothing needs it — the
+	// authority is each message's own 5-byte prefix, which grpcDeframingReader now really does read
+	// (it did not when this comment was written).
 	req.ContentLength = -1
 	resp, err := doWithHeaderTimeout(hc, req, httpcHeaderWait(budget))
 	if err != nil {
