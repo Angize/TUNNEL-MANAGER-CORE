@@ -46,13 +46,15 @@ const fakeTTL = 64
 // net.Conn method delegates to the embedded conn.
 type fragConn struct {
 	net.Conn
-	host string // the SNI we connect with; used to auto-locate the split point (absent under ECH)
-	pos  int    // explicit split offset into the first write; 0 = auto (middle of the cleartext hostname)
-	mode string // "split" | "disorder"
-	ttl  int    // disorder: TTL for the head segment; fake: TTL of the injected decoy (0 = each mode's default)
-	mu   sync.Mutex
-	sent bool
-	warn sync.Once // one line per conn when the chosen mode had to fall back to a plain split
+	host        string // the SNI we connect with; used to auto-locate the split point (absent under ECH)
+	pos         int    // explicit split offset into the first write; 0 = auto (middle of the cleartext hostname)
+	mode        string // "split" | "disorder" | "fake"
+	ttl         int    // disorder: TTL for the head segment; fake: TTL of the injected decoy (0 = each mode's default)
+	mu          sync.Mutex
+	sent        bool
+	warn        sync.Once // one line per conn when the chosen mode had to fall back to a plain split
+	warnFake    sync.Once // ...and one for the fake→disorder step, which is a separate loss of protection
+	warnNoSplit sync.Once // ...and one for "sni_split is on and nothing was split at all"
 	// dsSend belongs to the CARRIER, not to this conn: sni_mode=fake injects once per dial, so a
 	// per-conn reporter would report once per reconnect — which on a failing tunnel is a line per
 	// retry. Never nil in production (fragWrap passes the carrier's); the zero value is usable, so
@@ -87,6 +89,37 @@ func (f *fragConn) degraded(why string) {
 	})
 }
 
+// fakeDegraded is degraded's counterpart for the fake→disorder step, and it needs its own sync.Once:
+// fake is the only mode that beats a DPI which REASSEMBLES the stream, so falling back to disorder
+// is a real loss of protection even though disorder still runs. Every one of writeFake's bail-outs
+// used to take that step in complete silence — the operator picked the strongest mode, the panel kept
+// showing it, and the tunnel quietly ran the weaker one. A separate Once (rather than reusing warn)
+// is what lets a conn that falls all the way through report BOTH steps, which is the truth.
+func (f *fragConn) fakeDegraded(why string) {
+	f.warnFake.Do(func() {
+		log.Printf("core/tls: sni_mode \"fake\" fell back to disorder (%s) — disorder desyncs a DPI that "+
+			"reads packets, but NOT one that reassembles the stream, which is the only thing fake buys", why)
+	})
+}
+
+// noSplit reports, once per connection, that sni_split is configured and nothing was split. at is
+// what splitAt returned, so the message can name the actual reason instead of a guess.
+func (f *fragConn) noSplit(p []byte, at int) {
+	f.warnNoSplit.Do(func() {
+		switch {
+		case f.pos > 0:
+			log.Printf("core/tls: sni_split is on but split_pos=%d is outside the %d-byte ClientHello — "+
+				"nothing was fragmented", f.pos, len(p))
+		case f.host == "":
+			log.Printf("core/tls: sni_split is on but this carrier dials with no SNI — nothing was fragmented")
+		default:
+			log.Printf("core/tls: sni_split is on but the hostname is not in the ClientHello in cleartext " +
+				"(ECH encrypts it) — nothing was fragmented, and nothing needs to be: there is no cleartext " +
+				"SNI left for a DPI to read")
+		}
+	})
+}
+
 // newFragConn wraps c so its first write is split. host is the SNI (for auto split-point location),
 // pos an explicit offset (0 = auto), mode the fragmentation mode, ttl the disorder head-segment TTL,
 // ds the carrier's decoy-transmit reporter (nil is tolerated: a test conn reports into its own).
@@ -114,6 +147,13 @@ func (f *fragConn) Write(p []byte) (int, error) {
 	}
 	at := f.splitAt(p)
 	if at <= 0 || at >= len(p) {
+		// Nothing is split, on a tunnel whose config says sni_split is on and whose startup log says
+		// so too. The usual cause is ECH: with the real name encrypted, splitAt's cleartext search
+		// finds nothing and returns 0, and the ClientHello goes out whole. That is the correct
+		// behaviour — there is no cleartext SNI left to straddle a segment boundary, and ECH is the
+		// stronger defence anyway — but it was completely silent, so an operator running ECH plus
+		// sni_split believed both were active when only one was.
+		f.noSplit(p, at)
 		return f.Conn.Write(p)
 	}
 	switch f.mode {
