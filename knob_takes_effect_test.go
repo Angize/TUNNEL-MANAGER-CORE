@@ -51,20 +51,36 @@ func TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt(t *testing.T) {
 		t.Fatalf("a discarded sni_split must be reported, got %q", out)
 	}
 
+	// disorder is the ONE mode that reads split_ttl, so it is the one mode whose line may quote it.
 	applies := &sniCarrier{applied: true}
 	buf.Reset()
-	if !applySNISplit(applies, "ws", "fake", 12, 4) {
+	if !applySNISplit(applies, "ws", "disorder", 12, 4) {
 		t.Error("applySNISplit reported failure for a carrier that accepted it")
 	}
 	out = buf.String()
-	if !strings.Contains(out, "SNI fragmentation on (mode=fake split_pos=12 ttl=4)") {
+	if !strings.Contains(out, "SNI fragmentation on (mode=disorder split_pos=12 ttl=4)") {
 		t.Fatalf("a carrier that APPLIES sni_split must still be reported as on, got %q", out)
 	}
 	if strings.Contains(out, "WARNING") {
 		t.Fatalf("an applied sni_split must not warn: %q", out)
 	}
-	if applies.gotMode != "fake" || applies.gotPos != 12 || applies.gotTTL != 4 {
-		t.Fatalf("the carrier got (%q,%d,%d), want (fake,12,4)", applies.gotMode, applies.gotPos, applies.gotTTL)
+	if applies.gotMode != "disorder" || applies.gotPos != 12 || applies.gotTTL != 4 {
+		t.Fatalf("the carrier got (%q,%d,%d), want (disorder,12,4)", applies.gotMode, applies.gotPos, applies.gotTTL)
+	}
+
+	// fake and split do NOT read split_ttl, so the line must not quote one. Printing ttl=N for a mode
+	// that never consults it is the same lie about a knob that this whole function exists to stop.
+	for _, mode := range []string{"fake", "split"} {
+		c := &sniCarrier{applied: true}
+		buf.Reset()
+		applySNISplit(c, "ws", mode, 12, 4)
+		out = buf.String()
+		if strings.Contains(out, "ttl=4") {
+			t.Fatalf("mode=%s reported ttl=4, but only disorder reads split_ttl: %q", mode, out)
+		}
+		if !strings.Contains(out, "SNI fragmentation on (mode="+mode+" split_pos=12") {
+			t.Fatalf("mode=%s must still be reported as on, got %q", mode, out)
+		}
 	}
 
 	// A carrier without the seam at all (dns, raw, …) must warn rather than say nothing.

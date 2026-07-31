@@ -62,21 +62,18 @@ type fragConn struct {
 	dsSend *desyncSend
 }
 
-// fakeSegTTL is the TTL stamped on the injected decoy in sni_mode=fake.
+// fakeSegTTL is the TTL stamped on the injected decoy in sni_mode=fake. It is ALWAYS fakeTTL:
+// split_ttl does not apply to this mode and is deliberately not read here.
 //
-// split_ttl is offered by the panel for fake mode as well as disorder, stored, shipped to the node
-// and the core, and printed in the startup log as ttl=N — but the fake path hardcoded a constant, so
-// the number the operator chose reached everything except the packet. It is honoured when set: the
-// bad TCP checksum already kills the decoy at the server, and a low TTL on top is exactly the
-// belt-and-braces the knob offers (it also kills the decoy at a middlebox that rewrites checksums).
-// 0 keeps fake mode's own default, which is a NORMAL TTL — the decoy has to reach the on-path DPI
-// to be worth sending, and unlike disorder it does not rely on expiring to stay away from the server.
-func (f *fragConn) fakeSegTTL() int {
-	if f.ttl > 0 {
-		return f.ttl
-	}
-	return fakeTTL
-}
+// ⚠ It briefly did read it, and that was wrong. The two modes want OPPOSITE values out of that one
+// stored number. disorder needs it LOW (default 4) because the head segment has to expire before the
+// server. fake needs it HIGH because the decoy is killed at the server by its bad TCP checksum, not
+// by expiring, and its whole job is to reach the on-path DPI first — a low TTL kills it before the
+// DPI and turns the strongest SNI mode into an expensive no-op. The panel keeps ONE input for both
+// modes, so a tunnel that had stored 4 for disorder and then switched to fake silently got a decoy
+// that died en route. There is no useful low value here, so there is nothing to honour: the knob
+// simply has no meaning in this mode, and the panel no longer offers it.
+func (f *fragConn) fakeSegTTL() int { return fakeTTL }
 
 // degraded reports, exactly once per connection, that the operator's chosen SNI mode could not be
 // applied and this conn fell back to a plain in-order split. Silence here was the bug: disorder and

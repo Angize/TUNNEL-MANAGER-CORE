@@ -91,18 +91,22 @@ const KCPOverhead = 24
 //
 // The number has to be read against the CEILING, which is low. A DNS query name is 255 bytes, base32
 // costs 8 characters per 5 bytes, and the zone and nonce labels come out of the same budget — so even
-// a ten-character zone leaves only ~87 bytes of MTU (measured, not estimated). Anything above that is
-// unreachable and a floor set there would refuse every zone in existence.
+// a ten-character zone leaves only ~87 bytes of MTU (measured on the box, not estimated), and it
+// falls from there: 40 characters leave 69, 74 leave 48, 87 leave 40, 88 leave 39.
 //
-// The old floor of 40 was too low in a way that mattered: kcp-go's SetMtu only refuses an MTU at or
-// below KCPOverhead, so past roughly a 118-character zone the MTU drops under 24, SetMtu FAILS
-// SILENTLY, and KCP goes on using its own 1400-byte default over a transport that can carry twenty
-// bytes. Between there and 40 the tunnel is not slow, it cannot carry anything — and the core came
-// up, logged "session established", and never named the zone as the cause.
+// ⚠ THE FLOOR WENT UP TO 48 AND CAME STRAIGHT BACK DOWN. The justification for raising it was that a
+// very long zone drove the MTU under KCPOverhead, where kcp-go's SetMtu fails and KCP silently keeps
+// its own 1400-byte default. That scenario was NEVER REACHABLE: an MTU under 24 needs a zone of ~116
+// characters, and this very check already refused everything from 88 up at the old floor of 40. So
+// raising it bought nothing against the failure it named, and banned the 75..87 character band —
+// which does start, does hand SetMtu a value it accepts, and does carry traffic, slowly. A zone that
+// long is a plausible four-level corporate delegation, and the panel accepts up to 253 characters.
 //
-// 2×KCPOverhead is the honest boundary: below it more than half of every DNS query is KCP header. It
-// still admits a zone of roughly 70 characters, well past anything a delegation realistically uses.
-const MinUsefulMTU = 2 * KCPOverhead
+// So the floor is the ceiling KCP itself enforces plus a margin, not a throughput opinion: below
+// KCPOverhead SetMtu refuses outright and the carrier is dead in a way nothing reports. Above it the
+// tunnel is slow, which is the operator's call to make and not this constant's. Anything that reads
+// like "more than half the query is header" is an argument for a WARNING, not a refusal.
+const MinUsefulMTU = KCPOverhead + 16
 
 const handshakeRetxInterval = 500 * time.Millisecond
 

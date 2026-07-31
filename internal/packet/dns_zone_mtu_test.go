@@ -9,12 +9,14 @@ import (
 
 // TestDNSRefusesAZoneThatLeavesAnUnusableMTU is the regression test for the dns MTU floor.
 //
-// In user terms: the panel and the node accept a zone up to 253 characters. Past a certain length
-// the query name has almost no room left for tunnel data — and the old floor of 40 accepted that,
-// because kcp-go only refuses an MTU at or below its own 24-byte header. So the core came up, logged
-// "session established", and then spent most of every DNS query on the KCP header while a single
-// ordinary packet shattered into dozens of queries. The tunnel was not slow, it could not carry
-// anything, and nothing anywhere named the zone as the cause.
+// In user terms: the panel and the node accept a zone up to 253 characters. Past ~116 the query name
+// leaves an MTU under KCP's own 24-byte header, kcp-go's SetMtu refuses it, KCP silently keeps its
+// 1400-byte default over a transport that can carry twenty bytes, and the core still comes up and
+// logs "session established" — a tunnel that cannot carry anything, with nothing naming the zone.
+// That is what this floor exists to refuse, and the refusal has to say what to shorten.
+//
+// It must NOT refuse more than that. The floor briefly rose to 48 and took the 75..87-character
+// zones with it; those start, are accepted by SetMtu, and carry traffic. See the second test.
 func TestDNSRefusesAZoneThatLeavesAnUnusableMTU(t *testing.T) {
 	// Build zones by length and find where the carrier draws the line.
 	zoneOf := func(n int) string {
@@ -31,27 +33,27 @@ func TestDNSRefusesAZoneThatLeavesAnUnusableMTU(t *testing.T) {
 	}
 
 	shortOK := false
-	for _, n := range []int{10, 20, 40} { // measured on the box: these leave 87, 81 and 69 bytes
+	for _, n := range []int{10, 20, 40, 75, 87} { // measured: these leave 87, 81, 69, 47 and 40 bytes
 		if _, err := newDNS(nil, true, "", nil, zoneOf(n), "psk", "chacha20-poly1305", 0); err == nil {
 			shortOK = true
 			break
 		}
 	}
 	if !shortOK {
-		t.Fatal("no short zone was accepted at all — the floor rejects configurations that work")
+		t.Fatal("no zone up to 87 characters was accepted — those tunnels start and carry traffic today")
 	}
 
 	// A zone long enough to squeeze the per-query budget must be refused, and the error must say
 	// what the operator can actually change.
 	var refused error
-	for n := 80; n <= 200; n += 5 { // 80 characters already leaves only 44 bytes (measured)
+	for n := 120; n <= 240; n += 5 { // an 88-character zone leaves 39 and is where the floor bites
 		if _, err := newDNS(nil, true, "", nil, zoneOf(n), "psk", "chacha20-poly1305", 0); err != nil {
 			refused = err
 			break
 		}
 	}
 	if refused == nil {
-		t.Fatalf("no zone between 80 and 200 characters was refused — a zone that leaves under %d bytes "+
+		t.Fatalf("no zone between 120 and 240 characters was refused — a zone that leaves under %d bytes "+
 			"per query cannot carry traffic, and starting anyway is what hid the cause", dnstun.MinUsefulMTU)
 	}
 	msg := refused.Error()
@@ -62,25 +64,31 @@ func TestDNSRefusesAZoneThatLeavesAnUnusableMTU(t *testing.T) {
 	}
 }
 
-// TestDNSMTUFloorClearsKCPsOwnHeader pins the property behind the number, not the number: the floor
-// has to leave the payload bigger than the header KCP spends on every segment. The old 40 did not —
-// it left 16 payload bytes against a 24-byte header — and kcp-go accepted it, which is exactly why
-// nothing complained.
+// TestDNSMTUFloorClearsKCPsOwnHeader pins the floor from BOTH sides, which is the part this file got
+// wrong the first time. It has to be above what kcp-go's SetMtu refuses (or the carrier dies
+// silently) and no higher, because every extra byte of floor bans a zone length that works today.
 func TestDNSMTUFloorClearsKCPsOwnHeader(t *testing.T) {
 	if dnsMinMTU <= dnstun.KCPOverhead {
-		t.Fatalf("the MTU floor %d is at or below KCP's own %d-byte header — every segment would be "+
-			"pure overhead", dnsMinMTU, dnstun.KCPOverhead)
+		t.Fatalf("the MTU floor %d is at or below KCP's own %d-byte header — SetMtu refuses it outright, "+
+			"KCP silently keeps its 1400-byte default, and nothing reports it", dnsMinMTU, dnstun.KCPOverhead)
 	}
-	if payload := dnsMinMTU - dnstun.KCPOverhead; payload < dnstun.KCPOverhead {
-		t.Fatalf("the MTU floor %d leaves %d payload bytes against a %d-byte header — more than half of "+
-			"every DNS query would be KCP header", dnsMinMTU, payload, dnstun.KCPOverhead)
-	}
-	// And the other direction, which is the mistake this test caught the first time: a DNS query name
-	// is 255 bytes and base32 costs 8 characters per 5, so even a ten-character zone leaves only ~87.
-	// A floor above that ceiling refuses EVERY zone and the carrier becomes unusable.
+	// The ceiling. A DNS query name is 255 bytes and base32 costs 8 characters per 5, so even a
+	// ten-character zone leaves only ~87 (measured). A floor near that refuses zones that work.
 	if dnsMinMTU > 80 {
-		t.Fatalf("the MTU floor %d is above what any zone can leave (~87 for a ten-character zone) — "+
-			"no dns tunnel could ever start", dnsMinMTU)
+		t.Fatalf("the MTU floor %d is close to what any zone can leave (~87 for a ten-character zone) — "+
+			"almost no dns tunnel could start", dnsMinMTU)
+	}
+	// ⚠ THE REAL GUARD, and the one this file got wrong before. The floor exists to keep SetMtu from
+	// refusing, NOT to express an opinion about throughput. A "half the query is header" rule sounds
+	// principled and costs the 75..87-character zones, which do start and do carry traffic. Refusing
+	// a slow tunnel is not this constant's call; the operator picked the zone.
+	//
+	// Zone length -> MTU, measured on the box: 40->69, 74->48, 75->47, 80->44, 87->40, 88->39.
+	// Anything at or under 40 must therefore stay ACCEPTED, or a working delegation stops booting.
+	if dnsMinMTU > 40 {
+		t.Fatalf("the MTU floor is %d: that refuses every zone from 75 characters up (mtu 47 and down), "+
+			"and those tunnels start, hand SetMtu a value it accepts, and carry traffic. The floor may "+
+			"only exclude what KCP itself cannot take", dnsMinMTU)
 	}
 }
 

@@ -548,7 +548,14 @@ func applySNISplit(b any, transport, mode string, pos, ttl int) bool {
 		SetSNISplit(bool, int, string, int) bool
 	})
 	if ok && s.SetSNISplit(true, pos, mode, ttl) {
-		log.Printf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d ttl=%d)", mode, pos, ttl)
+		// Only disorder reads split_ttl. Printing ttl=N under mode=fake or mode=split reported a knob
+		// that nothing on those paths consults — the same class of lie this function was written to
+		// stop telling about sni_split itself.
+		if mode == "disorder" {
+			log.Printf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d ttl=%d)", mode, pos, ttl)
+		} else {
+			log.Printf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d; split_ttl does not apply to this mode)", mode, pos)
+		}
 		return true
 	}
 	log.Printf("core: WARNING carrier %s ignores sni_split — it sends no TLS ClientHello of its own, so nothing is fragmented", transport)

@@ -50,7 +50,53 @@ func TestPostLadderSendsChromesAcceptEncoding(t *testing.T) {
 		}
 	}
 	if o := got.Get("Origin"); !strings.HasPrefix(o, "https://") {
-		t.Fatalf("Origin = %q; Sec-Fetch-Site: same-origin is incoherent without one", o)
+		t.Fatalf("Origin = %q; Chrome does send Origin on a same-origin POST", o)
+	}
+}
+
+// TestDownstreamGetSendsNoOrigin is the other half, and it is the one that was wrong.
+//
+// Chrome appends Origin for a CORS request and, otherwise, only for methods other than GET and HEAD.
+// So it sends Origin on the POST above and NEVER on a same-origin GET. Setting it on both put a
+// header combination on the wire that no Chrome produces — on the single most distinctive request
+// this carrier makes: one long-lived downstream GET per session, carrying it right beside the
+// Sec-Fetch-Site: same-origin that is supposed to make the request look ordinary. A CDN bot-
+// management rule that cross-checks Fetch Metadata against Origin sees the anomaly on exactly the
+// request the header block exists to protect.
+func TestDownstreamGetSendsNoOrigin(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	req, err := http.NewRequest("GET", srv.URL+"/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	browserHeaders(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if o := got.Get("Origin"); o != "" {
+		t.Fatalf("the edge saw Origin=%q on a same-origin GET — no Chrome sends that, and this is the "+
+			"one request per session that stays open", o)
+	}
+	// The rest of the identity must still be there: this is not a licence to drop the block.
+	if got.Get("User-Agent") != chromeUA {
+		t.Fatalf("User-Agent = %q, want %q", got.Get("User-Agent"), chromeUA)
+	}
+	if ae := got.Get("Accept-Encoding"); ae != chromeAcceptEncoding {
+		t.Fatalf("Accept-Encoding = %q, want %q", ae, chromeAcceptEncoding)
+	}
+	for _, h := range chromeClientHints {
+		if v := got.Get(h[0]); v != h[1] {
+			t.Fatalf("the edge saw %s = %q, want %q", h[0], v, h[1])
+		}
 	}
 }
 
@@ -103,5 +149,27 @@ func TestGrpcModeStillSendsNoBrowserHeaders(t *testing.T) {
 	}
 	if ae := req.Header.Get("Accept-Encoding"); ae != "" {
 		t.Fatalf("grpc mode set Accept-Encoding %q; grpc-go sends none and the transport disables it", ae)
+	}
+}
+
+// TestIdentityEncodingIsNotAFailure pins the downstream Content-Encoding guard from both sides.
+//
+// The guard is real and necessary: setting Accept-Encoding by hand turns off Go's transparent
+// decompression, and the downstream body IS the data plane, so a genuinely compressed response must
+// fail the dial rather than feed compressed bytes into the AEAD. But it first refused ANY non-empty
+// value, including "identity" — the spec's own name for "not encoded" — which turned a legal,
+// perfectly decodable response into a tunnel that would not come up.
+func TestIdentityEncodingIsNotAFailure(t *testing.T) {
+	for _, ok := range []string{"", "identity", "IDENTITY", " identity ", "Identity"} {
+		if downstreamUnusable(ok) {
+			t.Fatalf("Content-Encoding %q means the body is NOT encoded — refusing it refuses a working "+
+				"edge; case and space in a header token must not decide whether a tunnel starts", ok)
+		}
+	}
+	for _, bad := range []string{"gzip", "br", "zstd", "GZIP", " deflate"} {
+		if !downstreamUnusable(bad) {
+			t.Fatalf("Content-Encoding %q would reach the framer as compressed bytes and the tunnel would "+
+				"carry garbage behind a green dot — it has to fail the dial", bad)
+		}
 	}
 }

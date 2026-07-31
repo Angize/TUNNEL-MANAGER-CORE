@@ -289,10 +289,29 @@ func browserHeaders(r *http.Request) {
 	for _, h := range chromeClientHints {
 		r.Header.Set(h[0], h[1])
 	}
-	if r.URL != nil && r.URL.Host != "" {
-		// Sec-Fetch-Site: same-origin is only coherent with an Origin that matches.
+	// Origin belongs on the POSTs and NOT on the downstream GET. Per the Fetch spec a browser
+	// appends Origin for a CORS request, and otherwise only for methods other than GET and HEAD —
+	// so Chrome sends it on a same-origin POST and never on a same-origin GET. Setting it on both
+	// put a header combination on the wire that no Chrome produces, on the single most distinctive
+	// request this carrier makes: one long-lived GET per session, right next to the
+	// Sec-Fetch-Site: same-origin that is supposed to make it look ordinary.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.URL != nil && r.URL.Host != "" {
 		r.Header.Set("Origin", "https://"+r.URL.Host)
 	}
+}
+
+// downstreamUnusable reports whether a Content-Encoding on the downstream response means its body
+// cannot be handed to the framer.
+//
+// Setting Accept-Encoding by hand (browserHeaders) turns OFF Go's transparent decompression, and the
+// downstream body IS the data plane — so a real coding has to fail the dial loudly rather than feed
+// compressed bytes into the AEAD. But "" and "identity" both mean NOT ENCODED: identity is the
+// spec's own name for the null coding and a legal thing for an edge to send, and refusing it refused
+// a response that needed no decoding at all. Case and surrounding space are not significant in a
+// header token, so neither may decide whether a tunnel comes up.
+func downstreamUnusable(enc string) bool {
+	e := strings.ToLower(strings.TrimSpace(enc))
+	return e != "" && e != "identity"
 }
 
 // grpcHeaders dresses a grpc-mode request as what it actually is: a gRPC call from a gRPC client.
@@ -1002,7 +1021,7 @@ func (b *TCP) dialHTTPCPost(hc *http.Client, closeIdle func(), ctx context.Conte
 	// by name: the dial fails, the pool treats the edge as bad, and the operator gets a message that
 	// says which knob to turn rather than a tunnel that connects and delivers nothing. Our origin
 	// serves application/octet-stream, which no CDN compresses by default, so this should never fire.
-	if enc := gresp.Header.Get("Content-Encoding"); enc != "" {
+	if enc := gresp.Header.Get("Content-Encoding"); downstreamUnusable(enc) {
 		gresp.Body.Close()
 		cancel()
 		return nil, fmt.Errorf("httpc: down came back %s-encoded — this edge compresses the downstream, "+
