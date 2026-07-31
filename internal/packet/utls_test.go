@@ -52,7 +52,7 @@ func TestTLSToEdgeUsesChromeFingerprintALPNh1(t *testing.T) {
 	cc := &chWriteConn{}
 	b := &TCP{isClient: true, ws: true, wsTLS: true}
 	// Handshake fails (no server) right after the ClientHello; we only inspect what was sent.
-	_, _ = b.tlsToEdge(cc, "1.2.3.4:443", "cdn.example.com", nil, false)
+	_, _ = b.tlsToEdge(cc, "1.2.3.4:443", "cdn.example.com", nil, false, handshakeTimeout)
 	if len(cc.hello) == 0 {
 		t.Fatal("no ClientHello was written")
 	}
@@ -118,7 +118,7 @@ func helloSeenBy(t *testing.T, alpn []string, goFingerprint bool) *tls.ClientHel
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = uEdgeHandshake(cli, "cdn.example.com", nil, alpn, goFingerprint)
+	_, _ = uEdgeHandshake(cli, "cdn.example.com", nil, alpn, goFingerprint, handshakeTimeout)
 	cli.Close()
 	<-done
 	if got == nil {

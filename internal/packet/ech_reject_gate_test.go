@@ -105,7 +105,7 @@ func TestECHRejectionNeverYieldsAUsableConn(t *testing.T) {
 			}
 			defer raw.Close()
 
-			conn, err := uEdgeHandshake(raw, "edge.example", ech, tc.alpn, tc.goFingerprint)
+			conn, err := uEdgeHandshake(raw, "edge.example", ech, tc.alpn, tc.goFingerprint, handshakeTimeout)
 			if conn != nil {
 				conn.Close()
 			}

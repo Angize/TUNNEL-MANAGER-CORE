@@ -733,14 +733,17 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 			if err != nil {
 				return nil, err
 			}
-			// Bound the handshake on the socket itself. Transport.TLSHandshakeTimeout does NOT apply
-			// when the caller supplies DialTLSContext — the transport is not the one handshaking — and
-			// uEdgeHandshake sets no deadline of its own, so BOTH real-TLS paths here (h2 and the
-			// http/1.1 one below) had no bound at all: an edge that completes TCP and then stalls
-			// mid-ClientHello parked the dial indefinitely. Cleared on success, because from that
+			// Bound the handshake. Transport.TLSHandshakeTimeout does NOT apply when the caller supplies
+			// DialTLSContext — the transport is not the one handshaking — so BOTH real-TLS paths here
+			// (h2 and the http/1.1 one below) had no bound at all: an edge that completes TCP and then
+			// stalls mid-ClientHello parked the dial indefinitely.
+			//
+			// The budget is PASSED IN rather than armed on the socket here. uEdgeHandshake arms the
+			// deadline itself, so an arm at this line was simply overwritten by its fixed
+			// handshakeTimeout — which is why probe_timeout_secs still did not reach the TLS leg after
+			// #216, and a 5s probe still paid 10s of handshake. Cleared on success, because from that
 			// point h2 owns the conn and a lingering deadline would kill the live stream.
-			_ = c.SetDeadline(time.Now().Add(budget))
-			uc, err := uEdgeHandshake(b.fragWrap(c, host), host, ech, alpn, h2) // split the ClientHello SNI when enabled
+			uc, err := uEdgeHandshake(b.fragWrap(c, host), host, ech, alpn, h2, budget) // split the ClientHello SNI when enabled
 			if err != nil {
 				c.Close()
 				return nil, err
