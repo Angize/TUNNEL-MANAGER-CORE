@@ -1120,17 +1120,24 @@ func (s *httpcSession) reapIfUnserved(b *TCP, sid string) {
 // deliver feeds one upstream chunk into the ordered upstream. Out-of-order chunks are buffered
 // until the gap fills; already-delivered seqs are dropped. Writes happen under upMu so the byte
 // stream stays correctly ordered even with several POSTs in flight.
-func (s *httpcSession) deliver(seq uint64, data []byte) {
+//
+// It REPORTS whether the chunk is now the server's to deliver, because the caller answers the POST
+// and a 204 is a promise. Dropping bytes and telling the client they were accepted stalls the stream
+// at nextSeq with nothing on either side able to notice.
+func (s *httpcSession) deliver(seq uint64, data []byte) bool {
 	s.upMu.Lock()
 	defer s.upMu.Unlock()
 	if seq < s.nextSeq {
-		return // already delivered / duplicate
+		// Already delivered. A re-POST of a seq we consumed is a legitimate retransmit and its bytes
+		// ARE in the stream, so this is a success: answering it with an error would make the client
+		// tear down a healthy session over a duplicate.
+		return true
 	}
 	// Runaway gap (a lost POST) — let the client fail + re-dial. Bounded on BOTH axes: the entry
 	// count, and the bytes those entries hold. A chunk is up to maxPostBody, so the count alone let
 	// a stranger park ~1 GiB here by posting sparse seqs that never fill the gap at nextSeq.
 	if len(s.pend) > 1024 || s.pendLen+len(data) > maxPendBytes() {
-		return
+		return false
 	}
 	if old, ok := s.pend[seq]; ok {
 		s.pendLen -= len(old) // a re-POST of a seq still waiting: replaces, doesn't add
@@ -1147,10 +1154,11 @@ func (s *httpcSession) deliver(seq uint64, data []byte) {
 		s.nextSeq++
 		if len(d) > 0 {
 			if _, err := s.upW.Write(d); err != nil {
-				return // session gone
+				return false // session gone — the client must re-dial, not keep posting into it
 			}
 		}
 	}
+	return true
 }
 
 func (s *httpcSession) close(b *TCP, sid string) {
@@ -1245,7 +1253,21 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}
-		s.deliver(seq, data)
+		if !s.deliver(seq, data) {
+			// The chunk was THROWN AWAY: the pending map hit its entry or byte cap, or the upstream
+			// pipe is gone. 204 means "chunk accepted, session stays open", and answering it for a
+			// chunk nobody has is the same mistake the truncated-body branch fifteen lines above
+			// spells out — the client never learns and never re-dials, so the stream stalls at
+			// nextSeq forever while the downstream GET keeps streaming and the dot stays green. The
+			// overflow guard's own comment already claims this "lets the client fail + re-dial";
+			// nothing made that true. A non-2xx does: the POST worker fails the conn (once) and
+			// dialLoop re-dials a fresh session, which is the only thing that can refill the gap.
+			//
+			// A duplicate (seq below nextSeq) is NOT this case — those bytes really were delivered,
+			// so deliver reports success and the retransmit gets its 204.
+			http.Error(w, "", http.StatusBadRequest)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent) // 204: chunk accepted, session stays open
 		return
 	}
