@@ -168,6 +168,71 @@ func TestHTTPCServerWriteFailsInsteadOfParkingWhenThePeerStopsReading(t *testing
 	}
 }
 
+// ...and the same claim at the size the tunnel really writes, which is the size that was never covered.
+//
+// The test above writes 64 KiB, larger than either server writer's buffer, so bufio forwards it straight
+// to the socket inside c.w.Write and the armed deadline does bite. A framed tunnel packet is 2+sealed
+// bytes — about one TUN MTU — and that is SMALLER than both buffers (net/http's 2048-byte
+// bufferBeforeChunkingSize, x/net/http2's 4 KiB handlerChunkWriteSize). Both handlers flush after every
+// frame, so every write starts against an empty buffer, c.w.Write never touches the socket, and 100% of
+// the blocking is in c.flush() — which the deadline was disarmed before. On the real frame size the
+// server write was therefore still completely unbounded, and a tarpitting peer parks the goroutine that
+// drains the TUN forever.
+func TestHTTPCServerWriteDeadlineCoversTheFlushAtFrameSize(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		h2   bool
+	}{{"http1", false}, {"h2c", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := make(chan error, 1)
+			h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fl, ok := w.(http.Flusher)
+				if !ok {
+					out <- errors.New("ResponseWriter is not a Flusher")
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				fl.Flush()
+				conn := newHTTPCServerConn(w, nil, w, fl.Flush, r.RemoteAddr, nil)
+				_ = conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+				// One framed tunnel packet, under BOTH writers' buffer sizes on purpose.
+				buf := make([]byte, 1452)
+				var err error
+				t0 := time.Now()
+				for err == nil && time.Since(t0) < 30*time.Second {
+					_, err = conn.Write(buf)
+				}
+				out <- err
+			})
+
+			ts := httptest.NewUnstartedServer(h)
+			if tc.h2 {
+				ts.EnableHTTP2 = true
+				ts.StartTLS()
+			} else {
+				ts.Start()
+			}
+			defer ts.Close()
+
+			resp, err := ts.Client().Get(ts.URL)
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			defer resp.Body.Close() // never read: this IS the stalled peer
+
+			select {
+			case err := <-out:
+				if err == nil {
+					t.Fatal("the server absorbed every byte at frame size — nothing bounded the write")
+				}
+				t.Logf("server write failed as it should: %v", err)
+			case <-time.After(10 * time.Second):
+				t.Fatal("a frame-sized server write parked past its deadline: the deadline is disarmed before the flush, which is where all the socket I/O happens")
+			}
+		})
+	}
+}
+
 // CLIENT, grpc shape. Here the writer is an io.Pipe feeding the request body, and the pipe's reader is
 // Go's h2 transport: once the server stops reading, the stream window fills, the transport stops
 // draining the pipe, and Write parks. A pipe offers no deadline handle, so the deadline has to close
