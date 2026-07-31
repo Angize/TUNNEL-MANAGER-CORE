@@ -335,9 +335,10 @@ type TCP struct {
 	psk       string
 	idle      time.Duration // read deadline; reaps dead/probe connections
 
-	cover    bool             // wrap the connection in a REALITY-style TLS cover
-	coverSNI string           // client: SNI to present; server: real dest to borrow
-	coverSrv *tlscover.Server // server-side REALITY responder (nil on the client)
+	cover     bool             // wrap the connection in a REALITY-style TLS cover
+	coverSNI  string           // client: SNI to present; server: real dest to borrow
+	coverHint sync.Once        // client: one line naming the two causes of a cover handshake that "succeeds" into the real site
+	coverSrv  *tlscover.Server // server-side REALITY responder (nil on the client)
 
 	// WebSocket carrier (transport "ws"): the stream is wrapped in RFC 6455 binary
 	// frames after an HTTP Upgrade, so it can be fronted through a CDN. ws is
@@ -2312,6 +2313,33 @@ func (b *TCP) dialCarrier(attribute bool) (net.Conn, string, string, error) {
 }
 
 // handshakeAndPrime wraps a freshly-dialed conn in a framer, runs the client ephemeral handshake
+// coverProbeHint names the two causes that produce ONE indistinguishable symptom on a cover tunnel:
+// the TLS handshake succeeds and the core handshake behind it then fails.
+//
+// tlscover's server reads an auth token out of the ClientHello session id. When the token does not
+// open — a mismatched PSK, or either clock off by more than tlscover's 120s replay window — the
+// server does exactly what it does for a censor's probe: it proxies the connection to the REAL cover
+// site. That is the correct answer to a probe, and it is why the carrier is probe-resistant. But our
+// own client is on the other end of it, so it completes a perfectly valid TLS session with a site
+// that has never heard of the core protocol, and the failure surfaces as a generic handshake error
+// with nothing pointing at the clock.
+//
+// This cannot be fixed by signalling: any hint the server sends our client, a censor's probe can
+// also collect. So the hint has to be client-side and local, which is what this is. Once per carrier
+// (sync.Once): the dial loop retries forever, and a line per retry is a line per second.
+func (b *TCP) coverProbeHint() {
+	if !b.cover {
+		return
+	}
+	b.coverHint.Do(func() {
+		log.Printf("core/tcp: the TLS cover handshake to %s succeeded but the core handshake behind it did not. "+
+			"The cover server answers an unopenable auth token by proxying to the real cover site — which is what "+
+			"makes it probe-resistant — so this looks identical to a censor probe from here. The two causes are a "+
+			"PSK mismatch and a clock skew over %ds between the ends; check the clocks first (this host: %s)",
+			b.coverSNI, tlscover.AuthWindowSecs(), time.Now().UTC().Format(time.RFC3339))
+	})
+}
+
 // (crypto) and the obfs salt exchange, then primes the server with a ping that authenticates us.
 // On any failure the returned error is non-nil and the caller closes conn. On success the framer
 // is fully established and ready for serve/readLoop.
@@ -2325,6 +2353,7 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 	conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	if b.cryptoOn { // ephemeral handshake first: establishes the session sealer
 		if err := b.clientHandshake(cf); err != nil {
+			b.coverProbeHint()
 			return nil, err
 		}
 		// A completed crypto handshake means the SERVER answered — an end-to-end authentication a CDN edge
