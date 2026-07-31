@@ -357,6 +357,12 @@ func (b *UDP) adoptSourceUDP() {
 	addr := b.sp.current()
 	if host, ok := b.rebindSourceTo(addr); ok {
 		log.Printf("core/udp: pinned source to %s", host)
+		// THIS is the landing. A source swap keeps the AEAD session, so no handshake follows that
+		// anyone could read one off — and the success path that used to release the pin only runs when
+		// something failed first. On a healthy tunnel the operator's jump therefore sat "in progress"
+		// for the whole pinTTL, freezing rotation, with the panel showing a move that had in fact
+		// already completed.
+		b.sp.pinLandedOn(addr)
 		// Silent, like the ws edge pool: a manual source "make this active" changes only the active source
 		// (the source pool's own status file reflects it). The session survives, so there's nothing to
 		// reconnect and no event is emitted — we no longer log a src-pin here.

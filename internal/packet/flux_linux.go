@@ -994,6 +994,7 @@ func (f *Flux) adoptSourceFlux() {
 	}
 	f.localIP.Store(&net.IPAddr{IP: ip})
 	log.Printf("flux: pinned source to %s", ip)
+	f.sp.pinLandedOn(addr) // the swap IS the landing — see adoptSourceUDP
 	// Silent for the same reason as the destination pin: the source is stamped per packet so the AEAD
 	// session survives — nothing to reconnect, nothing to log. The source pool's status file shows it.
 }
