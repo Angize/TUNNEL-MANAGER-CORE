@@ -15,9 +15,13 @@ import "testing"
 // A compile-time check would not catch this: the carriers are only ever held as the carrier interface,
 // so a missing method is invisible until that runtime assertion quietly fails.
 func TestEveryClientCarrierAcceptsDeadAfter(t *testing.T) {
+	// The signature includes the bool: a carrier is the only thing that knows whether it will really
+	// ENFORCE the value, and main prints "self-heal deadline set to Ns" on the strength of that answer.
+	// A carrier that dropped back to the void-returning shape would fail this assertion and take the
+	// setting silently inert again — the exact failure this test exists for.
 	for _, c := range []any{&TCP{}, &UDP{}, &Raw{}, &Flux{}, &DNS{}} {
-		if _, ok := c.(interface{ SetDeadAfter(int) }); !ok {
-			t.Fatalf("%T does not implement SetDeadAfter — dead_after_secs is silently inert on it", c)
+		if _, ok := c.(interface{ SetDeadAfter(int) bool }); !ok {
+			t.Fatalf("%T does not implement SetDeadAfter(int) bool — dead_after_secs is silently inert on it", c)
 		}
 	}
 }

@@ -102,10 +102,15 @@ func ListenDNS(dev *tun.Device, listenAddr, zone, psk, cipher string) (*DNS, err
 // method: main.go probes for it with a type assertion, the assertion failed, and the "self-heal deadline
 // set" log line sits inside the successful branch — so the knob was a no-op here with nothing said.
 // The session still floors the value, so a tiny setting cannot reap a healthy session.
-func (d *DNS) SetDeadAfter(secs int) {
-	if secs > 0 {
-		d.cfg.DeadAfter = time.Duration(secs) * time.Second
+func (d *DNS) SetDeadAfter(secs int) bool {
+	if secs <= 0 {
+		return false
 	}
+	d.cfg.DeadAfter = time.Duration(secs) * time.Second
+	// The SERVER of a connectionless carrier holds no dead window at all — there is no connection to
+	// reap and clientLoop, the only reader of this value, never starts. Report that rather than let
+	// main print "self-heal deadline set to Ns" over a number nothing will ever consult.
+	return d.isClient
 }
 
 // SetStatusPath (client, optional) wires the status file every OTHER carrier already writes: an
