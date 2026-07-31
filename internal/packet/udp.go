@@ -24,6 +24,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -556,6 +557,41 @@ func (b *UDP) sendConn() *net.UDPConn {
 		return b.conn.Load()
 	}
 	return b.replyConn.Load()
+}
+
+// hostOnly returns the host part of an "ip:port", or s unchanged if it has none. Portable, beside
+// its portable caller below, for the same reason buildSrcAllow is.
+func hostOnly(s string) string {
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		return h
+	}
+	return strings.TrimSpace(s)
+}
+
+// parseIP4 parses s as an IPv4 address, returning nil for anything else (including a valid IPv6).
+func parseIP4(s string) net.IP {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return nil
+	}
+	return ip.To4()
+}
+
+// buildSrcAllow builds the server-side source-IP admit set from a pool's source IPs, keyed by bare
+// 4-byte IPv4. Shared by udp, raw and flux, whose SetPeerSources map-build was byte-identical.
+//
+// It lives HERE, in a portable file, and not beside the raw carrier that used to hold it: udp.go is
+// portable and calls it, so with the definition behind //go:build linux the whole packet failed to
+// compile for any other GOOS with "undefined: buildSrcAllow". Nothing on the fleet cares — the core
+// only runs on linux — but it meant `GOOS=windows go build ./...` could not type-check the tree.
+func buildSrcAllow(ips []string) map[string]struct{} {
+	m := make(map[string]struct{}, len(ips))
+	for _, s := range ips {
+		if ip := parseIP4(hostOnly(s)); ip != nil {
+			m[string(ip.To4())] = struct{}{}
+		}
+	}
+	return m
 }
 
 // replySock is the socket for a SOLICITED reply (a handshake response or a pong, sent while processing an

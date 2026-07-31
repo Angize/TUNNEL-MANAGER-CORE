@@ -1116,18 +1116,6 @@ func (r *Raw) srcAllowed(ip net.IP) bool {
 	return srcAllowedIn(r.srcAllow, ip)
 }
 
-// buildSrcAllow builds the server-side source-IP admit set from a pool's source IPs, keyed by bare
-// 4-byte IPv4. Shared by the raw and flux carriers, whose SetPeerSources map-build was byte-identical.
-func buildSrcAllow(ips []string) map[string]struct{} {
-	m := make(map[string]struct{}, len(ips))
-	for _, s := range ips {
-		if ip := parseIP4(hostOnly(s)); ip != nil {
-			m[string(ip.To4())] = struct{}{}
-		}
-	}
-	return m
-}
-
 // srcAllowedIn reports whether ip is in the admit set. An empty set => false, keeping the strict
 // single-source filter unchanged. Shared by raw/flux srcAllowed.
 func srcAllowedIn(set map[string]struct{}, ip net.IP) bool {
@@ -1416,22 +1404,6 @@ func (r *Raw) send(typ byte, payload []byte, to *net.IPAddr) {
 		return
 	}
 	r.writeCtrl(body, to)
-}
-
-// hostOnly returns the host part of an "ip:port", or s unchanged if it has none.
-func hostOnly(s string) string {
-	if h, _, err := net.SplitHostPort(s); err == nil {
-		return h
-	}
-	return strings.TrimSpace(s)
-}
-
-func parseIP4(s string) net.IP {
-	ip := net.ParseIP(s)
-	if ip == nil {
-		return nil
-	}
-	return ip.To4()
 }
 
 // routeLocalIP asks the kernel which local IPv4 it would use to reach peer, by
