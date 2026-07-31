@@ -22,8 +22,16 @@ import (
 const (
 	dnsBackoffMin = time.Second
 	dnsBackoffMax = 30 * time.Second
-	dnsMinMTU     = 40 // a KCP session needs a workable MTU; a very long zone leaves too little
+	// dnsMinMTU is the smallest KCP MTU a zone may leave. It is dnstun's number, not a copy: the
+	// floor is about KCP's own per-segment overhead, which lives there.
+	dnsMinMTU = dnstun.MinUsefulMTU
 )
+
+// zoneBytesToDrop is how many characters a zone must lose to free `need` more bytes per query.
+// Each raw byte costs ceil(8/5) base32 characters in the query name, so one character of zone buys
+// back five eighths of a byte. Reported in the error because "your zone is too long" without a
+// number leaves the operator guessing at the one thing they can change.
+func zoneBytesToDrop(need int) int { return (need*8 + 4) / 5 }
 
 // DNS carries L3 packets over a DNS tunnel. It satisfies the core carrier interface (Run/Close).
 type DNS struct {
@@ -57,7 +65,14 @@ func newDNS(dev *tun.Device, isClient bool, addr string, resolvers []string, zon
 	}
 	mtu := codec.MaxUpstream() - dnstun.SessionOverhead
 	if mtu < dnsMinMTU {
-		return nil, fmt.Errorf("dns: zone %q leaves too little room per query (mtu=%d, need >=%d)", zone, mtu, dnsMinMTU)
+		// The old floor was 40, which kcp-go accepts (it only refuses an MTU at or below its own
+		// 24-byte header) — so a long zone came up, logged "session established", and then spent 60%
+		// of every DNS query on the KCP header while a single 1200-byte packet shattered into ~75
+		// queries. Refusing with the number of characters to remove beats starting a tunnel that
+		// cannot carry anything and saying nothing about why.
+		return nil, fmt.Errorf("dns: zone %q leaves only %d bytes per query, and the carrier needs %d "+
+			"(KCP spends %d of them on its own header) — shorten the zone by about %d characters",
+			zone, mtu, dnsMinMTU, dnstun.KCPOverhead, zoneBytesToDrop(dnsMinMTU-mtu))
 	}
 	return &DNS{
 		dev: dev, isClient: isClient, zone: zone, addr: addr, resolvers: resolvers,
