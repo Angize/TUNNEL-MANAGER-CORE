@@ -330,6 +330,42 @@ func (p *PeerPool) nextEndpoint(proactive bool) (addr string, moved bool) {
 	return p.fail()
 }
 
+// keepCursorOn puts cur back on addr — the endpoint the carrier is REALLY using — after a rotation
+// attempt that did not take. Distinct from rejectCandidate: it burns nothing and heals nothing.
+//
+// It exists for make-before-break. The rotation timer advances the pool, buildWarm dials the endpoint
+// it advanced onto, and if that build fails the live connection deliberately STAYS where it is — the
+// whole point of building before breaking. But the failure path had already run fail(), which burns
+// the candidate (right) and then advances cur again (fine, the next beat needs a different one) and
+// publishes Active = whatever cur now points at (wrong). So the pool status file named an endpoint the
+// tunnel had never been on, the panel drew that IP as active, and the next beat "rotated" onto the
+// endpoint the tunnel was already using — a rotation event for a move that had already not happened.
+//
+// The burn recorded by fail() is kept: that endpoint really did refuse to come up. Only the cursor
+// goes back, so `Active` describes the tunnel again and the next rotateOnce starts from the truth.
+// Nil-safe: the rotation beat fires when EITHER pool has an interval, so a source-only rotation
+// reaches here with no destination pool at all.
+func (p *PeerPool) keepCursorOn(addr string) {
+	if p == nil || addr == "" {
+		return
+	}
+	p.mu.Lock()
+	moved := false
+	if p.addrs[p.cur] != addr {
+		for idx, a := range p.addrs {
+			if a == addr {
+				p.commitLocked(idx) // a DELIBERATE choice: staying put is the outcome of the failed attempt
+				moved = true
+				break
+			}
+		}
+	}
+	p.mu.Unlock()
+	if moved {
+		p.writeStatus()
+	}
+}
+
 // rejectCandidate UNDOES a rotation whose target the carrier could not actually adopt — the udp source
 // rebind failed because the new source IP is not on this host (removed from the interface but still in
 // the pool). nextEndpoint has already advanced cur onto that unbindable endpoint (and, on a failover,

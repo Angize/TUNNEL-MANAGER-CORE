@@ -67,7 +67,7 @@ func TestPinIsNotConsumedByAPreBuiltRotationCarrier(t *testing.T) {
 
 	// The rotation timer parks the NEXT carrier. It resolves pp.current() now — a1 — which is the whole
 	// point of make-before-break, and the whole reason a later pin can be ignored.
-	if !cli.buildWarm(func() {}, "", true) {
+	if !cli.buildWarm(func() {}, "", true, "") {
 		t.Fatal("buildWarm did not park a carrier — the test cannot reproduce the race")
 	}
 

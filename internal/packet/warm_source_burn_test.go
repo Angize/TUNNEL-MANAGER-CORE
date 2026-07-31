@@ -68,7 +68,7 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 	// One warm build per destination endpoint, so the pool cycles and burnAdvance reaches the source
 	// walk — the branch under test. Every one of them fails: the live carrier never moves.
 	for i := 0; i < b.pp.size(); i++ {
-		if b.buildWarm(func() { b.burnAdvance(false) }, b.sourceIP(), true) {
+		if b.buildWarm(func() { b.burnAdvance(false) }, b.sourceIP(), true, "") {
 			t.Fatal("buildWarm reported success against an endpoint that closes before a single core frame")
 		}
 		if w := b.takeWarm(); w != nil {
