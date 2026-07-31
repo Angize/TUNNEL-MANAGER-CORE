@@ -675,6 +675,20 @@ func (s *dnsServer) serveLoop() {
 		}
 
 		data, derr := s.codec.DecodeName(qname)
+		if errors.Is(derr, ErrBareZone) {
+			// A TXT query on the zone apex itself. Our client never sends one (EncodeName always
+			// prepends a nonce label, even for a payload-free poll), so this is a resolver checking
+			// the delegation, a scanner, or someone draining us. Answer it — staying silent on our own
+			// zone is its own signal, and a resolver that gets nothing marks the zone lame — but answer
+			// it EMPTY, without going near the downstream queue.
+			//
+			// This was a real theft-of-service: `dig TXT <zone>` in a loop popped one server->client
+			// datagram per query, so a stranger who read the zone off the public delegation could
+			// starve the tunnel. The payload is AEAD-sealed, so nothing was disclosed; what was stolen
+			// was the stream itself.
+			s.write(id, qn, nil, addr)
+			continue
+		}
 		if derr != nil {
 			continue // a TXT query outside our zone / malformed
 		}

@@ -3,6 +3,7 @@ package dnstun
 import (
 	"bytes"
 	"crypto/rand"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -139,15 +140,16 @@ func TestDecodeNameRejectsSharedSuffixLabel(t *testing.T) {
 	}
 }
 
-func TestDecodeBareZoneIsEmpty(t *testing.T) {
-	// A poll query for the bare zone (no data labels) is valid and carries zero upstream bytes.
+func TestDecodeBareZoneIsRejected(t *testing.T) {
+	// This test used to assert the opposite — that a bare-zone query is "a poll carrying zero
+	// upstream bytes" — and that assumption was the bug: the server answered it by taking a datagram
+	// off the server->client queue, so anyone who read the PUBLIC zone off the delegation could drain
+	// the tunnel with `dig TXT <zone>` in a loop. Our client never sends a bare zone (EncodeName
+	// always prepends a nonce label), so it is not a poll and must not be treated as one.
 	c, _ := NewCodec("t.example.com")
 	got, err := c.DecodeName("t.example.com.")
-	if err != nil {
-		t.Fatalf("DecodeName(bare zone): %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("bare-zone query decoded to %d bytes, want 0", len(got))
+	if !errors.Is(err, ErrBareZone) {
+		t.Fatalf("DecodeName(bare zone) = (%v, %v), want ErrBareZone", got, err)
 	}
 }
 
