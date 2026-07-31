@@ -96,8 +96,11 @@ func (l *l2inject) close() {
 }
 
 // sendTo injects one IPv4 packet (full IP header + payload) toward peer, prepending the Ethernet
-// header for peer's next hop. peer must be the SAME destination the packet's IPv4 header carries,
-// so the frame is handed to the gateway that actually serves it. The route is resolved lazily,
+// header for peer's next hop. peer must be the destination the tunnel ROUTES to — the same address
+// the real send path hands the kernel — so the frame is handed to the gateway that actually serves
+// it. On a spoof-dst link that is NOT the forged dst in the packet's own IPv4 header: the header
+// carries the decoy while the kernel routes by the real peer, and an injected frame has to make the
+// same choice or it leaves by a different first hop than the flow it is camouflaging. The route is resolved lazily,
 // cached, and re-resolved when the destination changes or after a send failure. Returns an error
 // (sending nothing) when the socket is closed or the next hop isn't resolvable yet.
 func (l *l2inject) sendTo(peer net.IP, ipPkt []byte) error {
