@@ -74,6 +74,12 @@ func (c *Codec) MaxUpstream() int { return c.maxUp }
 func (c *Codec) Zone() string { return c.zone }
 
 // zoneWireLen is the wire length of the zone name (label length-octets + bytes + the root octet).
+// ErrBareZone is returned by DecodeName for a query on the zone apex itself ("<zone>", no nonce
+// label). Our client never sends one — EncodeName always prepends a nonce, so even a payload-free
+// poll is "<nonce>.<zone>" — which makes this the one caller-visible way to tell "not our client"
+// from "our client, polling". The server uses it to answer without touching the session.
+var ErrBareZone = errors.New("dns codec: bare-zone query (no nonce label)")
+
 func zoneWireLen(zone string) int {
 	n := 1 // root label (0x00)
 	for _, lbl := range strings.Split(strings.TrimSuffix(zone, "."), ".") {
@@ -146,7 +152,15 @@ func (c *Codec) DecodeName(name string) ([]byte, error) {
 	}
 	prefix := strings.TrimSuffix(nl[:len(nl)-len(c.zone)], ".") // nonce + data labels, no trailing dot
 	if prefix == "" {
-		return []byte{}, nil // bare zone (external probe), no nonce/data
+		// The BARE zone: no nonce label at all. This cannot be our client — EncodeName always
+		// prepends one, even for a poll ("<nonce>.<zone>") — so it is a resolver validating the
+		// delegation, a scanner, or someone who read the zone off the public delegation and is
+		// draining us. It used to be indistinguishable from a poll here, both returning
+		// ([]byte{}, nil), and the server then answered it by POPPING a downstream datagram off the
+		// queue: `dig TXT <zone>` in a loop stole the server->client stream from the real client.
+		// Give the caller the distinction; it is the only one available without an authenticated
+		// poll, which would be a wire change.
+		return nil, ErrBareZone
 	}
 	labels := strings.Split(prefix, ".")
 	data := labels[1:] // drop the leftmost nonce label
