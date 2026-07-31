@@ -244,6 +244,12 @@ func (b *UDP) SetSourcePool(sp *PeerPool) {
 				// default source with the operator's chosen egress IP quietly unused — and with a lone
 				// src_ip and rotate=0 the pool never moves, so it is never retried either.
 				log.Printf("core/udp: initial source bind to %s failed: %v", host, err)
+				// ...and BURN it, which loudness alone never did. The socket stayed on the kernel
+				// default while the pool went on calling this entry Active, so the panel named a source
+				// the datagram path had never adopted; and because nothing marked it bad, every later
+				// heal treated it as a healthy IP that simply had not been tried. fail() burns it and
+				// advances, so the first rotation lands on an entry that binds.
+				b.sp.fail()
 			}
 			if err == nil {
 				applyConnSockBuf(nc)
@@ -360,7 +366,22 @@ func (b *UDP) adoptSourceUDP() {
 		// Silent, like the ws edge pool: a manual source "make this active" changes only the active source
 		// (the source pool's own status file reflects it). The session survives, so there's nothing to
 		// reconnect and no event is emitted — we no longer log a src-pin here.
+		return
 	}
+	// The rebind failed, so the socket never left the old source and the jump did NOT land. There was
+	// no else here at all, which meant two wrong things at once: the pin was left live, so it held the
+	// whole pinTTL forcing a source the host cannot bind — and then the ordinary success path released
+	// it through pinLanded() as though it HAD landed, with the panel showing the jump as complete over
+	// a tunnel still egressing from the previous IP.
+	//
+	// This is the treatment #214 gave tcp (dropUnusableSource) and this batch gave raw/flux
+	// (adoptableSource); udp is where it stopped. End the jump — it is momentary, not a lock — and
+	// burn the entry so rotation stops coming back to it. fail() refuses to touch a pinned entry, so
+	// the order matters.
+	if b.sp.pinCannotLand(addr) {
+		log.Printf("core/udp: manual jump to source %s abandoned — that IP will not bind on this host", addr)
+	}
+	b.sp.fail()
 }
 
 // ProbeAllNow retests every suspect/dead endpoint on both pools at once (the panel "probe now" control,
