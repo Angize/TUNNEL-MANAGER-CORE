@@ -115,37 +115,59 @@ func readSeqs(raw syscall.RawConn) (snd, rcv uint32, ok bool) {
 // IPv4 only (the raw injector builds IPv4); falls back to disorder on IPv6 or when any primitive is
 // unavailable. Needs CAP_NET_RAW + CAP_NET_ADMIN, which the core holds (it runs as root).
 func (f *fragConn) writeFake(p []byte, at int) (int, error) {
+	// Build the decoy FIRST: it depends on nothing about the socket, and the one case that cannot
+	// produce a decoy at all should not poke TCP_REPAIR or open an AF_PACKET socket on the way to
+	// finding that out.
+	fake := make([]byte, len(p))
+	copy(fake, p)
+	i := bytes.Index(fake, []byte(f.host))
+	if i < 0 {
+		// The hostname is not in the ClientHello in cleartext — ECH. With nothing to overwrite, the
+		// "decoy" would be a BYTE-IDENTICAL copy of the real ClientHello, injected at the same sequence
+		// with a corrupt checksum. A DPI resolving that overlap recovers exactly the SNI it would have
+		// seen anyway: zero benefit, and a duplicate segment carrying a bad checksum is itself a
+		// signature. Reachable whenever ECH is on AND split_pos is set explicitly, because splitAt
+		// returns f.pos before it ever searches for the hostname.
+		f.fakeDegraded("the hostname is not in the ClientHello in cleartext (ECH), so the decoy would be " +
+			"byte-identical to the real one — injecting it would add a signature and hide nothing")
+		return f.writeDisorder(p, at)
+	}
+	copy(fake[i:i+len(f.host)], decoySNI(len(f.host)))
+
 	la, ok1 := f.Conn.LocalAddr().(*net.TCPAddr)
 	ra, ok2 := f.Conn.RemoteAddr().(*net.TCPAddr)
 	if !ok1 || !ok2 {
+		f.fakeDegraded("the connection is not TCP, so there is no 4-tuple to forge a segment on")
 		return f.writeDisorder(p, at)
 	}
 	src, dst := la.IP.To4(), ra.IP.To4()
 	if src == nil || dst == nil { // IPv6 -> the raw injector can't build it; disorder is the next best
+		f.fakeDegraded("the edge is IPv6 and the decoy injector builds IPv4 only")
 		return f.writeDisorder(p, at)
 	}
 	sc, ok := f.Conn.(syscall.Conn)
 	if !ok {
+		f.fakeDegraded("the connection exposes no raw fd")
 		return f.writeDisorder(p, at)
 	}
 	raw, err := sc.SyscallConn()
 	if err != nil {
+		f.fakeDegraded("SyscallConn: " + err.Error())
 		return f.writeDisorder(p, at)
 	}
 	snd, rcv, ok := readSeqs(raw)
 	if !ok {
+		// TCP_REPAIR needs CAP_NET_ADMIN. Without the sequence numbers the decoy cannot be placed at
+		// the same offset as the real ClientHello, which is the whole mechanism.
+		f.fakeDegraded("TCP_REPAIR could not read the connection's sequence numbers (needs CAP_NET_ADMIN)")
 		return f.writeDisorder(p, at)
 	}
 	inj, err := newL2Inject()
 	if err != nil {
+		f.fakeDegraded("AF_PACKET injector: " + err.Error())
 		return f.writeDisorder(p, at)
 	}
 	defer inj.close()
-	fake := make([]byte, len(p))
-	copy(fake, p)
-	if i := bytes.Index(fake, []byte(f.host)); i >= 0 {
-		copy(fake[i:i+len(f.host)], decoySNI(len(f.host)))
-	}
 	seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), snd, rcv, tcpPshAck, 0xffff, fake)
 	badTCPChecksum(seg) // the SERVER drops the fake (bad L4 checksum); the DPI still ingests it
 	if ip := buildIP4Ext(src, dst, protoTCP, f.fakeSegTTL(), false, seg); ip != nil {
