@@ -941,7 +941,22 @@ func (r *Raw) learnPeer(addr *net.IPAddr) {
 	// already re-scoped to this peer, so the common case is the atomic-load fast path and nothing
 	// happens; the hand-off covers what a rotation cannot know up front — the server learning its
 	// client at all, and then following that client's SOURCE rotation.
-	r.leak.scopeAsync(addr.IP)
+	//
+	// It scopes to the CURRENT peer, not to whoever sent this frame, and the difference is the whole
+	// bug. The rule set is single-scoped: pointing it at one address takes it OFF the previous one. On
+	// a pooled CLIENT the branch above deliberately does NOT adopt the sender — and SetPeerPool just as
+	// deliberately keeps admitting the endpoint a rotation left, so frames from it keep arriving for a
+	// while. Passing addr here handed each of those frames the power to drag the rules back onto the
+	// OLD destination, i.e. off the one the tunnel is now using: the #211 kernel-answer leak, re-opened
+	// on the live endpoint by every straggler, on every rotation. install-before-remove does not help —
+	// it closes the sub-millisecond gap between two rules, not a scope pointed at the wrong address.
+	//
+	// Where the sender IS the peer this is identical: on a server, and on a single-peer client, the
+	// store above has just made them the same value. provenFrom next door already draws exactly this
+	// distinction for the same class of frame.
+	if p := r.peer.Load(); p != nil {
+		r.leak.scopeAsync(p.IP)
+	}
 }
 
 // learnLocalIP records, once, the local source IP the kernel routes toward peer — the tcp profile's
