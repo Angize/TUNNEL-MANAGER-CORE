@@ -1178,8 +1178,8 @@ func (r *Raw) SetSourcePool(sp *PeerPool) {
 			// Seeding an IP the host cannot send from is the worst case of all: it is stamped from the
 			// FIRST packet, so the tunnel never comes up at all on the profiles whose checksum binds the
 			// source. Burn it and leave the source unset — srcIP() then falls back to the kernel's pick
-			// and the first rotation lands on an entry that works.
-			sp.fail()
+			// and the first rotation lands on an entry that works. Unconditional: see failUnusable.
+			sp.failUnusable()
 		}
 	}
 }
@@ -1301,8 +1301,8 @@ func (r *Raw) adoptSourceRaw() {
 	ip := adoptableSource("raw", r.sp, addr, &r.srcWarned)
 	if ip == nil {
 		// adoptableSource has already ended the jump; pull the IP out of rotation too so the next
-		// tick does not come straight back to it.
-		r.sp.fail()
+		// tick does not come straight back to it. Unconditional: see failUnusable.
+		r.sp.failUnusable()
 		return
 	}
 	r.localIP.Store(&net.IPAddr{IP: ip})

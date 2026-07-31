@@ -876,7 +876,8 @@ func (f *Flux) SetSourcePool(sp *PeerPool) {
 		} else {
 			// Same reasoning as the raw twin: a seed the host cannot send from is stamped from the
 			// FIRST packet. Burn it and let the kernel pick until rotation reaches a usable entry.
-			sp.fail()
+			// Unconditional: see failUnusable.
+			sp.failUnusable()
 		}
 	}
 }
@@ -996,7 +997,7 @@ func (f *Flux) adoptSourceFlux() {
 	addr := f.sp.current()
 	ip := adoptableSource("flux", f.sp, addr, &f.srcWarned)
 	if ip == nil {
-		f.sp.fail() // the jump is already ended; pull the IP out of rotation too
+		f.sp.failUnusable() // the jump is already ended; pull the IP out of rotation too (see failUnusable)
 		return
 	}
 	f.localIP.Store(&net.IPAddr{IP: ip})

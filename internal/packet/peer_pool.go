@@ -199,7 +199,13 @@ func (p *PeerPool) bestIdxLocked(except int) int {
 
 // burnLocked moves the endpoint's health FSM on a failure: healthy → suspect (scheduled +30s), or, if
 // it is already tracked (a due endpoint we retried live that failed again), one step further down the
-// backoff toward dead. A no-op axis when auto-burn is off. Caller holds the lock.
+// backoff toward dead. Caller holds the lock.
+//
+// It does NOT consult auto-burn itself — the callers decide, and they do not all decide the same way,
+// because they are not answering the same question. fail() is about a REMOTE endpoint that looks
+// unreachable, and auto-burn is exactly the policy for that ("do not sideline a peer just because it
+// timed out"). failUnusable() and rejectCandidate() are about a LOCAL impossibility — a source IP that
+// is not on this host — which no policy can make usable; see failUnusable.
 func (p *PeerPool) burnLocked(addr string) {
 	r := p.health[addr]
 	if r == nil {
@@ -278,7 +284,25 @@ func (p *PeerPool) advanceEligibleLocked() bool {
 // fail reports that the active endpoint looks dead. With auto-burn it is walked down the health FSM
 // (healthy→suspect→…→dead); either way the pool advances to the next endpoint to try and returns it
 // (plus whether it actually moved).
-func (p *PeerPool) fail() (addr string, moved bool) {
+func (p *PeerPool) fail() (addr string, moved bool) { return p.failWith(false) }
+
+// failUnusable is fail() for a source the KERNEL refuses — an IP that is not configured on this host —
+// rather than for a peer that merely looks unreachable, and it burns even with auto-burn OFF.
+//
+// The two are different questions. Auto-burn is a policy about REMOTE reachability: an operator can
+// reasonably say "never sideline a peer, just rotate past it", because a peer that times out now may
+// answer in a minute. An address this box cannot send from is a local fact no policy changes, and
+// leaving it healthy means every rotation walks straight back onto it — the #189/#214 defect, which
+// since #215 is a total SILENT blackout on the raw udp/tcp profiles (sendViaConn refuses the degraded
+// send there, because the carrier header's L4 checksum was computed over that source).
+//
+// rejectCandidate has always burned unconditionally for exactly this reason. This is the same rule
+// for the other three shapes of the same event — the seed, the operator jump, and tcp's dial — which
+// went through the gated fail() and so left an unusable IP in rotation whenever auto-burn was off.
+// With auto-burn ON (every tunnel the panel builds: rotCollect hardcodes it) the two are identical.
+func (p *PeerPool) failUnusable() (addr string, moved bool) { return p.failWith(true) }
+
+func (p *PeerPool) failWith(unusable bool) (addr string, moved bool) {
 	p.mu.Lock()
 	// A live operator pin freezes failover ATOMICALLY — checked under the same p.mu that selectEntry
 	// takes — so an in-flight fail() racing a just-set pin can't burn or advance off the pinned endpoint
@@ -290,7 +314,7 @@ func (p *PeerPool) fail() (addr string, moved bool) {
 		return a, false
 	}
 	prev := p.cur
-	if p.autoBurn {
+	if p.autoBurn || unusable {
 		p.burnLocked(p.addrs[p.cur])
 	}
 	p.advanceFailLocked()
