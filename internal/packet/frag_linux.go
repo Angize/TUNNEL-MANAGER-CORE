@@ -22,6 +22,10 @@ const (
 	optTCPQueueSeq    = 21 // TCP_QUEUE_SEQ
 	queueRecv         = 1  // TCP_RECV_QUEUE (kernel enum: NO_QUEUE=0, RECV=1, SEND=2)
 	queueSend         = 2  // TCP_SEND_QUEUE
+
+	// The two ways OUT of repair mode, which the kernel does NOT treat alike:
+	repairOff        = 0  // TCP_REPAIR_OFF — also sends a window probe (a bare ACK) right away
+	repairOffNoProbe = -1 // TCP_REPAIR_OFF_NO_WP — same, minus the probe. What we want; see readSeqs.
 )
 
 // ttlOpt returns the (level, option) pair for the hop-limit socket option of the connection's
@@ -87,7 +91,26 @@ func readSeqs(raw syscall.RawConn) (snd, rcv uint32, ok bool) {
 		if syscall.SetsockoptInt(f, syscall.IPPROTO_TCP, optTCPRepair, 1) != nil {
 			return
 		}
-		defer syscall.SetsockoptInt(f, syscall.IPPROTO_TCP, optTCPRepair, 0)
+		// -1, not 0. The kernel treats them differently on the way OUT of repair mode: 0 also calls
+		// tcp_send_window_probe(), which on an ESTABLISHED socket transmits a bare ACK immediately.
+		// readSeqs runs on an idle, just-connected socket at the ClientHello point, so that ACK landed
+		// between the handshake and the ClientHello on EVERY sni_mode=fake connection — an exchange
+		// that appears on exactly the connections trying not to stand out. -1 leaves repair mode with
+		// the identical effect and no probe.
+		//
+		// MEASURED on DE with tcpdump, not reasoned from the kernel source (which is what the finding
+		// did): with 0 the capture carries an extra `Flags [.], ack 1` from us AND the peer's answering
+		// ACK, and /proc/net/netstat's TCPWinProbe goes up by one; with -1 neither appears and the
+		// counter does not move.
+		//
+		// Falling back to 0 if -1 is refused is not version tolerance for our own code — it is the one
+		// case where failing is worse than the probe: a socket LEFT IN REPAIR MODE does not behave like
+		// a TCP socket at all, and this deferred call is the only thing that takes it out.
+		defer func() {
+			if syscall.SetsockoptInt(f, syscall.IPPROTO_TCP, optTCPRepair, repairOffNoProbe) != nil {
+				syscall.SetsockoptInt(f, syscall.IPPROTO_TCP, optTCPRepair, repairOff)
+			}
+		}()
 		if syscall.SetsockoptInt(f, syscall.IPPROTO_TCP, optTCPRepairQueue, queueSend) != nil {
 			return
 		}
