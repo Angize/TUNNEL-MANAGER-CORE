@@ -440,6 +440,12 @@ type TCP struct {
 	// srcWarned holds the sources already reported as unbindable, one line each. It was a single
 	// sync.Once, i.e. ONE line for the whole process: a source pool that rotated onto a second dead
 	// IP was then completely silent, and the operator had no way to tell one bad entry from several.
+	// destRot counts destination burns since the last healthy session, so the SOURCE is only walked
+	// once the destination pool has cycled through every endpoint against it. Written from TWO
+	// goroutines — dialLoop's post-serve classification, and the rotation timer, which reaches
+	// burnAdvance through buildWarm — so it is an atomic: a plain int was a data race the moment
+	// make-before-break handed a burn to the timer.
+	destRot   atomic.Int64
 	srcWarned sync.Map    // source string -> struct{}
 	probing   atomic.Bool // a retest batch is in flight; keeps the retest tick free for the operator pin
 	// lastSrc is the source the dialer really BOUND to — empty when no bind was applied (none
@@ -540,6 +546,48 @@ func (b *TCP) sourceIP() string {
 		return b.sp.current()
 	}
 	return b.bindIP
+}
+
+// burnAdvance burns+advances the destination pool and, once that pool has cycled through every
+// endpoint against the current source, walks the SOURCE too (the same policy the datagram carriers'
+// rotationController applies). It PUBLISHES NOTHING ITSELF — every event for the move is the caller's
+// to write. Make-before-break needs exactly that: the endpoint it burned is one the live carrier never
+// moved to, so naming it as active, or logging it as a rotation, describes a move that did not happen.
+// Returns the endpoint the pool now points at.
+//
+// carrierGone decides BOTH whether the source is burned and whether the source walk is announced,
+// because those two are the same question asked twice:
+//
+//	false  a failed WARM build (make-before-break). The live carrier is still up and still bound to
+//	       this source, so the source has proven NOTHING. It used to call rotateSourceTCP(false) here
+//	       — the failover form — which burns the live, working source out of rotation AND logs
+//	       "rotated source to X" and publishes a src-rotate for a move the tunnel never made. That is
+//	       the premature-announcement class the #179/#189 proactive-vs-failover split exists to close:
+//	       the gate was added on the destination and the source kept the failover form. proactive=true
+//	       is exactly "advance without burning and without publishing".
+//	true   the dial/handshake/post-serve death paths. The carrier really is gone and the destination
+//	       pool has cycled through every endpoint against this source, so burning it and announcing
+//	       the move are both right.
+//
+// It is a method rather than a closure inside dialLoop so a test can drive the REAL callback that
+// buildWarm receives. The stub the warm-rotate test passed instead is why this went unnoticed.
+func (b *TCP) burnAdvance(carrierGone bool) (string, bool) {
+	if (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned()) {
+		return "", false // an operator pin freezes failover: current()/sourceIP() force the pinned endpoint
+	}
+	walkSource := func() { b.rotateSourceTCP(!carrierGone) }
+	if b.pp == nil {
+		if b.sp != nil {
+			walkSource()
+		}
+		return "", false
+	}
+	addr, _ := b.pp.fail()
+	if n := b.destRot.Add(1); b.sp != nil && b.pp.size() > 0 && int(n) >= b.pp.size() {
+		walkSource()
+		b.destRot.Store(0)
+	}
+	return addr, true
 }
 
 // rotateSourceTCP advances the source pool so the NEXT dial binds to a new local IP, returning the new
@@ -1905,42 +1953,18 @@ func (b *TCP) dialLoop() {
 			w.conn.Close() // built just as Close fired — do not leak the fd
 		}
 	}()
-	// direct-tcp peer/source pools: burnQuiet burns+advances the destination and, once the dest pool has
-	// cycled through every endpoint against the current source, walks the source too (same policy as the
-	// datagram carriers' rotationController). succeedBoth clears transient burns after a healthy session.
-	// destRot is written from TWO goroutines: this loop's post-serve classification, and the rotation
-	// timer, which reaches burnQuiet through buildWarm. A plain int was a data race the moment
-	// make-before-break handed a burn to the timer.
-	var destRot atomic.Int64
-	// burnQuiet burns+advances the destination (walking the source once the dest pool has cycled) and
-	// PUBLISHES NOTHING. Make-before-break needs exactly this: the endpoint it burned is one the live
-	// carrier never moved to, so naming it as the active endpoint — or logging it as a rotation —
-	// would describe a move that did not happen. Returns the endpoint the pool now points at.
-	burnQuiet := func() (string, bool) {
-		if (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned()) {
-			return "", false // an operator pin freezes failover: current()/sourceIP() force the pinned endpoint
-		}
-		if b.pp == nil {
-			if b.sp != nil {
-				b.rotateSourceTCP(false)
-			}
-			return "", false
-		}
-		addr, _ := b.pp.fail()
-		if n := destRot.Add(1); b.sp != nil && b.pp.size() > 0 && int(n) >= b.pp.size() {
-			b.rotateSourceTCP(false)
-			destRot.Store(0)
-		}
-		return addr, true
-	}
-	// burnDest is burnQuiet plus a refresh of the active label: the carrier is gone, so the endpoint the
+	// direct-tcp peer/source pools: burnAdvance burns+advances the destination and, once the dest pool
+	// has cycled through every endpoint against the current source, walks the source too (same policy
+	// as the datagram carriers' rotationController). succeedBoth clears transient burns after a healthy
+	// session.
+	// burnDest is burnAdvance plus a refresh of the active label: the carrier is gone, so the endpoint the
 	// pool advanced onto IS where the tunnel is heading. announce=true also writes a "peer-rotate" down —
 	// used on the dial/handshake-failure paths, where this IS the only event for the drop. announce=false
 	// burns SILENTLY (active only, no event): the post-serve death path already emits a single precise
 	// classified down() for the drop below, so a "peer-rotate" down here too double-counted every short
 	// death (two 'down's, one 'up' per drop). nil-safe (ws-pool/server).
 	burnDest := func(announce bool) {
-		if addr, burned := burnQuiet(); burned {
+		if addr, burned := b.burnAdvance(true); burned { // the carrier is gone: this IS a failover
 			b.st.setActive(b.stTag + " · " + addr)
 			if announce {
 				b.st.down("peer-rotate", "ip:"+addr)
@@ -1948,7 +1972,7 @@ func (b *TCP) dialLoop() {
 		}
 	}
 	succeedBoth := func() {
-		destRot.Store(0)
+		b.destRot.Store(0)
 		// succeeded() returns the recovered address only on a real heal transition (it cleared a
 		// burn/suspect), else "" — so emit a discrete heal event exactly once per recovery, matching the
 		// datagram carriers' event("heal","peer-retest")/("src-retest"). nil-safe (ws-pool/server).
@@ -2179,7 +2203,7 @@ func (b *TCP) dialLoop() {
 				// and only then drop this one: dialLoop adopts the parked carrier without dialing, and
 				// the changeover costs no connect and no handshake. Measured on the shipped code, closing
 				// first cost 0.20-0.25s of blackout at every rotation.
-				if !b.buildWarm(func() { burnQuiet() }, srcMovedTo, dstMoved) {
+				if !b.buildWarm(func() { b.burnAdvance(false) }, srcMovedTo, dstMoved) { // live carrier stays: silent, and its source is not burned
 					// The endpoint we advanced onto will not come up. KEEP the healthy connection —
 					// trading it for a dead one is exactly what make-before-break exists to prevent —
 					// and re-arm; burnQuiet already burned it, so the next beat picks a different one.
