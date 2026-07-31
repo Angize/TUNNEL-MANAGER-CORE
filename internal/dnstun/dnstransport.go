@@ -180,6 +180,7 @@ type dnsClient struct {
 	once      sync.Once
 	qid       atomic.Uint32 // fallback DNS transaction-id source when a crypto/rand read fails
 	sendErr   sendErrLog    // throttled write-failure logging (see sendlog.go)
+	answerErr sendErrLog    // throttled REJECTED-answer logging (SERVFAIL/REFUSED/NXDOMAIN), same throttle
 
 	// Pipelining state. inflight maps a live query's DNS id to its deadline + the nonce label the
 	// reply must echo (matching by id AND nonce keeps the off-path anti-spoof strength of the old
@@ -408,7 +409,7 @@ func (c *dnsClient) recvLoop() {
 	buf := make([]byte, dnsReadBuf)
 	empties := 0
 	for {
-		n, _, err := c.conn.ReadFromUDP(buf) // reply may come from any source (anycast/smart-DNS backend)
+		n, from, err := c.conn.ReadFromUDP(buf) // reply may come from any source (anycast/smart-DNS backend)
 		if err != nil {
 			return // socket closed by Close
 		}
@@ -421,7 +422,20 @@ func (c *dnsClient) recvLoop() {
 		}
 		down, derr := parseResponseTXT(buf[:n], id)
 		if derr != nil {
-			continue
+			// SAY it. parseResponseTXT was given the RCode check precisely so a rejection stops looking
+			// like a healthy empty answer — "Surfacing it lets the caller's empty/failure accounting see
+			// the real cause" — and then the only caller threw the error away with a bare continue. A
+			// resolver that refuses every query (rate limit, a blocked zone, one that stopped recursing)
+			// left the operator with a tunnel that goes quiet and nothing anywhere naming the cause, which
+			// reads as censorship. Throttled and named by SOURCE, because with several resolvers in
+			// rotation "which one" is the whole question, and this recurs at query rate.
+			c.answerErr.noteAs("dns/"+from.String(), "answer rejected", derr)
+			// ...and COUNT it, which is the half that changed behaviour. Before the RCode check a
+			// SERVFAIL parsed as a zero-length answer and fell into the accounting below; after it, the
+			// continue skipped that, so `active` stayed true and fill() kept pipelineWindow (16) queries
+			// in flight against a resolver refusing all of them. A rejection is not a delivery: let it
+			// age the window down to idleTarget exactly as an empty reply does.
+			down = nil
 		}
 		if len(down) > 0 {
 			select {
