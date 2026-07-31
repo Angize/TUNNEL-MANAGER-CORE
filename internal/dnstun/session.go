@@ -81,6 +81,29 @@ const kcpMTUDefault = 220
 // up to a 24-byte nonce + 16-byte tag). A few bytes of slack keeps xchacha (24-byte nonce) safe.
 const SessionOverhead = 1 + 12 + 24 + 16 + 3
 
+// KCPOverhead is kcp-go's own per-segment header (IKCP_OVERHEAD). Every KCP datagram spends this
+// many bytes before it carries a byte of payload, so an MTU near it is nearly all header. Exported
+// so the caller can floor its MTU against the real number instead of a copy that can drift.
+const KCPOverhead = 24
+
+// MinUsefulMTU is the smallest KCP MTU the DNS carrier will accept: the point where a segment's
+// payload is at least as large as the header it rides behind.
+//
+// The number has to be read against the CEILING, which is low. A DNS query name is 255 bytes, base32
+// costs 8 characters per 5 bytes, and the zone and nonce labels come out of the same budget — so even
+// a ten-character zone leaves only ~87 bytes of MTU (measured, not estimated). Anything above that is
+// unreachable and a floor set there would refuse every zone in existence.
+//
+// The old floor of 40 was too low in a way that mattered: kcp-go's SetMtu only refuses an MTU at or
+// below KCPOverhead, so past roughly a 118-character zone the MTU drops under 24, SetMtu FAILS
+// SILENTLY, and KCP goes on using its own 1400-byte default over a transport that can carry twenty
+// bytes. Between there and 40 the tunnel is not slow, it cannot carry anything — and the core came
+// up, logged "session established", and never named the zone as the cause.
+//
+// 2×KCPOverhead is the honest boundary: below it more than half of every DNS query is KCP header. It
+// still admits a zone of roughly 70 characters, well past anything a delegation realistically uses.
+const MinUsefulMTU = 2 * KCPOverhead
+
 const handshakeRetxInterval = 500 * time.Millisecond
 
 // handshakeTimeout is a var (not const) only so a test can shorten it; production keeps 15s,
