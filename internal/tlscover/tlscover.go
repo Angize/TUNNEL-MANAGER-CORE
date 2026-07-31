@@ -85,6 +85,12 @@ func sealToken(psk string, ts int64) ([]byte, error) {
 	return append(nonce8, a.Seal(nil, nonce[:], pt, nil)...), nil
 }
 
+// AuthWindowSecs is the clock skew the auth token tolerates, in seconds. Exported so the carrier can
+// name the real number when it reports the one symptom a skewed clock produces: a TLS handshake that
+// succeeds into the REAL cover site (the server's answer to an unopenable token, and to a probe)
+// while the core handshake behind it fails with nothing pointing at the clock.
+func AuthWindowSecs() int { return authWindow }
+
 func openToken(psk string, sid []byte) bool {
 	if len(sid) != 32 {
 		return false
