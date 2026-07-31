@@ -676,7 +676,14 @@ func (f *Flux) learnPeer(addr *net.IPAddr) {
 	// re-scoped to this peer, so the common case is the atomic-load fast path and nothing happens;
 	// the hand-off covers what a rotation cannot know up front — a server following the client's
 	// SOURCE rotation, and the brief window where a pool server still answers from its old IP.
-	f.leak.scopeAsync(addr.IP)
+	//
+	// The CURRENT peer, not the frame's sender — see the raw twin for the full reasoning. Short
+	// version: the rule set is single-scoped, a pooled client deliberately keeps accepting frames from
+	// the endpoint a rotation just left, and passing the sender let each of those drag the rules off
+	// the destination the tunnel is actually using.
+	if p := f.peer.Load(); p != nil {
+		f.leak.scopeAsync(p.IP)
+	}
 }
 
 // learnLocalIP records, once, the local source IP the kernel routes toward peer — the tcp profile's
