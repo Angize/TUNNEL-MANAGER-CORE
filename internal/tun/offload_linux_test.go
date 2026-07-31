@@ -78,7 +78,7 @@ func TestSegmentTCP4(t *testing.T) {
 	const seq0 = 1000
 	super := buildTCP4(src, dst, seq0, 0x18 /*PSH|ACK*/, payload)
 
-	segs := segment(super, 1400, true)
+	segs, _ := segment(super, 1400, true)
 	if len(segs) != 3 {
 		t.Fatalf("got %d segments, want 3", len(segs))
 	}
@@ -111,7 +111,7 @@ func TestSegmentUDP4(t *testing.T) {
 		payload[i] = byte(i * 7)
 	}
 	super := buildUDP4(src, dst, payload)
-	segs := segment(super, 1200, false)
+	segs, _ := segment(super, 1200, false)
 	if len(segs) != 3 {
 		t.Fatalf("got %d UDP segments, want 3", len(segs))
 	}
@@ -132,7 +132,7 @@ func TestSegmentUDP4(t *testing.T) {
 func TestSegmentSinglePassThrough(t *testing.T) {
 	src, dst := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
 	super := buildTCP4(src, dst, 1, 0x18, make([]byte, 500))
-	segs := segment(super, 1400, true) // one MSS fits -> single segment
+	segs, _ := segment(super, 1400, true) // one MSS fits -> single segment
 	if len(segs) != 1 {
 		t.Fatalf("got %d segments, want 1", len(segs))
 	}
