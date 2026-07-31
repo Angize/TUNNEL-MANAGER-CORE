@@ -429,9 +429,15 @@ func (p *PeerPool) selectEntry(key string) bool {
 // race the pin's own TTL expiry between a check and the clear (the isPinned()+pinApplied(current())
 // two-call form could), and it needs no current() call: while pinned, current() forces the pinned
 // endpoint, so a success is by definition on it. No-op when no pin is in force.
-// It is for carriers that re-resolve current() at connect time (udp/raw/flux all re-point at
-// current() in their adopt path and then re-handshake), where "we connected" and "we connected on the
-// pin" are the same statement. tcp is NOT one of those — see pinLandedOn.
+// It is for the DESTINATION pools of udp/raw/flux, which re-point at current() in their adopt path
+// and then re-handshake, so "we connected" and "we connected on the pin" are the same statement. tcp
+// is NOT one of those — see pinLandedOn.
+//
+// ⚠ It is NOT for a SOURCE pool, and the sentence that used to say "udp/raw/flux" without qualifying
+// it was wrong on exactly that half. A source swap deliberately keeps the AEAD session — that is the
+// whole point, the source is independent of the keys — so there is no re-handshake to read a landing
+// off, and on a healthy tunnel the success path that called this never runs at all. The source adopt
+// itself is the landing, and it reports it (pinLandedOn) where it happens.
 func (p *PeerPool) pinLanded() {
 	p.mu.Lock()
 	changed := p.pinnedLocked()
@@ -656,7 +662,9 @@ func (c *rotationController) success() (dstHealed, srcHealed string) {
 	}
 	if c.src != nil {
 		srcHealed = c.src.succeeded()
-		c.src.pinLanded()
+		// No pinLanded() for the source. A handshake says nothing about whether the SOURCE pin landed:
+		// the source swap keeps the session, so this call would release the operator's jump on the
+		// strength of an unrelated destination connect. adoptSource* reports the real landing.
 	}
 	return
 }

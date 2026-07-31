@@ -1292,6 +1292,7 @@ func (r *Raw) adoptSourceRaw() {
 	}
 	r.localIP.Store(&net.IPAddr{IP: ip})
 	log.Printf("raw: pinned source to %s", ip)
+	r.sp.pinLandedOn(addr) // the swap IS the landing — see adoptSourceUDP for why no handshake follows
 	// Silent for the same reason as the destination pin: the session survives a source swap, so there is
 	// nothing to reconnect and nothing to log — the source pool's own status file reflects the change.
 }
