@@ -1930,19 +1930,30 @@ type warmDial struct {
 //
 // Failures are attributed exactly like a primary dial (dialCarrier(true) + burn on a failed
 // handshake), so a rotation onto a blocked IP still burns it.
-func (b *TCP) buildWarm(burn func(), srcAddr string, dstMoved bool) bool {
+// dstPrev is the destination the LIVE connection is on, and it is restored on every failure path
+// below. burn() runs fail(), which burns the candidate (right) and then advances the cursor again and
+// publishes that as Active (wrong): the tunnel deliberately never left dstPrev, so without this the
+// pool named an endpoint it had never been on — the panel drew the wrong IP as live, and the next
+// beat "rotated" onto the endpoint the tunnel was already using. The burn itself is kept; only the
+// cursor is corrected. Empty (and nil-safe) when there is no destination pool, i.e. a source-only beat.
+//
+// It lives HERE rather than at the call site so it cannot be forgotten by one of the three ways this
+// function returns false, and so a test can drive the real thing.
+func (b *TCP) buildWarm(burn func(), srcAddr string, dstMoved bool, dstPrev string) bool {
 	if b.closed.Load() {
 		return false
 	}
 	conn, label, combo, err := b.dialCarrier(true)
 	if err != nil {
 		burn()
+		b.pp.keepCursorOn(dstPrev)
 		return false
 	}
 	cf, err := b.handshakeAndPrime(conn)
 	if err != nil {
 		conn.Close()
 		burn() // answers TCP but will not carry the tunnel — same attribution the primary path uses
+		b.pp.keepCursorOn(dstPrev)
 		return false
 	}
 	// Anything already parked belongs to a dialLoop iteration that never adopted it — its connection
@@ -1958,6 +1969,7 @@ func (b *TCP) buildWarm(burn func(), srcAddr string, dstMoved bool) bool {
 		return true
 	default:
 		conn.Close() // another build won the slot (overlapping timers) — drop this one
+		b.pp.keepCursorOn(dstPrev)
 		return false
 	}
 }
@@ -2211,7 +2223,9 @@ func (b *TCP) dialLoop() {
 				// when EITHER pool advances, so announcing a destination rotation off `moved` alone
 				// described a destination move on a source-only beat.
 				dstMoved := false
+				dstPrev := "" // where the LIVE connection is; restored below if the warm build fails
 				if b.pp != nil {
+					dstPrev = b.pp.current()
 					if _, m := b.pp.rotateOnce(); m {
 						dstMoved = true // the endpoint itself is read back at the adoption site, once it is real
 					}
@@ -2232,11 +2246,11 @@ func (b *TCP) dialLoop() {
 				// and only then drop this one: dialLoop adopts the parked carrier without dialing, and
 				// the changeover costs no connect and no handshake. Measured on the shipped code, closing
 				// first cost 0.20-0.25s of blackout at every rotation.
-				if !b.buildWarm(func() { b.burnAdvance(false) }, srcMovedTo, dstMoved) { // live carrier stays: silent, and its source is not burned
+				if !b.buildWarm(func() { b.burnAdvance(false) }, srcMovedTo, dstMoved, dstPrev) { // live carrier stays: silent, its source is not burned, its endpoint is still Active
 					// The endpoint we advanced onto will not come up. KEEP the healthy connection —
 					// trading it for a dead one is exactly what make-before-break exists to prevent —
-					// and re-arm; burnQuiet already burned it, so the next beat picks a different one.
-					// Nothing is published: the tunnel never left the endpoint it is on.
+					// and re-arm; burnAdvance already burned it, so the next beat picks a different one.
+					// buildWarm has already put the cursor back on dstPrev.
 					rot.Reset(iv)
 					return
 				}
