@@ -87,6 +87,7 @@ type Flux struct {
 	leak      antiLeaker
 	sendMu    sync.RWMutex // senders RLock around the raw-fd Sendto; Close takes the write lock before closing it
 	sendDown  bool         // set under sendMu.Lock in Close: no more Sendto on the (about-to-be-closed) raw fd
+	srcWarned sync.Map     // source string -> struct{}: sources already reported as unusable, one line each (see adoptableSource)
 	sendErr   sendErrLog   // throttled data-plane send-failure logging (see sendlog.go)
 	desync    desyncCfg    // client-only fake-packet desync (decoys emitted before each handshake); zero value = off
 	inj       *l2inject    // AF_PACKET injector for bad-checksum decoys (IP_HDRINCL repairs the checksum); nil unless a badsum/both mode is on
@@ -858,8 +859,12 @@ func (f *Flux) SetSourcePool(sp *PeerPool) {
 	// cur=0), instead of the route-derived default until the first rotation. Called before Run(), so
 	// learnPeer/tryHandshake's `if localIP==nil` guard then leaves this in place.
 	if sp != nil {
-		if ip := parseIP4(hostOnly(sp.current())); ip != nil {
+		if ip := adoptableSource("flux", sp, sp.current(), &f.srcWarned); ip != nil {
 			f.localIP.Store(&net.IPAddr{IP: ip})
+		} else {
+			// Same reasoning as the raw twin: a seed the host cannot send from is stamped from the
+			// FIRST packet. Burn it and let the kernel pick until rotation reaches a usable entry.
+			sp.fail()
 		}
 	}
 }
@@ -871,12 +876,16 @@ func (f *Flux) rotateSourceFlux(proactive bool) {
 	if f.sp == nil {
 		return
 	}
+	prev := f.sp.current() // the source we stamp today — fall back here if the next one is unusable
 	addr, moved := f.sp.nextEndpoint(proactive)
 	if !moved {
 		return
 	}
-	ip := parseIP4(hostOnly(addr))
+	ip := adoptableSource("flux", f.sp, addr, &f.srcWarned)
 	if ip == nil {
+		// Undo the move, exactly as rotateSourceUDP does — see the raw twin for why publishing and
+		// burning here would both be wrong.
+		f.sp.rejectCandidate(prev)
 		return
 	}
 	f.localIP.Store(&net.IPAddr{IP: ip})
@@ -972,8 +981,10 @@ func (f *Flux) adoptSourceFlux() {
 	if f.sp == nil {
 		return
 	}
-	ip := parseIP4(hostOnly(f.sp.current()))
+	addr := f.sp.current()
+	ip := adoptableSource("flux", f.sp, addr, &f.srcWarned)
 	if ip == nil {
+		f.sp.fail() // the jump is already ended; pull the IP out of rotation too
 		return
 	}
 	f.localIP.Store(&net.IPAddr{IP: ip})

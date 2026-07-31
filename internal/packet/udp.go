@@ -577,6 +577,45 @@ func parseIP4(s string) net.IP {
 	return ip.To4()
 }
 
+// adoptableSource resolves a source-pool entry to an IPv4 this host can actually SEND FROM, for the
+// carriers that STAMP the source — into a crafted IP header, or into an IP_PKTINFO control message —
+// instead of binding a socket to it. nil means "do not adopt it"; the caller decides the pool
+// bookkeeping, which differs between a rotation (undo the move) and an operator jump (burn it).
+//
+// raw and flux had no check at all. udp has had rebindSourceTo + rejectCandidate since #189 and tcp
+// got canBindSource + dropUnusableSource in #214; the two crafted-header carriers got neither, so
+// rotateSource*/adoptSource*/SetSourcePool stored whatever the pool handed them, logged "rotated
+// source to X" and published a src-rotate event naming an address the tunnel cannot use.
+//
+// Since #215 that is not cosmetic on the udp and tcp raw profiles: sendViaConn deliberately REFUSES
+// to fall back to the kernel source there — the carrier header's L4 checksum was computed over the
+// pinned one, so a degraded send would put a wrong-checksum segment on the wire — so an unusable
+// source is a total, silent blackout that only a throttled log line mentions. #209 widened the blast
+// radius to effectively every client raw/flux tunnel, by turning bind_ip into a one-entry source pool.
+//
+// It ASKS the kernel (a throwaway bind), for the reasons canBindSource gives: an InterfaceAddrs()
+// comparison is wrong in both directions on the cases that matter.
+func adoptableSource(tag string, sp *PeerPool, addr string, warned *sync.Map) net.IP {
+	ip := parseIP4(hostOnly(addr))
+	if ip != nil && canBindSource(ip) {
+		return ip
+	}
+	if _, dup := warned.LoadOrStore(addr, struct{}{}); !dup {
+		if ip == nil {
+			log.Printf("core/%s: source %q is not a usable IPv4 address — leaving the kernel to pick the source", tag, addr)
+		} else {
+			log.Printf("core/%s: source IP %s is not configured on this host — leaving the kernel to pick the source", tag, ip)
+		}
+	}
+	// An operator jump aimed HERE is over: we have just proven the IP cannot be used, and a jump is a
+	// momentary move within the rotation, not a lock. Ending it also unblocks the caller's burn —
+	// fail() refuses to touch a pinned entry (the same reasoning as dropUnusableSource).
+	if sp != nil && sp.pinCannotLand(addr) {
+		log.Printf("core/%s: manual jump to source %s abandoned — that IP is not configured on this host", tag, addr)
+	}
+	return nil
+}
+
 // buildSrcAllow builds the server-side source-IP admit set from a pool's source IPs, keyed by bare
 // 4-byte IPv4. Shared by udp, raw and flux, whose SetPeerSources map-build was byte-identical.
 //

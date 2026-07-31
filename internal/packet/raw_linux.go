@@ -66,6 +66,7 @@ type Raw struct {
 	// genuine frame) — accepted over threading the dst through every synchronous reply path.
 	replySrc  atomic.Pointer[net.IP]
 	noPktinfo sync.Once           // one-shot warning: server frames arrived without IP_PKTINFO, so replySrc stays unset
+	srcWarned sync.Map            // source string -> struct{}: sources already reported as unusable, one line each (see adoptableSource)
 	sendErr   sendErrLog          // throttled data-plane send-failure logging (see sendlog.go)
 	srcAllow  map[string]struct{} // admitted peer IPs (4-byte keys): the client's source pool on a server, the destination pool on a client; set once before Run, then read-only
 	session   atomic.Pointer[sealerBox]
@@ -1151,8 +1152,14 @@ func (r *Raw) SetSourcePool(sp *PeerPool) {
 	// cur=0), instead of the route-derived default until the first rotation. Called before Run(), so
 	// the later `if localIP==nil` guards (learnPeer/tryHandshake) then leave this in place.
 	if sp != nil {
-		if ip := parseIP4(hostOnly(sp.current())); ip != nil {
+		if ip := adoptableSource("raw", sp, sp.current(), &r.srcWarned); ip != nil {
 			r.localIP.Store(&net.IPAddr{IP: ip})
+		} else {
+			// Seeding an IP the host cannot send from is the worst case of all: it is stamped from the
+			// FIRST packet, so the tunnel never comes up at all on the profiles whose checksum binds the
+			// source. Burn it and leave the source unset — srcIP() then falls back to the kernel's pick
+			// and the first rotation lands on an entry that works.
+			sp.fail()
 		}
 	}
 }
@@ -1164,12 +1171,20 @@ func (r *Raw) rotateSourceRaw(proactive bool) {
 	if r.sp == nil || r.link.pinsSource() {
 		return
 	}
+	prev := r.sp.current() // the source we stamp today — fall back here if the next one is unusable
 	addr, moved := r.sp.nextEndpoint(proactive)
 	if !moved {
 		return
 	}
-	ip := parseIP4(hostOnly(addr))
+	ip := adoptableSource("raw", r.sp, addr, &r.srcWarned)
 	if ip == nil {
+		// The pool advanced onto a source this host cannot send from (the IP was removed from the
+		// interface but not from the pool). Undo the move, exactly as rotateSourceUDP does: not one
+		// packet left prev, so publishing a src-rotate naming the new one would describe a move that
+		// never happened, the healthy in-use source would stay burned, and a later success() would
+		// heal-clear an IP that was never tried. The old code returned here in silence with the pool
+		// already moved, which is the same defect one layer up.
+		r.sp.rejectCandidate(prev)
 		return
 	}
 	r.localIP.Store(&net.IPAddr{IP: ip})
@@ -1262,8 +1277,12 @@ func (r *Raw) adoptSourceRaw() {
 	if r.sp == nil || r.link.pinsSource() {
 		return
 	}
-	ip := parseIP4(hostOnly(r.sp.current()))
+	addr := r.sp.current()
+	ip := adoptableSource("raw", r.sp, addr, &r.srcWarned)
 	if ip == nil {
+		// adoptableSource has already ended the jump; pull the IP out of rotation too so the next
+		// tick does not come straight back to it.
+		r.sp.fail()
 		return
 	}
 	r.localIP.Store(&net.IPAddr{IP: ip})
