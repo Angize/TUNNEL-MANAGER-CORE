@@ -1242,14 +1242,19 @@ func (b *TCP) noteECHSelfHeal(host string, ech []byte) {
 // edge rejects a stale ECH config it returns a fresh RetryConfigList — we redial
 // once and retry with it, so Cloudflare's periodic ECH-key rotation self-heals
 // without a rebuild. On any failure the passed (or redialed) conn is closed.
-func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live bool) (net.Conn, error) {
+//
+// budget bounds EVERY leg this owns — each handshake attempt and the self-heal redial in between. It
+// is the caller's connect budget (handshakeTimeout on the live dial, probe_timeout_secs on a probe),
+// because a probe that walks the ECH self-heal used to cost a fixed 10s dial plus two fixed 10s
+// handshakes no matter what the operator asked for.
+func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live bool, budget time.Duration) (net.Conn, error) {
 	var err error
 	healed := false // set once we redial with a fresh RetryConfigList
 	for attempt := 0; attempt < 2; attempt++ {
 		var uc net.Conn
 		// ALPN forced to http/1.1: the WebSocket upgrade that follows (wsClientHandshake) is
 		// HTTP/1.1, so the edge must not pick h2.
-		uc, err = uEdgeHandshake(b.fragWrap(conn, host), host, ech, []string{"http/1.1"}, false) // split the ClientHello's SNI when enabled
+		uc, err = uEdgeHandshake(b.fragWrap(conn, host), host, ech, []string{"http/1.1"}, false, budget) // split the ClientHello's SNI when enabled
 		if err == nil {
 			if healed && live { // live self-heal: persist the fresh key and surface it (pool or single-edge)
 				b.noteECHSelfHeal(host, ech)
@@ -1263,7 +1268,7 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 			log.Printf("core/ws: ECH-SELFHEAL[reactive/in-band] for %s (%s) — stale key rejected, retrying with fresh key %s",
 				host, dialAddr, base64.StdEncoding.EncodeToString(ech))
 			healed = true
-			if conn, err = b.dialer(10*time.Second).Dial("tcp", dialAddr); err != nil {
+			if conn, err = b.dialer(budget).Dial("tcp", dialAddr); err != nil {
 				return nil, err
 			}
 			continue
@@ -1279,7 +1284,15 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 // is set uTLS injects the real Encrypted ClientHello in place of Chrome's GREASE-ECH, keeping BOTH
 // the fingerprint and the hidden SNI. A stale ECH key surfaces as a *utls.ECHRejectionError with a
 // fresh RetryConfigList for the caller's self-heal. Shared by the ws (tlsToEdge) and HTTP carriers.
-func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFingerprint bool) (net.Conn, error) {
+//
+// budget bounds the handshake, and it is a PARAMETER because this function is the only thing that can
+// bound it: it arms the socket deadline itself, so anything the caller armed first is overwritten and
+// lost. That is how probe_timeout_secs stayed inert on the TLS leg after #216 — the httpc probe set
+// `SetDeadline(now+budget)` immediately before calling in here, and this arm (a fixed handshakeTimeout,
+// which ApplyTuning does not touch) replaced it. An operator asking for a 5s probe still paid 10s of
+// TLS on every retest and every differential-probe arm, on the transports where a probe is a full
+// establish.
+func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFingerprint bool, budget time.Duration) (net.Conn, error) {
 	cfg := &utls.Config{ServerName: host}
 	var echPub []string
 	// echRejected records that the blanket-accept hook below actually fired, i.e. the edge rejected our
@@ -1326,7 +1339,7 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFin
 			return nil, err
 		}
 	}
-	conn.SetDeadline(time.Now().Add(handshakeTimeout))
+	conn.SetDeadline(time.Now().Add(budget))
 	if err = uc.Handshake(); err != nil {
 		// On an ECH rejection uTLS hands back a fresh RetryConfigList (for the in-band self-heal) after
 		// completing the outer handshake against the ECH public-name cert — which we accepted unverified
@@ -1498,7 +1511,7 @@ func (b *TCP) establishWS(attribute bool) (net.Conn, string, string, error) {
 	// had already seen the ClientHello and the Upgrade before the first decoy arrived.
 	b.sendTCPFakes(conn)
 	if b.wsTLS {
-		tc, terr := b.tlsToEdge(conn, dialAddr, host, ech, true) // live carrier: a self-heal is panel-worthy
+		tc, terr := b.tlsToEdge(conn, dialAddr, host, ech, true, handshakeTimeout) // live carrier: a self-heal is panel-worthy
 		if terr != nil {
 			attrib()
 			return nil, dialAddr, "", terr
@@ -1548,11 +1561,13 @@ func (b *TCP) probeEdgeFull(ip string, sni wsSNIEntry) bool {
 		if host == "" {
 			host = ip
 		}
-		// probeTimeout is the operator's edge-probe budget, and until now the httpc branch ignored it
-		// entirely: a hardcoded 10s dial, an unbounded TLS handshake and a fixed 30s header wait meant a
-		// probe could run ~50s where probe_timeout_secs said 5. The ws branch below has always honoured
-		// it. Every retest and every differential-probe arm runs through here, so the knob decided
-		// nothing about how fast a blocked http/grpc edge is judged.
+		// probeTimeout is the operator's edge-probe budget, and the httpc branch used to ignore it
+		// entirely: a hardcoded 10s dial, a TLS handshake bounded only by a fixed 10s of its own, and a
+		// fixed 30s header wait meant a probe could run ~50s where probe_timeout_secs said 5. Every
+		// retest and every differential-probe arm runs through here, so the knob decided nothing about
+		// how fast a blocked http/grpc edge is judged. The budget now reaches all three legs — the TLS
+		// one only because uEdgeHandshake TAKES it: that function arms the socket deadline itself, so
+		// arming one before calling it (which is what #216 did) is overwritten and lost.
 		conn, err := b.dialHTTPCOnce(ip, host, sni.ech, sni.path, probeTimeout)
 		if err != nil {
 			// Retry ONCE with the fresh key on a stale-ECH rejection, exactly as the live path
@@ -1587,7 +1602,7 @@ func (b *TCP) probeEdgeFull(ip string, sni wsSNIEntry) bool {
 		host = ip
 	}
 	if b.wsTLS {
-		tc, terr := b.tlsToEdge(conn, ip, host, sni.ech, false) // probe: don't emit a self-heal event
+		tc, terr := b.tlsToEdge(conn, ip, host, sni.ech, false, probeTimeout) // probe: the operator's budget, and don't emit a self-heal event
 		if terr != nil {
 			return false
 		}

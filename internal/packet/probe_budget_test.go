@@ -1,0 +1,90 @@
+package packet
+
+import (
+	"net"
+	"testing"
+	"time"
+)
+
+// silentTLSEdge accepts TCP and then says nothing at all — the shape of a blocked or tarpitting CDN
+// edge, and the one that makes a TLS handshake hang rather than fail.
+func silentTLSEdge(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	held := make(chan net.Conn, 16)
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			select {
+			case held <- c: // hold it open, never read, never write
+			default:
+				c.Close()
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		close(held)
+		for c := range held {
+			c.Close()
+		}
+	})
+	return ln.Addr().String()
+}
+
+// probe_timeout_secs must bound the TLS leg of an edge probe, not just the dial and the header wait.
+//
+// #216 armed the socket deadline in dialHTTPCOnce right before calling uEdgeHandshake — and
+// uEdgeHandshake armed it AGAIN, with a fixed 10s handshakeTimeout that ApplyTuning does not touch.
+// The later call wins (fragConn embeds net.Conn, so SetDeadline on the wrapper reaches the same
+// socket), so the operator's budget was overwritten on exactly the leg the comment claimed it now
+// covered. The two carriers show it at different sizes and BOTH are asserted here:
+//
+//   - ws: nothing else bounds the handshake, so a silent edge cost a flat 10s per probe no matter
+//     what probe_timeout_secs said. This is the one that matters — every retest and every
+//     differential-probe arm pays it, and an over-long probe is what freezes rotation and holds a
+//     manual pin.
+//   - http/grpc: doWithHeaderTimeout caps the whole request at 3xbudget, so the fixed 10s was capped
+//     there rather than being unbounded — the probe still ran 3x its budget instead of 1x.
+func TestProbeTimeoutBoundsTheTLSHandshake(t *testing.T) {
+	const budget = 2 * time.Second
+	p0 := probeTimeout
+	probeTimeout = budget
+	t.Cleanup(func() { probeTimeout = p0 })
+
+	for _, tc := range []struct {
+		name  string
+		build func(addr string) *TCP
+	}{
+		{"ws", func(addr string) *TCP {
+			return &TCP{addr: addr, ws: true, wsPath: "/", wsTLS: true, wsHost: "cdn.example.com"}
+		}},
+		{"httpc-post", func(addr string) *TCP {
+			return &TCP{addr: addr, ws: true, httpc: true, httpcMode: "post", wsPath: "/", wsTLS: true, wsHost: "cdn.example.com"}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr := silentTLSEdge(t)
+			b := tc.build(addr)
+			t0 := time.Now()
+			healthy := b.probeEdgeFull(addr, wsSNIEntry{host: "cdn.example.com", path: "/"})
+			elapsed := time.Since(t0)
+			if healthy {
+				t.Fatal("an edge that never answers the ClientHello probed HEALTHY")
+			}
+			// Generous: the dial is instant on loopback, so with the budget honoured this is one
+			// budget plus scheduling. The failing case is 10s (ws) or 3xbudget (httpc).
+			if limit := 2 * budget; elapsed > limit {
+				t.Errorf("the probe took %v against a probe_timeout_secs of %v: the TLS leg is bounded by uEdgeHandshake's fixed handshakeTimeout, not by the operator's budget",
+					elapsed.Round(10*time.Millisecond), budget)
+			}
+			t.Logf("probe returned in %v on a %v budget", elapsed.Round(10*time.Millisecond), budget)
+		})
+	}
+}
