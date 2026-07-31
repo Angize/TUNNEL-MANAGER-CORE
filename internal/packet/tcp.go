@@ -2436,7 +2436,18 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 			return nil, err
 		}
 	}
-	_ = cf.writeFrame(typePing, nil) // prime + authenticate us to the server
+	// The prime ping is the client's first real write on this connection — and since the obfs salt
+	// stopped travelling on its own, the ONLY one on this path: sendSalt above just fills saltPend and
+	// can now fail on RNG/cipher errors alone, so the `if err := cf.sendSalt()` guard no longer covers
+	// any I/O at all. Discarding this error meant handshakeAndPrime returned (cf, nil) — success — for
+	// a connection whose very first byte never left the box. The caller then adopts that carrier and
+	// logs a connect, and only the read side notices, moments later. It is worse for a warm standby,
+	// which is built and PARKED: a carrier that was already dead when it was built sits waiting to
+	// replace a healthy one. The salt rides this same write when obfs is on, so its failure surfaces
+	// here too.
+	if err := cf.writeFrame(typePing, nil); err != nil { // prime + authenticate us to the server
+		return nil, err
+	}
 	// Deliberately do NOT stamp b.lastRx here: this ping is something WE sent, and lastRx means "last
 	// authenticated INBOUND frame". Crediting it refreshed the status-file heartbeat on every reconnect,
 	// so a pooled/httpc client whose dial+TLS always succeeds (a CDN edge always accepts) but which never
