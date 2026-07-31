@@ -34,6 +34,12 @@ const (
 // packets instead of coalescing them into one. Paid once, on the first write of a connection.
 const fragGap = 1 * time.Millisecond
 
+// fakeTTL is fake mode's DEFAULT decoy TTL: a normal value, because the decoy is killed at the
+// server by a bad TCP checksum (hop-independent), not by expiring — so it only needs to be high
+// enough to reach the on-path DPI. An operator's split_ttl overrides it (see fakeSegTTL). It lives
+// here rather than beside the Linux injector because fakeSegTTL is portable.
+const fakeTTL = 64
+
 // fragConn splits the FIRST write on a connection so the client's TLS ClientHello is sent across two
 // TCP segments and the cleartext SNI lands on the segment boundary. A cheap complement to ECH (which
 // hides the SNI entirely). After the first write the conn is a transparent passthrough; every other
@@ -43,7 +49,7 @@ type fragConn struct {
 	host string // the SNI we connect with; used to auto-locate the split point (absent under ECH)
 	pos  int    // explicit split offset into the first write; 0 = auto (middle of the cleartext hostname)
 	mode string // "split" | "disorder"
-	ttl  int    // disorder: TTL for the head segment (0 = default); low enough to die before the server
+	ttl  int    // disorder: TTL for the head segment; fake: TTL of the injected decoy (0 = each mode's default)
 	mu   sync.Mutex
 	sent bool
 	warn sync.Once // one line per conn when the chosen mode had to fall back to a plain split
@@ -52,6 +58,22 @@ type fragConn struct {
 	// retry. Never nil in production (fragWrap passes the carrier's); the zero value is usable, so
 	// a hand-built fragConn in a test is safe too.
 	dsSend *desyncSend
+}
+
+// fakeSegTTL is the TTL stamped on the injected decoy in sni_mode=fake.
+//
+// split_ttl is offered by the panel for fake mode as well as disorder, stored, shipped to the node
+// and the core, and printed in the startup log as ttl=N — but the fake path hardcoded a constant, so
+// the number the operator chose reached everything except the packet. It is honoured when set: the
+// bad TCP checksum already kills the decoy at the server, and a low TTL on top is exactly the
+// belt-and-braces the knob offers (it also kills the decoy at a middlebox that rewrites checksums).
+// 0 keeps fake mode's own default, which is a NORMAL TTL — the decoy has to reach the on-path DPI
+// to be worth sending, and unlike disorder it does not rely on expiring to stay away from the server.
+func (f *fragConn) fakeSegTTL() int {
+	if f.ttl > 0 {
+		return f.ttl
+	}
+	return fakeTTL
 }
 
 // degraded reports, exactly once per connection, that the operator's chosen SNI mode could not be
