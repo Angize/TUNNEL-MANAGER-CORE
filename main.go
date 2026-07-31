@@ -322,24 +322,18 @@ func main() {
 	case pinUnsupported:
 		log.Printf("core: WARNING carrier %s ignores bind_ip — it can pin neither a source IP nor a source pool, so this tunnel egresses from whatever source the kernel routes it out of", cfg.Transport)
 	}
-	// Per-tunnel self-heal deadline (client): when set, tighten the carrier's dead-detection window so
-	// this tunnel re-establishes/fails over faster than the default (~3×keepalive / 60s idle backstop).
+	// Per-tunnel self-heal deadline: when set, tighten the carrier's dead-detection window so this
+	// tunnel re-establishes/fails over faster than the default (~3×keepalive / 60s idle backstop).
 	// Every carrier implements it; a 0 value leaves the default formula in place.
-	if cfg.Role == "client" && cfg.DeadAfterSecs > 0 {
-		s, ok := b.(interface{ SetDeadAfter(int) })
-		if !ok {
-			// Say so. The comment above used to claim every carrier implements this, and *packet.DNS did
-			// not — so the assertion failed, the log line below (which lives in the success branch) never
-			// printed, and a fleet-wide operator setting was silently inert on exactly one transport.
-			log.Printf("core: WARNING carrier %s ignores dead_after_secs — it implements no SetDeadAfter", cfg.Transport)
-		}
-		if ok {
-			s.SetDeadAfter(cfg.DeadAfterSecs)
-			// Log the EFFECTIVE deadline — the one the carrier will really enforce, floor and all.
-			effDead, floorNote := effectiveDeadAfter(cfg.Transport, cfg.Keepalive, cfg.DeadAfterSecs)
-			log.Printf("tnl-core: self-heal deadline set to %ds (%s)", effDead, floorNote)
-		}
-	}
+	//
+	// Applied on BOTH roles, not just the client. The panel writes dead_after_secs onto both ends of a
+	// tunnel and config.go validates it on both, but this was gated on "client" — so on tcp/ws, where
+	// the window IS the connection's read deadline and the server has one of its own, the server kept
+	// its default (~60s) while the client honoured the operator's 20s. Half the tunnel self-healed at
+	// the configured speed and the other half did not. On the connectionless carriers (udp/raw/flux)
+	// the server holds no such window at all — there is no connection to reap — so this is inert
+	// there by shape, not by oversight.
+	applyDeadAfter(b, cfg.Transport, cfg.Keepalive, cfg.DeadAfterSecs)
 	// Wire the status file: a liveness heartbeat (hb) plus this carrier's resolved dead window (dw),
 	// and an event ring carrying the client's precise self-heal reasons into the node/panel system
 	// log. EVERY client carrier implements it now — dns was the last one that did not, which left the
@@ -370,16 +364,7 @@ func main() {
 	// SNI fragmentation (client, ws/http): split the wss ClientHello so the cleartext SNI crosses a
 	// TCP segment boundary. Only the ws/HTTP carrier implements it; others ignore this.
 	if cfg.Role == "client" && cfg.SNISplit {
-		if s, ok := b.(interface {
-			SetSNISplit(bool, int, string, int)
-		}); ok {
-			mode := cfg.SNIMode
-			if mode == "" {
-				mode = "split"
-			}
-			s.SetSNISplit(true, cfg.SplitPos, mode, cfg.SplitTTL)
-			log.Printf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d ttl=%d)", mode, cfg.SplitPos, cfg.SplitTTL)
-		}
+		applySNISplit(b, cfg.Transport, cfg.SNIMode, cfg.SplitPos, cfg.SplitTTL)
 	}
 	// Destination rotation pool (client, direct transports udp/tcp/raw/flux): cycle the peer IPs and
 	// burn a blocked one so a single filtered server IP doesn't kill the tunnel — the direct-transport
@@ -553,6 +538,57 @@ func effectiveDeadAfter(transport string, keepaliveSecs, deadAfterSecs int) (int
 		return floor, note
 	}
 	return deadAfterSecs, note
+}
+
+// applyDeadAfter wires the per-tunnel self-heal deadline into the carrier and logs the EFFECTIVE
+// value. It deliberately takes NO role: dead_after_secs is written onto both ends of a tunnel by the
+// panel and validated on both by config.go, and on tcp/ws the window IS the connection's read
+// deadline, which the server has one of too. Gating this on role=="client" left the server reaping a
+// dead connection on its own ~60s default while the client honoured the operator's 20s — half the
+// tunnel self-healing at the configured speed and half not. On the connectionless carriers the
+// server holds no such window at all (there is no connection to reap), so this is inert there by the
+// shape of the carrier rather than by a gate.
+//
+// Split out of main so the decision is reachable from a test without opening a TUN.
+func applyDeadAfter(b any, transport string, keepaliveSecs, deadAfterSecs int) bool {
+	if deadAfterSecs <= 0 {
+		return false // leave each carrier's default formula in place
+	}
+	s, ok := b.(interface{ SetDeadAfter(int) })
+	if !ok {
+		// Say so. The comment here used to claim every carrier implements this, and *packet.DNS did
+		// not — so the assertion failed, the success log never printed, and a fleet-wide operator
+		// setting was silently inert on exactly one transport.
+		log.Printf("core: WARNING carrier %s ignores dead_after_secs — it implements no SetDeadAfter", transport)
+		return false
+	}
+	s.SetDeadAfter(deadAfterSecs)
+	effDead, floorNote := effectiveDeadAfter(transport, keepaliveSecs, deadAfterSecs)
+	log.Printf("tnl-core: self-heal deadline set to %ds (%s)", effDead, floorNote)
+	return true
+}
+
+// applySNISplit wires SNI fragmentation into the carrier and logs what really happened.
+//
+// The old code printed "SNI fragmentation on" for any carrier that merely HAD the method. *TCP has
+// it for transport=tcp as well as ws, and on tcp it discards the setting — no ClientHello of ours
+// goes to an edge there — so a tcp tunnel logged positive confirmation of a defence that was not
+// running. Report what the carrier actually accepted instead.
+//
+// Split out of main so the decision is reachable from a test without opening a TUN.
+func applySNISplit(b any, transport, mode string, pos, ttl int) bool {
+	if mode == "" {
+		mode = "split"
+	}
+	s, ok := b.(interface {
+		SetSNISplit(bool, int, string, int) bool
+	})
+	if ok && s.SetSNISplit(true, pos, mode, ttl) {
+		log.Printf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d ttl=%d)", mode, pos, ttl)
+		return true
+	}
+	log.Printf("core: WARNING carrier %s ignores sni_split — it sends no TLS ClientHello of its own, so nothing is fragmented", transport)
+	return false
 }
 
 // spoofLogTag names which outer field(s) a spoof carrier forges, for the startup log.

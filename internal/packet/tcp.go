@@ -592,11 +592,16 @@ func (b *TCP) SetDesync(on bool, ttl, count int, mode string) {
 // DPI. pos is the split offset into the ClientHello (0 = auto: the middle of the hostname). Only
 // meaningful with wss; a no-op on the server or a non-ws carrier. main wires it via the shared
 // SetSNISplit type assertion. Call before Run().
-func (b *TCP) SetSNISplit(on bool, pos int, mode string, ttl int) {
+// It REPORTS whether it took. The knob splits a TLS ClientHello, so it means nothing on a carrier
+// that never sends one — but the caller could not tell an applied setting from a discarded one, and
+// logged "SNI fragmentation on" either way. On transport=tcp that line was simply false: this
+// method returned at the first condition and no ClientHello was ever split.
+func (b *TCP) SetSNISplit(on bool, pos int, mode string, ttl int) bool {
 	if !b.isClient || !on || !b.ws {
-		return
+		return false
 	}
 	b.sniSplit, b.splitPos, b.sniMode, b.splitTTL = true, pos, mode, ttl
+	return true
 }
 
 // fragWrap wraps conn in a ClientHello-splitting fragConn when SNI fragmentation is enabled, else

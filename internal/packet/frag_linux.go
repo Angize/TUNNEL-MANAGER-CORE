@@ -13,11 +13,6 @@ import (
 // enough to pass the first few hops where a DPI usually sits.
 const disorderTTL = 4
 
-// fakeTTL is the TTL of the injected fake ClientHello in fake mode: a normal value, because the fake
-// is killed at the server by a bad TCP checksum (hop-independent), not by TTL — so it only needs a
-// TTL high enough to reach the on-path DPI, which any normal value satisfies.
-const fakeTTL = 64
-
 // TCP_REPAIR socket options (stable Linux ABI). They let us READ the connection's current send/recv
 // sequence numbers without disturbing it — needed so a fake segment can overlap the real ClientHello
 // at the exact sequence a stateful DPI reassembles on. We only read; we never rewind or write.
@@ -152,8 +147,8 @@ func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 		copy(fake[i:i+len(f.host)], decoySNI(len(f.host)))
 	}
 	seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), snd, rcv, tcpPshAck, 0xffff, fake)
-	badTCPChecksum(seg)                                                        // the SERVER drops the fake (bad L4 checksum); the DPI still ingests it
-	if ip := buildIP4Ext(src, dst, protoTCP, fakeTTL, false, seg); ip != nil { // normal TTL so the fake reaches the DPI; the checksum, not TTL, kills it before the server
+	badTCPChecksum(seg) // the SERVER drops the fake (bad L4 checksum); the DPI still ingests it
+	if ip := buildIP4Ext(src, dst, protoTCP, f.fakeSegTTL(), false, seg); ip != nil {
 		f.dsSend.note("tcp/sni-fake", inj.sendTo(dst, ip))
 	}
 	return f.Conn.Write(p) // the real ClientHello, whole, at the same sequence (socket untouched)
