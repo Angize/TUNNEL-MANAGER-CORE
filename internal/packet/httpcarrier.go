@@ -182,12 +182,21 @@ func (c *httpcConn) Write(p []byte) (int, error) {
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
+	// The flush is INSIDE the armed window, and that is the whole point of arming it. c.w.Write does not
+	// touch the socket at the size this carrier really writes: a framed tunnel packet is 2+sealed bytes,
+	// about one TUN MTU, and both server writers buffer it — net/http's HTTP/1 response into its
+	// 2048-byte bufferBeforeChunkingSize bufio, x/net/http2's into its 4 KiB handlerChunkWriteSize
+	// buffer. Both handlers flush after every frame, so each write starts against an EMPTY buffer and
+	// none of them ever reaches the wire in c.w.Write; every byte of socket I/O, and therefore all of
+	// the blocking, happens in c.flush(). Disarming before it left the real write path with no bound at
+	// all — the deadline only ever bit for a write larger than the buffer, which is why the regression
+	// test that used a 64 KiB buffer passed either way.
 	disarm := c.armWrite()
 	n, err := c.w.Write(p)
-	disarm()
 	if err == nil && c.flush != nil {
 		c.flush()
 	}
+	disarm()
 	return n, err
 }
 
