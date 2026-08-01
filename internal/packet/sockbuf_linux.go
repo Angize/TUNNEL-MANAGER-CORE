@@ -3,6 +3,7 @@
 package packet
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"syscall"
@@ -79,6 +80,11 @@ func sizeBuf(fd, n, forceOpt, plainOpt, warnIdx int, dir, sysctl string) {
 			log.Printf("core: WARNING sock_buf %d bytes was clamped to %d on the %s buffer%s — raise "+
 				"net.core.%s on this host or give the process CAP_NET_ADMIN, or the throughput this "+
 				"setting exists to buy never arrives", n, eff, dir, forcedNote(forced), sysctl)
+			// ...and to the PANEL, which is the layer the operator actually reads. The log line alone
+			// only reaches the core unit's journal, and the node reads that on one branch: after a
+			// build that FAILED. A core that started and was merely clamped went through no branch at
+			// all, so the setting stayed green in the UI with nothing anywhere saying otherwise.
+			noteCfgWarn("sockbuf-clamped", fmt.Sprintf("%s %d %d", dir, n, eff))
 		})
 	}
 }
