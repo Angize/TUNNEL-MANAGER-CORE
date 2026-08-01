@@ -55,7 +55,7 @@ func TestFakeModeSaysWhenItCouldNotRun(t *testing.T) {
 	buf := fragLog(t)
 	// A conn whose addresses are not TCP: writeFake's very first bail-out.
 	c := &capConn{local: strAddr("local"), rem: strAddr("remote")}
-	f := newFragConn(c, "example.com", 0, sniFakeMode, 0, nil)
+	f := newFragConn(c, "example.com", 0, sniFakeMode, 0, false, nil)
 	if _, err := f.Write(hello("example.com")); err != nil {
 		t.Fatal(err)
 	}
@@ -89,8 +89,9 @@ func TestFakeModeRefusesAByteIdenticalDecoy(t *testing.T) {
 		rem:   &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 443},
 	}
 	// An explicit split_pos, so splitAt does not need the hostname — and a payload that does NOT
-	// contain it, which is what ECH leaves behind.
-	f := newFragConn(c, "example.com", 12, sniFakeMode, 0, nil)
+	// contain it, which is what ECH leaves behind. ech=true because that is the situation described:
+	// the refusal is right either way, but only this arm may claim there is nothing left to hide.
+	f := newFragConn(c, "example.com", 12, sniFakeMode, 0, true, nil)
 	p := hello("") // no cleartext hostname anywhere in the buffer
 	if bytes.Contains(p, []byte("example.com")) {
 		t.Fatal("the fixture must not carry the hostname in cleartext")
@@ -114,13 +115,19 @@ func TestFakeModeRefusesAByteIdenticalDecoy(t *testing.T) {
 // to straddle a boundary), but it was completely silent, so an operator running ECH plus sni_split
 // believed both were active when only one was.
 func TestSNISplitSaysWhenNothingIsSplit(t *testing.T) {
-	for _, tc := range []struct{ name, host, want string }{
-		{"ech hides the hostname", "example.com", "not in the ClientHello in cleartext"},
-		{"carrier dials with no SNI", "", "no SNI"},
+	for _, tc := range []struct {
+		name, host, want string
+		ech              bool
+	}{
+		// ech must be TRUE here: this case IS the ECH one, and the message it asserts is the one that
+		// concludes there is nothing left to protect. Passing false would make it assert that
+		// conclusion for a dial with no ECH at all — the defect this signature exists to prevent.
+		{"ech hides the hostname", "example.com", "not in the ClientHello in cleartext", true},
+		{"carrier dials with no SNI", "", "no SNI", false},
 	} {
 		buf := fragLog(t)
 		c := &capConn{local: strAddr("l"), rem: strAddr("r")}
-		f := newFragConn(c, tc.host, 0, sniSplitMode, 0, nil)
+		f := newFragConn(c, tc.host, 0, sniSplitMode, 0, tc.ech, nil)
 		p := hello("")
 		if _, err := f.Write(p); err != nil {
 			t.Fatal(err)
@@ -137,7 +144,7 @@ func TestSNISplitSaysWhenNothingIsSplit(t *testing.T) {
 	buf := fragLog(t)
 	c := &capConn{local: strAddr("l"), rem: strAddr("r")}
 	p := hello("example.com")
-	f := newFragConn(c, "example.com", len(p)+50, sniSplitMode, 0, nil)
+	f := newFragConn(c, "example.com", len(p)+50, sniSplitMode, 0, false, nil)
 	if _, err := f.Write(p); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +155,7 @@ func TestSNISplitSaysWhenNothingIsSplit(t *testing.T) {
 	// And the case that WORKS must stay silent, or the line becomes noise on every healthy tunnel.
 	buf = fragLog(t)
 	c = &capConn{local: strAddr("l"), rem: strAddr("r")}
-	f = newFragConn(c, "example.com", 0, sniSplitMode, 0, nil)
+	f = newFragConn(c, "example.com", 0, sniSplitMode, 0, false, nil)
 	if _, err := f.Write(hello("example.com")); err != nil {
 		t.Fatal(err)
 	}

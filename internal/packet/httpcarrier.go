@@ -771,7 +771,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 			// handshakeTimeout — which is why probe_timeout_secs still did not reach the TLS leg after
 			// #216, and a 5s probe still paid 10s of handshake. Cleared on success, because from that
 			// point h2 owns the conn and a lingering deadline would kill the live stream.
-			uc, err := uEdgeHandshake(b.fragWrap(c, host), host, ech, alpn, h2, budget) // split the ClientHello SNI when enabled
+			uc, err := uEdgeHandshake(b.fragWrap(c, host, ech), host, ech, alpn, h2, budget) // split the ClientHello SNI when enabled
 			if err != nil {
 				c.Close()
 				return nil, err
@@ -812,7 +812,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 					return nil, err
 				}
 				if b.wsTLS {
-					c = b.fragWrap(c, host)
+					c = b.fragWrap(c, host, ech)
 				}
 				return track(c), nil
 			},

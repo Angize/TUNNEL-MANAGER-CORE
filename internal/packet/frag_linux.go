@@ -145,14 +145,21 @@ func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 	copy(fake, p)
 	i := bytes.Index(fake, []byte(f.host))
 	if i < 0 {
-		// The hostname is not in the ClientHello in cleartext — ECH. With nothing to overwrite, the
-		// "decoy" would be a BYTE-IDENTICAL copy of the real ClientHello, injected at the same sequence
-		// with a corrupt checksum. A DPI resolving that overlap recovers exactly the SNI it would have
-		// seen anyway: zero benefit, and a duplicate segment carrying a bad checksum is itself a
-		// signature. Reachable whenever ECH is on AND split_pos is set explicitly, because splitAt
-		// returns f.pos before it ever searches for the hostname.
-		f.fakeDegraded("the hostname is not in the ClientHello in cleartext (ECH), so the decoy would be " +
-			"byte-identical to the real one — injecting it would add a signature and hide nothing")
+		// The hostname is not in the ClientHello in cleartext. With nothing to overwrite, the "decoy"
+		// would be a BYTE-IDENTICAL copy of the real ClientHello, injected at the same sequence with a
+		// corrupt checksum. A DPI resolving that overlap recovers exactly the SNI it would have seen
+		// anyway: zero benefit, and a duplicate segment carrying a bad checksum is itself a signature.
+		// So the fallback is right either way — but the REASON is not the same, and this used to name
+		// ECH without being told whether ECH was on. Under ECH there is nothing left to hide; without
+		// it, the hostname search simply failed and the real SNI is on the wire.
+		why := "the hostname is not in the ClientHello in cleartext"
+		if f.ech {
+			why += " (ECH encrypts it)"
+		} else {
+			why += " and ECH is NOT on — check that ws_host matches the SNI this carrier dials with"
+		}
+		f.fakeDegraded(why + ", so the decoy would be byte-identical to the real one — injecting it " +
+			"would add a signature and hide nothing")
 		return f.writeDisorder(p, at)
 	}
 	copy(fake[i:i+len(f.host)], decoySNI(len(f.host)))
