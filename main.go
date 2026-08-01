@@ -36,11 +36,8 @@ type tunOpener func(name string, mtu int, addr string, gso bool) (*tun.Device, e
 
 // openTUN opens the TUN and returns the gso setting the device ACTUALLY got.
 //
-// GSO is a throughput knob and the panel describes it as one ("اگر پشتیبانی نشود
-// بی‌اثر است"). It was not: on a kernel or container without IFF_VNET_HDR the
-// gso-specific ioctl failed, main called log.Fatalf, systemd restarted the unit and
-// the tunnel never came up at all — the whole link dead because a speed knob was on,
-// with nothing on the dashboard saying why.
+// A failed gso ioctl falls back to a plain device: gso is a throughput knob, not a
+// requirement, so it must never keep the tunnel from coming up.
 //
 // A gso-specific failure is now retried ONCE without gso. The retry is also what
 // makes the log honest: ErrGSOUnsupported cannot tell "no vnet-hdr here" from "no

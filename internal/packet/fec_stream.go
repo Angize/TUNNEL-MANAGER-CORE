@@ -184,15 +184,9 @@ func (e *fecEncoder) flushLocked() {
 	for i := 0; i < count; i++ { // only the real data shards go on the wire
 		e.emit(append(hdr(fecTypeData, i), data[i]...))
 	}
-	// Parity scales with what the block actually carries. A partial block puts `count` data
-	// shards on the wire, not n — the receiver synthesizes the (n-count) pad shards as zeros —
-	// so emitting all k parity costs k/count, not the configured k/n. At the default 10+3 that
-	// is 300% overhead on every single-frame flush, i.e. on every tunnel under ~667 pps, where
-	// the panel promises ۳۰٪. kEff = ceil(k*count/n) is the SMALLEST parity count that still
-	// holds the configured erasure ratio (kEff/(count+kEff) >= k/(n+k) reduces to kEff >= k*count/n),
-	// and it is exactly k when the block is full, so a saturated tunnel is untouched.
-	// NOT a wire change: the header still declares the configured k, so the decoder is unchanged
-	// and simply never sees the parity shards we did not send — they are erasures like any other.
+	// Parity scales with the real data shards, not n: kEff = ceil(k*count/n) is the smallest count
+	// holding the configured erasure ratio, and equals k on a full block. Not a wire change — the
+	// header still declares k, and the unsent parity shards are erasures like any other.
 	kEff := (e.k*count + e.n - 1) / e.n
 	for i := 0; i < kEff; i++ {
 		e.emit(append(hdr(fecTypeParity, i), parity[i]...))

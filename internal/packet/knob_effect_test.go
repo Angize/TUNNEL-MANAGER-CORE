@@ -5,17 +5,9 @@ import (
 	"time"
 )
 
-// TestFakeModeIgnoresSplitTTL pins that the fake decoy's TTL is NOT the disorder knob.
-//
-// This test previously asserted the opposite, and asserting the opposite is what shipped the bug.
-// The two modes want opposite values out of one stored number: disorder needs it LOW (default 4) so
-// the head segment expires before the server, fake needs it HIGH because its decoy is killed at the
-// server by a bad checksum and has to reach the on-path DPI first. The panel keeps ONE input for
-// both, so a tunnel that stored 4 for disorder and then switched to fake got a decoy that died en
-// route — the strongest SNI mode silently reduced to an expensive no-op.
-//
-// In user terms: picking «ClientHelloِ جعلی» must behave the same whatever number is sitting in the
-// TTL box from a previous mode.
+// TestFakeModeIgnoresSplitTTL pins that the fake decoy's TTL is not the disorder knob. The two modes
+// want opposite values from one stored number: disorder low so the head expires, fake high so the
+// decoy outruns the DPI.
 func TestFakeModeIgnoresSplitTTL(t *testing.T) {
 	for _, ttl := range []int{0, 1, 4, 5, 64, 255} {
 		f := newFragConn(nil, "example.com", 0, sniFakeMode, ttl, false, nil)

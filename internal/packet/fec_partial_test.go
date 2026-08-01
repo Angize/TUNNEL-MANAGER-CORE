@@ -66,12 +66,8 @@ func flushBlock(t *testing.T, e *fecEncoder, sink *fecCapture, count int) (data,
 	return sink.take()
 }
 
-// TestPartialFecBlockScalesParity is the regression test for the partial-block parity blowup
-// (backlog D6): flushLocked emitted the full k parity shards no matter how few real data shards
-// the block carried, so at the default 10+3 a single-frame flush went out as 1 data + 3 parity —
-// 300% overhead where the panel's preset promises ۳۰٪. Since a block only fills at n frames per
-// fecFlushDelay (~667 pps at 10 shards / 15 ms), that was the NORMAL case for every tunnel that
-// is not saturated: interactive traffic paid 4x the bandwidth the operator selected.
+// TestPartialFecBlockScalesParity: a partial block must scale its parity count with the data
+// shards it really carries, not emit the full k.
 //
 // The test pins the property, not the formula: for every geometry and every block occupancy the
 // parity actually emitted must (a) still hold the configured erasure ratio and (b) be the

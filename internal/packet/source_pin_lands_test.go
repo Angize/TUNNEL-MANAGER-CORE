@@ -6,21 +6,8 @@ import (
 	"testing"
 )
 
-// A SOURCE pin lands when the source is adopted — there is no handshake to read it off.
-//
-// A pin is «این را فعال کن»: a momentary jump that releases itself the instant it arrives. For a
-// DESTINATION pin the release signal is obvious — the carrier re-handshakes onto the new endpoint, so
-// "we connected" and "we connected on the pin" are the same statement, and pinLanded() reads it off
-// the success path.
-//
-// A SOURCE swap is not like that, and pinLanded's doc claimed it was ("udp/raw/flux all re-point at
-// current() in their adopt path and then re-handshake"). The source is independent of the AEAD keys —
-// keeping the session across the swap is the whole point — so nothing re-handshakes, and the success
-// path that would have released the pin only runs when something failed first
-// (`if b.peerAnswered.Load() && (failN > 0 || ...)`). On a healthy tunnel it never runs at all.
-//
-// So the operator's jump sat "in progress" for the entire pinTTL: rotation frozen, the panel showing a
-// move that had in fact completed a second after the button was pressed.
+// A source pin lands when the source is adopted, not on a handshake: a source swap keeps the AEAD
+// session, so nothing re-handshakes and the destination pin's release path never runs.
 func TestASourcePinLandsWhenTheSourceIsAdopted(t *testing.T) {
 	const other = "127.0.0.2"
 

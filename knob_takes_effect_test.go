@@ -96,12 +96,8 @@ func TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt(t *testing.T) {
 	}
 }
 
-// TestDeadAfterTakesNoRole drives the REAL applyDeadAfter.
-//
-// In user terms: the operator sets «مهلتِ خودترمیمی» to 20s and the panel writes it to BOTH ends.
-// The client really reaped a silent carrier after 20s; the tcp/ws server — where the same window is
-// the connection's read deadline — kept its own ~60s default, because the wiring in main was gated
-// on role=="client". Half the tunnel self-healed at the configured speed and half did not.
+// TestDeadAfterTakesNoRole drives the real applyDeadAfter: the self-heal deadline must apply on
+// both roles, not only the client.
 //
 // The signature is the guard: applyDeadAfter takes no role, so the gate cannot come back without
 // changing it, and this test fails to compile if it does.
