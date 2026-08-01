@@ -8,19 +8,10 @@ import (
 	"testing"
 )
 
-// TestSetDesyncKeepsTheModesThatNeedNoHdrincl pins which decoy modes survive a host where the
-// IP_HDRINCL socket cannot open (a container without CAP_NET_RAW for AF_INET/SOCK_RAW, a seccomp
-// profile, a hardened kernel).
-//
-// The two decoy kinds use two DIFFERENT sockets for opposite reasons: a low-TTL decoy needs
-// IP_HDRINCL so the kernel honours the forged TTL, while a bad-checksum decoy must AVOID IP_HDRINCL
-// because it always repairs the checksum, and goes out over AF_PACKET instead. SetDesync opened the
-// IP_HDRINCL socket before it looked at the mode and returned on failure, so an operator who chose
-// mode=badsum — which never touches that socket — lost the whole camouflage and read
-// "fake-desync disabled" in the journal with no hint that their mode did not need it.
-//
-// The matrix is over the mode, because the mode is what decides which sockets are needed. It drives
-// the real SetDesync and then asserts what sendFakes will actually do, not just the stored config.
+// TestSetDesyncKeepsTheModesThatNeedNoHdrincl pins which decoy modes survive a host where the IP_HDRINCL
+// socket cannot open. The two kinds use DIFFERENT sockets for opposite reasons: a low-TTL decoy needs
+// IP_HDRINCL to honour the forged TTL, a bad-checksum decoy must avoid it and goes out over AF_PACKET.
+// The matrix is over the mode; it drives the real SetDesync, then asserts what sendFakes will do.
 func TestSetDesyncKeepsTheModesThatNeedNoHdrincl(t *testing.T) {
 	boom := errors.New("operation not permitted")
 	for _, tc := range []struct {

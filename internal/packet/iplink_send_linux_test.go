@@ -10,19 +10,10 @@ import (
 	"time"
 )
 
-// TestDegradedSendDropsOnlyTheSourceBoundProfiles drives the REAL send path (sendViaConn) with a
-// pinned source the kernel cannot honour, and watches the wire.
-//
-// pinnedSrc is set on every raw SERVER (replySrc, the IP the client dialed), so this is the ordinary
-// path, not a corner: when that IP stops being local mid-session — a pool address removed from the
-// interface, a secondary not re-added after a provider flap — WriteMsgIP starts failing on every
-// packet. The degraded send that follows is right for a profile whose bytes do not depend on the
-// source, and wrong for udp/tcp, whose carrier header was checksummed over the pinned source: those
-// go out with a wrong L4 checksum, on every packet, for as long as the source is gone.
-//
-// It needs CAP_NET_RAW to open the sockets and skips where it does not have it; the accompanying
-// TestRawChecksumBindsSourceMatchesTheEncapsulation needs no privileges and is what pins the rule
-// this decides on.
+// TestDegradedSendDropsOnlyTheSourceBoundProfiles drives the REAL send path (sendViaConn) with a pinned
+// source the kernel cannot honour, and watches the wire. pinnedSrc is set on every raw SERVER, so this
+// is the ordinary path: when that IP stops being local mid-session the degraded send is right for a
+// profile whose bytes do not depend on the source, and wrong for udp/tcp, which checksummed over it.
 func TestDegradedSendDropsOnlyTheSourceBoundProfiles(t *testing.T) {
 	lo := net.IPv4(127, 0, 0, 1)
 	unbindable := net.IPv4(203, 0, 113, 9) // TEST-NET-3: never a local address

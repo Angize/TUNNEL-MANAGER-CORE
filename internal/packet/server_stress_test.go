@@ -103,12 +103,10 @@ func TestHTTPCServerMalformedBlast(t *testing.T) {
 	}
 }
 
-// TestHTTPCServerSessionChurn drives the session lifecycle concurrently: each worker binds a
-// downstream GET (which starts serve), POSTs an upstream chunk through it, then abandons the GET
-// (context cancel). Real client ordering is GET-first, because deliver() writes to the upstream pipe
-// that only drains once serve reads it. Many of these in parallel stress create/serve/teardown and
-// the session map. The point of the test is running it under -race: any unsynchronised access to the
-// httpcSessions map or a session's fields shows up here. Afterward the server must stay responsive.
+// TestHTTPCServerSessionChurn drives the session lifecycle concurrently: each worker binds a downstream
+// GET (which starts serve), POSTs an upstream chunk through it, then abandons the GET. GET-first is the
+// real client ordering, since deliver() writes to a pipe that only drains once serve reads it. The point
+// is running it under -race: any unsynchronised access to the session map shows up here.
 func TestHTTPCServerSessionChurn(t *testing.T) {
 	base, hc, srv := httpcStressServer(t)
 	hc.Timeout = 2 * time.Second // never let a held-open GET hang a worker

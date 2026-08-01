@@ -10,16 +10,8 @@ import (
 
 // TestDialLoopBurnsOnHandshakeFailure guards the destination pool against the interference shape this
 // fleet actually meets: a DPI that lets the TCP handshake complete and then kills the payload, so the
-// connect SUCCEEDS and the CORE handshake fails.
-//
-// dialLoop attributes a failed DIAL (burn + advance) but for a long time did nothing at all on a failed
-// handshake — it fell straight through to the reconnect backoff. The pool therefore never moved and the
-// client re-dialed the SAME blocked endpoint forever: destination rotation was inert for the one failure
-// mode it exists to escape.
-//
-// The listener here accepts every connection and immediately closes it, which is exactly that shape. Both
-// pool endpoints point at it, so the test never depends on an unroutable address (that would fail at DIAL
-// and exercise the branch that already worked).
+// connect SUCCEEDS and the CORE handshake fails. Without the burn the pool never moves and the client
+// re-dials the same blocked endpoint forever. The listener accepts and closes at once — exactly that shape.
 func TestDialLoopBurnsOnHandshakeFailure(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

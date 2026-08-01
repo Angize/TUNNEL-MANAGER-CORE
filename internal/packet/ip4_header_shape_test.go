@@ -8,25 +8,10 @@ import (
 	"testing"
 )
 
-// TestCraftedHeadersLookLikeTheFlowTheyJoin pins the two IPv4 header fields every hand-built packet
-// used to leave at zero.
-//
-// MEASURED in a netns before it was written, because what the kernel does here is not something to
-// reason about. On one veth pair, one instant:
-//
-//	real raw data (conn.WriteToIP, kernel-built)     DF=1, ID varying   34109, 34820, 35061 …
-//	an ordinary Linux UDP socket, same namespace     DF=1, ID varying   46961, 46962
-//	a low-TTL decoy (IP_HDRINCL)                     DF=0, ID 34107/34108  <- kernel FILLED the ID
-//	a bad-checksum decoy (AF_PACKET)                 DF=0, ID 0            <- nothing filled anything
-//	flux REAL data (buildIP4 -> IP_HDRINCL)          DF=0, ID varying
-//
-// So DF was wrong on every packet these functions build — one bit that separates each decoy from the
-// flow it exists to imitate, and on flux and the spoof link, where ALL traffic is built here, one bit
-// that separates the whole tunnel from ordinary Linux UDP. The ID was wrong only on the AF_PACKET
-// paths, because raw(7) says an IP_HDRINCL socket fills in a zero ID and it really does.
-//
-// The test asserts the header BYTES rather than the observed wire, so it holds for the AF_PACKET
-// callers that no kernel ever touches.
+// TestCraftedHeadersLookLikeTheFlowTheyJoin pins the two IPv4 header fields every hand-built packet used
+// to leave at zero. DF was wrong on every packet these functions build — one bit separating each decoy
+// from the flow it imitates, and on flux and the spoof link one bit separating the whole tunnel from an
+// ordinary Linux socket. The ID mattered only on AF_PACKET, since IP_HDRINCL fills a zero ID itself.
 func TestCraftedHeadersLookLikeTheFlowTheyJoin(t *testing.T) {
 	src, dst := net.IPv4(10, 99, 0, 1), net.IPv4(10, 99, 0, 2)
 	body := []byte("a sealed core frame")

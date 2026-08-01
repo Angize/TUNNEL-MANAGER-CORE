@@ -83,12 +83,10 @@ func echoHTTPC() *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
-// TestHTTPCProbeUsesRealEstablish locks in the HTTP-carrier probe fix: probeEdgeFull must run a REAL httpc
-// session (which validates the origin's HTTP 200), not a TLS-only reachability check. A CDN
-// terminates TLS for any of its anycast IPs, so a dead origin behind it completes TCP+TLS yet 502s
-// the actual httpc establish — the old TLS-only probe passed that edge (falsely healing it on retest
-// and defeating the manual-pin auto-release, which read the block as "transient"). The real-establish
-// probe must fail it. the http carrier over plain HTTP isolates exactly this: front reachable, origin dead.
+// TestHTTPCProbeUsesRealEstablish locks in the HTTP-carrier probe fix: probeEdgeFull must run a REAL
+// httpc session, which validates the origin's 200, not a TLS-only reachability check. A CDN terminates
+// TLS for any of its anycast IPs, so a dead origin behind it completes TCP+TLS yet 502s the establish —
+// which a TLS-only probe falsely heals. Plain HTTP isolates it: front reachable, origin dead.
 func TestHTTPCProbeUsesRealEstablish(t *testing.T) {
 	good := echoHTTPC()
 	defer good.Close()
@@ -198,11 +196,10 @@ func httpcInject(t *testing.T, cliCtrl, srvCtrl *os.File) {
 	}
 }
 
-// TestTunnelHTTPCPost runs a full server<->client httpc tunnel in POST-ladder mode over a real
-// (plain HTTP/1.1) socket and asserts a packet traverses each way. It is the regression test for
-// the server-side bug where handleServerConn ran wsServerHandshake on an HTTP-carrier conn (b.ws is set
-// for httpc): the client speaks core frames directly over the GET/POST pair, so a WS handshake
-// there misreads the core handshake as an HTTP request and the tunnel connects but passes no data.
+// TestTunnelHTTPCPost runs a full server<->client httpc tunnel in POST-ladder mode over a real plain
+// HTTP/1.1 socket and asserts a packet traverses each way. It is the regression test for the server
+// running wsServerHandshake on an HTTP-carrier conn (b.ws is set for httpc): the client speaks core
+// frames directly over the GET/POST pair, so a WS handshake there connects but passes no data.
 func TestTunnelHTTPCPost(t *testing.T) { testTunnelHTTPC(t, "post", false) }
 
 // TestTunnelHTTPCPostObfs is the same with the length-mask obfs handshake in play.

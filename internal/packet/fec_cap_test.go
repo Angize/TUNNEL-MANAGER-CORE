@@ -20,11 +20,10 @@ func fecDataShard(blk uint32, n, k int) []byte {
 	return pkt
 }
 
-// TestFecDecoderCodecCap is the regression test for the pre-auth memory-exhaustion DoS: fecDecoder
-// caches a Reed-Solomon codec per distinct (n,k), input runs before peer auth, and nothing budgeted
-// the codec objects — so a hostile peer spraying unique (n,k) headers could pin an unbounded set of
-// GF(256) matrices. The codecs cache must now stay bounded by fecMaxCodecs regardless of how many
-// distinct geometries are thrown at it.
+// TestFecDecoderCodecCap is the regression test for the pre-auth memory-exhaustion DoS: fecDecoder caches
+// a Reed-Solomon codec per distinct (n,k), input runs before peer auth, and nothing budgeted the codec
+// objects — so a hostile peer spraying unique geometries could pin an unbounded set of GF(256) matrices.
+// The cache must stay bounded by fecMaxCodecs however many geometries are thrown at it.
 func TestFecDecoderCodecCap(t *testing.T) {
 	d := newFecDecoder(func([]byte) {})
 	blk := uint32(0)

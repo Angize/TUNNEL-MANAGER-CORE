@@ -10,12 +10,10 @@ import (
 	"time"
 )
 
-// TestDesyncWireEmission is a real-socket integration check (root-only): it drives the
-// actual Raw.SetDesync + sendFakes path over a live IP_HDRINCL socket to the loopback and
-// receives the decoys on a raw socket of the same protocol, asserting the kernel
-// transmitted exactly `count` decoys carrying the stamped low TTL and a plausible-frame
-// payload size. This proves the emission mechanism end to end (openHdrincl + buildIP4Ext +
-// Sendto over a real kernel socket), beyond the pure-function unit tests.
+// TestDesyncWireEmission is a real-socket integration check (root-only): it drives the actual
+// Raw.SetDesync + sendFakes path over a live IP_HDRINCL socket to the loopback and receives the decoys on
+// a raw socket of the same protocol, asserting the kernel transmitted exactly `count` of them with the
+// stamped low TTL. That proves the emission mechanism end to end, beyond the pure-function unit tests.
 func TestDesyncWireEmission(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("needs root (raw sockets / CAP_NET_RAW)")

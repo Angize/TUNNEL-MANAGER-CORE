@@ -15,14 +15,9 @@ import (
 const unbindableSrc = "203.0.113.9"
 
 // TestUnusableSourceIsBurnedNotSilentlyIgnored drives the real dialer — the function every dial goes
-// through to install LocalAddr — over a source pool whose current entry cannot be bound.
-//
-// Skipping the bind and dialing from the kernel default is deliberate (dialLoop charges a failed dial
-// to the DESTINATION, so failing here would burn the destination pool one endpoint at a time while
-// the peers are perfectly reachable). What was missing is everything else: the entry stayed HEALTHY
-// and ACTIVE, so every rotation came straight back to it, the panel kept showing the tunnel sourced
-// from an IP it never leaves from, and source rotation was silently off. The warning was a single
-// sync.Once for the whole process, so a pool that rotated onto a SECOND dead IP said nothing at all.
+// through to install LocalAddr — over a source pool whose current entry cannot be bound. Skipping the
+// bind is deliberate, since dialLoop charges a failed dial to the DESTINATION. What must not be skipped
+// is the rest: an entry left HEALTHY and ACTIVE brings every rotation straight back to it, silently.
 func TestUnusableSourceIsBurnedNotSilentlyIgnored(t *testing.T) {
 	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, true, 0, "")
 	b := &TCP{sp: sp}
@@ -70,20 +65,10 @@ func TestUnusableSourceWarnsPerEntry(t *testing.T) {
 	}
 }
 
-// TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed is the end-to-end half: a real direct-tcp
-// client against a real in-process server, with an operator jump aimed at a source IP that cannot be
-// bound. The dial succeeds (from the kernel default, over loopback) and reaches dialLoop's
-// pin-release site.
-//
-// A jump is a MOMENTARY move within the rotation, not a lock, and it ends one of two ways: the
-// carrier lands on it, or it is proven impossible. This is the second. Before the fix it ended the
-// FIRST way by mistake — lastSrc held the REQUESTED source, so the "did we land?" check compared its
-// own input and always matched: the panel reported the jump as done, rotation resumed, and the tunnel
-// went on leaving from the kernel default while the IP stayed green in the pool, so the next rotation
-// walked straight back onto it.
-//
-// The observable difference between "landed" and "abandoned" is the burn: an abandoned jump takes the
-// unusable IP out of rotation, a landed one leaves it active.
+// TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed is the end-to-end half: a real direct-tcp client
+// against a real server, with an operator jump aimed at a source IP that cannot be bound. A jump ends one
+// of two ways — the carrier lands on it, or it is proven impossible — and this is the second. The
+// observable difference is the burn: an abandoned jump takes the IP out of rotation, a landed one does not.
 func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 	const psk = "srcpin-unbindable-psk-0123456789"
 	const cipher = "aes-256-gcm"

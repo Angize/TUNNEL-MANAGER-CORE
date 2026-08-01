@@ -75,15 +75,10 @@ func TestL2InjectResolvesPerDestination(t *testing.T) {
 	}
 }
 
-// TestRawBadsumDecoyFollowsDestination closes the class behind #24 by driving the REAL path
-// (Raw.sendFakes), not the injector helper: the L2 route a bad-checksum decoy is framed for must be
-// the destination the tunnel is on NOW.
-//
-// The injector used to freeze the destination it was constructed with (the startup peer) and only
-// ever re-resolve after a Sendto failure — which never comes, because handing a frame to the NIC
-// succeeds regardless. So on a raw/flux tunnel with a rotating destination pool every badsum decoy
-// kept going to the FIRST destination's next hop while its IPv4 header carried the new one: on a
-// host whose destinations take different routes the decoys silently stopped reaching the DPI.
+// TestRawBadsumDecoyFollowsDestination drives the REAL path (Raw.sendFakes), not the injector helper:
+// the L2 route a bad-checksum decoy is framed for must be the destination the tunnel is on NOW. An
+// injector frozen at construction only re-resolves after a Sendto failure — which never comes, because
+// handing a frame to the NIC succeeds — so every decoy kept going to the first destination's next hop.
 func TestRawBadsumDecoyFollowsDestination(t *testing.T) {
 	f := &fakeResolver{}
 	r := &Raw{isClient: true, proto: protoBIP, profile: "bip", fakeFd: -1}
@@ -115,19 +110,8 @@ func TestRawBadsumDecoyFollowsDestination(t *testing.T) {
 
 // TestRawBadsumDecoyFramesForTheRoutedPeer closes the whole class: whatever the link forges into the
 // decoy's IPv4 HEADER, the Ethernet frame it is injected in must be built for the address the tunnel
-// actually ROUTES to. Every other packet of the flow picks its first hop that way — forgedLink.send
-// Sendtos to.IP even while the header carries the decoy, and the low-TTL decoy sibling uses the same
-// `sa` — so a badsum decoy framed for the forged destination is the one packet that can leave by a
-// different next hop than the flow it exists to camouflage.
-//
-// The matrix is over the FORGE axes, because that is what decides whether header dst == to.IP:
-// a direct link (they agree, so the old code happened to be right) and each forgedLink combination
-// (spoof-src only agrees too; anything with spoofDst does not). fake_desync is accepted on the spoof
-// transport (config.go), so these are reachable configurations, not hypotheticals.
-//
-// It drives Raw.sendFakes, not the injector helper. What it does NOT cover: that the header still
-// carries the forged decoy — that is forgedLink.header's contract and TestIPLinkAddressingMatrix
-// pins it.
+// actually ROUTES to, as every other packet of the flow is. The matrix is over the FORGE axes, since
+// that is what decides whether header dst == to.IP. That the header still carries the decoy is header()'s.
 func TestRawBadsumDecoyFramesForTheRoutedPeer(t *testing.T) {
 	peer := &net.IPAddr{IP: net.IPv4(203, 0, 113, 5)}
 	decoy := net.IPv4(198, 51, 100, 200)

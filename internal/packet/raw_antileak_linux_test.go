@@ -9,16 +9,10 @@ import (
 	"time"
 )
 
-// ---------------------------------------------------------------------------
-// A tiny netfilter stand-in.
-//
-// The whole point of the raw anti-leak is that the rule must hit the KERNEL's answer and miss OUR
-// OWN carrier frames. Those two are indistinguishable at a glance on the icmp profile — both are
-// "ICMP echo reply to the peer" — which is exactly how the first design of this fix would have
-// black-holed the download. So rather than restating the expected argv (a list that goes stale the
-// moment someone edits a rule), these tests EVALUATE each rule against real packets: the kernel's
-// measured answer, and the bytes rawEncap actually produces.
-// ---------------------------------------------------------------------------
+// A tiny netfilter stand-in. The raw anti-leak rule must hit the KERNEL's answer and miss OUR OWN
+// carrier frames, and on the icmp profile those are indistinguishable at a glance — both are "ICMP echo
+// reply to the peer". So rather than restating the expected argv, which goes stale the moment a rule is
+// edited, these tests EVALUATE each rule against real packets and the bytes rawEncap actually produces.
 
 // nfPacket is an outgoing IPv4 packet as netfilter's OUTPUT chain sees it.
 type nfPacket struct {
@@ -126,17 +120,16 @@ func ourFrame(profile string, isClient, marked bool) nfPacket {
 	return p
 }
 
-// kernelAnswers is the MEASURED behaviour this fix exists to suppress: crafted carrier packets per
-// profile in a veth namespace pair, both directions observed with tcpdump. It returns what THIS
-// end's kernel emits when the PEER's frames arrive, so it is a function of our role.
+// kernelAnswers is what THIS end's kernel emits when the PEER's frames arrive, so it is a function of
+// our role:
 //
-//	icmp  the receiving kernel mirrored every echo request back, carrying our own ciphertext
-//	      (length 72). The other direction is silent: our echo replies provoke nothing.
-//	udp   both kernels answered with an icmp port-unreachable, which QUOTES the packet. It names
-//	      whatever port the peer aimed at, so the rule cannot and does not key on ports.
-//	tcp   both kernels answered with a RST.
+//	icmp  the receiving kernel mirrors every echo request back, carrying our own ciphertext. The other
+//	      direction is silent: our echo replies provoke nothing.
+//	udp   both kernels answer an icmp port-unreachable, which QUOTES the packet — so it names whatever
+//	      port the peer aimed at, and the rule cannot key on ports.
+//	tcp   both kernels answer a RST.
 //
-// The kernel's answer carries no mark of ours (mark 0) — that is the whole basis of the icmp rule.
+// The kernel's answer carries no mark of ours, which is the whole basis of the icmp rule.
 func kernelAnswers(profile string, isClient bool) []nfPacket {
 	switch profile {
 	case "icmp":
@@ -155,11 +148,10 @@ func kernelAnswers(profile string, isClient bool) []nfPacket {
 
 var leakPeer = net.IPv4(203, 0, 113, 7)
 
-// TestRawAntiLeakNeverMatchesOurOwnFrames is the guard that the first design of this fix failed.
-// On the icmp profile the server's DOWNSTREAM frames are echo replies to the peer — the same shape
-// as the kernel's mirror — so a plain "--icmp-type echo-reply -d peer -j DROP" drops the tunnel's
-// whole download direction. Measured before the fix: 10 of the server's 10 own frames dropped, and
-// every send returned EPERM. No rule this carrier installs may match anything it sends.
+// TestRawAntiLeakNeverMatchesOurOwnFrames is the guard the first design of this fix failed. On the icmp
+// profile the server's DOWNSTREAM frames are echo replies to the peer — the same shape as the kernel's
+// mirror — so a plain "--icmp-type echo-reply -d peer -j DROP" drops the tunnel's whole download
+// direction. No rule this carrier installs may match anything it sends.
 func TestRawAntiLeakNeverMatchesOurOwnFrames(t *testing.T) {
 	for profile := range rawProfiles {
 		for _, isClient := range []bool{true, false} {
@@ -222,12 +214,10 @@ func TestRawIcmpRuleIsSkippedWithoutTheMark(t *testing.T) {
 	}
 }
 
-// TestRawPortedProfilesReverseTheFlow: any carrier header that has L4 ports must put the client's
-// and the server's on the wire the other way round. Both ends sending an identical (sport,dport) is
-// not a conversation anything pairs up — the downstream direction reads as an unsolicited new flow,
-// so a NAT or stateful firewall in front of the client drops it — and two half-flows aimed at each
-// other are a signature in their own right. Read out of rawEncap via ourFrame, so it is the real
-// encapsulation being measured and not a restatement of the constants.
+// TestRawPortedProfilesReverseTheFlow: any carrier header that has L4 ports must put the client's and
+// the server's on the wire the other way round. Both ends sending an identical pair is not a
+// conversation anything pairs up — the downstream reads as an unsolicited new flow a NAT drops — and two
+// half-flows aimed at each other are a signature. Read out of rawEncap, so it measures the real thing.
 func TestRawPortedProfilesReverseTheFlow(t *testing.T) {
 	ported := 0
 	for profile := range rawProfiles {
@@ -261,11 +251,10 @@ func TestRawAntiLeakLeavesQuietProfilesAlone(t *testing.T) {
 	}
 }
 
-// TestRawRotationPreScopesAntiLeak drives the REAL destination-rotation and pin entry points and
-// asserts the rule is re-scoped there — on the caller's own goroutine — rather than being left for
-// the receive loop to discover. It also pins the install-before-remove order: the endpoint we just
-// left stays admitted for the frames still in flight, so a gap with no rule at all is exactly when
-// the kernel leaks. Same contract the flux carrier already holds.
+// TestRawRotationPreScopesAntiLeak drives the REAL destination-rotation and pin entry points and asserts
+// the rule is re-scoped there — on the caller's own goroutine — rather than left for the receive loop to
+// discover. It also pins the install-before-remove order: the endpoint we just left stays admitted for
+// the frames still in flight, so a gap with no rule at all is exactly when the kernel leaks.
 func TestRawRotationPreScopesAntiLeak(t *testing.T) {
 	rec := &leakRecorder{}
 	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, false, 0, "")

@@ -6,19 +6,10 @@ import (
 	"testing"
 )
 
-// TestFecCodecCacheCannotBePoisoned is the regression test for backlog D4: the decoder's
-// Reed-Solomon codec cache was bounded but never pruned, so the FIRST fecMaxCodecs geometries to
-// arrive owned it forever.
-//
-// In user terms: fecDecoder.input runs before any peer authentication, so a stranger who can send
-// packets to the carrier port could fire ~64 tiny forged block headers with made-up geometries —
-// once, before the tunnel ever carries traffic — and the cache would be full of junk for the life
-// of the process. The tunnel's own 10+3 codec could then never be built, every lossy block stopped
-// being repaired, and nothing said so: the panel still shows FEC on and the operator still pays
-// the parity bandwidth for protection that no longer exists.
-//
-// The test drives the real paths on ONE decoder: spray, then a real block with a real loss must
-// still be repaired — and again after a second spray, so the fix cannot be a one-shot.
+// TestFecCodecCacheCannotBePoisoned: the codec cache is bounded, and it must also be PRUNED. input runs
+// before any peer authentication, so a stranger could fire ~64 tiny forged block headers once, before the
+// tunnel carries traffic, and own the cache for the life of the process — the real geometry could never
+// be built, repair silently stopped, and the panel still showed FEC on. Sprayed twice, so no one-shot fix.
 func TestFecCodecCacheCannotBePoisoned(t *testing.T) {
 	// Two real 10+3 blocks, built through the real send path. count == n, so each block fills and
 	// flushes synchronously inside addData — no timer, no second goroutine.

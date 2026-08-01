@@ -61,15 +61,10 @@ func TestDesyncSpecs(t *testing.T) {
 	}
 }
 
-// TestBuildIP4Ext verifies the header fields, that buildIP4 matches the explicit
-// (ttl 64, good checksum) form, that a good checksum verifies to zero, and that badSum
-// deliberately breaks it.
-//
-// "Byte-identical" was the original wording and it can no longer hold: Identification is now
-// per-packet (it was left at 0, which put ID=0 on the wire from every AF_PACKET path — measured).
-// The promise that matters is unchanged, so it is stated field-wise instead: buildIP4 IS
-// buildIP4Ext(ttl=64, badSum=false) in everything except the two fields that are per-packet by
-// design — the ID, and the checksum that follows from it.
+// TestBuildIP4Ext verifies the header fields, that a good checksum verifies to zero, and that badSum
+// deliberately breaks it. buildIP4 IS buildIP4Ext(ttl=64, badSum=false) in everything except the two
+// fields that are per-packet by design — the Identification, and the checksum that follows from it — so
+// the equivalence is stated field-wise rather than as byte-identity.
 func TestBuildIP4Ext(t *testing.T) {
 	src := net.IPv4(10, 0, 0, 1)
 	dst := net.IPv4(10, 0, 0, 2)
@@ -129,17 +124,10 @@ func TestBuildIP4Ext(t *testing.T) {
 	}
 }
 
-// TestBuildIP4ExtBadSumZeroTwin locks in the one's-complement zero-twin fix: when the correct
-// header checksum is 0x0000, its bitwise complement 0xffff ALSO verifies (both are valid
-// representations of zero), so a naive ^sum would leave a VALID checksum. buildIP4Ext must
-// still produce an invalid one.
-//
-// The header used to be pinned by hand (src=10.0.0.0 dst=192.168.1.0 proto=253 ttl=238, 69-byte
-// payload summed to exactly 0x0000). Identification is per-packet now, so that premise is no longer
-// reproducible from the inputs alone — and the ID contributes linearly to the one's-complement sum,
-// so for this header EXACTLY ONE ID value produces the 0x0000 twin. The counter is package-level and
-// this test is in-package, so it is set directly and the right ID is searched for exhaustively:
-// deterministic, no probability involved.
+// TestBuildIP4ExtBadSumZeroTwin locks in the one's-complement zero-twin case: when the correct header
+// checksum is 0x0000 its complement 0xffff ALSO verifies, so a naive ^sum would leave a VALID checksum.
+// Identification is per-packet and contributes linearly to the sum, so for a fixed header exactly one ID
+// produces the twin. The counter is package-level and is searched exhaustively — no probability involved.
 func TestBuildIP4ExtBadSumZeroTwin(t *testing.T) {
 	src := net.IPv4(10, 0, 0, 0)
 	dst := net.IPv4(192, 168, 1, 0)
@@ -290,15 +278,10 @@ func TestDecoySeqDistinct(t *testing.T) {
 	}
 }
 
-// TestDecoySeqNeverAliasesTheLiveStream closes the half TestDecoySeqDistinct above does NOT cover: that
-// test only proves the decoys of a batch differ from EACH OTHER, so it stayed green while every decoy
-// carried the live stream's own on-wire sequence.
-//
-// The icmp profile stamps `uint16(seq)`, and fakeSeqGap used to be 1<<20 — exactly 16×2^16, i.e. zero
-// modulo the 16-bit field. So decoy 0 went out with the sequence of the frame just sent and decoy 1 with
-// the very next one, sharing the PSK-derived icmp id: a middlebox tracking echoes by (id, seq) could take
-// the real frame for a duplicate of a decoy it had already seen. The gap has to be far from zero modulo
-// 2^16 as well as large in the 32-bit space.
+// TestDecoySeqNeverAliasesTheLiveStream closes the half TestDecoySeqDistinct does not: that one proves
+// the decoys of a batch differ from EACH OTHER, and stays green while every decoy carries the live
+// stream's own on-wire sequence. The icmp profile stamps only uint16(seq), so the gap must be far from
+// zero modulo 2^16 as well as large in the 32-bit space, or a middlebox reads a real frame as a duplicate.
 func TestDecoySeqNeverAliasesTheLiveStream(t *testing.T) {
 	const live = 41000
 	r := &Raw{proto: protoICMP}

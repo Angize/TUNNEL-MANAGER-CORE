@@ -7,31 +7,10 @@ import (
 	"testing"
 )
 
-// The ws-pool half of the pre-pin carrier fix has to be guarded AT THE SITE THAT CONSULTS IT.
-//
-// TestWSPoolPinMatches next door builds a bare wsPool and calls p.pinMatches four times. That pins
-// what the predicate MEANS and nothing about whether anything still asks it — delete the whole `if`
-// block in dialLoopWarm's activeReady arm and that test stays green, which is the same shape as the
-// two dead_after_secs tests that both passed on the pre-fix tree.
-//
-// The direct-TCP half does have an end-to-end test (TestPinIsNotConsumedByAPreBuiltRotationCarrier
-// drives a real dialLoop against a real server and asserts the tunnel lands on the pinned endpoint).
-// The pool half cannot be driven the same way, and it is worth writing down why rather than leaving
-// the gap unexplained: current() FORCES the pinned edge, so every ordinary dial already lands on it
-// and passes the check. The only way to produce a mismatched carrier is the race the block documents
-// — a background active dial that resolved its edge BEFORE the pin arrived, landing after it — and
-// reaching that window on demand needs an outage, an adopted standby, an in-flight active dial and a
-// pin, all interleaved in one order. A test that tried would be timing-dependent, and a flaky guard
-// on a rare window is worth less than no guard at all.
-//
-// So this reads the call site, exactly as dead_after_wiring_test.go does for main.go's applyDeadAfter
-// and as the panel's browser-gate guards do. It walks the AST rather than grepping, so reformatting
-// or a renamed variable cannot fool it, and it is deliberately narrow: it asserts that the arm which
-// adopts a finished active dial still asks the pool whether that carrier matches a live pin, and
-// still refuses it when the answer is no.
-//
-// What it does NOT prove: that pinMatches returns the right answer (TestWSPoolPinMatches does), or
-// that the discard path re-dials correctly. It proves the question is still being asked.
+// The ws-pool half of the pre-pin carrier fix has to be guarded AT THE SITE THAT CONSULTS IT:
+// TestWSPoolPinMatches pins what the predicate MEANS and stays green if the `if` block in dialLoopWarm's
+// activeReady arm is deleted. The window it guards needs an outage, an adopted standby, an in-flight
+// dial and a pin interleaved, so this walks the AST instead — it proves only that the question is asked.
 func TestActiveAdoptionStillConsultsThePin(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "tcp.go", nil, parser.ParseComments)

@@ -5,21 +5,10 @@ import (
 	"time"
 )
 
-// TestWarmStandbyResumesRotationAfterThePoolHeals drives the REAL warm-standby manager
-// (dialLoopWarm) against a live in-process ws server, through the exact sequence that froze
-// proactive rotation for the life of a connection:
-//
-//  1. every edge but one is burned, so aimStandby finds nothing distinct and degrades to a plain
-//     step — the warm standby is built on the SAME edge as the active;
-//  2. the rotation tick correctly refuses to promote it (that would retire a healthy carrier and
-//     rebuild an identical one) — but it used to ONLY skip, leaving the stale standby held;
-//  3. requestStandby() is a hard no-op while a standby is held, so nothing could ever build one on
-//     another edge;
-//  4. the pool heals. Nothing happens. Every later tick lands in the same skip, forever: the
-//     "rotation just stopped" report, which no pin or probe could clear.
-//
-// The assertion is the user-visible outcome — the active edge actually moves once the pool heals —
-// not the internal state, so it stays true however the manager is refactored.
+// TestWarmStandbyResumesRotationAfterThePoolHeals drives the REAL warm-standby manager against a live
+// in-process ws server, through the sequence that froze rotation for the life of a connection: with one
+// edge healthy the standby is built on the ACTIVE's own edge, the tick correctly refuses to promote it,
+// and requestStandby() is a hard no-op while one is held. The assertion is that the edge moves on heal.
 func TestWarmStandbyResumesRotationAfterThePoolHeals(t *testing.T) {
 	const psk = "warm-heal-psk-abcdefghijklmnopq"
 	const cipher = "aes-256-gcm"

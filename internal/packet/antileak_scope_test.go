@@ -34,19 +34,10 @@ func (s *scopeRecorder) last() string {
 	return s.ips[len(s.ips)-1]
 }
 
-// The anti-leak rules must stay scoped to the endpoint the tunnel is CURRENTLY using.
-//
-// The rule set is single-scoped: pointing it at one address takes it off the previous one. learnPeer
-// ran on the receive goroutine and re-scoped to whoever sent the frame — while a pooled CLIENT
-// deliberately does NOT adopt that sender as its peer, and SetPeerPool just as deliberately keeps
-// admitting the endpoint a rotation left so frames still in flight from it are not dropped. So every
-// one of those stragglers dragged the rules back onto the OLD destination, i.e. OFF the live one:
-// the #211 kernel-answer leak, re-opened on the endpoint actually carrying traffic, on every
-// rotation. install-before-remove does not help — it closes the sub-millisecond gap between two rule
-// sets, not a scope pointed at the wrong address.
-//
-// The synchronous `scope` calls on the rotate/pin paths were always right; it is only this async
-// hand-off that ran backwards.
+// The anti-leak rules must stay scoped to the endpoint the tunnel is CURRENTLY using. The rule set is
+// single-scoped, so pointing it at one address takes it off the previous one — and a pooled client keeps
+// admitting the endpoint a rotation left, so a straggler frame must not drag the scope back onto it.
+// The synchronous scope calls on the rotate/pin paths are not at issue; this is the async hand-off.
 func TestAntiLeakScopeIsNotDraggedBackByAStragglerFrame(t *testing.T) {
 	const live, old = "203.0.113.20", "203.0.113.10"
 

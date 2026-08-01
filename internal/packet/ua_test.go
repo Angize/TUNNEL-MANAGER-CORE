@@ -9,11 +9,10 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-// The uTLS ClientHello parrot and the advertised HTTP User-Agent must name the SAME Chrome major. A
-// real browser's JA3/JA4 (derived from its TLS ClientHello) and its User-Agent always agree; if they
-// disagree here — e.g. a uTLS bump moved HelloChrome_Auto but the UA const was left behind, or vice
-// versa — that mismatch is a cheap, high-confidence fingerprint. Wiring the two together in a test
-// fails the build the moment they drift, so the ws/HTTP carriers can never ship a skewed pair.
+// The uTLS ClientHello parrot and the advertised HTTP User-Agent must name the SAME Chrome major. A real
+// browser's JA3/JA4 and its User-Agent always agree; a disagreement here — a uTLS bump that moved
+// HelloChrome_Auto while the UA const stayed, or the reverse — is a cheap, high-confidence fingerprint.
+// Wiring the two together in a test fails the build the moment they drift.
 func TestUserAgentMatchesTLSParrot(t *testing.T) {
 	parrot := utls.HelloChrome_Auto.Version // e.g. "133"
 	if parrot == "" {
@@ -34,15 +33,10 @@ func TestUserAgentMatchesTLSParrot(t *testing.T) {
 	}
 }
 
-// TestAcceptEncodingMatchesUAMajor ties the advertised Accept-Encoding to the Chrome major the UA and
-// the uTLS parrot both name, the same way TestUserAgentMatchesTLSParrot ties the UA to the parrot.
-//
-// Chrome has offered zstd by default since 123. The ws carrier hand-writes its header block rather
-// than deriving it from the parrot, so nothing kept the two in step: the block advertised Chrome 133
-// while offering "gzip, deflate, br" — a pre-123 encoding list under a post-123 User-Agent, which is
-// a combination the real browser stopped producing and precisely the cross-check a CDN's bot
-// management runs. Without this guard the next uTLS bump moves the UA and leaves the list behind
-// again.
+// TestAcceptEncodingMatchesUAMajor ties the advertised Accept-Encoding to the Chrome major the UA and the
+// uTLS parrot both name, the way TestUserAgentMatchesTLSParrot ties the UA to the parrot. Chrome has
+// offered zstd by default since 123, and the ws carrier hand-writes its header block rather than deriving
+// it from the parrot — so without this guard the next bump moves the UA and leaves the list behind.
 func TestAcceptEncodingMatchesUAMajor(t *testing.T) {
 	major := 0
 	if _, err := fmt.Sscanf(utls.HelloChrome_Auto.Version, "%d", &major); err != nil || major == 0 {

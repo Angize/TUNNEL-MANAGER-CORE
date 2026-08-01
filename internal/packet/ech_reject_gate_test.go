@@ -45,22 +45,10 @@ func x25519Pub(t *testing.T) []byte {
 	return k.PublicKey().Bytes()
 }
 
-// TestECHRejectionNeverYieldsAUsableConn drives the real uEdgeHandshake against a real TLS 1.3 server
-// that has no ECH keys — which IS an ECH rejection — and asserts that no usable connection comes back.
-//
-// This is the invariant the reject-verify hook silently rests on. To surface the fresh RetryConfigList
-// for the in-band self-heal we must let uTLS proceed past its own certificate check, so the hook
-// accepts the outer certificate UNVERIFIED. That is only safe because uTLS always turns a rejected ECH
-// into an error: it refuses to offer anything below TLS 1.3 once an ECH config list is set, so no
-// downgrade reaches the hook and then completes, and the TLS 1.3 path sends alertECHRequired and
-// returns *ECHRejectionError before marking the handshake complete. Neither of those facts is ours,
-// and a uTLS bump could take either away — at which point we would be holding a TLS session whose
-// certificate NOBODY checked, i.e. an open MITM window on every carrier that fronts through a CDN.
-//
-// uEdgeHandshake now fails closed if the hook fired and the handshake nevertheless succeeded, so this
-// test stays green either way; what it locks is the OBSERVABLE property — an ECH rejection never
-// hands a connection back — which is what turns a uTLS regression into a red test instead of a
-// silent downgrade of the whole ws/http/grpc family.
+// TestECHRejectionNeverYieldsAUsableConn drives the real uEdgeHandshake against a TLS 1.3 server with no
+// ECH keys — which IS a rejection — and asserts no usable connection comes back. This is the invariant
+// the reject-verify hook rests on: to surface the fresh RetryConfigList it accepts the outer certificate
+// UNVERIFIED, safe only because uTLS turns a rejected ECH into an error — not our fact, and bump-able.
 func TestECHRejectionNeverYieldsAUsableConn(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

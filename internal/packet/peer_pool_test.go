@@ -372,11 +372,10 @@ func TestUDPSourcePoolBindsInitialSource(t *testing.T) {
 	b.conn.Load().Close()
 }
 
-// TestUDPSourceRebindFailureKeepsSocketAndPool closes the class behind #32: when a source rotation
-// advances onto an IP that is no longer on the interface, the rebind fails — and the pool must NOT be
-// left claiming that IP active while the socket still egresses from the previous one. Before the fix,
-// nextEndpoint had already burned the (healthy, in-use) previous source and pointed the status file at
-// the unbindable one, so the panel showed the wrong active source and a live IP was falsely burned.
+// TestUDPSourceRebindFailureKeepsSocketAndPool: when a source rotation advances onto an IP that is no
+// longer on the interface the rebind fails, and the pool must NOT be left claiming that IP active while
+// the socket still egresses from the previous one — nextEndpoint has by then burned the healthy, in-use
+// source and pointed the status file at the unbindable one.
 func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
 	c0, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {

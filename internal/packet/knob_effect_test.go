@@ -83,11 +83,9 @@ func TestServerHonoursDeadAfter(t *testing.T) {
 }
 
 // TestSetDeadAfterReportsWhetherItWillBeEnforced pins the seam main's startup line depends on.
-//
-// dead_after_secs is applied on BOTH roles now, which is right — on tcp/ws the window IS the
-// connection's read deadline and the server has one too. But the connectionless carriers only reap
-// from a client loop, so on their SERVER the value is stored and never read, and main printed
-// "self-heal deadline set to Ns" over it anyway. The carrier is the only thing that knows.
+// dead_after_secs is applied on BOTH roles, which is right — on tcp/ws the window IS the connection's
+// read deadline and the server has one too. But the connectionless carriers reap only from a client
+// loop, so on their SERVER the value is stored and never read. The carrier is the only thing that knows.
 func TestSetDeadAfterReportsWhetherItWillBeEnforced(t *testing.T) {
 	const keepalive = 10 * time.Second
 

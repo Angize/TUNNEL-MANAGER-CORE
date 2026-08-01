@@ -9,10 +9,9 @@ import (
 )
 
 // TestUDPRotationKeepsStreamFlowing proves a proactive DESTINATION rotation re-handshakes onto the new
-// endpoint FAST — the re-handshake init goes out immediately after the rotation, not after the 1s
-// handshake-retransmit sleep. A client streams a packet every 30ms across a pool that rotates every
-// 700ms between two live server IPs; the largest gap between packets that reach the server must stay well
-// under the pre-fix ~1s stall. (Same clientLoop shape backs raw/flux, so this covers all three.)
+// endpoint FAST — the init goes out immediately after the rotation, not after the 1s retransmit sleep. A
+// client streams a packet every 30ms across a pool rotating every 700ms between two live server IPs, and
+// the largest gap between packets reaching the server must stay well under a full retransmit interval.
 func TestUDPRotationKeepsStreamFlowing(t *testing.T) {
 	const psk = "rot-stream-psk-abcdefghijklmnop"
 	const cipher = "chacha20-poly1305"

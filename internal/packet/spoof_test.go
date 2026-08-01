@@ -8,11 +8,9 @@ import (
 )
 
 // TestIPLinkAddressingMatrix pins the pure addressing decisions of both links across every spoof
-// combination, with no sockets opened. This is the class-closing guard for the ipLink split: header()
-// (what src/dst an outgoing packet carries), replyTo() (where a server answers), filterSrc() (whether
-// the peer source filter applies) and pinsSource() (whether a source-rotation pool is refused) are the
-// four axes every "and under spoof?" bug lived on. If a future change forks the datapath or flips one
-// of these, this test fails without needing CAP_NET_RAW.
+// combination, with no sockets opened. header() (what src/dst a packet carries), replyTo() (where a
+// server answers), filterSrc() (whether the peer source filter applies) and pinsSource() (whether a
+// source pool is refused) are the four axes every "and under spoof?" bug lived on. Needs no CAP_NET_RAW.
 func TestIPLinkAddressingMatrix(t *testing.T) {
 	ip := func(s string) net.IP { return net.ParseIP(s).To4() }
 	real := ip("10.0.0.1")               // our real source

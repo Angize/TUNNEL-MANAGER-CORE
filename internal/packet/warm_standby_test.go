@@ -69,12 +69,10 @@ func readFrameT(t *testing.T, cf *connFramer, what string) (byte, []byte) {
 	return typ, append([]byte(nil), pt...)
 }
 
-// TestServerDownstreamFollowsData proves the server-side invariant the warm-standby feature
-// depends on, without any client machinery: two concurrent authenticated connections A and B,
-// the server keeps BOTH, and its TUN->client downstream target follows the connection that most
-// recently sent a DATA frame (never a ping, never merely the newest connection). It also proves a
-// single connection behaves exactly as before, and that closing the old downstream does not
-// interrupt delivery on the survivor (no re-handshake — the same session keeps decoding).
+// TestServerDownstreamFollowsData proves the server-side invariant the warm-standby feature depends on,
+// without any client machinery: with two concurrent authenticated connections the server keeps BOTH, and
+// its downstream target follows the one that most recently sent a DATA frame — never a ping, never merely
+// the newest. It also proves a single connection is unchanged and the survivor keeps decoding.
 func TestServerDownstreamFollowsData(t *testing.T) {
 	const psk = "downstream-follows-data-psk-123456"
 	const cipher = "aes-256-gcm"
@@ -167,12 +165,10 @@ func poolActive(p *wsPool) string {
 	return p.active
 }
 
-// TestWarmStandbyManualPinRebuildsStandby exercises the manual-pin branch of the warm-standby loop:
-// after an operator pins an edge, the ACTIVE must re-land on exactly that edge AND a fresh warm
-// standby must be rebuilt afterwards. The rebuild is the observable guard for the standbyBuilding
-// leak fix — the branch must always clear standbyBuilding (even when the pin fires while the standby
-// is still mid-build) so requestStandby() is not left a permanent no-op, which would silently stop
-// proactive rotation (it promotes a READY standby) until a manual rebuild.
+// TestWarmStandbyManualPinRebuildsStandby exercises the manual-pin branch: after an operator pins an
+// edge, the ACTIVE must re-land on exactly that edge AND a fresh standby must be rebuilt. The rebuild is
+// the observable guard for the standbyBuilding leak — the branch must always clear it, even when the pin
+// fires mid-build, or requestStandby() becomes a permanent no-op and proactive rotation stops.
 func TestWarmStandbyManualPinRebuildsStandby(t *testing.T) {
 	const psk = "warm-pin-rebuild-psk-abcdefghijkl"
 	const cipher = "aes-256-gcm"
@@ -212,11 +208,10 @@ func TestWarmStandbyManualPinRebuildsStandby(t *testing.T) {
 	waitFor(t, 5*time.Second, "standby rebuilt after the pin", func() bool { return cli.standby.Load() != nil })
 }
 
-// TestNonWarmPinReleasesOnLanding proves the NON-warm client loop releases a manual pin the instant
-// the carrier lands on the pinned edge (pinApplied), instead of holding it for the whole pinTTL. A
-// lingering pin freezes rotation (current() forces the edge and the rotation timer skips every beat)
-// even after a healthy pin has landed — the warm loop already released on connect; the non-warm loop
-// must too.
+// TestNonWarmPinReleasesOnLanding proves the NON-warm client loop releases a manual pin the instant the
+// carrier lands on the pinned edge, instead of holding it for the whole pinTTL. A lingering pin freezes
+// rotation — current() forces the edge and the timer skips every beat — even after a healthy pin has
+// landed. The warm loop already released on connect; the non-warm loop must too.
 func TestNonWarmPinReleasesOnLanding(t *testing.T) {
 	const psk = "nonwarm-pin-release-psk-abcdefghij"
 	const cipher = "aes-256-gcm"
@@ -254,11 +249,10 @@ func TestNonWarmPinReleasesOnLanding(t *testing.T) {
 	})
 }
 
-// TestWarmStandbyFailover drives the full make-before-break client against a real in-process
-// ListenWS server over a two-edge pool (two SNIs fronting one origin). It asserts that the client
-// warms a standby, that traffic flows both ways over the active, and that killing the active
-// promotes the ALREADY-WARM standby (proven by framer pointer identity — not a fresh dial) with
-// data continuing to flow both directions and no re-handshake.
+// TestWarmStandbyFailover drives the full make-before-break client against a real in-process ListenWS
+// server over a two-edge pool. It asserts that the client warms a standby, that traffic flows both ways
+// over the active, and that killing the active promotes the ALREADY-WARM standby — proven by framer
+// pointer identity, not a fresh dial — with data still flowing both ways and no re-handshake.
 func TestWarmStandbyFailover(t *testing.T) {
 	const psk = "warm-standby-psk-abcdefghijklmnop"
 	const cipher = "aes-256-gcm"

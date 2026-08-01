@@ -6,20 +6,10 @@ import (
 	"time"
 )
 
-// TestServerReelectsDownstreamAfterLiveConnDies drives the real server: two authenticated carriers,
-// the live one dies, and the client sends NOTHING afterwards.
-//
-// The downstream target follows the client's DATA frames (handleFrame) and nothing else — ping and
-// pong deliberately do not move it, and publishServerConn only ever claims an EMPTY slot, so a
-// second connection never steals downstream just by connecting. That left one hole: when the live
-// connection died while another authenticated one was up (a warm standby, or the parked carrier of a
-// destination rotation), onConnErr cleared b.cur and NO path re-elected. Every server->client packet
-// was then dropped until the client happened to send a DATA frame. Inside the tunnel a TCP flow heals
-// in milliseconds off its own ACKs; a one-way download — UDP video, a file the client is only
-// receiving — stayed completely dark for as long as the client had nothing to send.
-//
-// The test is deliberately silent on B: it never writes a frame on it after the failure, so a green
-// result can only come from the server re-electing on its own.
+// TestServerReelectsDownstreamAfterLiveConnDies drives the real server: two authenticated carriers, the
+// live one dies, and the client sends NOTHING afterwards. The downstream target follows DATA frames and
+// nothing else, and publishServerConn only claims an EMPTY slot — so without re-election every
+// server->client packet is dropped until the client happens to send. The test stays deliberately silent.
 func TestServerReelectsDownstreamAfterLiveConnDies(t *testing.T) {
 	const psk = "server-reelect-downstream-psk-123"
 	const cipher = "aes-256-gcm"

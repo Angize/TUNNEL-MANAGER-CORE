@@ -28,17 +28,10 @@ func destPoolActive(t *testing.T, path string) string {
 	return doc.Active
 }
 
-// A failed make-before-break build must leave the pool describing the endpoint the tunnel is on.
-//
-// The rotation timer advances the destination pool, buildWarm dials the endpoint it advanced onto,
-// and when that build fails the live connection deliberately STAYS — the whole point of building
-// before breaking. But the failure path runs fail(), which burns the candidate (right), advances the
-// cursor again (fine, the next beat needs a different one) and publishes `Active` = wherever the
-// cursor now points (wrong). So the pool named an endpoint the tunnel had never been on: the panel
-// drew that IP as active, and the next beat "rotated" onto the endpoint the tunnel was already using
-// — a rotation event for a move that had already not happened.
-//
-// This is the destination half of the same defect #244 fixed for the source. #244 did not touch it.
+// A failed make-before-break build must leave the pool describing the endpoint the tunnel is on. The
+// timer advances the pool, buildWarm dials what it advanced onto, and when that build fails the live
+// connection deliberately STAYS — while fail() burns the candidate (right), advances the cursor again
+// (fine) and publishes Active as wherever it now points (wrong). The source half was fixed first.
 func TestFailedWarmBuildLeavesTheDestinationCursorWhereTheTunnelIs(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

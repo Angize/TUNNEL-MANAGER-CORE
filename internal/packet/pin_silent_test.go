@@ -9,16 +9,10 @@ import (
 	"testing"
 )
 
-// TestOperatorPinIsSilentOnEveryCarrier guards the documented invariant that "make this active" is a
-// deliberate operator jump and must be COMPLETELY silent on every carrier: the active endpoint changes,
-// and nothing lands in the event ring.
-//
-// This is a real regression guard, not a formality. PR #139 made the pin silent but only edited udp.go
-// and tcp.go — raw and flux carry their own copies of adoptPeer/adoptSource and kept emitting
-// down("peer-pin") / event("down","src-pin"). That went unnoticed until the panel and node stopped
-// treating those codes as benign, at which point a manual pin on a raw or flux tunnel started rendering
-// as a red disconnect AND flipped the node's liveness verdict to dead. Asserting silence per carrier is
-// what keeps the four copies from drifting again.
+// TestOperatorPinIsSilentOnEveryCarrier guards the invariant that "make this active" is a deliberate
+// operator jump and must be COMPLETELY silent: the active endpoint changes and nothing lands in the
+// event ring. Per carrier, because raw and flux carry their own copies of adoptPeer/adoptSource — when
+// those drifted, a manual pin rendered as a red disconnect and flipped the node's liveness to dead.
 func TestOperatorPinIsSilentOnEveryCarrier(t *testing.T) {
 	type statusDoc struct {
 		Active string `json:"active"`

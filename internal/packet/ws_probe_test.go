@@ -75,17 +75,10 @@ func wsProbe(t *testing.T, wantPath string, req wsRawReq) (raw string, hsErr err
 	return sb.String(), <-errCh
 }
 
-// TestWSServerAnswers101OnlyForAWellFormedUpgradeOnItsOwnPath is the probe-resistance guard for the
-// ws origin.
-//
-// The server used to answer 101 Switching Protocols to ANY request carrying `Upgrade: websocket`:
-// req.URL.Path was never read (ws_path was pure client-side decoration), Sec-WebSocket-Version was
-// never checked, and an ABSENT Sec-WebSocket-Key hashed to a constant, perfectly valid Accept that was
-// returned anyway. So `curl -H 'Upgrade: websocket' http://origin/` — the third case below, which is a
-// request no real WebSocket client can produce — identified the origin as a tunnel in one shot.
-//
-// The cases are written as what a prober would actually send, and the assertion is on the RAW bytes
-// the server wrote, because "did it answer 101" is the whole question.
+// TestWSServerAnswers101OnlyForAWellFormedUpgradeOnItsOwnPath is the probe-resistance guard for the ws
+// origin. Answering 101 to ANY request carrying `Upgrade: websocket` — without reading the path, checking
+// the version, or requiring a Sec-WebSocket-Key — identifies the origin as a tunnel in one curl. The
+// cases are what a prober would actually send, and the assertion is on the RAW bytes the server wrote.
 func TestWSServerAnswers101OnlyForAWellFormedUpgradeOnItsOwnPath(t *testing.T) {
 	const secret = "/media/stream"
 

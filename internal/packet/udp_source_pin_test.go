@@ -6,21 +6,10 @@ import (
 	"testing"
 )
 
-// udp is the last carrier where a source IP the host cannot bind was accepted in silence.
-//
-// #214 gave tcp `canBindSource` + `dropUnusableSource`; this batch gave raw and flux
-// `adoptableSource`. udp had `rebindSourceTo`, which reports failure honestly — and then both of its
-// callers threw the answer away:
-//
-//   - adoptSourceUDP had NO else at all. An operator jump onto an unbindable IP left the pin LIVE, so
-//     it held the whole pinTTL forcing a source that cannot work, and the ordinary success path then
-//     released it through pinLanded() as though it had landed — the panel showing the jump complete
-//     over a tunnel still egressing from the previous address.
-//   - SetSourcePool's initial bind logged the failure and stopped there. The socket stayed on the
-//     kernel default while the pool went on publishing that entry as Active, and since nothing marked
-//     it bad, a later heal treated it as a healthy IP that simply had not been tried yet.
-//
-// 192.0.2.0/24 is TEST-NET-1 (RFC 5737): routable-looking and on no interface here.
+// udp is the last carrier where a source IP the host cannot bind was accepted in silence. rebindSourceTo
+// reports failure honestly and both callers threw the answer away: the operator jump left the pin LIVE,
+// to be released later as though it had landed, and the initial bind logged and stopped, leaving the pool
+// publishing an Active entry nothing had marked bad. 192.0.2.0/24 is on no interface here.
 func TestUDPRefusesASourceThisHostCannotBind(t *testing.T) {
 	t.Run("a pin onto an unbindable source is abandoned, not consumed", func(t *testing.T) {
 		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, true, 0, "")

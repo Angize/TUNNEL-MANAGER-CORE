@@ -18,15 +18,9 @@ func liveRemote(b *TCP) string {
 }
 
 // TestPinIsNotConsumedByAPreBuiltRotationCarrier drives the real dialLoop of a direct-TCP client with a
-// destination pool, reproducing the exact sequence an operator hits: the rotation timer has already
-// built and parked the NEXT carrier when the pin arrives.
-//
-// buildWarm resolves its target through dialCarrier -> dialTarget -> pp.current() at BUILD time, i.e.
-// before the pin exists, and the adoption path reuses that connection verbatim without re-consulting
-// the pool. So the tunnel came up on the ROTATION's endpoint, published it as active, logged a
-// peer-rotate naming it — and then called pinLanded(), which cleared the pin unconditionally. The panel
-// reported the operator's jump as complete while the tunnel sat on a different IP, with nothing in the
-// log mentioning the pin. "I pinned #3 and it went to #2."
+// destination pool, reproducing the sequence an operator hits: the rotation timer has already built and
+// parked the NEXT carrier when the pin arrives. buildWarm resolved its target BEFORE the pin existed and
+// the adoption path reuses that connection verbatim, so the pin must not be released against it.
 func TestPinIsNotConsumedByAPreBuiltRotationCarrier(t *testing.T) {
 	const psk = "pin-prebuilt-rotation-psk-abcdef"
 	const cipher = "aes-256-gcm"
@@ -94,10 +88,9 @@ func TestPinIsNotConsumedByAPreBuiltRotationCarrier(t *testing.T) {
 }
 
 // TestWSPoolPinMatches covers the read-only pin check the warm-standby loop consults before letting a
-// freshly dialed carrier become the ACTIVE. A background active dial started before the pin resolves
-// its edge through current() at dial time, so its result can be for the pre-pin edge; adopting it left
-// the operator on an edge they did not pick AND — because it did not match — pinApplied never cleared
-// the pin, so proactive rotation stayed frozen for the rest of pinTTL.
+// freshly dialed carrier become the ACTIVE. A background active dial started before the pin resolves its
+// edge at dial time, so its result can be for the pre-pin edge; adopting it leaves the operator on an
+// edge they did not pick AND — because it does not match — pinApplied never clears the pin.
 func TestWSPoolPinMatches(t *testing.T) {
 	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, snis("front-a", "front-b"), true, "")
 

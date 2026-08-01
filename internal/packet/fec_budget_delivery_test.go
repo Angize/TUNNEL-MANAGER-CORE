@@ -18,21 +18,10 @@ func fecBlockOf(pkts [][]byte, blk uint32) [][]byte {
 	return out
 }
 
-// TestFecDeliversAnArrivedShardOverTheByteBudget pins the file-header promise — "nothing a receiver
-// physically got is ever held hostage to the rest of its block" — in the one case it used to be
-// false: when the decoder's anti-amplification byte budget is exhausted.
-//
-// A data shard IS its payload (the code is systematic) and deliverShard copies straight out of the
-// wire buffer, so handing it on needs no storage at all; only RETAINING it for the RS math does. The
-// budget guard sat above the delivery call, so a well-formed shard that physically arrived was
-// dropped — with FEC on, tunToNet never writes a frame itself, so the decoder is the only path these
-// frames have and that is a hard hole in the stream, with no log, no counter and no event. The
-// budget is reachable pre-auth by design (that is what it defends against), which is exactly when
-// the real tunnel's own packets must keep flowing.
-//
-// Everything here goes through the REAL encoder and the REAL input(): the packets are genuine wire
-// bytes with genuine RS parity, so the reconstruct at the end really reconstructs. Only the budget
-// itself is lowered, so the arithmetic fits in a test instead of 64 MiB of shards.
+// TestFecDeliversAnArrivedShardOverTheByteBudget pins the file-header promise — nothing a receiver
+// physically got is held hostage to the rest of its block — where the decoder's anti-amplification byte
+// budget is exhausted. A data shard IS its payload, so handing it on needs no storage; only RETAINING it
+// does. Real encoder, real input(); only the budget is lowered so the arithmetic fits in a test.
 func TestFecDeliversAnArrivedShardOverTheByteBudget(t *testing.T) {
 	var wire [][]byte
 	enc, err := newFecEncoder(5, 2, func(p []byte) { wire = append(wire, append([]byte(nil), p...)) })

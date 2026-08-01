@@ -77,15 +77,10 @@ func TestKeepaliveIntervalPerTunnelStable(t *testing.T) {
 	}
 }
 
-// recentData gates the opportunistic keepalive: true suppresses the active connection's ping. A
-// fresh connection (no data yet) must NOT suppress — otherwise it could be idle-reaped before the
-// first packet; recent INBOUND data must suppress; data older than the keepalive window must resume
-// pinging.
-//
-// This drives the real inbound path (handleFrame) rather than storing the stamp by hand, because the
-// question that matters is WHO is allowed to stamp it. That an outbound write must NOT stamp it is the
-// other half of the same invariant and is proven end-to-end by
-// TestReceiveBlackholeIsDetectedWhileOutboundDataFlows — this test says nothing about it.
+// recentData gates the opportunistic keepalive: true suppresses the active connection's ping. A fresh
+// connection must NOT suppress, or it could be idle-reaped before the first packet; recent INBOUND data
+// must; data older than the window must resume pinging. It drives the real inbound path rather than
+// storing the stamp by hand, because the question that matters is WHO is allowed to stamp it.
 func TestRecentData(t *testing.T) {
 	dev, _ := tunPair(t, "recentdata")
 	b := &TCP{keepalive: 15 * time.Second, dev: dev}

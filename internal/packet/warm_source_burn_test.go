@@ -9,24 +9,10 @@ import (
 	"time"
 )
 
-// A failed make-before-break build must ANNOUNCE NOTHING and BURN NO SOURCE.
-//
-// burnAdvance walks the source once the destination pool has cycled, and it did so with
-// rotateSourceTCP(false) — the FAILOVER form, which logs "rotated source to X" and publishes
-// down/src-rotate. On the make-before-break path the live carrier deliberately does NOT move, so the
-// panel recorded a source rotation that never happened, from a function whose own doc says "PUBLISHES
-// NOTHING". It is the premature-announcement class the #179/#189 proactive-vs-failover split closed
-// for the destination; the source kept the failover form.
-//
-// It also BURNED an endpoint — and which one is worth stating precisely, because the audit finding got
-// it wrong: fail() burns p.addrs[p.cur], and on this path the rotation timer has already advanced cur
-// onto the CANDIDATE source, so the burn lands there and not on the source the live connection is bound
-// to. Still wrong (the warm build died on the destination, which is why the destination is burned
-// separately — the candidate source proved nothing about itself), but not the disaster it was filed as.
-//
-// This drives the REAL callback buildWarm receives. TestBuildWarmFailurePublishesNoRotation, which uses
-// the same harness, passes a stub (`func() { burns++ }`) — so it says nothing about what the real one
-// does, which is exactly why this survived.
+// A failed make-before-break build must ANNOUNCE NOTHING and BURN NO SOURCE. burnAdvance walks the source
+// once the destination pool has cycled, and its failover form publishes a rotation the live carrier never
+// made. A stray burn lands on the CANDIDATE source, not the live one, since the timer has already
+// advanced cur. This drives the REAL callback buildWarm receives; the sibling test passes a stub.
 func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

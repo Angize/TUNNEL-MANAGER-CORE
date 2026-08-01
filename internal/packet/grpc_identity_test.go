@@ -12,16 +12,9 @@ import (
 )
 
 // TestGrpcRequestIsNotABrowser drives a REAL grpc-mode tunnel and inspects the request that actually
-// reached the origin — not the helper that builds the headers.
-//
-// The request used to claim Chrome (User-Agent, Accept-Language, Cache-Control) while also carrying
-// Content-Type: application/grpc and TE: trailers, which browser fetch/XHR is forbidden to set, and
-// omitting grpc-accept-encoding, which every real gRPC client sends. That combination exists nowhere:
-// it is a browser making a call no browser can make, and it is precisely what a gRPC-aware WAF keys
-// on. The operator saw only `http/grpc: got HTTP 4xx`.
-//
-// The TLS half of the same identity is TestGrpcPathUsesTheGoFingerprint. Both must hold: fixing one
-// alone relocates the mismatch (a grpc-go User-Agent under a Chrome JA3 is the same lie reversed).
+// reached the origin, not the helper that builds the headers. A request claiming Chrome while carrying
+// Content-Type: application/grpc and TE: trailers is a browser making a call no browser can make, which
+// is what a gRPC-aware WAF keys on. The TLS half is TestGrpcPathUsesTheGoFingerprint; both must hold.
 func TestGrpcRequestIsNotABrowser(t *testing.T) {
 	const psk = "grpc-identity-psk-abcdefghijklmno"
 	const cipher = "aes-256-gcm"
@@ -101,11 +94,10 @@ func TestGrpcRequestIsNotABrowser(t *testing.T) {
 	}
 }
 
-// TestCarrierWiresTheRightFingerprint covers the WIRING, not the switch: a correct goFingerprint
-// branch in uEdgeHandshake proves nothing if establishHTTPC passes the wrong flag. It drives the real
-// establishHTTPC over real TLS (no httpcTLS override, so the production uTLS branch runs) into a
-// server that records the ClientHello it parsed. The handshake fails on the self-signed certificate —
-// by then the hello is already on the wire, which is all this is about.
+// TestCarrierWiresTheRightFingerprint covers the WIRING, not the switch: a correct goFingerprint branch
+// in uEdgeHandshake proves nothing if establishHTTPC passes the wrong flag. It drives the real
+// establishHTTPC over real TLS into a server that records the ClientHello it parsed. The handshake fails
+// on the self-signed certificate — by then the hello is already on the wire, which is all this is about.
 func TestCarrierWiresTheRightFingerprint(t *testing.T) {
 	for _, tc := range []struct {
 		mode        string

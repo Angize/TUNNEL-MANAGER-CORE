@@ -7,16 +7,10 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/dnstun"
 )
 
-// TestDNSRefusesAZoneThatLeavesAnUnusableMTU is the regression test for the dns MTU floor.
-//
-// In user terms: the panel and the node accept a zone up to 253 characters. Past ~116 the query name
-// leaves an MTU under KCP's own 24-byte header, kcp-go's SetMtu refuses it, KCP silently keeps its
-// 1400-byte default over a transport that can carry twenty bytes, and the core still comes up and
-// logs "session established" — a tunnel that cannot carry anything, with nothing naming the zone.
-// That is what this floor exists to refuse, and the refusal has to say what to shorten.
-//
-// It must NOT refuse more than that. The floor briefly rose to 48 and took the 75..87-character
-// zones with it; those start, are accepted by SetMtu, and carry traffic. See the second test.
+// TestDNSRefusesAZoneThatLeavesAnUnusableMTU is the regression test for the dns MTU floor. Past about 116
+// characters the query name leaves an MTU under KCP's own header, SetMtu refuses it, KCP keeps its
+// 1400-byte default over a transport that carries twenty bytes, and the core still comes up and logs
+// "session established". It must NOT refuse more than that — see the second test.
 func TestDNSRefusesAZoneThatLeavesAnUnusableMTU(t *testing.T) {
 	// Build zones by length and find where the carrier draws the line.
 	zoneOf := func(n int) string {
@@ -78,13 +72,10 @@ func TestDNSMTUFloorClearsKCPsOwnHeader(t *testing.T) {
 		t.Fatalf("the MTU floor %d is close to what any zone can leave (~87 for a ten-character zone) — "+
 			"almost no dns tunnel could start", dnsMinMTU)
 	}
-	// ⚠ THE REAL GUARD, and the one this file got wrong before. The floor exists to keep SetMtu from
-	// refusing, NOT to express an opinion about throughput. A "half the query is header" rule sounds
-	// principled and costs the 75..87-character zones, which do start and do carry traffic. Refusing
-	// a slow tunnel is not this constant's call; the operator picked the zone.
-	//
-	// Zone length -> MTU, measured on the box: 40->69, 74->48, 75->47, 80->44, 87->40, 88->39.
-	// Anything at or under 40 must therefore stay ACCEPTED, or a working delegation stops booting.
+	// ⚠ THE REAL GUARD. The floor exists to keep SetMtu from refusing, NOT to express an opinion about
+	// throughput: a "half the query is header" rule sounds principled and costs the 75..87-character zones,
+	// which do start and do carry traffic. Refusing a slow tunnel is not this constant's call — the operator
+	// picked the zone.
 	if dnsMinMTU > 40 {
 		t.Fatalf("the MTU floor is %d: that refuses every zone from 75 characters up (mtu 47 and down), "+
 			"and those tunnels start, hand SetMtu a value it accepts, and carry traffic. The floor may "+

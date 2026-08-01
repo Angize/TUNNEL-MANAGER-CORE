@@ -11,18 +11,10 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/dnstun"
 )
 
-// The dns carrier publishes `dw` into the status file and the panel calls a tunnel dead once hb is
-// that many seconds old. The number therefore has to be the one the SESSION re-dials on — and the
-// carrier had re-derived its own version of the rule, keeping dnstun's absolute floor and dropping the
-// keepaliveDeadMult×keepalive term entirely. At the shipped defaults (keepalive=15s, no
-// dead_after_secs) it published 20 against a real 45: a healthy dns tunnel reads as dead 25 seconds
-// early, so one dropped ping — on the carrier whose whole justification is surviving several — turns
-// the dot red while traffic is flowing.
-//
-// The numbers below are written from the RULE, not from either implementation, so this stays a real
-// assertion if someone re-derives the window a third time. The existing e2e (dns_status_test.go) could
-// not catch it: it dials with keepalive=1s, the one region where 3×keepalive is under the 20s floor and
-// both formulas coincide, and it only asserts dw >= the floor.
+// The dns carrier publishes `dw` into the status file and the panel calls a tunnel dead once hb is that
+// many seconds old, so the number must be the one the SESSION re-dials on. The values below are written
+// from the RULE, not from either implementation, so this stays a real assertion if the window is
+// re-derived a third time. The e2e test cannot catch it: its keepalive is where both formulas coincide.
 func TestDNSPublishesTheWindowTheSessionEnforces(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -56,12 +48,10 @@ func TestDNSPublishesTheWindowTheSessionEnforces(t *testing.T) {
 	}
 }
 
-// ...and the same claim end to end, against the window the LIVE session is really holding rather than
-// against a table. This is the half a formula test cannot give: it runs a real client into a real
-// authoritative server, reads the file the node reads, and compares it with the number the keepalive
-// goroutine was started with. keepalive is 15s — the shipped default, and the region where the two
-// formulas disagreed — but nothing here waits for a ping: dw is published at Run and the session
-// establishes over loopback immediately.
+// ...and the same claim end to end, against the window the LIVE session is really holding rather than a
+// table. It runs a real client into a real authoritative server, reads the file the node reads, and
+// compares it with the number the keepalive goroutine was started with. Nothing waits for a ping: dw is
+// published at Run and the session establishes over loopback immediately.
 func TestDNSPublishedWindowMatchesTheLiveSession(t *testing.T) {
 	const (
 		psk  = "e2e-shared-pre-shared-key-1234567890"

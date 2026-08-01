@@ -30,11 +30,10 @@ func coreStatusEvents(t *testing.T, path string) []coreEvent {
 	return doc.Events
 }
 
-// TestRotateSourceTCPProactiveDefersEvent pins the #30 contract at the point that decides publication:
-// a PROACTIVE source rotation advances the pool but announces NOTHING — the move is not real until the
-// warm carrier goes live at the adoption site — while a FAILOVER source rotation (the tunnel really
-// leaving a dead source) is announced at once. Announcing a proactive move here described a rotation a
-// failed make-before-break build never made, the source mirror of the destination fix in #179.
+// TestRotateSourceTCPProactiveDefersEvent pins the contract at the point that decides publication: a
+// PROACTIVE source rotation advances the pool but announces NOTHING — the move is not real until the
+// warm carrier goes live at the adoption site — while a FAILOVER rotation, the tunnel really leaving a
+// dead source, is announced at once. Announcing proactively describes a move a failed build never made.
 func TestRotateSourceTCPProactiveDefersEvent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "src.status")
 	b := &TCP{isClient: true, stTag: "tcp", addr: "d0:443"}
@@ -58,15 +57,10 @@ func TestRotateSourceTCPProactiveDefersEvent(t *testing.T) {
 	}
 }
 
-// TestDirectPoolShortDeathEmitsOneDown closes the class behind #10: a genuine, sub-minLiveness death on a
-// direct destination pool must surface EXACTLY ONE 'down' event — the classified reason — not a
-// "peer-rotate" down (from the burn) plus the classified down. The double left the operator reading twice
-// as many disconnects as really happened (two 'down's, one 'up' per drop).
-//
-// It stands up a real core TCP server on two loopback IPs and a client whose direct pool points at both,
-// brings the tunnel up, then drops the client's live connection directly (the server stays up, so the
-// client cleanly reconnects — no re-dial noise). The drop is a genuine death (no manual switch / no timed
-// rotation), so it takes the burn+classify path under test.
+// TestDirectPoolShortDeathEmitsOneDown: a genuine, sub-minLiveness death on a direct destination pool
+// must surface EXACTLY ONE 'down' event — the classified reason — not a "peer-rotate" down from the burn
+// plus the classified one, which leaves the operator reading twice as many disconnects as happened. It
+// stands up a real server on two loopback IPs and drops the client's live connection directly.
 func TestDirectPoolShortDeathEmitsOneDown(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"
@@ -164,17 +158,10 @@ func hasKind(events []coreEvent, kind string) bool {
 	return false
 }
 
-// TestSourceOnlyRotationDoesNotAnnounceTheDestination closes #28 by driving the REAL dialLoop: a timed
-// rotation whose SOURCE pool moved while the destination pool could not must publish `src-rotate` only.
-//
-// The beat fires when EITHER pool advances, but the adoption site gated its destination announcement on
-// `b.pp != nil` alone — so every source-only beat also logged `peer-rotate` naming the endpoint the
-// tunnel had never left, and moved the status file's `active` onto it. That is the steady state once the
-// other destinations are burned, i.e. exactly when an operator is reading the log to find out what is
-// blocked.
-//
-// The destination pool here has ONE endpoint (rotateOnce cannot move), the source pool has two loopback
-// aliases (it can), and the server is real, so the warm build succeeds and the carrier is really adopted.
+// TestSourceOnlyRotationDoesNotAnnounceTheDestination drives the REAL dialLoop: a timed rotation whose
+// SOURCE pool moved while the destination pool could not must publish `src-rotate` only. The beat fires
+// when EITHER pool advances, so gating the destination announcement on `b.pp != nil` alone names an
+// endpoint the tunnel never left — the steady state once the other destinations are burned.
 func TestSourceOnlyRotationDoesNotAnnounceTheDestination(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"

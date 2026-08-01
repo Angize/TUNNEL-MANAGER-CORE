@@ -25,10 +25,9 @@ func clockPool(ips []string, snis []wsSNIEntry, autoBurn bool, statusPath string
 }
 
 // TestWSPoolStandbyNeverCollidesWithActive checks the warm-standby edge selection: however many times the
-// standby is rebuilt (a CDN reaps the idle standby, over and over), it is always aimed at a DIFFERENT IP
-// than the live active edge — so a proactive rotation always moves to a real, distinct edge instead of
-// silently promoting onto the active's own edge. Regression for the "rotation silently stopped / both
-// edges ended up the same" report across the ws-family carriers (ws, httpc-grpc, httpc-post).
+// standby is rebuilt — a CDN reaps the idle one, over and over — it is always aimed at a DIFFERENT IP
+// than the live active edge, so a proactive rotation always moves to a real, distinct edge instead of
+// silently promoting onto the active's own. Regression for "rotation stopped / both edges are the same".
 func TestWSPoolStandbyNeverCollidesWithActive(t *testing.T) {
 	p := newWSPool([]string{"a", "b"}, snis("x"), true, "")
 	standbyIP := func() string { // mimic warmEstablish(standby): aim, then read the edge via current()
@@ -96,11 +95,10 @@ func TestWSPoolStandbyVariesSNI(t *testing.T) {
 	}
 }
 
-// TestPoolAdvanceReportsRealMove pins down advance()'s contract: it reports whether the edge the
-// carrier would actually DIAL changed, not whether the raw cursor moved (the cursor always moves).
-// The proactive rotation timer uses this to avoid tearing a healthy connection down when every other
-// combination is burned — the common "one edge survived the filter" steady state, where a blind close
-// cost a re-dial + handshake + traffic gap every interval for no edge change and no log line.
+// TestPoolAdvanceReportsRealMove pins advance()'s contract: it reports whether the edge the carrier would
+// actually DIAL changed, not whether the raw cursor moved — the cursor always moves. The rotation timer
+// uses this to avoid tearing a healthy connection down when every other combination is burned, the common
+// "one edge survived the filter" state, where a blind close costs a re-dial every interval for nothing.
 func TestPoolAdvanceReportsRealMove(t *testing.T) {
 	// Healthy multi-edge pool: a step reaches a different combo, so advance() reports a real move.
 	p := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
@@ -461,11 +459,10 @@ func TestSelectEntryPinsAndClears(t *testing.T) {
 	}
 }
 
-// TestPinOneShot locks down the fix: a pin is a ONE-SHOT exact jump. Within its short window it
-// FORCES exactly the chosen edge (no drift onto a neighbour — the reported "pin #3 -> #2" bug —
-// even across advance()/a suspect partner); after the window it clears and normal rotation resumes
-// (it does NOT lock forever). A PROVEN burn of the pinned edge itself is covered separately by
-// TestPinReleasesOnProvenBlock (it self-releases so the tunnel recovers now, not after pinTTL).
+// TestPinOneShot locks down a pin as a ONE-SHOT exact jump: within its short window it FORCES exactly the
+// chosen edge — no drift onto a neighbour, even across advance() or a suspect partner — and after the
+// window it clears so normal rotation resumes. It does NOT lock forever. A PROVEN burn of the pinned edge
+// is covered separately by TestPinReleasesOnProvenBlock.
 func TestPinOneShot(t *testing.T) {
 	p, now := clockPool([]string{"a", "b", "c"}, snis("x", "y"), true, "")
 	p.markSuspect("sni", "x", "test") // messy partner axis
@@ -502,11 +499,10 @@ func TestPinOneShot(t *testing.T) {
 	}
 }
 
-// TestPinReleasesOnProvenBlock locks in the pin-safety fix: pinning an edge that turns out to be
-// genuinely blocked must not hang the tunnel for the whole pinTTL. When a differential probe PROVES
-// the pinned edge blocked (markSuspect — the attributeFailure path), the pin self-releases at once
-// so current() falls back to a healthy edge immediately. This is the "I pinned 172, it was really
-// blocked, the tunnel dropped for 30s and never landed" report.
+// TestPinReleasesOnProvenBlock locks in the pin-safety rule: pinning an edge that turns out to be
+// genuinely blocked must not hang the tunnel for the whole pinTTL. When a differential probe PROVES the
+// pinned edge blocked, the pin self-releases at once so current() falls back to a healthy edge
+// immediately, instead of the tunnel dropping for the rest of the window and never landing.
 func TestPinReleasesOnProvenBlock(t *testing.T) {
 	p, _ := clockPool([]string{"a", "b"}, snis("x"), true, "")
 	if !p.selectEntry("ip", "b") { // operator jumps onto b
@@ -669,11 +665,9 @@ func TestDataPlaneFaultBurn(t *testing.T) {
 }
 
 // TestDataPlaneSuspectBackoffMonotonic closes the class behind the backwards-backoff bug: a data-plane
-// suspect enters at step 2 (the longer 120s wait), so the NEXT failed retest must schedule step 3 (300s)
-// — a LONGER wait — not step 1 (60s). It ran backwards because the suspect record was created with the
-// zero fails value while its nextRetest came from suspectStepAt(2); retestBackoff does fails++ then reads
-// suspectBackoff[fails], so fails=0 made the first failed retest land on suspectBackoff[1] < the initial
-// suspectBackoff[2]. The fix stamps fails to match the entry step.
+// suspect enters at step 2, so the NEXT failed retest must schedule step 3 — a LONGER wait — not step 1.
+// retestBackoff does fails++ and then reads suspectBackoff[fails], so a record created with fails=0 while
+// its nextRetest came from step 2 walks the schedule from the wrong place. fails must match the step.
 func TestDataPlaneSuspectBackoffMonotonic(t *testing.T) {
 	p, now := clockPool([]string{"a", "b"}, snis("x"), true, "")
 	p.dataSuccess("b") // arm the recent-good outage guard

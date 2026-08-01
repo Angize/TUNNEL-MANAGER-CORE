@@ -8,17 +8,10 @@ import (
 	"testing"
 )
 
-// gRPC's 5-byte message prefix is `compressed(1) length(4)`, and the deframer read only the length.
-//
-// The body IS the data plane here, exactly as it is on the POST ladder — where an encoded downstream
-// is refused by name. Handing a compressed message to the framer instead means the AEAD opens
-// garbage: the tunnel comes up, delivers nothing, and the failure is charged to the edge as a
-// data-plane fault far from its cause. And we advertise `grpc-accept-encoding: gzip` deliberately (its
-// absence was the fingerprint #235 removed), so an intermediary is invited to compress.
-//
-// The comment beside the request headers asserted this check already existed — "our own deframer takes
-// the compressed flag from each message's 5-byte prefix" — which is how it went unread. One reader
-// type serves BOTH ends, so this covers the client and the server at once.
+// gRPC's 5-byte message prefix is `compressed(1) length(4)`, and the deframer must read both. The body IS
+// the data plane here, exactly as on the POST ladder: handing a compressed message to the framer makes
+// the AEAD open garbage, so the tunnel comes up, delivers nothing, and the fault is charged to the edge
+// far from its cause — and we advertise grpc-accept-encoding: gzip, so an intermediary is invited to.
 func TestGrpcDeframerRefusesACompressedMessage(t *testing.T) {
 	payload := []byte("a framed tunnel packet")
 

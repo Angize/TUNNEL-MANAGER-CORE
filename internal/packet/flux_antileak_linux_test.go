@@ -7,14 +7,10 @@ import (
 	"time"
 )
 
-// TestFluxRotationPreScopesAntiLeak drives the REAL rotation and pin entry points and asserts that
-// the anti-leak rule is re-scoped there — on the rotation timer's own goroutine — instead of being
-// deferred into the receive loop. It also pins the install-before-remove order.
-//
-// Before the fix rotatePeerFlux/adoptPeerFlux stored the new peer and nothing else, so the rule stayed
-// scoped to the endpoint we had just left. Our kernel then answered the new endpoint's first frames
-// with ICMP unreachables — the exact leak the rule exists to prevent — until one of them reached
-// learnPeer, which fixed it by forking 10 to 16 iptables processes on the AF_PACKET receive goroutine.
+// TestFluxRotationPreScopesAntiLeak drives the REAL rotation and pin entry points and asserts the
+// anti-leak rule is re-scoped there — on the rotation timer's own goroutine — instead of being deferred
+// into the receive loop. It also pins the install-before-remove order. A rule still scoped to the
+// endpoint we left lets our kernel answer the new one's first frames with the leak it exists to prevent.
 func TestFluxRotationPreScopesAntiLeak(t *testing.T) {
 	rec := &leakRecorder{}
 	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, false, 0, "")
@@ -68,11 +64,10 @@ func TestFluxRotationPreScopesAntiLeak(t *testing.T) {
 	}
 }
 
-// TestFluxLearnPeerNeverBlocksOnIptables is the one that matters for throughput: a re-scope the
-// rotation could NOT predict — a server following the client's SOURCE rotation, or a pool server still
-// answering from its previous IP — is discovered by the first authenticated frame, which arrives on
-// the single AF_PACKET receive goroutine. That goroutine IS the data path, and each re-scope runs a
-// process per rule (8 for the raw carrier, 5 for udp/stun) twice over. Before the fix it ran inline.
+// TestFluxLearnPeerNeverBlocksOnIptables is the one that matters for throughput: a re-scope the rotation
+// could NOT predict — a server following the client's SOURCE rotation, or a pool server still answering
+// from its previous IP — is discovered by the first authenticated frame, on the single AF_PACKET receive
+// goroutine. That goroutine IS the data path, and each re-scope forks a process per rule, twice over.
 func TestFluxLearnPeerNeverBlocksOnIptables(t *testing.T) {
 	installing := make(chan struct{})
 	rec := &leakRecorder{delay: 750 * time.Millisecond, tookTo: installing}

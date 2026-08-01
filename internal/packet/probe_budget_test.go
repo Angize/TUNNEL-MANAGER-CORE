@@ -39,19 +39,9 @@ func silentTLSEdge(t *testing.T) string {
 }
 
 // probe_timeout_secs must bound the TLS leg of an edge probe, not just the dial and the header wait.
-//
-// #216 armed the socket deadline in dialHTTPCOnce right before calling uEdgeHandshake — and
-// uEdgeHandshake armed it AGAIN, with a fixed 10s handshakeTimeout that ApplyTuning does not touch.
-// The later call wins (fragConn embeds net.Conn, so SetDeadline on the wrapper reaches the same
-// socket), so the operator's budget was overwritten on exactly the leg the comment claimed it now
-// covered. The two carriers show it at different sizes and BOTH are asserted here:
-//
-//   - ws: nothing else bounds the handshake, so a silent edge cost a flat 10s per probe no matter
-//     what probe_timeout_secs said. This is the one that matters — every retest and every
-//     differential-probe arm pays it, and an over-long probe is what freezes rotation and holds a
-//     manual pin.
-//   - http/grpc: doWithHeaderTimeout caps the whole request at 3xbudget, so the fixed 10s was capped
-//     there rather than being unbounded — the probe still ran 3x its budget instead of 1x.
+// uEdgeHandshake arms the socket deadline itself, so a deadline armed just before calling it is
+// overwritten by its own fixed one. Both carriers are asserted: on ws nothing else bounds the handshake,
+// so a silent edge costs a flat 10s per probe; on http/grpc the header timeout caps it at 3× the budget.
 func TestProbeTimeoutBoundsTheTLSHandshake(t *testing.T) {
 	const budget = 2 * time.Second
 	p0 := probeTimeout

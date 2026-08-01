@@ -7,11 +7,10 @@ import (
 	"time"
 )
 
-// nonFlusherWriter is an http.ResponseWriter that deliberately does NOT implement http.Flusher, which
-// is the one thing the GET handler bails out on after it has done its argument checks. net/http's own
-// writer always implements Flusher, so this is the only way to drive that branch at all — and driving
-// it is the point: it was the single statement that could return between "create the session" and
-// "start serving it", i.e. the only way to produce the orphan the reap watchdog existed for.
+// nonFlusherWriter is an http.ResponseWriter that deliberately does NOT implement http.Flusher, the one
+// thing the GET handler bails out on after its argument checks. net/http's own writer always implements
+// Flusher, so this is the only way to drive that branch — and driving it is the point: it was the single
+// statement that could return between creating the session and serving it.
 type nonFlusherWriter struct {
 	hdr    http.Header
 	status int
@@ -26,18 +25,10 @@ func (n *nonFlusherWriter) Header() http.Header {
 func (n *nonFlusherWriter) Write(p []byte) (int, error) { return len(p), nil }
 func (n *nonFlusherWriter) WriteHeader(code int)        { n.status = code }
 
-// TestHTTPCGetNeverLeavesAnUnservedSession replaces the reap watchdog with the property that made it
-// dead: no request can leave a session created and never served.
-//
-// The watchdog armed a 10 s timer per session and its reap branch had become unreachable — after #200
-// the downstream GET is the only creator and close(s.served) happened a few statements later in the
-// same handler. Its test built both sessions by hand in the map and called reapIfUnserved directly,
-// so it was green either way and said nothing about reachability. The one real gap was the Flusher
-// assertion sitting BETWEEN the create and the serve; that check now runs first, so the branch is not
-// merely unreachable today, it cannot be produced.
-//
-// Both halves are needed: the bail-out must allocate nothing, and the ordinary GET must still create
-// AND serve — otherwise "no sessions, ever" would pass.
+// TestHTTPCGetNeverLeavesAnUnservedSession replaces the reap watchdog with the property that made the
+// watchdog dead: no request may leave a session created and never served. The one real gap was the
+// Flusher assertion sitting BETWEEN the create and the serve; it runs first now, so the branch is not
+// merely unreachable but unproducible. Both halves are needed, or "no sessions, ever" would pass.
 func TestHTTPCGetNeverLeavesAnUnservedSession(t *testing.T) {
 	const sid = "00112233445566778899aabbccddeeff"
 
