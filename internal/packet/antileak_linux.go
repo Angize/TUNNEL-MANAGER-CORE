@@ -8,25 +8,10 @@ import (
 	"sync/atomic"
 )
 
-// antiLeaker owns the firewall rules a carrier installs so the peer's — or our own — kernel
-// does not answer its carrier packets. Two carriers need it, for opposite reasons:
-//
-//   - flux taps at AF_PACKET, BEFORE netfilter, so it can drop the inbound frame outright
-//     (raw PREROUTING) and the kernel never sees an exotic protocol / unbound port to
-//     ICMP-reject. See fluxDropMatches.
-//   - raw reads a net.ListenIP socket, delivered AFTER PREROUTING and INPUT, so dropping the
-//     inbound frame would drop OUR OWN receive with it (measured: both chains take the raw
-//     socket to zero). It suppresses the kernel's ANSWER on the way out instead. See
-//     rawDropMatches.
-//
-// Either way the rules are scoped to ONE peer and RE-SCOPED on demand, because an IP-rotation
-// pool changes the peer (the client's destination, or the client source a server follows) and a
-// rule left on the OLD peer stops suppressing on the new one. Every entry point is idempotent —
-// while the peer is unchanged it costs one atomic load and no lock — so it is safe to call per
-// authenticated frame.
-//
-// install is wired by the carrier's constructor. A carrier built by hand (only ever a test)
-// leaves it nil and every entry point installs nothing, so no test can reach the host firewall.
+// antiLeaker owns the firewall rules a carrier installs so the peer's — or our own — kernel does not
+// answer its carrier packets. flux taps at AF_PACKET before netfilter and drops the inbound frame; raw
+// reads a socket delivered after PREROUTING and INPUT, so it must suppress the kernel's ANSWER on the way
+// out instead. Rules are scoped to ONE peer and re-scoped on rotation; every entry point is idempotent.
 type antiLeaker struct {
 	install func(peer net.IP) func() // installs this carrier's rules for peer, returns their removal (nil if none went in)
 	closeCh <-chan struct{}          // the carrier's close channel: never install a rule teardown will not remove
@@ -52,14 +37,10 @@ func (a *antiLeaker) scope(peer net.IP) {
 	}
 }
 
-// scopeAsync is scope with an OFF-GOROUTINE apply, for callers on the data path. learnPeer runs
-// on the single receive goroutine and a re-scope forks a process per rule twice over — once to
-// install the new scope, once to remove the old — so doing it inline stalled the receive loop for
-// as long as iptables took. On a host whose xtables lock is contended that is a visible pause in
-// the download, on every destination rotation and every operator pin.
-//
-// Ordering is safe without a queue because apply re-reads the DESIRED peer under mu: two hand-offs
-// in quick succession both converge on the later one, whichever goroutine wins the lock.
+// scopeAsync is scope with an OFF-GOROUTINE apply, for callers on the data path. learnPeer runs on the
+// single receive goroutine and a re-scope forks a process per rule twice over, so doing it inline stalls
+// the receive loop for as long as iptables takes — a visible pause in the download on every rotation.
+// Ordering is safe without a queue: apply re-reads the DESIRED peer under mu, so both hands converge.
 func (a *antiLeaker) scopeAsync(peer net.IP) {
 	if a.wants(peer) {
 		go a.apply()

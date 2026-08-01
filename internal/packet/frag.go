@@ -15,18 +15,13 @@ const (
 	// fully reassembles the TCP stream still recovers the SNI.
 	sniSplitMode = "split"
 	// sniDisorderMode additionally sends the HEAD segment at a low TTL so it expires in transit: an
-	// on-path DPI ingests it (out of order, since the tail arrives first with a higher sequence) but
-	// the server never sees that copy. The kernel retransmits the head at the normal TTL, so the
-	// server still reassembles the real ClientHello. This desyncs a reassembling DPI's view — the
-	// zapret/GoodbyeDPI "disorder" idea — at the cost of one retransmit (~RTO) on connect.
+	// on-path DPI ingests it out of order, but the server never sees that copy and reassembles the real
+	// ClientHello from the kernel's retransmit. Costs one retransmit (~RTO) on connect.
 	sniDisorderMode = "disorder"
-	// sniFakeMode injects a whole FAKE ClientHello (real one with the SNI overwritten by a benign
-	// decoy) as a raw segment at the SAME sequence as the real one, with a corrupt TCP checksum so
-	// the server drops it. A reassembling DPI resolves the overlap to the decoy SNI and clears the
-	// flow; the server discards the fake (bad checksum) and gets the real ClientHello. Killing by
-	// checksum is hop-independent, so unlike disorder it works even when the server is a nearby CDN
-	// edge. This is the technique that beats a DPI which reassembles the stream (which plain split and
-	// disorder do not). Linux + IPv4; falls back to disorder otherwise.
+	// sniFakeMode injects a whole FAKE ClientHello (the real one with the SNI overwritten by a benign
+	// decoy) at the SAME sequence as the real one, with a corrupt TCP checksum so the server drops it. A
+	// reassembling DPI resolves the overlap to the decoy and clears the flow. Killing by checksum is
+	// hop-independent, so this is the only mode that beats a DPI which reassembles. Linux + IPv4.
 	sniFakeMode = "fake"
 )
 
@@ -63,36 +58,26 @@ type fragConn struct {
 	dsSend *desyncSend
 }
 
-// fakeSegTTL is the TTL stamped on the injected decoy in sni_mode=fake. It is ALWAYS fakeTTL:
-// split_ttl does not apply to this mode and is deliberately not read here.
-//
-// ⚠ It briefly did read it, and that was wrong. The two modes want OPPOSITE values out of that one
-// stored number. disorder needs it LOW (default 4) because the head segment has to expire before the
-// server. fake needs it HIGH because the decoy is killed at the server by its bad TCP checksum, not
-// by expiring, and its whole job is to reach the on-path DPI first — a low TTL kills it before the
-// DPI and turns the strongest SNI mode into an expensive no-op. The panel keeps ONE input for both
-// modes, so a tunnel that had stored 4 for disorder and then switched to fake silently got a decoy
-// that died en route. There is no useful low value here, so there is nothing to honour: the knob
-// simply has no meaning in this mode, and the panel no longer offers it.
+// fakeSegTTL is the TTL stamped on the injected decoy in sni_mode=fake. It is ALWAYS fakeTTL: split_ttl
+// does not apply here and is deliberately not read. The two modes want OPPOSITE values out of that one
+// stored number — disorder needs it LOW so the head expires before the server, fake needs it HIGH
+// because the decoy is killed at the server by its checksum and its job is to reach the DPI first.
 func (f *fragConn) fakeSegTTL() int { return fakeTTL }
 
 // degraded reports, exactly once per connection, that the operator's chosen SNI mode could not be
-// applied and this conn fell back to a plain in-order split. Silence here was the bug: disorder and
-// fake are materially stronger than split, the panel keeps showing the mode the operator picked, and
-// the usual cause — a container without the capability to set a per-segment TTL — is invisible from
-// the outside. Once per conn, not per write, so a busy tunnel cannot flood the journal.
+// applied and this conn fell back to a plain in-order split. It has to be said: disorder and fake are
+// materially stronger, the panel keeps showing the picked mode, and the usual cause — a container
+// without the capability to set a per-segment TTL — is invisible from outside.
 func (f *fragConn) degraded(why string) {
 	f.warn.Do(func() {
 		log.Printf("core/tls: sni_mode %q fell back to a plain split (%s) — the split still helps a stateless DPI, the desync does not apply", f.mode, why)
 	})
 }
 
-// fakeDegraded is degraded's counterpart for the fake→disorder step, and it needs its own sync.Once:
-// fake is the only mode that beats a DPI which REASSEMBLES the stream, so falling back to disorder
-// is a real loss of protection even though disorder still runs. Every one of writeFake's bail-outs
-// used to take that step in complete silence — the operator picked the strongest mode, the panel kept
-// showing it, and the tunnel quietly ran the weaker one. A separate Once (rather than reusing warn)
-// is what lets a conn that falls all the way through report BOTH steps, which is the truth.
+// fakeDegraded is degraded's counterpart for the fake→disorder step, with its own sync.Once: fake is the
+// only mode that beats a DPI which REASSEMBLES the stream, so falling back to disorder is a real loss of
+// protection even though disorder still runs. A separate Once lets a conn that falls all the way through
+// report BOTH steps.
 func (f *fragConn) fakeDegraded(why string) {
 	f.warnFake.Do(func() {
 		log.Printf("core/tls: sni_mode \"fake\" fell back to disorder (%s) — disorder desyncs a DPI that "+
@@ -100,15 +85,10 @@ func (f *fragConn) fakeDegraded(why string) {
 	})
 }
 
-// noSplit reports, once per connection, that sni_split is configured and nothing was split. at is
-// what splitAt returned, so the message can name the actual reason instead of a guess.
-//
-// The last branch used to state ECH as the CAUSE and draw the security conclusion from it — "nothing
-// needs to be [fragmented]: there is no cleartext SNI left for a DPI to read" — while nothing had told
-// this conn whether ECH was on. It fired on ANY failure of the hostname search, so the case that
-// matters most (the configured host simply not matching what the carrier dials with, ECH off, the real
-// SNI on the wire) printed a line saying the operator was covered. f.ech carries the fact, so the two
-// states can say different things: one is genuinely harmless, the other is a live exposure.
+// noSplit reports, once per connection, that sni_split is configured and nothing was split. at is what
+// splitAt returned, so the message names the actual reason. f.ech is what separates the two states that
+// look identical from here: under ECH there is no cleartext SNI left and nothing needs splitting, while
+// without it the hostname search simply failed and the real SNI is on the wire — a live exposure.
 func (f *fragConn) noSplit(p []byte, at int) {
 	f.warnNoSplit.Do(func() {
 		switch {
@@ -130,11 +110,10 @@ func (f *fragConn) noSplit(p []byte, at int) {
 	})
 }
 
-// newFragConn wraps c so its first write is split. host is the SNI (for auto split-point location),
-// pos an explicit offset (0 = auto), mode the fragmentation mode, ttl the disorder head-segment TTL,
-// ech whether this dial presents an ECH config (so the fallback messages can state the real cause
-// instead of assuming one), ds the carrier's decoy-transmit reporter (nil is tolerated: a test conn
-// reports into its own).
+// newFragConn wraps c so its first write is split. host is the SNI (for auto split-point location), pos
+// an explicit offset (0 = auto), mode the fragmentation mode, ttl the disorder head-segment TTL, ech
+// whether this dial presents an ECH config (so the fallback messages state the real cause), ds the
+// carrier's decoy-transmit reporter (nil is tolerated).
 func newFragConn(c net.Conn, host string, pos int, mode string, ttl int, ech bool, ds *desyncSend) *fragConn {
 	if mode == "" {
 		mode = sniSplitMode
@@ -159,12 +138,9 @@ func (f *fragConn) Write(p []byte) (int, error) {
 	}
 	at := f.splitAt(p)
 	if at <= 0 || at >= len(p) {
-		// Nothing is split, on a tunnel whose config says sni_split is on and whose startup log says
-		// so too. The usual cause is ECH: with the real name encrypted, splitAt's cleartext search
-		// finds nothing and returns 0, and the ClientHello goes out whole. That is the correct
-		// behaviour — there is no cleartext SNI left to straddle a segment boundary, and ECH is the
-		// stronger defence anyway — but it was completely silent, so an operator running ECH plus
-		// sni_split believed both were active when only one was.
+		// Nothing is split, on a tunnel whose config says sni_split is on. The usual cause is ECH: with the
+		// real name encrypted, splitAt's cleartext search finds nothing and the ClientHello goes out whole —
+		// correct, but silent, so an operator running ECH plus sni_split believed both were active.
 		f.noSplit(p, at)
 		return f.Conn.Write(p)
 	}
@@ -189,14 +165,10 @@ func (f *fragConn) writeSplit(p []byte, at int) (int, error) {
 	return n1 + n2, err
 }
 
-// badTCPChecksum corrupts the TCP checksum of an IPv4 TCP segment (the checksum field is bytes 16-17
-// of the TCP header) so the SERVER's stack drops the segment — a hop-distance-independent way to make
-// the fake ClientHello die before the server while an on-path DPI (which usually does not verify the
-// TCP checksum) still ingests it. Routers operate at L3 and never touch the L4 checksum, so a bad TCP
-// checksum survives all the way to the server — unlike a bad IP checksum, which a TTL-decrementing
-// router recomputes and "repairs". This is why fake mode kills its decoy by checksum, not by TTL:
-// TTL needs the fake to die between the DPI and the server, a window that may not exist when the
-// server is a nearby CDN edge.
+// badTCPChecksum corrupts the TCP checksum of an IPv4 TCP segment so the SERVER's stack drops it — a
+// hop-distance-independent way to make the fake ClientHello die before the server while an on-path DPI
+// (which usually does not verify it) still ingests it. Routers work at L3 and never touch the L4
+// checksum, unlike a bad IP checksum, which a TTL-decrementing router recomputes and "repairs".
 func badTCPChecksum(seg []byte) {
 	if len(seg) < 18 {
 		return
@@ -209,21 +181,10 @@ func badTCPChecksum(seg []byte) {
 // up can be built by padding a leftmost label instead of by chopping a name in half.
 var decoyApexes = []string{"b-cdn.net", "fastly.net", "azureedge.net", "cloudflare.com", "cdn.jsdelivr.net"}
 
-// decoySNI returns exactly n bytes forming a benign, SYNTACTICALLY VALID hostname, to overwrite the
-// real SNI in the fake ClientHello. n is dictated by the real hostname's length, because the SNI
-// length field in the record has to stay valid.
-//
-// It used to be a raw modulo repeat of the 18-byte constant "www.cloudflare.com", so unless the real
-// host happened to be exactly 18 characters the decoy was a chopped or doubled string —
-// "www.cloudflare." (a trailing dot), "www.cloudflare.comw", "www.cloudflare.comwww.c". None of those
-// is a name any client ever sends, so a DPI that reassembled the overlap recorded a structurally
-// impossible SNI: an anomaly worth flagging, which is the exact opposite of the point. Padding the
-// LEFTMOST label instead is how real CDN hostnames grow ("assets-3f2.cdn.example.com"), so every
-// length lands on a name that could exist.
-//
-// What this does NOT fix: the core is not told which CDN is in front (cdn_profile is a panel concept
-// that the node does not forward — backlog B1), so a decoy sent to an ArvanCloud edge can still name
-// a different CDN. Choosing the apex to match the edge needs that plumbing first.
+// decoySNI returns exactly n bytes forming a benign, SYNTACTICALLY VALID hostname to overwrite the real
+// SNI in the fake ClientHello; n is dictated by the real hostname's length, because the record's SNI
+// length field has to stay valid. It pads the LEFTMOST label, the way real CDN hostnames grow, so every
+// length lands on a name that could exist — a chopped or doubled constant would be its own anomaly.
 func decoySNI(n int) []byte {
 	if n <= 0 {
 		return nil

@@ -6,18 +6,10 @@ import (
 	"time"
 )
 
-// sendErrLog throttles one data-plane send-error line per carrier.
-//
-// Both extremes are wrong here. Logging every occurrence buries the journal — a failing socket fails at
-// packet rate, so a stalled tunnel would write thousands of identical lines a second. Logging none is
-// what made this whole class of fault invisible: the carrier goes dark, the peer's heartbeat freezes,
-// and the panel renders it as "the other end stopped answering" — pointing the operator at the remote
-// node when the failure is local (ENOBUFS on a burst, ENETUNREACH after a route flap, EMSGSIZE after an
-// MTU change, EPERM when CAP_NET_RAW is lost, EINVAL when a pinned source is no longer a local address).
-//
-// One line per interval carrying the suppressed count gives the cause without the flood. Per-carrier
-// rather than package-level on purpose: on a hub node with many tunnels, a shared throttle would let one
-// noisy tunnel hide another's failure entirely.
+// sendErrLog throttles one data-plane send-error line per carrier. Logging every occurrence buries the
+// journal — a failing socket fails at packet rate — while logging none made this class of fault
+// invisible: the carrier goes dark and the panel reads it as "the other end stopped answering" when the
+// cause is local. Per-carrier, so on a hub node one tunnel's failure cannot hide behind another's.
 type sendErrLog struct {
 	last atomic.Int64 // unix nanos of the last line emitted
 	n    atomic.Int64 // occurrences accumulated since then

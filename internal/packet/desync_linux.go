@@ -1,21 +1,9 @@
 //go:build linux
 
-// Fake-packet desync: a content-agnostic anti-DPI mechanism shared by the raw and flux
-// carriers (the two that build the whole IPv4 header via IP_HDRINCL, so they can forge a
-// TTL/checksum). Just before each handshake the client emits a few DECOY packets to the
-// peer:
-//
-//   - a low-TTL decoy expires a few hops out — it reaches an on-path DPI but dies before
-//     the server, so the server never sees it (sent via IP_HDRINCL, which honours the TTL);
-//   - a bad-checksum decoy is discarded by the first hop that validates the IP checksum (most
-//     routers, and the server's own stack) — it must be injected at L2 via AF_PACKET, because
-//     an IP_HDRINCL socket ALWAYS recomputes the checksum and would silently repair it.
-//
-// Either way a STATEFUL DPI that tracks the flow ingests the decoys and mis-syncs its
-// per-flow state, while the real, AEAD-authenticated session is untouched (a decoy that does
-// reach the server carries random bytes and cannot open). This is the paqet/zapret "fake
-// before handshake" idea, done natively for the carriers we fully control. It has no effect
-// on the kernel-socket carriers (udp/tcp/ws), which cannot forge the header.
+// Fake-packet desync: a content-agnostic anti-DPI mechanism shared by the raw and flux carriers (the two
+// that build the whole IPv4 header, so they can forge a TTL/checksum). Just before each handshake the
+// client emits a few DECOY packets — low-TTL ones that expire before the server, and bad-checksum ones
+// that must go out at L2 because an IP_HDRINCL socket would repair them — so a stateful DPI mis-syncs.
 package packet
 
 import "crypto/rand"
@@ -87,11 +75,9 @@ func (d desyncCfg) specs() []fakeSpec {
 	return out
 }
 
-// specsTCP is specs() for the kernel-TCP inject path (tcp/cover/ws): every decoy keeps the LOW
-// TTL and is never promoted to 64, because a well-formed-looking segment on a REAL connection's
-// 4-tuple must not reach the server (it would draw an RST / challenge-ACK); the low TTL makes it
-// die on the path, where the DPI still sees it. badsum still corrupts the checksum for extra
-// insurance against a DPI that validates it.
+// specsTCP is specs() for the kernel-TCP inject path (tcp/cover/ws): every decoy keeps the LOW TTL and is
+// never promoted to 64, because a well-formed segment on a REAL connection's 4-tuple must not reach the
+// server — it would draw an RST or a challenge-ACK. badsum still corrupts the checksum as insurance.
 func (d desyncCfg) specsTCP() []fakeSpec {
 	if !d.on {
 		return nil
@@ -108,25 +94,10 @@ func (d desyncCfg) specsTCP() []fakeSpec {
 	return out
 }
 
-// fakeSeqGap offsets a decoy's sequence/counter away from the live stream's, so a decoy does not land
-// inside the sequence space the real frames are USING when it is sent and get mistaken for one by the
-// peer (which drops it anyway on the AEAD) or, worse, by a middlebox reassembling the flow. It is a
-// distance, not an impossibility: every counter here wraps or advances, so the live stream does
-// eventually reach the value a decoy carried. Decoys fire once per fresh handshake, when the counter
-// is near its start, and the gap sets how far away that moment is — about 32768 frames on icmp (only
-// uint16(seq) reaches the wire, rawprofile.go) and about a megabyte of tunnelled traffic on the tcp
-// profile (decoySeq is a BYTE counter, tcpISN+tcpBytes+gap). By then the decoy is long gone from any
-// middlebox's state.
-//
-// The low 15 bits matter as much as the size. The icmp profile stamps only uint16(seq), and the old
-// value 1<<20 is exactly 16×2^16 — so modulo the 16-bit field the offset was ZERO and every decoy
-// carried the live stream's own (id, seq): decoy 0 aliased the frame just sent and decoy 1 the very next
-// one. A middlebox that tracks icmp echoes by (id, seq) could then treat the real frame as a duplicate
-// of the decoy it had already seen. The gap must therefore be far from 0 modulo 2^16 as well as large
-// in the full 32-bit space that the tcp and esp profiles use.
-//
-// 1<<20 + 1<<15 keeps the 32-bit distance and puts the decoy exactly HALF the 16-bit space away, which
-// is the furthest a wrapping 16-bit counter can be from the live value in either direction.
+// fakeSeqGap offsets a decoy's sequence away from the live stream's, so a decoy does not land inside the
+// sequence space the real frames are using. It is a distance, not an impossibility — decoys fire once per
+// fresh handshake, near the counter's start. The low 15 bits matter as much as the size: icmp stamps only
+// uint16(seq), so a gap that is a multiple of 2^16 is ZERO there. This value is half the 16-bit space.
 const fakeSeqGap = 1<<20 + 1<<15
 
 // fakePayload returns a random-length, random-content payload sized like a small

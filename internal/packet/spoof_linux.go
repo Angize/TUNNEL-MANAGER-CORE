@@ -1,20 +1,17 @@
 //go:build linux
 
-// The "spoof" transport is a standalone IP-spoofing carrier. It rides the same bip-like raw-IP
-// datapath as the raw carrier (identical framing, AEAD, replay guard, ephemeral handshake,
-// keepalive, FEC and TUN plumbing — all shared Raw code), but forges an outer IPv4 field:
+// The "spoof" transport is a standalone IP-spoofing carrier. It rides the same bip-like raw-IP datapath
+// as the raw carrier — identical framing, AEAD, replay guard, handshake, keepalive, FEC and TUN plumbing,
+// all shared Raw code — but forges an outer IPv4 field:
 //
-//   - a forged SOURCE (spoof_src_ip): the client hides its real IP; the server is told the client's
-//     real IP (real_peer_ip) to answer, since it can never learn it from the forged wire source.
-//   - a forged DESTINATION = a decoy (spoof_dst_ip): the wire shows traffic to the decoy while the
-//     packet is routed to the real server (only works when the decoy IP routes to that server, e.g.
-//     an extra IP the provider maps to it). The server receives via AF_PACKET (the decoy is not a
-//     local address, so an AF_INET raw socket would never see it) and answers AS the decoy.
+//	spoof_src_ip  the client hides its real IP; the server is told real_peer_ip to answer, since it can
+//	              never learn it from the forged wire source.
+//	spoof_dst_ip  the wire shows traffic to a decoy while the packet is routed to the real server (only
+//	              works when the decoy IP routes there). The server receives via AF_PACKET, since the
+//	              decoy is not a local address, and answers AS the decoy.
 //
-// There is NO rotation of any kind here (neither source nor destination) — that is the whole reason
-// spoofing was lifted out of raw: it is a different connection model, not a knob. The addressing is
-// the forgedLink (iplink_linux.go); the constructors below only pick the forged fields and open the
-// IP_HDRINCL / AF_PACKET sockets the link needs.
+// There is NO rotation of any kind here — that is why spoofing was lifted out of raw: it is a different
+// connection model, not a knob. The addressing is the forgedLink (iplink_linux.go).
 package packet
 
 import (

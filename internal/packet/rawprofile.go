@@ -1,10 +1,7 @@
-// Raw-IP encapsulation profiles for the "raw" transport. Each profile wraps a
-// sealed core frame in a different IP-layer carrier so the tunnel mimics ordinary
-// IPIP / GRE / ICMP / TCP / UDP traffic — or "bip", our native minimal framing.
-//
-// The sealed frame (the AEAD ciphertext, identical to the UDP/TCP carriers) is
-// the innermost payload; only the carrier header — and therefore the IP protocol
-// number on the wire — changes between profiles:
+// Raw-IP encapsulation profiles for the "raw" transport. Each profile wraps a sealed core frame in a
+// different IP-layer carrier so the tunnel mimics ordinary IPIP / GRE / ICMP / TCP / UDP traffic — or
+// "bip", our native minimal framing. Only the carrier header, and so the IP protocol number on the wire,
+// changes between them; the sealed frame is the innermost payload either way:
 //
 //	bip   proto 253  no L4 header            [IPv4][sealed]
 //	ipip  proto 4    no L4 header            [IPv4][sealed]
@@ -12,14 +9,10 @@
 //	icmp  proto 1    8-byte ICMP echo        [IPv4][ICMP][sealed]  (req 8 / reply 0)
 //	udp   proto 17   8-byte UDP header        [IPv4][UDP][sealed]
 //	tcp   proto 6    20-byte TCP header       [IPv4][TCP][sealed]  (PSH|ACK, live-flow seq/ack/window)
-//	esp   proto 50    8-byte ESP header       [IPv4][ESP][sealed]  (IPsec ESP: per-session SPI + incrementing seq)
+//	esp   proto 50    8-byte ESP header       [IPv4][ESP][sealed]  (IPsec ESP: per-session SPI + seq)
 //
-// The receiver ignores the carrier header's contents (the inner AEAD tag is the
-// real integrity check); the header only has to be well formed enough to look
-// like the protocol it imitates and to be skipped on the way in. Unlike
-// Backhaul's raw modes, the sealed frame carries a masked nonce (no cleartext
-// nonce on the wire) and rides our ephemeral-key session — so a passive observer
-// sees neither a fixed nonce signature nor a static key.
+// The receiver ignores the carrier header's contents — the inner AEAD tag is the real integrity check —
+// so it only has to be well formed enough to look like the protocol it imitates and to be skipped.
 package packet
 
 import (
@@ -62,15 +55,10 @@ const (
 	rawTCPWindow = 0xFAF0 // 64240
 )
 
-// rawPorts returns the (source, destination) port pair THIS end stamps on a tcp/udp carrier
-// packet. A conversation reverses — the client sends ephemeral->443 and the server answers
-// 443->ephemeral — and two ends both sending 51820->443, as this carrier used to, is not one:
-//
-//   - no stateful middlebox pairs the two halves up, so the downstream direction arrives as an
-//     unsolicited NEW inbound flow. A NAT or a stateful firewall in front of the client drops it,
-//     which is the whole download direction gone.
-//   - a pair of half-flows aimed at each other, neither ever answering the other, is a signature
-//     in its own right — the opposite of what a carrier profile exists to do.
+// rawPorts returns the (source, destination) port pair THIS end stamps on a tcp/udp carrier packet. A
+// conversation reverses — client ephemeral->443, server 443->ephemeral — and two ends both sending
+// 51820->443 is not one: no middlebox pairs the halves up, so the downstream arrives as an unsolicited
+// NEW inbound flow a NAT drops, and two half-flows aimed at each other are a signature in themselves.
 func rawPorts(isClient bool) (sport, dport uint16) {
 	if isClient {
 		return rawClientPort, rawServerPort
@@ -78,15 +66,10 @@ func rawPorts(isClient bool) (sport, dport uint16) {
 	return rawServerPort, rawClientPort
 }
 
-// rawChecksumBindsSource reports whether this profile's carrier header carries a checksum computed
-// over the OUTER SOURCE address, so the bytes rawEncap produced are only valid if the packet really
-// leaves from the source they were built for. udp and tcp do (the IPv4 pseudo-header is part of
-// l4Checksum); icmp's checksum covers the ICMP header and payload only, and bip/ipip/gre/esp carry
-// no checksum at all, so those are source-independent.
-//
-// It exists for exactly one decision — sendViaConn's fallback, when the pinned source cannot be used
-// (see there) — and TestRawChecksumBindsSourceMatchesTheEncapsulation derives the answer from
-// rawEncap itself, so a new profile cannot quietly disagree with this list.
+// rawChecksumBindsSource reports whether this profile's carrier header carries a checksum computed over
+// the OUTER SOURCE address, so rawEncap's bytes are only valid if the packet really leaves from that
+// source. udp and tcp do (the IPv4 pseudo-header is part of l4Checksum); icmp, bip, ipip, gre and esp do
+// not. It exists for one decision — sendViaConn's fallback when the pinned source cannot be used.
 func rawChecksumBindsSource(profile string) bool {
 	switch rawProfiles[profile] {
 	case protoUDP, protoTCP:
@@ -101,11 +84,9 @@ func rawProtoFor(profile string) (int, bool) {
 	return p, ok
 }
 
-// rawEffProto returns the EFFECTIVE outer IP protocol number for a carrier. The bare "bip"
-// profile may override its native 253 with any 1..255 (rawProto / config raw_proto) to slip
-// past a protocol-whitelist filter — e.g. 58 (ICMPv6), which the IPv4 kernel ignores. Every
+// rawEffProto returns the EFFECTIVE outer IP protocol number for a carrier. The bare "bip" profile may
+// override its native 253 with any 1..255 (raw_proto) to slip past a protocol-whitelist filter. Every
 // other profile keeps its fixed number, since that number is tied to its forged L4 header.
-// rawProto<=0 or out of range leaves the profile's native number untouched.
 func rawEffProto(profile string, rawProto int) (int, bool) {
 	base, ok := rawProfiles[profile]
 	if !ok {
@@ -117,13 +98,10 @@ func rawEffProto(profile string, rawProto int) (int, bool) {
 	return base, true
 }
 
-// rawEncap prepends profile's carrier header to a sealed frame and returns the
-// bytes to hand the raw socket (the kernel prepends the outer IPv4 header, so we
-// do NOT include it here). src/dst are the tunnel endpoint IPs, needed for the
-// TCP checksum; isClient selects the direction-dependent fields (ICMP echo
-// request vs reply, and the tcp/udp port pair — see rawPorts, a flow that never
-// reverses is not a flow); id/seq make the ICMP/TCP headers look like a live flow; spi
-// is the per-session ESP Security Parameters Index (esp profile only).
+// rawEncap prepends profile's carrier header to a sealed frame and returns the bytes to hand the raw
+// socket (the kernel prepends the outer IPv4 header, so it is not included here). src/dst are the tunnel
+// endpoint IPs, needed for the TCP checksum; isClient selects the direction-dependent fields; id/seq make
+// the ICMP/TCP headers look like a live flow; spi is the per-session ESP SPI.
 func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id uint16, seq, ack, spi uint32) []byte {
 	switch rawProfiles[profile] {
 	case protoBIP, protoIPIP:
@@ -185,28 +163,18 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 	return payload
 }
 
-// rawDecap strips the profile's carrier header, returning the inner sealed
-// frame. A raw ip4 read MAY or may not include the outer IPv4 header depending
-// on the platform/kernel, so rawDecap detects a genuine leading IPv4 header
-// (version 4, with the total-length and protocol fields matching) and strips it
-// only then — otherwise the bytes already start at the carrier header. It
-// reports false on a packet too short to hold the expected carrier header.
-// proto is the EFFECTIVE outer IP protocol number actually on the wire (equals the
-// profile's native number unless a bip carrier overrode it via raw_proto); it is used
-// only to recognise an included IPv4 header. The carrier-header stripping keys off the
-// PROFILE (bip stays header-less whatever its number), so a custom bip proto still
-// decaps bare.
+// rawDecap strips the profile's carrier header, returning the inner sealed frame. A raw ip4 read MAY or
+// may not include the outer IPv4 header depending on the platform, so rawDecap detects a genuine one
+// (version 4, total-length and protocol matching) and strips it only then. proto is the EFFECTIVE outer
+// protocol number, used only to recognise that header; the stripping itself keys off the PROFILE.
 func rawDecap(profile string, proto int, pkt []byte) ([]byte, bool) {
 	framing := rawProfiles[profile]
 	if len(pkt) >= 20 && pkt[0]>>4 == 4 {
 		ihl := int(pkt[0]&0x0f) * 4
 		total := int(binary.BigEndian.Uint16(pkt[2:4]))
-		// A genuine included IPv4 header: version 4, a sane IHL, this carrier's own
-		// protocol at byte 9, and a total-length that fits within the bytes read.
-		// Keying off total <= len(pkt) (rather than an exact match) tolerates a
-		// platform that pads the raw read with trailing bytes; we then slice out
-		// exactly the [ihl:total] payload so any trailing pad is dropped instead of
-		// being mistaken for frame bytes.
+		// A genuine included IPv4 header: version 4, a sane IHL, this carrier's own protocol at byte 9, and a
+		// total-length that fits the bytes read. Keying off total <= len(pkt) rather than an exact match
+		// tolerates a platform that pads the read; the [ihl:total] slice then drops the pad.
 		if ihl >= 20 && total >= ihl && total <= len(pkt) && int(pkt[9]) == proto {
 			pkt = pkt[ihl:total] // a real IPv4 header was included; strip it (and any trailing pad)
 		}

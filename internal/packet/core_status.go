@@ -8,14 +8,10 @@ import (
 	"time"
 )
 
-// coreStatus is a lightweight status-file writer + event ring for the connectionless datagram
-// transports (udp / raw / flux). They have no ws edge pool, but a client still wants to surface
-// PRECISE, core-observed events to the node/panel system log: a self-heal re-handshake (the peer
-// most likely restarted / went silent) and the recovery that follows. It writes the SAME status
-// JSON shape the ws pool does (an events ring + a ts), so the node's edge-status reader consumes it
-// unchanged; the pool-only fields (active health / burned lists / pin) are simply absent. Only the
-// CLIENT wires one up (via SetStatusPath); on the server, and before wiring, the nil receiver makes
-// every method a no-op. Safe for concurrent use.
+// coreStatus is a lightweight status-file writer + event ring for the connectionless datagram transports
+// (udp / raw / flux). They have no ws edge pool, but a client still wants PRECISE, core-observed events
+// in the node/panel log. It writes the SAME status JSON shape the ws pool does, minus the pool-only
+// fields, so the node's reader consumes it unchanged. Client-only; the nil receiver no-ops elsewhere.
 type coreStatus struct {
 	mu      sync.Mutex
 	writeMu sync.Mutex // serializes the file write+rename so concurrent writers don't race the shared .tmp path
@@ -37,21 +33,10 @@ const hbInterval = 5 * time.Second
 // heartbeat into a sub-second status-file rewrite loop.
 const hbMinInterval = time.Second
 
-// hbPeriod resolves how often to republish for a carrier whose resolved dead-window is dwSecs — the SAME
-// number setDW publishes, which is what a reader ages hb against.
-//
-// hb is a TIMESTAMP, not a tick: the reader computes age = now - hb, so a late republish INFLATES the age
-// by up to one whole period. A fixed 5s period is fine against a 30s window and wrong against a tight
-// one: keepalive=5s with dead_after=10s (both allowed; dw=10) publishes an age that reaches ~12.5s on a
-// tunnel that never lost a frame, and the panel dot flickers red/green.
-//
-// dw/4 is what the arithmetic asks for. A healthy idle carrier's newest inbound frame is already up to
-// 1.3×keepalive old (the keepalive jitter ceiling), and dead_after is clamped to >=2×keepalive, so that
-// term is at most 0.65×dw; a quarter-window of publish lag lands the published age at 0.9×dw plus the
-// pong's RTT, leaving a tenth of the window as margin. A third-window leaves ~1.7% — under a tight
-// dw=10 that is 0.17s, i.e. less than the RTT on any real path, so it would still flicker.
-//
-// dwSecs<=0 (no window resolved) keeps the plain ceiling.
+// hbPeriod resolves how often to republish for a carrier whose resolved dead-window is dwSecs — the same
+// number setDW publishes and a reader ages hb against. hb is a TIMESTAMP, not a tick, so a late
+// republish INFLATES the age by up to one whole period: a fixed 5s is fine against a 30s window and
+// wrong against a tight one. dw/4 leaves about a tenth of the window as margin; dwSecs<=0 keeps the ceiling.
 func hbPeriod(dwSecs int64) time.Duration {
 	p := hbInterval
 	if dwSecs > 0 {
@@ -133,19 +118,10 @@ func newCoreStatus(path, active string) *coreStatus {
 	return s
 }
 
-// cfgWarns carries a startup CONFIGURATION warning — a setting the operator chose that the host did
-// not actually grant — from wherever it is discovered to the status file the panel reads.
-//
-// The sock_buf clamp is the case that showed why this is needed. It was reported with a log.Printf
-// into the core unit's journal, and the node reads that journal from exactly ONE place
-// (_core_last_error), on the failure branch after a build. A core that STARTED and merely had its
-// buffers clamped never goes through that branch, so the warning reached nobody: the panel showed
-// the setting green and the operator had to ssh to the node to find out that their 16 MiB did not
-// take. The change that added the log line closed the core's half and left the operator's open.
-//
-// Sockets are sized while the carrier is built, which is BEFORE main wires the status file, so a note
-// raised before the sink exists is held and flushed the moment it appears. Only the CLIENT wires one;
-// on a server the note stays in the journal, which is where a server-side operator already looks.
+// cfgWarns carries a startup CONFIGURATION warning — a setting the operator chose that the host did not
+// actually grant — from wherever it is discovered to the status file the panel reads. A journal line
+// reaches nobody: the node reads the core's journal only on the failure branch after a build, so a core
+// that STARTED and merely had its buffers clamped said nothing. A note raised before the sink exists waits.
 var cfgWarns struct {
 	mu      sync.Mutex
 	pending []cfgWarnNote
@@ -236,11 +212,9 @@ func (s *coreStatus) write() {
 	if s == nil || s.path == "" {
 		return
 	}
-	// Hold writeMu across BOTH the snapshot and the file write so the on-disk write order can never
-	// invert the snapshot order: without this, two concurrent write() calls could snapshot in one
-	// order but rename in the other, letting an older snapshot clobber a newer status file and drop
-	// the latest event until the next event forces a rewrite. Lock order is writeMu->mu (mu released
-	// before I/O), matching ws_pool.go's writeStatus so the two never deadlock.
+	// Hold writeMu across BOTH the snapshot and the file write so the on-disk write order can never invert
+	// the snapshot order — an older snapshot must never clobber a newer status file. Lock order is
+	// writeMu->mu (mu released before I/O), matching ws_pool.go's writeStatus, so the two never deadlock.
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.mu.Lock()

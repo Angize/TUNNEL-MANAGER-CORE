@@ -1,13 +1,7 @@
-// Forward error correction for the datagram carriers (udp / stun / raw / flux): a
-// systematic Reed-Solomon ERASURE code over GF(256). For every block of n data
-// shards we emit k parity shards; the receiver, which knows exactly which shards
-// are missing (gaps in the per-shard index), can reconstruct up to k lost shards
-// of the block WITHOUT a retransmit. This is what keeps a throttled/high-loss
-// link (the Iran scenario) usable: losses are repaired locally instead of
-// collapsing the inner TCP with retransmits and congestion backoff.
-//
-// This file is the pure codec (platform-independent, unit-tested). The wire
-// framing + block buffering that carries it live in the transport.
+// Forward error correction for the datagram carriers (udp / stun / raw / flux): a systematic Reed-Solomon
+// ERASURE code over GF(256). For every block of n data shards we emit k parity shards, and the receiver —
+// which knows exactly which shards are missing — reconstructs up to k of them WITHOUT a retransmit, so a
+// high-loss link is repaired locally instead of collapsing the inner TCP. This file is the pure codec.
 package packet
 
 import "errors"

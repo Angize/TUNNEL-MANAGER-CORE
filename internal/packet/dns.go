@@ -1,10 +1,7 @@
-// DNS-tunnel carrier: L3 packets ride a reliable, AEAD-sealed KCP session that is itself tunnelled
-// inside DNS queries and responses (see internal/dnstun). The client polls a recursive resolver;
-// the server is an authoritative responder. This is the last-resort carrier for a full
-// (protocol+destination) whitelist: the client only ever sends UDP/53 to a DOMESTIC resolver — never
-// a packet to the foreign server IP — so a destination whitelist cannot see it, and port 53 is kept
-// open because blocking it breaks all name resolution. Unlike raw/flux this uses only ordinary UDP
-// sockets, so it is portable (no CAP_NET_RAW / Linux-only build).
+// DNS-tunnel carrier: L3 packets ride a reliable, AEAD-sealed KCP session tunnelled inside DNS queries
+// and responses (see internal/dnstun). The client polls a recursive resolver; the server is an
+// authoritative responder. The last-resort carrier for a full protocol+destination whitelist: the client
+// only ever sends UDP/53 to a DOMESTIC resolver. Ordinary UDP sockets only, so it stays portable.
 package packet
 
 import (
@@ -65,11 +62,9 @@ func newDNS(dev *tun.Device, isClient bool, addr string, resolvers []string, zon
 	}
 	mtu := codec.MaxUpstream() - dnstun.SessionOverhead
 	if mtu < dnsMinMTU {
-		// The old floor was 40, which kcp-go accepts (it only refuses an MTU at or below its own
-		// 24-byte header) — so a long zone came up, logged "session established", and then spent 60%
-		// of every DNS query on the KCP header while a single 1200-byte packet shattered into ~75
-		// queries. Refusing with the number of characters to remove beats starting a tunnel that
-		// cannot carry anything and saying nothing about why.
+		// A floor low enough for kcp-go to accept still lets a long zone come up, log "session established",
+		// and then spend most of every DNS query on the KCP header while one packet shatters into dozens.
+		// Refusing with the number of characters to remove beats a tunnel that cannot carry anything.
 		return nil, fmt.Errorf("dns: zone %q leaves only %d bytes per query, and the carrier needs %d "+
 			"(KCP spends %d of them on its own header) — shorten the zone by about %d characters",
 			zone, mtu, dnsMinMTU, dnstun.KCPOverhead, zoneBytesToDrop(dnsMinMTU-mtu))
@@ -98,10 +93,9 @@ func ListenDNS(dev *tun.Device, listenAddr, zone, psk, cipher string) (*DNS, err
 // main loop (re)establishes a session and pumps net→tun until it dies, then reconnects with backoff.
 
 // SetDeadAfter (client) applies the operator's dead_after_secs to the dnstun session's dead window, so
-// the fleet-wide setting reaches this carrier like every other one. Previously *DNS simply had no such
-// method: main.go probes for it with a type assertion, the assertion failed, and the "self-heal deadline
-// set" log line sits inside the successful branch — so the knob was a no-op here with nothing said.
-// The session still floors the value, so a tiny setting cannot reap a healthy session.
+// the fleet-wide setting reaches this carrier like every other one. main.go probes for this method with
+// a type assertion, so its absence would be silent. The session still floors the value, so a tiny
+// setting cannot reap a healthy session.
 func (d *DNS) SetDeadAfter(secs int) bool {
 	if secs <= 0 {
 		return false
@@ -113,16 +107,10 @@ func (d *DNS) SetDeadAfter(secs int) bool {
 	return d.isClient
 }
 
-// SetStatusPath (client, optional) wires the status file every OTHER carrier already writes: an
-// events ring plus the two numbers a reader needs to age a tunnel — hb (the last authenticated
-// inbound frame) and dw (the dead window this carrier really enforces).
-//
-// dns was the one client carrier with none of it. main.go probes for this method with a type
-// assertion, the assertion failed, and the "writing status/events to …" line lives in the successful
-// branch — so the file was never created and nothing said why. Downstream that is a dot the panel
-// cannot decide: with no hb it has only traffic flow to go on, so a healthy but IDLE dns tunnel ages
-// into yellow, and a genuinely dead one never goes red at all, because instant-red is gated on a
-// published dead window (_dw > 0) that did not exist. Call before Run().
+// SetStatusPath (client, optional) wires the status file every OTHER carrier already writes: an events
+// ring plus the two numbers a reader needs to age a tunnel — hb (the last authenticated inbound frame)
+// and dw (the dead window this carrier really enforces). Without them the panel has only traffic flow to
+// go on, so a healthy but IDLE dns tunnel ages to yellow and a dead one never goes red. Call before Run().
 func (d *DNS) SetStatusPath(path string) {
 	if path == "" || !d.isClient {
 		return
@@ -130,15 +118,10 @@ func (d *DNS) SetStatusPath(path string) {
 	d.st = newCoreStatus(path, "dns · "+d.zone)
 }
 
-// heartbeat republishes the live session's liveness into the status file, paced off dw exactly as
-// the shared heartbeat() does for the other carriers. It is a carrier-local loop only because the
-// number has to be PULLED from whatever session is live right now: dns re-dials into a brand new
-// session on every recovery, and the shared helper reads one fixed atomic.
-//
-// The source is the SESSION's lastRx, not the packets this carrier reads. An idle dns tunnel carries
-// no data at all — its proof of life is the keepalive pong, which dnstun consumes internally and
-// never yields as a packet. Stamping only what netToTun read would freeze hb on a healthy tunnel and
-// recreate, from the other side, the exact false-red this whole file is about.
+// heartbeat republishes the live session's liveness into the status file, paced off dw exactly as the
+// shared heartbeat() does. It is carrier-local only because the number has to be PULLED from whatever
+// session is live: dns re-dials into a brand new one on every recovery. The source is the SESSION's
+// lastRx, not the packets read — an idle dns tunnel's only proof of life is a pong dnstun consumes.
 func (d *DNS) heartbeat(dwSecs int64) {
 	if d.st == nil {
 		return
@@ -165,15 +148,9 @@ func (d *DNS) heartbeat(dwSecs int64) {
 }
 
 // deadWin is the window after which a silent session counts as dead. dns does NOT use the shared
-// 2×keepalive floor — dnstun applies its own absolute floor, because this carrier is high-loss and
-// its window has to survive several dropped polls. Publishing the SAME number the session enforces
-// is the point: a reader that re-derived its own multiplier would age hb against a window nothing
-// applies (see effectiveDeadAfter, which had that exact bug in the startup log).
-//
-// It is resolved by ASKING dnstun rather than by restating the rule here, which is what this function
-// used to do — and it restated it wrong. It kept the floor and dropped the keepaliveDeadMult×keepalive
-// term, so at the shipped defaults it published 20s while the session re-dialled at 45s: a healthy dns
-// tunnel went red on the dashboard, and the comment two lines above is exactly the promise it broke.
+// 2×keepalive floor — dnstun applies its own absolute floor, because this carrier is high-loss and its
+// window has to survive several dropped polls. Publishing the SAME number the session enforces is the
+// point, so it is resolved by ASKING dnstun rather than by restating the rule here.
 func (d *DNS) deadWin() time.Duration {
 	return dnstun.ResolveDeadWindow(d.cfg.Keepalive, d.cfg.DeadAfter)
 }
@@ -200,11 +177,10 @@ func (d *DNS) Run() error {
 		}
 		conn, err := d.connect()
 		if err != nil {
-			// Deliberately NO down event here. The retry loop backs off from 1s to 30s, so one per
-			// attempt would append an event a second at first and evict the real history out of a
-			// capped ring. The session death below already recorded the outage exactly once, and a
-			// tunnel that has never connected is legible without any event at all: dw is published
-			// while hb stays 0, which is precisely the "never connected" state the panel reads.
+			// Deliberately NO down event here. The retry loop backs off from 1s to 30s, so one per attempt would
+			// append an event a second at first and evict the real history out of a capped ring. The session
+			// death below records the outage once, and dw published while hb stays 0 already reads as
+			// "never connected".
 			log.Printf("core/dns: connect: %v", err)
 			if d.sleep(backoff) {
 				return nil

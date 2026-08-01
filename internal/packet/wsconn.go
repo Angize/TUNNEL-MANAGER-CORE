@@ -1,11 +1,7 @@
-// WebSocket (RFC 6455) carrier for the TCP transport. A wsConn is a net.Conn that
-// presents a plain byte STREAM to the caller while framing every write as a binary
-// WebSocket frame and de-framing reads — so the existing connFramer (length-prefix
-// + AEAD) rides on top unchanged, exactly as it does over a raw TCP or a TLS-cover
-// conn. The point of the WebSocket carrier is CDN-frontability: a client can reach
-// a CDN edge over wss:// with the Host/SNI of an allowed domain, and the CDN proxies
-// the WebSocket to our origin — the censor sees TLS to the CDN (collateral freedom),
-// not a tunnel. Frame masking follows the RFC: the client masks, the server does not.
+// WebSocket (RFC 6455) carrier for the TCP transport. A wsConn is a net.Conn that presents a plain byte
+// STREAM while framing every write as a binary WebSocket frame and de-framing reads, so connFramer rides
+// on top unchanged. The point is CDN-frontability: the client reaches a CDN edge over wss:// with an
+// allowed domain's Host/SNI and the CDN proxies to our origin. The client masks, the server does not.
 package packet
 
 import (
@@ -222,11 +218,9 @@ func wsClientHandshake(conn net.Conn, host, path string, deadline time.Time) (*b
 		resp.Header.Get("Sec-WebSocket-Accept") != wsAccept(key) {
 		return nil, errNotWS
 	}
-	// We advertise permessage-deflate to match Chrome's WS fingerprint, but wsConn does NOT
-	// implement DEFLATE and readWSFrame ignores RSV1. If the edge/server actually negotiated it
-	// (echoing it in the 101), inbound frames would be compressed and de-framed as garbage, so
-	// fail the handshake rather than silently corrupt the stream. Our own origin never echoes
-	// Sec-WebSocket-Extensions, so this only trips against an edge that would have compressed.
+	// We advertise permessage-deflate to match Chrome's WS fingerprint, but wsConn does NOT implement
+	// DEFLATE and readWSFrame ignores RSV1. If the edge actually negotiated it, inbound frames would be
+	// de-framed as garbage — so fail the handshake rather than silently corrupt the stream.
 	if exts := resp.Header.Get("Sec-WebSocket-Extensions"); strings.Contains(strings.ToLower(exts), "permessage-deflate") {
 		return nil, fmt.Errorf("ws: server negotiated permessage-deflate (unsupported); refusing to read compressed frames")
 	}
@@ -277,20 +271,9 @@ func wsUpgradeForUs(req *http.Request, wantPath string) bool {
 }
 
 // wsServerHandshake reads the HTTP request and, if it is a WebSocket upgrade FOR US, answers 101 and
-// returns the buffered reader for framing. Everything else — a probe, a scanner, a browser, or a
-// WebSocket client that found the port but not the path — gets a plausible 404 and errNotWS, so the
-// port looks like an ordinary idle web endpoint rather than a tunnel.
-//
-// It used to answer 101 to ANY request carrying `Upgrade: websocket`: req.URL.Path was never read
-// (ws_path was pure client-side decoration), the version was never checked, and an absent
-// Sec-WebSocket-Key hashed to a constant Accept that was returned anyway. One
-// `curl -H 'Upgrade: websocket' http://origin/` identified the origin as a tunnel.
-//
-// wantPath is the operator's ws_path — both ends carry the same one (create, edit and rebuild all
-// funnel through the panel's _node_extra, and the node emits ws_path for both roles), so requiring it
-// turns the path into a second thing a prober must know on top of the address. The key and version
-// checks add no new dependency: the client already validates Sec-WebSocket-Accept against the key it
-// sent, so an edge that failed to pass the key through end-to-end could never have worked.
+// returns the buffered reader for framing. Everything else — a probe, a scanner, a browser, a WebSocket
+// client that found the port but not the path — gets a plausible 404 and errNotWS. wantPath is the
+// operator's ws_path, which both ends carry, so it is a second thing a prober must know beyond the address.
 func wsServerHandshake(conn net.Conn, wantPath string, deadline time.Time) (*bufio.Reader, error) {
 	conn.SetDeadline(deadline)
 	r := bufio.NewReaderSize(conn, readBufSize)
