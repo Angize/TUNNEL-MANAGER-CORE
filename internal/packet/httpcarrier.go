@@ -1013,6 +1013,25 @@ func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Conte
 		resp.Body.Close()
 		cancel()
 		pw.Close()
+		// A 403 from the EDGE has one overwhelmingly likely cause and the bare status hid it.
+		// MEASURED against a live Cloudflare edge, four requests seconds apart, same host, same
+		// method, same path, same Go TLS fingerprint, varying only the headers:
+		//
+		//	Content-Type: application/grpc          -> 403 Forbidden (cloudflare's own error page)
+		//	grpc-go User-Agent, ordinary type       -> 404 (reached the origin routing)
+		//	TE: trailers, ordinary type             -> 404
+		//	no grpc identity at all                 -> 404
+		//
+		// So it is the content type alone, which matches Cloudflare requiring gRPC to be switched on
+		// PER ZONE (Network -> gRPC) before it will carry it. The same shape got a 200 from an
+		// ArvanCloud edge, so this is not universal. Nothing here is wrong with the carrier; the
+		// operator has a switch to flip, and "got HTTP 403" never said so.
+		if resp.StatusCode == http.StatusForbidden {
+			return nil, fmt.Errorf("http/grpc: the CDN edge refused the gRPC request with HTTP 403 — "+
+				"measured on a live edge, this is the Content-Type: application/grpc header alone, and "+
+				"Cloudflare needs gRPC enabled on the zone (Network -> gRPC) before it will proxy it. "+
+				"Turn it on for %s, or use the plain ws / http carrier shape instead", dialAddr)
+		}
 		return nil, fmt.Errorf("http/grpc: got HTTP %d (want 200)", resp.StatusCode)
 	}
 	conn := &httpcConn{
