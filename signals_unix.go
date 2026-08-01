@@ -10,10 +10,9 @@ import (
 )
 
 // wireRotateSignals installs the live "rotate now" / "probe now" controls the node drives with
-// `systemctl kill`. It lives in its own !windows file because SIGUSR1/SIGUSR2 do not exist on
-// Windows, which kept `GOOS=windows go build ./...` — the cheapest full-tree type check on the box
-// this repo is developed from — from ever completing. Nothing on the fleet changes: every node runs
-// linux, and this is the same code that was inline in main.
+// `systemctl kill`. It lives in its own !windows file because SIGUSR1/SIGUSR2 do not exist on Windows,
+// which kept `GOOS=windows go build ./...` — the cheapest full-tree type check available here — from
+// ever completing. Nothing on the fleet changes: every node runs linux.
 func wireRotateSignals(b any) {
 	// SIGUSR1 rotates the edge IP, SIGUSR2 rotates the SNI — one dimension, no rebuild,
 	// the TUN stays up while the carrier re-dials on the new edge.

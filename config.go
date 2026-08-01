@@ -50,58 +50,41 @@ type Config struct {
 	Mode    string `json:"mode"`    // "packet" (only mode implemented in this slice)
 	Profile string `json:"profile"` // "core" (the core profile identifier)
 
-	// Transport selects the carrier for core frames: "udp" (default,
-	// NAT-friendly datagrams), "tcp" (stream, length-prefixed frames), "raw"
-	// (each frame in a raw IPv4 packet of a chosen protocol — see Profile),
-	// "flux" (a polymorphic raw carrier whose IP protocol rotates every epoch on a
-	// clock-derived schedule both ends compute with no wire signal — see FluxRotateSecs),
-	// or "ws" (a WebSocket carrier, CDN-frontable — see WSHost).
+	// Transport selects the carrier for core frames: "udp" (default, NAT-friendly datagrams), "tcp"
+	// (stream, length-prefixed frames), "raw" (each frame in a raw IPv4 packet of a chosen protocol —
+	// see RawProfile), "flux" (a polymorphic raw carrier whose shape rotates per epoch off a
+	// clock-derived schedule, with no wire signal), or "ws" (CDN-frontable — see WSHost).
 	Transport string `json:"transport"`
 
-	// RawProfile selects the raw-transport encapsulation (Transport=="raw" only):
-	// "bip" (native, proto 253), "ipip" (4), "gre" (47), "icmp" (1), "udp" (17),
-	// "tcp" (6), or "esp" (50, IPsec ESP camouflage). The sealed frame is identical across profiles; only the
-	// IP-layer carrier header — and thus how the traffic looks — changes. Raw
-	// sockets need CAP_NET_RAW and Linux; ipip/gre often do not cross NAT.
+	// RawProfile selects the raw-transport encapsulation (Transport=="raw" only): "bip" (native, proto
+	// 253), "ipip" (4), "gre" (47), "icmp" (1), "udp" (17), "tcp" (6) or "esp" (50). The sealed frame is
+	// identical across profiles; only the IP-layer carrier header changes. Raw sockets need CAP_NET_RAW
+	// and Linux; ipip/gre often do not cross NAT.
 	RawProfile string `json:"raw_profile"`
 
-	// RawProto overrides the outer IP protocol number for the BARE "bip" profile
-	// (Transport=="raw" && RawProfile=="bip"). bip carries no L4 header, so only the
-	// protocol number on the wire changes — 0/unset keeps bip's native 253. Set it to
-	// slip past a protocol-whitelist filter that drops TCP/UDP but passes a "known"
-	// number (e.g. 58 = ICMPv6, which the IPv4 kernel ignores so there is no local
-	// contention). Ignored for the other profiles (their number is tied to their
-	// forged header). Range 1..255.
+	// RawProto overrides the outer IP protocol number for the BARE "bip" profile only — bip carries no L4
+	// header, so only the number on the wire changes (0/unset keeps 253). Set it to slip past a
+	// protocol-whitelist filter that passes a "known" number, e.g. 58 (ICMPv6), which the IPv4 kernel
+	// ignores. Ignored for the other profiles, whose number is tied to their forged header. Range 1..255.
 	RawProto int `json:"raw_proto"`
 
-	// SpoofSrc (client) forges the outer IPv4 source address of "spoof"-transport packets
-	// so per-source/stateful egress filters can't pin the real IP. RealPeer (server)
-	// is the client's REAL IP: with a forged source the server cannot learn where to
-	// reply, so it is told here (the AEAD still authenticates every frame). Transport
-	// "spoof" + crypto only; needs CAP_NET_RAW. Both empty = no spoofing.
+	// SpoofSrc (client) forges the outer IPv4 source address of "spoof"-transport packets so a
+	// per-source egress filter cannot pin the real IP. RealPeer (server) is the client's REAL IP: with a
+	// forged source the server cannot learn where to reply, so it is told here — the AEAD still
+	// authenticates every frame. Transport "spoof" + crypto only; needs CAP_NET_RAW. Both empty = off.
 	SpoofSrc string `json:"spoof_src_ip"`
 	RealPeer string `json:"real_peer_ip"`
 
-	// SpoofDst forges the outer IPv4 DESTINATION to a decoy IP (e.g. a reachable,
-	// unfiltered host) so an on-path censor sees traffic to the decoy, not to the real
-	// server. Both ends carry the same decoy: the client puts it in the header dst while
-	// still routing to the real server; the server therefore cannot receive on an ordinary
-	// AF_INET raw socket (the kernel drops packets whose dst isn't local) and instead reads
-	// with AF_PACKET, and replies with the decoy as the source. A server using SpoofDst
-	// must also set RealPeer (the forged source hides the client's real IP). Transport
-	// "spoof" + crypto only; needs CAP_NET_RAW. Empty = no destination spoofing.
+	// SpoofDst forges the outer IPv4 DESTINATION to a decoy IP, so an on-path censor sees traffic to the
+	// decoy while the packet still routes to the real server. The server therefore cannot receive on an
+	// ordinary AF_INET raw socket — the kernel drops packets whose dst is not local — and reads with
+	// AF_PACKET, replying as the decoy. It must also set RealPeer. Transport "spoof" + crypto only.
 	SpoofDst string `json:"spoof_dst_ip"`
 
-	// DNS-tunnel carrier (Transport=="dns"): the reliable AEAD/KCP session rides inside DNS
-	// queries/responses. DNSZone is the delegated zone whose authoritative NS is the server
-	// (e.g. "t.example.com"). DNSResolvers is the client's list of recursive resolvers to query
-	// (host or "host:port", :53 default) — typically DOMESTIC resolvers, so the client never sends
-	// a packet to the server IP and a destination whitelist can't see the tunnel. The server binds
-	// Listen (":53") as the authoritative responder. EVERY resolver in the list is used: the client
-	// round-robins across them query by query (dnstransport.go), which also spreads the query volume
-	// so no single resolver sees the whole tunnel. What is NOT there is health tracking — there is no
-	// burn/retest FSM for resolvers, so a dead one keeps costing a query timeout on its share of every
-	// round. Listing a resolver you are unsure of therefore has a standing cost.
+	// DNS-tunnel carrier (Transport=="dns"): the AEAD/KCP session rides inside DNS queries and responses.
+	// DNSZone is the delegated zone whose authoritative NS is the server; DNSResolvers is the client's
+	// list of recursive resolvers, typically DOMESTIC ones, so the client never sends a packet to the
+	// server IP. It round-robins EVERY resolver, and there is no health FSM — a dead one costs a timeout.
 	DNSZone      string   `json:"dns_zone"`
 	DNSResolvers []string `json:"dns_resolvers"`
 
@@ -111,36 +94,27 @@ type Config struct {
 	// only the pool IPs listen and each reply leaves from the IP the client dialed. Empty = use Listen.
 	ListenIPs []string `json:"listen_ips"`
 	Peer      string   `json:"peer"` // client: server address, e.g. "1.2.3.4:9000"
-	// PeerIPs is a rotation pool of DESTINATION endpoints for the direct transports (tcp/udp/raw/
-	// flux): the client cycles them and burns a blocked one, so a single blocked server IP doesn't
-	// kill the tunnel (the direct-transport analogue of the ws edge pool). When it has >1 entry it
-	// overrides the single Peer; each entry is "ip:port" for udp/tcp or "ip" for raw/flux (the port
-	// is ignored there). PeerRotateSecs is the proactive rotation interval (0 = rotate only on a
-	// dead peer); PeerAutoBurn drops a peer whose handshake never completes (the burn signal is a
-	// stalled handshake, so on a crypto-off udp pool — which has no handshake — only PeerRotateSecs
-	// applies and auto-burn is inert; raw/flux/tcp always have a liveness signal). PeerStatusPath is
-	// the status file the node exposes to the panel (which endpoint is active / burned).
+	// PeerIPs is a rotation pool of DESTINATION endpoints for the direct transports (tcp/udp/raw/flux):
+	// the client cycles them and burns a blocked one. With >1 entry it overrides the single Peer; each
+	// entry is "ip:port" for udp/tcp or "ip" for raw/flux. PeerRotateSecs is the proactive interval (0 =
+	// on failure only); PeerAutoBurn needs a liveness signal, so it is inert on a crypto-off udp pool.
 	PeerIPs        []string `json:"peer_ips"`
 	PeerRotateSecs int      `json:"peer_rotate_secs"`
 	PeerAutoBurn   bool     `json:"peer_auto_burn"`
 	PeerStatusPath string   `json:"peer_status_path"`
 	// SrcIPs is the SOURCE rotation pool: the client's OWN IPs that it sends FROM, cycled alongside
-	// PeerIPs (same PeerRotateSecs / PeerAutoBurn) so a blocked source IP is walked off too. Each is a
-	// bare IPv4 (this node's own address). Client + direct transports only; on raw it is ignored under
-	// spoof_src (a forged source is a deliberate decoy). raw/flux stamp the source per packet; udp
-	// rebinds its socket; tcp re-dials with a new LocalAddr. When set it supersedes the single BindIP.
+	// PeerIPs on the same interval and burn policy. Each is a bare IPv4. Client + direct transports only,
+	// and ignored on raw under spoof_src, where a forged source is a deliberate decoy. raw/flux stamp the
+	// source per packet, udp rebinds its socket, tcp re-dials. When set it supersedes the single BindIP.
 	SrcIPs []string `json:"src_ips"`
 	// SrcStatusPath is the status file the SOURCE pool writes (its own live state + the pin cmd file),
 	// separate from PeerStatusPath so the panel can show and drive both the source and destination pools.
 	// Empty = the source pool has no panel-facing status / manual pin (it still rotates and self-heals).
 	SrcStatusPath string `json:"src_status_path"`
-	// PeerSrcIPs (SERVER, raw/flux only) is the client's SOURCE pool — the set of IPs the client may send
-	// FROM once its source rotates. raw/flux servers see every host on the wire and pre-filter incoming
-	// frames by the learned peer source; without this the server would drop a rotated client source before
-	// crypto and never re-bind to it (stranding the tunnel until a rebuild). Listing the client's known
-	// sources lets a rotated-but-expected source reach crypto (which authenticates it) while still dropping
-	// unrelated hosts pre-crypto. Empty = strict single-source filter (non-pool tunnels). udp/tcp bind a
-	// socket per source and re-learn naturally, so they don't need this.
+	// PeerSrcIPs (SERVER, raw/flux only) is the client's SOURCE pool. Those servers see every host on the
+	// wire and pre-filter by the learned peer source, so without this a rotated client source is dropped
+	// before crypto and never re-bound — stranding the tunnel until a rebuild. Empty = strict
+	// single-source filter. udp/tcp bind a socket per source and re-learn on their own.
 	PeerSrcIPs []string `json:"peer_src_ips"`
 	// BindIP is the source IP the client dials FROM (its own node IP). On a host with
 	// several IPs the kernel would otherwise egress from the primary IP; binding pins the
@@ -153,108 +127,81 @@ type Config struct {
 	MTU     int    `json:"mtu"`      // TUN MTU, e.g. 1400
 
 	Keepalive int `json:"keepalive"` // client ping interval in seconds (default 15)
-	// SockBuf is the send/receive socket-buffer size (bytes) pinned on the datagram carriers (udp/raw/
-	// flux) via SO_SNDBUFFORCE/SO_RCVBUFFORCE — which bypass net.core.{r,w}mem_max (the core holds
-	// CAP_NET_ADMIN), so a large buffer applies without a sysctl. It matters on high-latency links where
-	// the bandwidth-delay product exceeds the default (~200 KiB) buffer and a burst overflows it (loss)
-	// before the reader drains it. TCP/WS autotune and are left alone. 0 = default (4 MiB); a negative
-	// value leaves the kernel default (feature off). Clamped to <=64 MiB.
+	// SockBuf is the send/receive socket-buffer size (bytes) pinned on the datagram carriers via
+	// SO_SNDBUFFORCE/SO_RCVBUFFORCE, which bypass net.core.{r,w}mem_max. It matters on high-latency links
+	// where the bandwidth-delay product exceeds the default and a burst overflows before the reader
+	// drains it. TCP/WS autotune and are left alone. 0 = 4 MiB; negative = kernel default. Max 64 MiB.
 	SockBuf int `json:"sock_buf"`
-	// DeadAfterSecs (client) is the per-tunnel self-heal deadline: the carrier is declared dead — and the
-	// client re-establishes / fails over — if no authenticated inbound frame arrives within this many
-	// seconds. It sets the read-deadline ceiling (b.idle for tcp/ws/http; the stale window for udp/raw/
-	// flux), so an operator can make a tunnel heal faster than the default (~3×keepalive ping-loss, 60s
-	// idle backstop). 0 = use the default formula. Clamped to >=2×keepalive so a healthy pinging link is
-	// never mis-reaped, so for a very short window lower Keepalive too.
+	// DeadAfterSecs (client) is the per-tunnel self-heal deadline: the carrier is declared dead, and the
+	// client re-establishes or fails over, if no authenticated inbound frame arrives within this many
+	// seconds. It sets the read-deadline ceiling for tcp/ws/http and the stale window for udp/raw/flux.
+	// 0 = the default formula. Clamped to >=2×keepalive, so a very short window needs a lower Keepalive.
 	DeadAfterSecs int       `json:"dead_after_secs"`
 	Crypto        CryptoCfg `json:"crypto"`
 
-	// Obfs turns on anti-DPI framing: the constant magic byte is dropped, the
-	// frame type is folded into the AEAD-sealed plaintext, random padding and
-	// keepalive jitter break size/timing fingerprints, and (TCP) the length
-	// prefix is masked with a PSK-derived keystream. It requires crypto because
-	// the obfuscation and probe resistance both rely on the AEAD key.
+	// Obfs turns on anti-DPI framing: the constant magic byte is dropped, the frame type is folded into
+	// the AEAD-sealed plaintext, random padding and keepalive jitter break size and timing fingerprints,
+	// and on TCP the length prefix is masked with a PSK-derived keystream. It requires crypto, because
+	// both the obfuscation and the probe resistance rely on the AEAD key.
 	Obfs bool `json:"obfs"`
 
-	// Cover wraps the (TCP) transport in a REALITY-style TLS session that
-	// fingerprints as Chrome, so the wire looks like ordinary HTTPS. Our client
-	// hides a PSK-authenticated token in its ClientHello; the server terminates
-	// TLS for us but transparently proxies every OTHER connection (probes, the
-	// censor) to CoverSNI:443, so active probing sees that site's genuine cert.
-	// CoverSNI must therefore be a REAL, reachable, unblocked HTTPS site — it is
-	// the cover the server borrows. TCP only; core/PSK runs inside the TLS tunnel.
+	// Cover wraps the TCP transport in a REALITY-style TLS session that fingerprints as Chrome, so the
+	// wire looks like ordinary HTTPS. Our client hides a PSK-authenticated token in its ClientHello; the
+	// server terminates TLS for us and transparently proxies every OTHER connection to CoverSNI:443, so
+	// CoverSNI must be a REAL, reachable, unblocked HTTPS site — it is the cover the server borrows.
 	Cover    bool   `json:"cover"`
 	CoverSNI string `json:"cover_sni"`
 
-	// WebSocket carrier (Transport=="ws"): the core stream rides RFC 6455 binary
-	// frames after an HTTP Upgrade, so it can be fronted through a CDN. WSHost is the
-	// Host header (and TLS SNI) — the fronting/origin domain; WSPath the request path
-	// ("/" default); WSTLS makes the client speak wss:// (standard TLS to the CDN edge)
-	// before the upgrade. The server stays plain (the CDN terminates TLS and forwards
-	// the WebSocket to the origin). TCP-family; obfs/crypto apply as with tcp.
+	// WebSocket carrier (Transport=="ws"): the core stream rides RFC 6455 binary frames after an HTTP
+	// Upgrade, so it can be fronted through a CDN. WSHost is the Host header and TLS SNI — the fronting
+	// domain; WSPath the request path ("/" default); WSTLS makes the client speak wss:// to the edge. The
+	// server stays plain, since the CDN terminates TLS. TCP-family; obfs/crypto apply as with tcp.
 	WSHost string `json:"ws_host"`
 	WSPath string `json:"ws_path"`
 	WSTLS  bool   `json:"ws_tls"`
-	// SNISplit fragments the wss ClientHello across two TCP segments so the cleartext SNI lands on
-	// the segment boundary — a stateless SNI-blocklist DPI can no longer match the full hostname
-	// (SNI fragmentation). A cheap complement to ECH for edges/censors where ECH is unavailable;
-	// ws/http client + wss only. SplitPos is the split offset into the ClientHello (0 = auto: the
-	// middle of the cleartext hostname; naturally a no-op under ECH, where the SNI is encrypted).
+	// SNISplit fragments the wss ClientHello across two TCP segments so the cleartext SNI lands on the
+	// segment boundary and a stateless SNI-blocklist DPI cannot match the hostname. It is the ALTERNATIVE
+	// to ECH where ECH is unavailable — under ECH the SNI is encrypted, so the split is a no-op. ws/http
+	// client + wss only. SplitPos is the offset into the ClientHello (0 = auto: middle of the hostname).
 	SNISplit bool `json:"sni_split"`
 	SplitPos int  `json:"split_pos"`
-	// SNIMode picks how the split is sent. THREE modes are accepted (validate() below):
-	//   "split"    (default) two in-order segments;
-	//   "disorder" additionally sends the head segment at a low TTL (SplitTTL) so it expires in transit
-	//              and a reassembling DPI sees the ClientHello out of order, while the kernel
-	//              retransmits it so the server still gets the real bytes;
-	//   "fake"     injects a decoy ClientHello carrying a substituted SNI, killed before the server by
-	//              a bad TCP checksum, so the DPI ingests the decoy and the server never sees it.
-	// SplitTTL is the disorder head TTL (0 = default).
+	// SNIMode picks how the split is sent; SplitTTL is the disorder head TTL (0 = default):
+	//
+	//	"split"    (default) two in-order segments
+	//	"disorder" also sends the head at a low TTL so it expires in transit and a reassembling DPI sees
+	//	           the ClientHello out of order; the kernel retransmits it, so the server gets the real bytes
+	//	"fake"     injects a decoy ClientHello with a substituted SNI, killed before the server by a bad
+	//	           TCP checksum, so the DPI ingests the decoy and the server never sees it
 	SNIMode  string `json:"sni_mode"`
 	SplitTTL int    `json:"split_ttl"`
 	// CDNCarrier picks the SHAPE the CDN-frontable carrier takes on the wire. All three share the
-	// fronting fields (ws_host / ws_tls / ws_ech / ws_path) and differ only in what they send:
+	// fronting fields (ws_host / ws_tls / ws_ech / ws_path) and differ only in what they send. The server
+	// auto-detects the client's style per request and serves h2c, so only the client is told:
 	//
 	//	"ws"    a WebSocket upgrade — the default; empty means this
-	//	"http"  a GET-down + POST-up request pair, which passes a CDN that blocks WebSocket
-	//	"grpc"  one full-duplex request dressed as a real gRPC call
-	//
-	// One field, not a boolean plus a mode: that pair could express states that do not exist
-	// ("not http, but grpc") and made the code and the panel call the same thing different names.
+	//	"http"  a GET-down + POST-up request pair, which passes a CDN that blocks WebSocket. Short
+	//	        discrete POSTs are what a body-buffering CDN still forwards at once
+	//	"grpc"  one full-duplex request dressed as a real gRPC call, which a CDN streams to the origin
+	//	        over h2c instead of buffering (needs ws_tls)
 	CDNCarrier string `json:"cdn_carrier"`
-	// On "http" the upstream is a POST ladder: each
-	// write is a short discrete POST — the most CDN-compatible, since a CDN that buffers
-	// request bodies still forwards short complete POSTs at once. "grpc" is a single
-	// full-duplex request wrapped as a real gRPC stream (Content-Type application/grpc +
-	// gRPC message framing): a CDN like Cloudflare connects to the origin with h2c and
-	// streams the gRPC call instead of buffering it, which is what makes a full-duplex
-	// stream survive the CDN->origin leg (needs ws_tls). Those two are the only modes —
-	// plain stream-one was removed, it stalled through buffering CDNs. Only
-	// The server auto-detects the client's style per request (and serves h2c so the CDN can reach
-	// it over HTTP/2), so only the client side needs to be told.
-	// HTTPUpWorkers / HTTPUpBatchKB / HTTPUpRate size the POST-ladder upstream (cdn_carrier "http") for the CDN in front. The default suits Cloudflare, which does not mind ~70
-	// requests/sec from one address; a WAF-protected CDN needs fewer, larger POSTs or it blocks the
-	// source IP. HTTPUpRate is a ceiling on POSTs per second and is the portable one — a worker count
-	// means a different request rate on a fast path than on a slow one. All zero = compiled defaults.
+	// HTTPUpWorkers / HTTPUpBatchKB / HTTPUpRate size the POST-ladder upstream (cdn_carrier "http") for
+	// the CDN in front: a WAF-protected one needs fewer, larger POSTs or it blocks the source IP.
+	// HTTPUpRate is the portable knob — a worker count means a different request rate on a fast path than
+	// on a slow one. All zero = compiled defaults.
 	HTTPUpWorkers int `json:"http_up_workers"`
 	HTTPUpBatchKB int `json:"http_up_batch_kb"`
 	HTTPUpRate    int `json:"http_up_rate"`
 
-	// WSECH is a base64 ECHConfigList (draft-ietf-tls-esni / RFC 9460 HTTPS-record
-	// "ech="). On a wss client it encrypts the real SNI (WSHost) inside the ClientHello,
-	// leaving only a benign public name on the wire — so an SNI-blocklisting censor
-	// cannot tell which domain is being reached and must block the whole CDN IP range
-	// (collateral cost) to stop it. The node fetches this from the domain's HTTPS DNS
-	// record over DoH (ordinary DNS is often poisoned). Empty = no ECH.
+	// WSECH is a base64 ECHConfigList (RFC 9460 HTTPS-record "ech="). On a wss client it encrypts the
+	// real SNI inside the ClientHello, leaving only a benign public name on the wire, so an
+	// SNI-blocklisting censor must block the whole CDN IP range to stop it. The node fetches it from the
+	// domain's HTTPS DNS record over DoH, since ordinary DNS is often poisoned. Empty = no ECH.
 	WSECH string `json:"ws_ech"`
 
-	// WSEdgeIPs / WSEdgeSNIs form a rotation POOL for the ws client: the core cycles
-	// (edge-IP × SNI) combinations so no single IP or domain stays exposed long enough
-	// to be fingerprinted, and drops a blocked one from rotation. Each SNI carries its
-	// own ECH + path. When WSEdgeIPs is non-empty the pool overrides the single
-	// WSHost/WSECH/peer. WSRotateSecs is the proactive rotation interval in seconds
-	// (0 = rotate only on failure). WSAutoBurn drops a failing IP/SNI from rotation
-	// (dial-timeout ⇒ IP, TLS-reset/403 ⇒ SNI) and records it to the status file.
+	// WSEdgeIPs / WSEdgeSNIs form a rotation POOL for the ws client: the core cycles (edge-IP × SNI)
+	// combinations so no single IP or domain stays exposed long enough to be fingerprinted, and drops a
+	// blocked one from rotation. Each SNI carries its own ECH and path. A non-empty WSEdgeIPs overrides
+	// the single WSHost/WSECH/peer. WSRotateSecs is the proactive interval (0 = on failure only).
 	WSEdgeIPs    []string `json:"ws_edge_ips"`
 	WSEdgeSNIs   []WSSNI  `json:"ws_edge_snis"`
 	WSRotateSecs int      `json:"ws_rotate_secs"`
@@ -264,17 +211,15 @@ type Config struct {
 	WSStatusPath string `json:"ws_status_path"`
 
 	// StatusPath is the general per-core status file for the connectionless datagram transports
-	// (udp/raw/flux): the client writes its precise self-heal event ring here so the node/panel
-	// system log can surface disconnects/recoveries with a core-observed reason. Empty = off. The
-	// ws pool uses WSStatusPath instead; keeping the two separate lets the node tell a pool core
-	// (which has SIGHUP/SIGUSR handlers) apart from a plain datagram core (which does not).
+	// (udp/raw/flux): the client writes its precise self-heal event ring here so the node/panel log can
+	// surface disconnects and recoveries with a core-observed reason. Empty = off. The ws pool uses
+	// WSStatusPath instead, which is how the node tells a pool core apart from a plain datagram one.
 	StatusPath string `json:"status_path"`
 
-	// WSWarmStandby keeps a SECOND, fully-handshaked carrier connection to another pool edge
-	// warm in the background (make-before-break). On the active carrier's failure or a proactive
-	// rotation the standby is promoted instantly instead of dialing fresh, so the TUN never sees a
-	// gap. Client + ws edge pool only (ignored otherwise); default false. The server side (no
-	// connect-time eviction + downstream-follows-data) is always on and single-connection-safe.
+	// WSWarmStandby keeps a SECOND, fully-handshaked carrier to another pool edge warm in the background
+	// (make-before-break), so the active's failure or a proactive rotation promotes it instantly and the
+	// TUN never sees a gap. Client + ws edge pool only; default false. The server side — no connect-time
+	// eviction, downstream follows data — is always on and safe for a single connection.
 	WSWarmStandby bool `json:"ws_warm_standby"`
 
 	// FluxCarrier selects how "flux" frames ride the wire: "udp" (default) sends
@@ -307,13 +252,10 @@ type Config struct {
 	// wire; a few-epoch grace window absorbs clock skew. 0 defaults to 600.
 	FluxRotateSecs int `json:"flux_rotate_secs"`
 
-	// Fec turns on forward error correction on the datagram carriers (flux
-	// udp/stun/raw). Data frames are grouped into blocks of FecData shards and
-	// FecParity parity shards are sent alongside; the receiver reconstructs up to
-	// FecParity lost shards per block WITHOUT a retransmit, so a throttled/high-loss
-	// link stays usable instead of collapsing the inner TCP with retransmits. It
-	// costs FecParity/FecData extra bandwidth. Both ends must match (the panel sets
-	// both). It has no effect on the tcp/ws carriers (TCP is already reliable).
+	// Fec turns on forward error correction on the datagram carriers. Data frames are grouped into blocks
+	// of FecData shards with FecParity parity shards alongside, and the receiver reconstructs up to
+	// FecParity lost shards per block WITHOUT a retransmit, so a high-loss link stays usable instead of
+	// collapsing the inner TCP. It costs FecParity/FecData extra bandwidth. Both ends must match.
 	Fec bool `json:"fec"`
 
 	// FecData / FecParity are the block geometry: FecData data shards per block,
@@ -323,24 +265,19 @@ type Config struct {
 	FecData   int `json:"fec_data"`
 	FecParity int `json:"fec_parity"`
 
-	// FakeDesync (client, raw/flux/tcp/ws carriers only) emits FakeCount decoy packets to the peer
-	// just before each handshake to mis-sync a stateful DPI. A low-TTL decoy expires a few
-	// hops out (before the server); a bad-checksum decoy is dropped by the server's IP stack —
-	// either way an on-path DPI ingests the decoy and mis-tracks the flow while the real,
-	// AEAD-authenticated session is untouched. It helps where the core builds the whole
-	// IPv4 header (raw/flux) or injects decoy TCP segments on the connection's 4-tuple via
-	// AF_PACKET (tcp/ws); only plain udp has no hook. Needs CAP_NET_RAW (the raw/flux carriers
-	// already require it; the AF_PACKET injector for tcp/ws needs it too).
+	// FakeDesync (client; raw/flux/tcp/ws only) emits FakeCount decoy packets to the peer just before
+	// each handshake to mis-sync a stateful DPI. A low-TTL decoy expires before the server, a
+	// bad-checksum one is dropped by its IP stack — either way the DPI ingests it and mis-tracks the flow
+	// while the AEAD session is untouched. Plain udp has no hook. Needs CAP_NET_RAW.
 	FakeDesync bool   `json:"fake_desync"`
 	FakeTTL    int    `json:"fake_ttl"`   // low-TTL decoy hop budget (default 4)
 	FakeCount  int    `json:"fake_count"` // decoys per handshake (default 2)
 	FakeMode   string `json:"fake_mode"`  // "ttl" (default) | "badsum" | "both"
 
-	// GSO opens the TUN with a virtio-net header and TCP/UDP segmentation
-	// offload, so the kernel hands the core large super-packets on bulk
-	// transfers instead of many MTU-sized ones — fewer syscalls/copies, higher
-	// throughput. It is a local optimization only (the wire format is unchanged)
-	// and each side can enable it independently. Linux only.
+	// GSO opens the TUN with a virtio-net header and TCP/UDP segmentation offload, so the kernel hands
+	// the core large super-packets on bulk transfers instead of many MTU-sized ones — fewer syscalls and
+	// copies, higher throughput. A local optimization only: the wire format is unchanged and each side
+	// can enable it independently. Linux only.
 	GSO bool `json:"gso"`
 
 	// Tuning carries the operator-tunable operational timing knobs (pool health FSM, dead-detection
@@ -402,12 +339,10 @@ func (c *Config) applyDefaults() {
 	if c.Transport == "" {
 		c.Transport = "udp"
 	}
-	// A destination rotation pool OWNS the dial target: seed the single Peer from the pool's first
-	// entry so the initial datagram dial (cfg.Peer) and the pool's starting endpoint (cur=0) always
-	// agree — otherwise a fail() at cur=0 would burn the wrong entry and the mismatched Peer would be
-	// dropped on the first rotation. The pool is authoritative, so this overrides any Peer the caller
-	// also set. A bare-IP first entry is fine for raw/flux (they ignore the port) and "ip:port" for
-	// udp/tcp; both were validated. It also satisfies the client-role "peer" check for a pool-only cfg.
+	// A destination rotation pool OWNS the dial target: seed the single Peer from the pool's first entry
+	// so the initial dial and the pool's starting endpoint always agree — otherwise a fail() at cur=0
+	// burns the wrong entry and the mismatched Peer is dropped on the first rotation. The pool is
+	// authoritative, so this overrides any Peer the caller also set.
 	if len(c.PeerIPs) > 0 {
 		c.Peer = c.PeerIPs[0]
 	}
@@ -499,13 +434,10 @@ func (c *Config) validate() error {
 		if c.Listen == "" {
 			return errors.New("server role requires \"listen\"")
 		}
-		// Only the tcp and udp servers ever READ listen_ips (main.go hands it to their listeners; raw,
-		// flux, ws and dns are given cfg.Listen alone). Accepting it elsewhere validated a bind list the
-		// data path then discarded: the server bound ONE address while its config, its status file and
-		// the panel all described a pool. raw in particular CANNOT honour it — a bound AF_INET raw socket
-		// is demuxed by DESTINATION, so a pooled raw server has to bind 0.0.0.0 or go deaf to every other
-		// pool IP (which is why the node sends 0.0.0.0 for it). Transport "" is udp here: validate() runs
-		// BEFORE applyDefaults.
+		// Only the tcp and udp servers ever READ listen_ips; raw, flux, ws and dns are given cfg.Listen
+		// alone. Accepting it elsewhere validates a bind list the data path then discards, so the server
+		// binds ONE address while its config, its status file and the panel all describe a pool. raw cannot
+		// honour it at all: a bound AF_INET raw socket is demuxed by DESTINATION.
 		if len(c.ListenIPs) > 0 && c.Transport != "" && c.Transport != "udp" && c.Transport != "tcp" {
 			return errors.New("listen_ips is read only by the udp and tcp servers; transport \"" + c.Transport + "\" binds \"listen\" alone")
 		}
@@ -537,10 +469,9 @@ func (c *Config) validate() error {
 			return errors.New("raw_profile must be one of bip|ipip|gre|icmp|udp|tcp|esp")
 		}
 		// rawEffProto honours raw_proto for the bare "bip" profile ONLY — every other profile's number is
-		// tied to its forged L4 header. Left unchecked the value validated, persisted and showed as set
-		// while the wire kept the profile's native number: a protocol-whitelist evasion the operator
-		// believed was on and was not. Reject it, the way this file already does for obfs+dns and for
-		// http_up_* off an http client. RawProfile "" is bip here: validate() runs BEFORE applyDefaults.
+		// tied to its forged L4 header. Left unchecked the value validates, persists and shows as set while
+		// the wire keeps the native number: a protocol-whitelist evasion the operator believes is on and is
+		// not. RawProfile "" is bip here, since validate() runs BEFORE applyDefaults.
 		if c.RawProto != 0 {
 			if c.RawProfile != "" && c.RawProfile != "bip" {
 				return errors.New("raw_proto overrides the outer protocol number for the \"bip\" profile only (raw_profile \"" + c.RawProfile + "\" is tied to its forged header)")
@@ -638,12 +569,10 @@ func (c *Config) validate() error {
 				return errors.New("ws_ech is not valid base64")
 			}
 		}
-		// SNI fragmentation splits the wss ClientHello, so it needs wss on a client. split_pos is a
-		// byte offset into the ClientHello (0 = auto: middle of the hostname); cap it so a runaway
-		// value can't push the split past a plausible ClientHello.
-		// The upstream shape only exists on an http-carrier client; reject it elsewhere rather than
-		// storing a setting that silently does nothing (the class of defect that made fake_desync on
-		// httpc look enabled for months).
+		// SNI fragmentation splits the wss ClientHello, so it needs wss on a client. split_pos is a byte
+		// offset into the ClientHello (0 = auto: middle of the hostname), capped so a runaway value cannot
+		// push the split past a plausible ClientHello. The upstream shape only exists on an http-carrier
+		// client, so it is rejected elsewhere rather than stored doing nothing.
 		if c.HTTPUpWorkers != 0 || c.HTTPUpBatchKB != 0 || c.HTTPUpRate != 0 {
 			if c.Role != "client" || c.CDNCarrier != "http" {
 				return errors.New("http_up_workers/http_up_batch_kb/http_up_rate apply to an http-carrier CLIENT only")
@@ -726,12 +655,10 @@ func (c *Config) validate() error {
 	default:
 		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", \"flux\", \"spoof\", \"ws\", or \"dns\"")
 	}
-	// PeerIPs is the DESTINATION rotation pool for the direct transports. It is a client-side
-	// dial-layer feature: a server listens (it does not dial), and ws has its own edge pool, so
-	// the pool is meaningless there. Each entry must be a literal IP the pool can swap to with no
-	// DNS step — "ip:port" for the stream/datagram carriers (udp/tcp), a bare IPv4 for raw/flux
-	// (which address the peer by IP; any port is ignored). The single Peer is still allowed
-	// alongside it (applyDefaults seeds Peer from the first pool entry when only the pool is set).
+	// PeerIPs is the DESTINATION rotation pool for the direct transports — a client-side dial-layer
+	// feature, so it is meaningless on a server (which listens) and on ws (which has its own edge pool).
+	// Each entry must be a literal IP the pool can swap to with no DNS step: "ip:port" for udp/tcp, a
+	// bare IPv4 for raw/flux. The single Peer is still allowed alongside it.
 	if len(c.PeerIPs) > 0 {
 		if c.Role != "client" {
 			return errors.New("peer_ips is a client rotation pool (a server listens, it does not dial)")
@@ -796,11 +723,10 @@ func (c *Config) validate() error {
 	if c.Obfs && !c.Crypto.Enabled {
 		return errors.New("obfs requires crypto enabled")
 	}
-	// The dns carrier has no obfs framing: main.go's dns case calls ListenDNS/DialDNS, whose signatures
-	// take no obfs flag, and nothing in internal/dnstun references it. Every OTHER carrier is handed
-	// cfg.Obfs. Left unchecked, obfs+dns validated, persisted, showed as enabled in the panel and in
-	// core-<name>.json, and did nothing — false assurance that anti-DPI framing was running, on the most
-	// sensitive carrier there is. Reject it so the misconfiguration is visible at build time instead.
+	// The dns carrier has no obfs framing: ListenDNS/DialDNS take no obfs flag and nothing in
+	// internal/dnstun references it, while every OTHER carrier is handed cfg.Obfs. Left unchecked,
+	// obfs+dns validates, persists and shows as enabled while doing nothing — false assurance that
+	// anti-DPI framing is running, on the most sensitive carrier there is.
 	if c.Obfs && c.Transport == "dns" {
 		return errors.New("obfs is not supported on the dns transport (the DNS carrier has no obfs framing)")
 	}
@@ -819,12 +745,10 @@ func (c *Config) validate() error {
 		if c.FecData < 0 || c.FecParity < 0 {
 			return errors.New("fec_data / fec_parity must be >= 0 (0 defaults to 10 / 3)")
 		}
-		// Validate the EFFECTIVE geometry — the same defaulting applyDefaults() will do
-		// AFTER validate() runs. Checking the raw values would let e.g. fec_data=254 with
-		// fec_parity omitted pass (254<=255) and then become 254+3=257, which the codec
-		// rejects (newFECCodec needs n+k<=256) so newFecPair silently disables FEC even
-		// though the user asked for it. An out-of-range request must be a clean config
-		// error here, not a silent FEC-off at runtime.
+		// Validate the EFFECTIVE geometry — the same defaulting applyDefaults() will do AFTER validate()
+		// runs. Checking the raw values would let fec_data=254 with fec_parity omitted pass and then become
+		// 257, which the codec rejects (n+k<=256), so newFecPair silently disables FEC even though the
+		// operator asked for it. An out-of-range request must be a clean config error, not silence.
 		ed, ep := c.FecData, c.FecParity
 		if ed == 0 {
 			ed = 10
@@ -835,12 +759,10 @@ func (c *Config) validate() error {
 		if ed < 1 || ep < 1 || ed+ep > 255 {
 			return errors.New("effective fec_data (default 10) + fec_parity (default 3) must satisfy fec_data>=1, fec_parity>=1, fec_data+fec_parity<=255")
 		}
-		// ...and the receiver has to be able to REPAIR the block, which the sum rule says nothing
-		// about. The decoder delivers intact shards on arrival and recovered ones last, so a repaired
-		// frame arrives at the AEAD up to blocksize-1 sequences behind the newest — and the replay
-		// guard refuses anything a full window behind. Past that the parity is computed, sent,
-		// reconstructed and then silently discarded: full cost, no repair. Measured: 64 recovers, 65
-		// does not.
+		// ...and the receiver has to be able to REPAIR the block, which the sum rule says nothing about. The
+		// decoder delivers intact shards on arrival and recovered ones last, so a repaired frame reaches the
+		// AEAD up to blocksize-1 sequences behind the newest — and the replay guard refuses anything a full
+		// window behind. Past that, the parity costs its full bandwidth and repairs nothing.
 		if ed > packet.MaxFecData {
 			return fmt.Errorf("fec_data must be at most %d: above that a parity-recovered frame lands outside the receiver's replay window and is discarded, so FEC would cost its full bandwidth and repair nothing", packet.MaxFecData)
 		}
@@ -855,11 +777,10 @@ func (c *Config) validate() error {
 		default:
 			return errors.New("fake_desync is supported on the raw, flux, spoof, tcp and ws carriers (not plain udp)")
 		}
-		// ws is only half true: the injector mirrors the connection's real 4-tuple, and an httpc
-		// session has no single kernel socket to mirror — its conn is synthetic, so the *net.TCPAddr
-		// assertion in tcp_inject_linux.go fails and injectDecoys returns without emitting anything.
-		// Accepting the flag there meant the operator saw desync stored, forwarded and logged as ON
-		// while not one decoy ever left the box: a defence they believed they had and did not.
+		// ws is only half true: the injector mirrors the connection's real 4-tuple, and an httpc session has
+		// no single kernel socket to mirror — its conn is synthetic, so the *net.TCPAddr assertion fails and
+		// nothing is emitted. Accepting the flag there means desync is stored, forwarded and logged as ON
+		// while not one decoy ever leaves the box.
 		if c.cdnIsHTTP() {
 			return errors.New("fake_desync does not work on the HTTP carrier (its conn has no real TCP 4-tuple to mirror) — use the plain ws mode, or turn desync off")
 		}

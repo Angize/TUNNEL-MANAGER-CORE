@@ -10,23 +10,10 @@ import (
 	"testing"
 )
 
-// The role gate must not come back at the CALL SITE, which is where it lived.
-//
-// dead_after_secs is written onto both ends of a tunnel by the panel and validated on both by
-// config.go, but main gated the call on role=="client". On tcp/ws that window IS the connection's
-// read deadline and the server has one of its own, so the server kept its ~60s default while the
-// client honoured the operator's 20s: half the tunnel self-healed at the configured speed and half
-// did not.
-//
-// Neither regression test written with that fix can catch its return. TestServerHonoursDeadAfter
-// pokes srv.SetDeadAfter directly — SetDeadAfter was never gated. TestDeadAfterTakesNoRole asserts
-// applyDeadAfter forwards, and its comment claims "the signature is the guard: applyDeadAfter takes
-// no role, so the gate cannot come back without changing it". That is not true: the gate lived at the
-// call site, and `if cfg.Role == "client" { applyDeadAfter(...) }` restores it without touching the
-// signature. Both tests pass unchanged on the pre-fix tree.
-//
-// main() is not callable from a test, so the call site is read instead — the same move the panel's
-// browser-gate guards make. It walks the AST rather than grepping, so reformatting cannot fool it.
+// The role gate must not come back at the CALL SITE, which is where it lived. Neither regression test
+// written with that fix can catch its return: one pokes SetDeadAfter, which was never gated, and the
+// other asserts applyDeadAfter forwards — but `if cfg.Role == "client" { applyDeadAfter(...) }` puts
+// the gate back without touching the signature. main() is not callable from a test, so this walks the AST.
 func TestApplyDeadAfterIsCalledUnconditionally(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "main.go", nil, parser.ParseComments)

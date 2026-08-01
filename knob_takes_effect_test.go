@@ -32,12 +32,10 @@ func (c *deadCarrier) SetDeadAfter(secs int) bool {
 	return c.applied
 }
 
-// TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt drives the REAL applySNISplit that main calls.
-//
-// In user terms: a core config with transport=tcp and sni_split=true loads without complaint and
-// prints "tnl-core: SNI fragmentation on (mode=…)". No ClientHello is ever split — *TCP.SetSNISplit
-// returns at its first condition on a non-ws carrier. The operator reading that log has positive
-// confirmation of a defence that is not running.
+// TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt drives the REAL applySNISplit that main calls. A
+// core config with transport=tcp and sni_split=true loads without complaint and prints "SNI
+// fragmentation on", while no ClientHello is ever split — SetSNISplit returns at its first condition on
+// a non-ws carrier. The operator reading that log has positive confirmation of a defence not running.
 func TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt(t *testing.T) {
 	discards := &sniCarrier{applied: false}
 	buf := captureLog(t)
@@ -96,11 +94,9 @@ func TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt(t *testing.T) {
 	}
 }
 
-// TestDeadAfterTakesNoRole drives the real applyDeadAfter: the self-heal deadline must apply on
-// both roles, not only the client.
-//
-// The signature is the guard: applyDeadAfter takes no role, so the gate cannot come back without
-// changing it, and this test fails to compile if it does.
+// TestDeadAfterTakesNoRole drives the real applyDeadAfter: the self-heal deadline must apply on both
+// roles, not only the client. The signature carries part of the guard — applyDeadAfter takes no role —
+// but the gate lived at the CALL SITE, which dead_after_wiring_test.go is what actually pins.
 func TestDeadAfterTakesNoRole(t *testing.T) {
 	c := &deadCarrier{applied: true}
 	buf := captureLog(t)

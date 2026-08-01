@@ -6,13 +6,9 @@ import (
 )
 
 // TestEffectiveDeadAfterUsesTheCarriersOwnFloor guards the startup log against promising a self-heal
-// deadline the carrier will not enforce. Every carrier floors dead_after_secs, but dns floors at its own
-// ABSOLUTE window while the rest clamp to 2×keepalive — so the shared 2×keepalive arithmetic misreported
-// dns in BOTH directions.
-//
-// This tests the helper the log line calls, and the call site is one line long: it logs exactly what the
-// helper returns. What it does NOT prove is that the dns carrier's floor is the number dnstun applies —
-// that link is DNSDeadFloorSecs reading dnstun.DeadFloor(), i.e. the same variable resolveKeepalive uses.
+// deadline the carrier will not enforce. Every carrier floors dead_after_secs, but dns floors at its
+// own ABSOLUTE window while the rest clamp to 2×keepalive. What it does NOT prove is that the dns floor
+// is the number dnstun applies — that link is DNSDeadFloorSecs reading dnstun.DeadFloor().
 func TestEffectiveDeadAfterUsesTheCarriersOwnFloor(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -48,12 +44,10 @@ func TestEffectiveDeadAfterUsesTheCarriersOwnFloor(t *testing.T) {
 	}
 }
 
-// TestFecRejectionNamesTheCarrier: the FEC rejection used to list "tcp/ws" only, so a dns tunnel was
-// refused by a message that never mentioned dns and the operator could reasonably read it as belonging
-// to a different tunnel. Every non-datagram carrier must see its own name in the error.
-//
-// Each case starts from a config that validates CLEAN on that transport and turns on nothing but fec, so
-// a passing assertion cannot come from some unrelated rejection.
+// TestFecRejectionNamesTheCarrier: the FEC rejection listed "tcp/ws" only, so a dns tunnel was refused
+// by a message that never mentioned dns and could reasonably be read as belonging to another tunnel.
+// Every non-datagram carrier must see its own name in the error. Each case starts from a config that
+// validates CLEAN on that transport and turns on nothing but fec, so a pass cannot come from elsewhere.
 func TestFecRejectionNamesTheCarrier(t *testing.T) {
 	build := map[string]func() *Config{
 		"dns": func() *Config {
