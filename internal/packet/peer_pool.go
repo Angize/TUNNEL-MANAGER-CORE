@@ -8,29 +8,9 @@ import (
 )
 
 // PeerPool rotates a client's DESTINATION endpoint (or, as a second instance, its SOURCE IP) across a
-// list of candidates, so a single blocked IP does not kill the tunnel: a dead endpoint (the handshake
-// never completes, or the carrier keeps dying young) is BURNED out of rotation and the pool advances to
-// the next live one; a proactive timer also rotates on a schedule. This is the direct-transport analogue
-// of the ws edge pool — it works at the dial/peer layer, before any transport framing, so tcp/udp/raw/
-// flux all drive it the same way by swapping the endpoint they use.
-//
-// Health is a three-state FSM (healthy → suspect → dead) exactly like the ws edge pool, not a one-shot
-// burn: a failing endpoint becomes SUSPECT (pulled from rotation, retested on an exponential backoff) and
-// only DEAD after it fails every backoff step; a merely temporary block therefore heals itself with no
-// rebuild. Because the direct transports have no cheap out-of-band prober (a TLS handshake is what the ws
-// pool retests with; udp/raw/flux have no equivalent), the "retest" here is re-admission: once a burned
-// endpoint's backoff elapses it becomes DUE and the live data plane tries it again on the next rotation
-// (proactive tick or failover) — the data plane itself is the probe. A "probe now" pulls every backoff
-// forward so a lifted block is picked up at once.
-//
-// The pool never dead-ends: when nothing is healthy or due it falls back to the least-bad endpoint
-// (soonest retest, suspect preferred over dead) so a transient outage that trips every candidate still
-// keeps trying instead of stranding the tunnel. An operator can also PIN a specific endpoint (current()
-// forces it until it lands or a short TTL lapses) to switch by hand, like the ws pool's per-edge select.
-//
-// The health primitives (healthRec, stateSuspect/stateDead, suspectBackoff, deadRetest, pinTTL,
-// healthStatus) are shared with the ws edge pool (ws_pool.go, same package) so both pools behave and
-// report identically.
+// list of candidates, so one blocked IP does not kill the tunnel. It shares the ws edge pool's health
+// primitives (ws_pool.go) — the same healthy → suspect → dead FSM — but has no out-of-band prober, so a
+// "retest" here is RE-ADMISSION: a due endpoint is retried by the live data plane, which IS the probe.
 type PeerPool struct {
 	mu         sync.Mutex
 	writeMu    sync.Mutex            // serializes the status file write+rename so concurrent writers don't race the shared .tmp
@@ -40,20 +20,14 @@ type PeerPool struct {
 	autoBurn   bool                  // burn a failing endpoint (vs. only rotate past it)
 	rotate     time.Duration         // proactive rotation interval (0 = failover-only)
 	statusPath string                // status file the panel reads (empty = off; also gates the pin cmd file)
-	// pinKey/pinUntil back the panel's "make this active" button — a MOMENTARY jump, NOT a permanent lock.
-	// selectEntry forces pinKey now; the pin RELEASES the instant the carrier lands on it (first successful
-	// connect -> pinLanded clears it, ~1 handshake), after which normal rotation resumes. pinUntil is only a
-	// CEILING for a pick that never connects (a dead IP): once it lapses, current() stops forcing the pick so
-	// the tunnel recovers on a live endpoint. So a healthy pin is held for ~one handshake, not the whole TTL.
+	// pinKey/pinUntil back the panel's "make this active" button — a MOMENTARY jump, NOT a lock. The pin
+	// RELEASES the instant the carrier lands on it (about one handshake); pinUntil is only a CEILING for a
+	// pick that never connects, so a dead choice cannot strand the tunnel for the whole TTL.
 	pinKey   string // operator "make active" endpoint; current() forces it until it lands OR pinUntil lapses
 	pinUntil int64  // unix-secs ceiling for a NOT-YET-LANDED pin only; a landed pin releases well before this
-	// chosen is the endpoint an ADVANCE deliberately moved onto, which currentLocked then returns
-	// instead of re-selecting. The two have different rules on purpose and a reader must not overrule
-	// the rotation: an advance re-admits a burned endpoint whose backoff is DUE (that re-admission IS
-	// the retest — the direct transports have no out-of-band prober, see the type comment), and a
-	// failover deliberately steps OFF the endpoint it just burned even when every candidate is burned.
-	// currentLocked's own passes do neither. Empty until the first advance; maintained only by
-	// commitLocked/pickLocked, so it can never be left pointing at an endpoint cur is not on.
+	// chosen is the endpoint an ADVANCE deliberately moved onto, which currentLocked returns instead of
+	// re-selecting: the two follow different rules on purpose, and a reader must not overrule the rotation.
+	// Maintained only by commitLocked/pickLocked, so it can never point somewhere cur is not.
 	chosen string
 	now    func() int64 // injectable clock (unix seconds); overridden in tests
 }
@@ -82,10 +56,8 @@ func (p *PeerPool) current() string {
 
 // commitLocked moves cur to idx as a DELIBERATE choice — an advance, or a rejected candidate being
 // undone — so currentLocked hands that endpoint back instead of re-selecting (see the chosen field).
-// pickLocked is the same move WITHOUT the commit, for currentLocked's own selection passes and for a
-// pin (whose own key governs while it is live, and where normal selection must resume once it lapses).
-// Every write to p.cur goes through one of the two, so chosen can never go stale. Both return the
-// endpoint, for callers that hand it straight back.
+// pickLocked is the same move WITHOUT the commit, for currentLocked's own passes and for a pin. Every
+// write to p.cur goes through one of the two, so chosen can never go stale.
 func (p *PeerPool) commitLocked(idx int) string {
 	p.cur = idx
 	p.chosen = p.addrs[idx]
@@ -113,23 +85,10 @@ func (p *PeerPool) currentLocked() string {
 	}
 	n := len(p.addrs)
 	now := p.now()
-	// Pass 0: the endpoint an advance deliberately chose. The passes below re-select under DIFFERENT
-	// rules, so without this a reader silently walks the pool straight back off the rotation's choice —
-	// and tcp re-asks current() for BOTH the dial (dialTarget) and the source bind (sourceIP) instead of
-	// consuming the address nextEndpoint returned. Two ways it bit:
-	//
-	//	rotation  advanceEligibleLocked re-admits a burned endpoint whose backoff is DUE; pass 1 refuses
-	//	          a burned endpoint while any healthy one exists. So the timer tore a healthy connection
-	//	          down and rebuilt it to the SAME endpoint every interval, forever — with a peer-rotate
-	//	          event and a status file naming an endpoint the tunnel was not on, while the due one was
-	//	          never dialled, so it never healed and "probe now" had nothing to trigger.
-	//	failover  advanceFailLocked steps off the endpoint it just burned (bestIdxLocked(p.cur) excludes
-	//	          it); pass 3 does not (bestIdxLocked(-1)). With every candidate burned and none due — a
-	//	          total outage, exactly when walking the list matters — the re-dial went straight back to
-	//	          the endpoint that had just failed.
-	//
-	// udp/raw/flux use the address nextEndpoint returns, so they never saw either; this makes current()
-	// agree with them.
+	// Pass 0: the endpoint an advance deliberately chose. The passes below re-select under DIFFERENT rules,
+	// so without this a reader walks straight back off the rotation's choice — an advance re-admits a DUE
+	// burned endpoint that pass 1 refuses while anything healthy exists, and a failover steps OFF what it
+	// just burned where pass 3 does not. udp/raw/flux use nextEndpoint's address; tcp re-asks current().
 	if p.chosen != "" && p.addrs[p.cur] == p.chosen {
 		return p.chosen
 	}
@@ -197,15 +156,10 @@ func (p *PeerPool) bestIdxLocked(except int) int {
 	return best
 }
 
-// burnLocked moves the endpoint's health FSM on a failure: healthy → suspect (scheduled +30s), or, if
-// it is already tracked (a due endpoint we retried live that failed again), one step further down the
-// backoff toward dead. Caller holds the lock.
-//
-// It does NOT consult auto-burn itself — the callers decide, and they do not all decide the same way,
-// because they are not answering the same question. fail() is about a REMOTE endpoint that looks
-// unreachable, and auto-burn is exactly the policy for that ("do not sideline a peer just because it
-// timed out"). failUnusable() and rejectCandidate() are about a LOCAL impossibility — a source IP that
-// is not on this host — which no policy can make usable; see failUnusable.
+// burnLocked moves the endpoint's health FSM on a failure: healthy → suspect, or one step further down
+// the backoff toward dead if it is already tracked. Caller holds the lock. It does NOT consult auto-burn
+// itself — the callers do, and differently: fail() is about a REMOTE endpoint that looks unreachable,
+// which is what auto-burn is a policy for; failUnusable/rejectCandidate are about a LOCAL impossibility.
 func (p *PeerPool) burnLocked(addr string) {
 	r := p.health[addr]
 	if r == nil {
@@ -286,20 +240,10 @@ func (p *PeerPool) advanceEligibleLocked() bool {
 // (plus whether it actually moved).
 func (p *PeerPool) fail() (addr string, moved bool) { return p.failWith(false) }
 
-// failUnusable is fail() for a source the KERNEL refuses — an IP that is not configured on this host —
-// rather than for a peer that merely looks unreachable, and it burns even with auto-burn OFF.
-//
-// The two are different questions. Auto-burn is a policy about REMOTE reachability: an operator can
-// reasonably say "never sideline a peer, just rotate past it", because a peer that times out now may
-// answer in a minute. An address this box cannot send from is a local fact no policy changes, and
-// leaving it healthy means every rotation walks straight back onto it — the #189/#214 defect, which
-// since #215 is a total SILENT blackout on the raw udp/tcp profiles (sendViaConn refuses the degraded
-// send there, because the carrier header's L4 checksum was computed over that source).
-//
-// rejectCandidate has always burned unconditionally for exactly this reason. This is the same rule
-// for the other three shapes of the same event — the seed, the operator jump, and tcp's dial — which
-// went through the gated fail() and so left an unusable IP in rotation whenever auto-burn was off.
-// With auto-burn ON (every tunnel the panel builds: rotCollect hardcodes it) the two are identical.
+// failUnusable is fail() for a source the KERNEL refuses — an IP not configured on this host — rather
+// than a peer that merely looks unreachable, so it burns even with auto-burn OFF. Auto-burn is a policy
+// about REMOTE reachability, where a peer that times out now may answer in a minute; an address this box
+// cannot send from is a local fact no policy changes, and leaving it healthy makes rotation return to it.
 func (p *PeerPool) failUnusable() (addr string, moved bool) { return p.failWith(true) }
 
 func (p *PeerPool) failWith(unusable bool) (addr string, moved bool) {
@@ -354,21 +298,10 @@ func (p *PeerPool) nextEndpoint(proactive bool) (addr string, moved bool) {
 	return p.fail()
 }
 
-// keepCursorOn puts cur back on addr — the endpoint the carrier is REALLY using — after a rotation
-// attempt that did not take. Distinct from rejectCandidate: it burns nothing and heals nothing.
-//
-// It exists for make-before-break. The rotation timer advances the pool, buildWarm dials the endpoint
-// it advanced onto, and if that build fails the live connection deliberately STAYS where it is — the
-// whole point of building before breaking. But the failure path had already run fail(), which burns
-// the candidate (right) and then advances cur again (fine, the next beat needs a different one) and
-// publishes Active = whatever cur now points at (wrong). So the pool status file named an endpoint the
-// tunnel had never been on, the panel drew that IP as active, and the next beat "rotated" onto the
-// endpoint the tunnel was already using — a rotation event for a move that had already not happened.
-//
-// The burn recorded by fail() is kept: that endpoint really did refuse to come up. Only the cursor
-// goes back, so `Active` describes the tunnel again and the next rotateOnce starts from the truth.
-// Nil-safe: the rotation beat fires when EITHER pool has an interval, so a source-only rotation
-// reaches here with no destination pool at all.
+// keepCursorOn puts cur back on addr — the endpoint the carrier is REALLY using — after a rotation that
+// did not take. It exists for make-before-break: when a warm build fails the live connection stays put,
+// while fail() has already advanced cur and would publish Active as an endpoint the tunnel was never on.
+// The burn fail() recorded is kept; only the cursor goes back. Nil-safe (a source-only rotation beat).
 func (p *PeerPool) keepCursorOn(addr string) {
 	if p == nil || addr == "" {
 		return
@@ -391,12 +324,9 @@ func (p *PeerPool) keepCursorOn(addr string) {
 }
 
 // rejectCandidate UNDOES a rotation whose target the carrier could not actually adopt — the udp source
-// rebind failed because the new source IP is not on this host (removed from the interface but still in
-// the pool). nextEndpoint has already advanced cur onto that unbindable endpoint (and, on a failover,
-// burned prev), but the socket never left prev. So burn the unbindable candidate (rotation must skip it)
-// and restore cur to prev, clearing any burn the failover put on it — prev is the live, working source.
-// Without this the published Active named a source the datagram path never adopted and a healthy, in-use
-// source stayed burned (and later heal-cleared as if it had recovered). No-op safety: never burns prev.
+// rebind failed because the new source IP is not on this host. nextEndpoint has already advanced cur onto
+// it (and, on a failover, burned prev), but the socket never left prev: so burn the unbindable candidate
+// and restore cur to prev, clearing any burn the failover put on it. It never burns prev.
 func (p *PeerPool) rejectCandidate(prev string) {
 	p.mu.Lock()
 	if bad := p.addrs[p.cur]; bad != prev {
@@ -413,11 +343,9 @@ func (p *PeerPool) rejectCandidate(prev string) {
 	p.writeStatus()
 }
 
-// healEvents emits the paired heal events after a datagram carrier's active endpoints prove alive again:
+// healEvents emits the paired heal events after a datagram carrier's endpoints prove alive again:
 // rc.success() clears any transient burn and returns the recovered destination/source IPs ("" when
-// nothing healed), which become "peer-retest"/"src-retest" events. Shared by udp/raw/flux, whose blocks
-// were byte-identical. st.event is nil-safe (server / off). (tcp's analogue differs — it uses succeeded()
-// singly with an "ip:" prefix — and stays separate.)
+// nothing healed), which become "peer-retest"/"src-retest". Shared by udp/raw/flux; st.event is nil-safe.
 func healEvents(st *coreStatus, rc *rotationController) {
 	dh, sh := rc.success()
 	if dh != "" {
@@ -428,11 +356,9 @@ func healEvents(st *coreStatus, rc *rotationController) {
 	}
 }
 
-// succeeded clears the active endpoint's burn after it connects — a live success proves it healthy right
-// now, so a transient block heals. Only writes the status file if something changed.
-// succeeded clears any health record on the CURRENT endpoint (it just proved good on the data plane).
-// Returns the recovered address when it actually cleared a burn/suspect mark (a heal transition), else ""
-// — so the carrier can emit a discrete heal event, otherwise a no-op.
+// succeeded clears any health record on the CURRENT endpoint — a live success proves it healthy right
+// now, so a transient block heals. Returns the recovered address when it actually cleared a burn (a heal
+// transition), else "", so the carrier can emit a discrete heal event. Writes the status file only then.
 func (p *PeerPool) succeeded() string {
 	p.mu.Lock()
 	a := p.addrs[p.cur]
@@ -460,10 +386,9 @@ func (p *PeerPool) probeAllNow() {
 }
 
 // selectEntry PINS a specific endpoint as the active one: current() forces it until the carrier lands on
-// it (pinApplied clears the pin) or pinTTL elapses with no land — whichever comes first. So it is a
-// "jump exactly here now and keep trying until connected" override that survives a transient outage but
-// self-releases on success and cannot strand the tunnel on a permanently-dead endpoint. It also clears
-// any suspect/dead mark on the chosen endpoint so it gets a clean shot. Returns false if key is unknown.
+// it (pinApplied clears the pin) or pinTTL elapses with no land. So it is "jump exactly here and keep
+// trying until connected" — it survives a transient outage but self-releases on success and cannot
+// strand the tunnel on a dead endpoint. It also clears any suspect/dead mark. False if key is unknown.
 func (p *PeerPool) selectEntry(key string) bool {
 	p.mu.Lock()
 	ok := false
@@ -484,20 +409,10 @@ func (p *PeerPool) selectEntry(key string) bool {
 	return ok
 }
 
-// pinLanded releases a live manual pin because the carrier just handshook successfully — a pin is
-// "jump here and keep trying until connected", so a success IS the landing. Single-locked so it can't
-// race the pin's own TTL expiry between a check and the clear (the isPinned()+pinApplied(current())
-// two-call form could), and it needs no current() call: while pinned, current() forces the pinned
-// endpoint, so a success is by definition on it. No-op when no pin is in force.
-// It is for the DESTINATION pools of udp/raw/flux, which re-point at current() in their adopt path
-// and then re-handshake, so "we connected" and "we connected on the pin" are the same statement. tcp
-// is NOT one of those — see pinLandedOn.
-//
-// ⚠ It is NOT for a SOURCE pool, and the sentence that used to say "udp/raw/flux" without qualifying
-// it was wrong on exactly that half. A source swap deliberately keeps the AEAD session — that is the
-// whole point, the source is independent of the keys — so there is no re-handshake to read a landing
-// off, and on a healthy tunnel the success path that called this never runs at all. The source adopt
-// itself is the landing, and it reports it (pinLandedOn) where it happens.
+// pinLanded releases a live manual pin because the carrier just handshook successfully — a pin is "jump
+// here and keep trying until connected", so a success IS the landing. Single-locked, so it cannot race
+// the pin's own TTL expiry, and it needs no current() call: while pinned, current() forces the pinned
+// one. DESTINATION pools of udp/raw/flux only: tcp uses pinLandedOn, and a source swap has no handshake.
 func (p *PeerPool) pinLanded() {
 	p.mu.Lock()
 	changed := p.pinnedLocked()
@@ -512,9 +427,8 @@ func (p *PeerPool) pinLanded() {
 
 // pinLandedOn releases a live manual pin ONLY when the carrier really came up on the pinned endpoint.
 // tcp needs the comparison because dialLoop can adopt a carrier the rotation timer PRE-BUILT, whose
-// endpoint was resolved before the pin existed. Releasing the pin then reported the operator's jump as
-// complete while the tunnel sat somewhere else — and, worse, resumed normal rotation as if the pick
-// had been honoured. wsPool.pinApplied has always compared; this is its direct-pool twin.
+// endpoint was resolved before the pin existed — releasing then reports the operator's jump as complete
+// while the tunnel sits somewhere else, and resumes rotation as if the pick had been honoured.
 func (p *PeerPool) pinLandedOn(addr string) {
 	p.mu.Lock()
 	changed := p.pinnedLocked() && p.pinKey == addr
@@ -527,20 +441,10 @@ func (p *PeerPool) pinLandedOn(addr string) {
 	}
 }
 
-// pinCannotLand is pinLandedOn's opposite: the carrier tried the operator's jump and the endpoint
-// turned out to be unusable outright — a source IP that is not configured on this host, which no
-// number of retries can fix. It clears the pin so current() stops forcing it and the pool moves on
-// at once.
-//
-// pinTTL is a ceiling for a pick that MIGHT still connect (a dead IP that could come back within the
-// window). Once "it cannot be used at all" is settled there is nothing left to wait for, and sitting
-// out the rest of the window just leaves the tunnel egressing from the kernel default while the panel
-// shows a jump in progress. A jump is a MOMENTARY move within the rotation, not a lock — so proving
-// it impossible ends it, exactly as landing on it ends it.
-//
-// Keyed, like pinLandedOn and wsPool.releasePinLocked, so it can never cancel a jump the operator has
-// since re-aimed somewhere else (the unkeyed releasePin below is for the different case where the
-// CURRENT pin is the one that keeps failing). Silent: no event, like every other pin transition.
+// pinCannotLand is pinLandedOn's opposite: the jump's endpoint turned out to be unusable outright — a
+// source IP not configured on this host, which no number of retries can fix — so it clears the pin and
+// the pool moves on at once. pinTTL is a ceiling for a pick that MIGHT still connect; once "cannot be
+// used at all" is settled there is nothing to wait for. Keyed, so it never cancels a re-aimed jump.
 func (p *PeerPool) pinCannotLand(key string) bool {
 	p.mu.Lock()
 	cleared := p.pinnedLocked() && p.pinKey == key
@@ -555,10 +459,8 @@ func (p *PeerPool) pinCannotLand(key string) bool {
 }
 
 // releasePin drops a manual pin whose endpoint has been PROVEN blocked (repeated failovers that never
-// landed), so current() stops forcing the dead endpoint for the rest of pinTTL and the tunnel recovers on
-// a live endpoint at once. A transient outage never reaches here — it heals before the fail threshold —
-// so only a decisively-blocked pin ends this way. Writes the status file so the panel reflects the
-// released pin immediately. No-op when no pin is set.
+// landed), so current() stops forcing the dead endpoint for the rest of pinTTL and the tunnel recovers
+// on a live one at once. A transient outage heals before the fail threshold and never reaches here.
 func (p *PeerPool) releasePin() {
 	p.mu.Lock()
 	changed := p.pinKey != ""
@@ -631,16 +533,9 @@ func (p *PeerPool) readSelectCmd() (key string, ok bool) {
 }
 
 // rotationController couples a client carrier's DESTINATION pool with an optional SOURCE pool and
-// centralizes the failover/proactive policy, so every carrier (udp/tcp/raw/flux) drives rotation
-// identically instead of re-deriving it. The carrier supplies its own rotate funcs (which actually swap
-// the peer / the source IP); the controller only decides WHEN to call them.
-//
-// Policy: on a dead peer, burn+advance the destination; once the destination pool has cycled through
-// every endpoint against the current source (destRot reaches the pool size), advance the source too, so
-// a blocked source IP is walked off after its destinations are exhausted. A source-only pool (no dest
-// pool) just advances the source. The proactive timer moves both pools together. An operator pin on
-// either pool FREEZES both failover and proactive rotation until it lands or its TTL lapses, so the
-// manual switch is not fought by auto-rotation.
+// centralizes the failover/proactive policy, so every carrier drives rotation identically — it decides
+// WHEN, the carrier's own funcs do the swapping. Policy: burn and advance the destination on a dead
+// peer, walk the SOURCE once every destination has been tried against it, and freeze both under a pin.
 type rotationController struct {
 	dst, src *PeerPool
 	destRot  int
@@ -675,11 +570,9 @@ func (c *rotationController) pinned() bool {
 // operator pin is in force it holds off failover until pinFailRelease proven-dead rounds auto-release it.
 func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 	if c.pinned() {
-		// A pinned endpoint proven blocked auto-releases so the tunnel recovers NOW instead of freezing on
-		// it for the rest of pinTTL — the datagram/direct analogue of the ws pool's releasePinLocked. Each
-		// call here is already a proven-dead round (peerFailThreshold retransmits, or a full clear-mode
-		// staleness window, with no session), so a transient blip never reaches even one round; only after
-		// pinFailRelease decisive rounds do we drop the pin and fall through to normal failover this call.
+		// A pinned endpoint proven blocked auto-releases so the tunnel recovers NOW instead of freezing on it
+		// for the rest of pinTTL. Each call here is already a proven-dead round, so a transient blip never
+		// reaches even one; only after pinFailRelease decisive rounds does the pin drop and failover resume.
 		c.pinFails++
 		if c.pinFails < pinFailRelease {
 			return
@@ -709,10 +602,9 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 	}
 }
 
-// success clears any transient burns after the carrier handshakes, resets the dest-cycle counter, and
-// releases a manual pin that has now landed (the carrier is live on the pinned endpoint).
-// success marks both pools good and returns the dst/src addresses that RECOVERED from a burn this call
-// (empty when nothing healed), so the carrier can surface a discrete heal event.
+// success marks both pools good after the carrier handshakes, resets the dest-cycle counter, releases a
+// destination pin that has now landed, and returns the dst/src addresses that RECOVERED from a burn this
+// call (empty when nothing healed) so the carrier can surface a discrete heal event.
 func (c *rotationController) success() (dstHealed, srcHealed string) {
 	c.destRot = 0
 	c.pinFails = 0 // a live success (the pin landed, or the endpoint healed) resets the release count
