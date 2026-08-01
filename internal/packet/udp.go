@@ -1,6 +1,6 @@
-// Package packet implements the core carrier: raw L3 IP packets read from a
-// TUN device, framed one-per-datagram, optionally AEAD-sealed, and shipped
-// over UDP to the peer, which writes them into its own TUN.
+// Package packet implements the core carrier: raw L3 IP packets read from a TUN device, framed
+// one-per-datagram, optionally AEAD-sealed, and shipped over UDP to the peer, which writes them into
+// its own TUN.
 //
 // Wire format (one UDP datagram = one frame):
 //
@@ -8,16 +8,11 @@
 //	[1] type  = 0 data | 1 ping | 2 pong
 //	[2:] payload — sealed when crypto is on, raw when off
 //
-// Session establishment. When crypto is on the two ends first run an ephemeral
-// X25519 handshake (see crypto.SessionSealer): the client sends a 48-byte init,
-// the server replies, and both derive fresh per-session keys. Data flows only
-// once that session exists. This gives forward secrecy and makes a captured
-// old-session frame undecryptable under the new keys, so it can neither rebind
-// the peer nor inject a packet. Handshake messages are demultiplexed from data by
-// trial: a datagram that does not AEAD-open under the current session is tried as
-// a handshake message (PSK-MAC authenticated); anything that is neither is
-// dropped in silence. With crypto off there is no handshake and no authentication
-// — a clear-mode tunnel offers no protection against a spoofed frame.
+// With crypto on, the two ends first run an ephemeral X25519 handshake (crypto.SessionSealer) and data
+// flows only once that session exists, so a captured old-session frame opens under nothing and can
+// neither rebind the peer nor inject a packet. Handshake messages are demuxed from data by trial: a
+// datagram that does not AEAD-open under the current session is tried as a PSK-MAC-authenticated
+// handshake message, and anything that is neither is dropped in silence. Clear mode has neither.
 package packet
 
 import (
@@ -43,11 +38,10 @@ const (
 	maxDatagram = 65535
 )
 
-// Sealer is the subset of crypto.Sealer core needs. Open returns the authenticated
-// (session, seq) pair from the nonce so the carrier can reject replays before
-// acting on a frame. aad carries the cleartext frame header (the type byte in
-// legacy framing) so it is authenticated and cannot be flipped on the wire; obfs
-// framing folds the type into the plaintext and passes nil.
+// Sealer is the subset of crypto.Sealer core needs. Open returns the authenticated (session, seq) pair
+// from the nonce so the carrier can reject replays before acting on a frame. aad carries the cleartext
+// frame header (the type byte in legacy framing) so it is authenticated and cannot be flipped on the
+// wire; obfs framing folds the type into the plaintext and passes nil.
 type Sealer interface {
 	Seal(pt, aad []byte) ([]byte, error)
 	Open(sealed, aad []byte) (session uint64, seq uint64, pt []byte, err error)
@@ -56,13 +50,10 @@ type Sealer interface {
 // sealerBox lets a *crypto.Sealer live in an atomic.Pointer.
 type sealerBox struct{ s Sealer }
 
-// stagedBox is one server-side staged (pending) session: its sealer plus its own replay guard,
-// adopted verbatim on promotion. A BOUNDED SET of these (maxStaged) replaces a single pending slot
-// so a replayed init can no longer evict a legit client's staged session by overwriting one slot —
-// promotion is still gated on a frame that actually opens under a candidate (which a replay can't
-// produce), and an attacker now needs maxStaged DISTINCT captured inits to push a legit candidate
-// out (was one). Shared by the datagram carriers (udp/raw/flux); touched only on the single receive
-// goroutine, so it needs no lock.
+// stagedBox is one server-side staged (pending) session: its sealer plus its own replay guard, adopted
+// verbatim on promotion. A BOUNDED SET of these (maxStaged) replaces a single pending slot, so a
+// replayed init can no longer evict a legit client's staged session by overwriting one slot. Shared by
+// udp/raw/flux; touched only on the single receive goroutine, so it needs no lock.
 type stagedBox struct {
 	box *sealerBox
 	rp  replayGuard
@@ -91,13 +82,10 @@ type UDP struct {
 	conn      atomic.Pointer[net.UDPConn]
 	rebindGen atomic.Int64
 	rebindMu  sync.Mutex // serializes rebindSourceTo so a proactive rotation and a pin-poll adopt can't race the swap (double-close / socket leak)
-	// Server-side listen sockets. A pooled server binds ONE socket per selected pool IP (not 0.0.0.0), so
-	// only those IPs listen and the reply leaves from the SAME IP the client dialed (source-correct for a
-	// NAT'd client). replyConn is the socket an AUTHENTICATED frame was last received on; tunToNet/writeCtrl
-	// reply on it. It is committed only where the peer address is learned (post-auth), so a stray or hostile
-	// datagram to another pool IP cannot hijack the reply source. rxConn stashes the current read loop's
-	// socket as a candidate (under rxMu) until that authenticated commit. rxMu serializes the N read loops
-	// into the single-receiver contract the crypto/replay/FEC path assumes.
+	// Server-side listen sockets. A pooled server binds ONE socket per selected pool IP, so the reply
+	// leaves from the SAME IP the client dialed. replyConn is the socket an AUTHENTICATED frame last
+	// arrived on — committed only where the peer is learned, so a stray or hostile datagram to another
+	// pool IP cannot hijack the reply source. rxMu funnels the N read loops into one receiver.
 	srvConns      []*net.UDPConn
 	replyConn     atomic.Pointer[net.UDPConn]
 	rxConn        atomic.Pointer[net.UDPConn]
@@ -119,7 +107,7 @@ type UDP struct {
 	hsCache initCache                        // server: recent inits -> responses (compute-DoS replay cache; receive-goroutine-only)
 	ci      atomic.Pointer[crypto.Ephemeral] // client's current handshake ephemeral
 	lastRx  atomic.Int64                     // unix-nano of the last authenticated frame (client staleness)
-	hbRx    atomic.Int64                     // unix-nano of the last REAL inbound frame — feeds the status heartbeat; 0 until the peer answers (v2.48.7)
+	hbRx    atomic.Int64                     // unix-nano of the last REAL inbound frame — feeds the status heartbeat; 0 until the peer answers
 	// peerAnswered gates the clear-mode heal: it is set when the CURRENT peer replies and cleared on
 	// every peer rotation, so success() only clears a burn on an endpoint that has actually replied
 	// SINCE we (re)pointed at it — never a false heal on a just-jumped-to (unproven) endpoint.
@@ -157,26 +145,15 @@ func (b *UDP) SetPeerPool(pp *PeerPool) {
 const peerFailThreshold = 12
 
 // pinFailRelease is how many proven-dead rounds (each already peerFailThreshold retransmits, or a full
-// clear-mode staleness window, of no session) a manual pin absorbs before it auto-releases so the tunnel
-// recovers instead of freezing on a blocked endpoint for the rest of pinTTL. The direct/datagram analogue
-// of the ws pool's releasePinLocked. Two rounds keeps a real transient (which heals before even one round)
-// from ever releasing a good pin, while still recovering well inside a manual pick's useful window.
+// clear-mode staleness window, with no session) a manual pin absorbs before it auto-releases, so the
+// tunnel recovers instead of freezing on a blocked endpoint for the rest of pinTTL. Two rounds keeps a
+// real transient — which heals before even one round — from ever releasing a good pin.
 const pinFailRelease = 2
 
-// rotatePeerUDP points the client at the next pool endpoint: burn+advance (proactive=false) or a
-// timed rotate (proactive=true). It resolves the endpoint and swaps b.peer. No-op when the pool did
-// not move.
-//
-// A TIMED rotation keeps the AEAD session, so not one packet is dropped. Every endpoint in a
-// destination pool is an address of the SAME server process — the panel builds the pool from one
-// node's IP list — and the session is independent of the address, which is the same argument the
-// source-rotation path below already relies on. The client simply starts addressing the next IP; the
-// server receives it on another of its pool sockets and learnPeer promotes that socket to the reply
-// socket on the first authenticated frame. Frames still in flight from the endpoint we just left open
-// under the same keys, so they are delivered rather than lost.
-//
-// A FAILOVER rotation still clears: that endpoint stopped answering, so the handshake retransmit is
-// what drives burn+advance across the rest of the pool.
+// rotatePeerUDP points the client at the next pool endpoint: burn+advance (proactive=false) or a timed
+// rotate (proactive=true). No-op when the pool did not move. A TIMED rotation keeps the AEAD session,
+// so not one packet is dropped — every pool endpoint is an address of the SAME server process and the
+// session is independent of the address. A FAILOVER clears it: that endpoint stopped answering.
 func (b *UDP) rotatePeerUDP(proactive bool) {
 	if b.pp == nil {
 		return
@@ -194,34 +171,29 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 		b.session.Store(nil) // the endpoint failed — force a fresh handshake to the next one
 		b.ci.Store(nil)
 	}
-	// Give the jumped-to endpoint a FRESH staleness window and mark it unproven. This matters most for
-	// a PROACTIVE rotation onto an untested (assumed-healthy) endpoint that turns out to be dead: without
-	// the reset, lastRx stays recent from the old endpoint so clear-mode failover never fires and the
-	// tunnel strands on the blackhole. Resetting makes sessionStale measure THIS endpoint, so a dead
-	// proactive jump fails over within the dead window rather than stranding.
+	// Give the jumped-to endpoint a FRESH staleness window and mark it unproven, so sessionStale measures
+	// THIS endpoint. Without the reset, a PROACTIVE rotation onto a dead endpoint never fires clear-mode
+	// failover — lastRx stays recent from the old one — and the tunnel strands on the blackhole.
 	b.lastRx.Store(time.Now().UnixNano())
 	b.peerAnswered.Store(false)
 	log.Printf("core/udp: rotated destination to %s", addr)
-	// BUG #30: refresh the live-carrier descriptor so the status file's "active" field tracks the NEW
-	// destination instead of staying frozen at the initial peer. Same format SetStatusPath uses
-	// ("udp · "+peer, peer=UDPAddr.String()). Only the DESTINATION path refreshes active; the source
-	// path (rotateSourceUDP) leaves it, since "active" names the destination, not the source.
+	// Refresh the live-carrier descriptor so the status file's "active" field tracks the NEW destination
+	// instead of staying frozen at the initial peer. Only the DESTINATION path refreshes active; the
+	// source path leaves it, since "active" names the destination.
 	b.st.setActive("udp · " + ua.String())
 	if proactive {
-		// Seamless: no session was cleared, so there is no re-handshake and nothing for a "reconnect"
-		// to pair with. event() records the jump WITHOUT arming wasDown — the same call the source
-		// rotation below uses, and for the same reason. Using down() here made every timed rotation
-		// surface in the panel as a drop plus a self-heal, which is what the operator was seeing.
+		// Seamless: no session was cleared, so there is no re-handshake and nothing for a "reconnect" to pair
+		// with. event() records the jump WITHOUT arming wasDown — down() here surfaces every timed rotation
+		// in the panel as a drop plus a self-heal.
 		b.st.event("down", "peer-rotate", "ip:"+addr)
 		return
 	}
 	b.st.down("peer-rotate", "ip:"+addr) // clears the session -> re-handshake -> reconnect pairs the down
 }
 
-// SetSourcePool (client) wires a source-IP rotation pool: the client cycles the local IP it sends
-// FROM. Unlike raw/flux (which stamp the source per packet), udp owns a kernel socket, so a rotation
-// REBINDS it — a fresh socket on the new source IP replaces the old one (see rotateSourceUDP). The
-// AEAD session is independent of the address, so the session survives; the server just relearns the
+// SetSourcePool (client) wires a source-IP rotation pool: the client cycles the local IP it sends FROM.
+// Unlike raw/flux (which stamp the source per packet), udp owns a kernel socket, so a rotation REBINDS
+// it. The AEAD session is independent of the address, so it survives and the server just relearns the
 // peer from the next authenticated frame. nil / single-endpoint = fixed source. Call before Run().
 func (b *UDP) SetSourcePool(sp *PeerPool) {
 	if !b.isClient {
@@ -244,12 +216,10 @@ func (b *UDP) SetSourcePool(sp *PeerPool) {
 				// default source with the operator's chosen egress IP quietly unused — and with a lone
 				// src_ip and rotate=0 the pool never moves, so it is never retried either.
 				log.Printf("core/udp: initial source bind to %s failed: %v", host, err)
-				// ...and BURN it, which loudness alone never did. The socket stayed on the kernel
-				// default while the pool went on calling this entry Active, so the panel named a source
-				// the datagram path had never adopted; and because nothing marked it bad, every later
-				// heal treated it as a healthy IP that simply had not been tried. failUnusable() burns it
-				// and advances, so the first rotation lands on an entry that binds — unconditionally,
-				// because the kernel's refusal is not the remote-reachability question auto-burn gates.
+				// ...and BURN it, which loudness alone never did. The socket stayed on the kernel default while
+				// the pool went on calling this entry Active, so the panel named a source the datagram path had
+				// never adopted. failUnusable burns unconditionally: the kernel's refusal is not the
+				// remote-reachability question auto-burn is a policy for.
 				b.sp.failUnusable()
 			}
 			if err == nil {
@@ -337,13 +307,10 @@ func (b *UDP) adoptPeerUDP() {
 	b.peer.Store(ua)
 	b.session.Store(nil)
 	b.ci.Store(nil)
-	// The same two resets rotatePeerUDP performs, for the same reason: a pin is a jump to an endpoint
-	// that has proven NOTHING yet. Without them, in clear mode (no handshake to gate on) peerAnswered
-	// stayed true from the PREVIOUS endpoint, so the very next clientLoop tick ran the heal for the
-	// newly pinned one — clearing its burn record, emitting a false "heal", and releasing the pin
-	// through pinLanded() before it had actually landed, which let normal rotation resume immediately
-	// and defeated the operator's pick. lastRx likewise stayed recent from the old endpoint, so the
-	// dead window for the new one was measured from a frame it never sent.
+	// The same two resets rotatePeerUDP performs, for the same reason: a pin is a jump to an endpoint that
+	// has proven NOTHING yet. Without them, clear mode (no handshake to gate on) runs the heal for the
+	// newly pinned endpoint on the very next tick — clearing its burn, emitting a false heal and releasing
+	// the pin before it landed — and its dead window is measured from a frame it never sent.
 	b.lastRx.Store(time.Now().UnixNano())
 	b.peerAnswered.Store(false)
 	log.Printf("core/udp: pinned destination to %s", addr)
@@ -364,28 +331,19 @@ func (b *UDP) adoptSourceUDP() {
 	addr := b.sp.current()
 	if host, ok := b.rebindSourceTo(addr); ok {
 		log.Printf("core/udp: pinned source to %s", host)
-		// THIS is the landing. A source swap keeps the AEAD session, so no handshake follows that
-		// anyone could read one off — and the success path that used to release the pin only runs when
-		// something failed first. On a healthy tunnel the operator's jump therefore sat "in progress"
-		// for the whole pinTTL, freezing rotation, with the panel showing a move that had in fact
-		// already completed.
+		// THIS is the landing. A source swap keeps the AEAD session, so no handshake follows that anyone
+		// could read one off, and the success path that releases a pin only runs when something failed
+		// first — so on a healthy tunnel the operator's jump would sit "in progress" for the whole pinTTL.
 		b.sp.pinLandedOn(addr)
 		// Silent, like the ws edge pool: a manual source "make this active" changes only the active source
 		// (the source pool's own status file reflects it). The session survives, so there's nothing to
 		// reconnect and no event is emitted — we no longer log a src-pin here.
 		return
 	}
-	// The rebind failed, so the socket never left the old source and the jump did NOT land. There was
-	// no else here at all, which meant two wrong things at once: the pin was left live, so it held the
-	// whole pinTTL forcing a source the host cannot bind — and then the ordinary success path released
-	// it through pinLanded() as though it HAD landed, with the panel showing the jump as complete over
-	// a tunnel still egressing from the previous IP.
-	//
-	// This is the treatment #214 gave tcp (dropUnusableSource) and this batch gave raw/flux
-	// (adoptableSource); udp is where it stopped. End the jump — it is momentary, not a lock — and
-	// burn the entry so rotation stops coming back to it. failWith refuses to touch a pinned entry, so
-	// the order matters. Unconditional (failUnusable): see that method for why the kernel's refusal is
-	// not the remote-reachability question auto-burn is a policy for.
+	// The rebind failed, so the socket never left the old source and the jump did NOT land. Leaving the pin
+	// live holds the whole pinTTL forcing a source the host cannot bind, and the ordinary success path then
+	// releases it as though it HAD landed. End the jump — it is momentary, not a lock — and burn the entry,
+	// in that order, since failWith refuses to touch a pinned one. Unconditional, like adoptableSource.
 	if b.sp.pinCannotLand(addr) {
 		log.Printf("core/udp: manual jump to source %s abandoned — that IP will not bind on this host", addr)
 	}
@@ -460,19 +418,16 @@ func (b *UDP) SetStatusPath(path string) {
 // panel judges the dot by the same number the carrier acts on.
 func (b *UDP) deadWin() time.Duration { return sessionStaleWindow(b.keepalive, b.deadAfterSecs) }
 
-// sessionStale reports that the client has heard nothing it could authenticate from the server
-// for long enough that the peer has most likely restarted with a fresh session. The client then
-// drops its now-useless session and re-handshakes. Without this a SERVER restart wedges the tunnel:
-// the client keeps pinging under a key the fresh server cannot open and — because it still holds a
-// session — never re-initiates on its own. A false positive (a few lost pings on a healthy link)
-// only costs one harmless re-handshake. Only meaningful with crypto on.
+// sessionStale reports that the client has heard nothing it could authenticate for long enough that the
+// peer has most likely restarted with a fresh session, so the client drops its now-useless session and
+// re-handshakes. Without it a SERVER restart wedges the tunnel: the client keeps pinging under a key the
+// fresh server cannot open. A false positive costs one harmless re-handshake. Crypto only.
 func (b *UDP) sessionStale() bool { return staleSince(b.lastRx.Load(), b.deadWin()) }
 
-// markRx stamps a genuine inbound frame: it advances BOTH the failover clock (lastRx) and the liveness
-// heartbeat (hbRx) to the same instant. hbRx is set ONLY here — on proven inbound — so hb reads 0 until
-// the peer actually answers, which is what keeps a still-connecting tunnel yellow instead of a false
-// green. Seeds that only re-baseline the failover clock (initial connect, destination/source rotation)
-// call lastRx.Store directly and must NOT call this, or a never-answered link would look alive.
+// markRx stamps a genuine inbound frame, advancing BOTH the failover clock (lastRx) and the liveness
+// heartbeat (hbRx). hbRx is set ONLY here — on proven inbound — so hb reads 0 until the peer actually
+// answers, which keeps a still-connecting tunnel yellow instead of a false green. Seeds that only
+// re-baseline the failover clock (connect, rotation) call lastRx.Store directly and must not come here.
 func (b *UDP) markRx() {
 	now := time.Now().UnixNano()
 	b.lastRx.Store(now)
@@ -481,10 +436,8 @@ func (b *UDP) markRx() {
 
 // provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for
 // about one RTT after a jump the endpoint we LEFT is still answering; those frames are ours and are
-// delivered, but they say nothing about the endpoint we just moved to — counting them as proof is what
-// let a blocked IP hide behind the one it replaced. A frame from any address that is NOT another pool
-// endpoint is unattributable (a server that replies from one fixed IP rather than the dialed one) and
-// still counts, so an unusual listen config degrades to the old behaviour instead of a rotation storm.
+// delivered, but counting them as proof is what lets a blocked IP hide behind the one it replaced. A
+// frame from an address that is not another pool endpoint is unattributable and still counts.
 func (b *UDP) provenFrom(ip net.IP) {
 	if ip != nil && len(b.poolIPs) > 0 {
 		if p := b.peer.Load(); p != nil && !p.IP.Equal(ip) {
@@ -546,10 +499,9 @@ func Listen(listenAddrs []string, dev *tun.Device, keepalive time.Duration, obfs
 }
 
 // serverReadLoop reads one server listen socket. All listen sockets funnel through rxMu into the single
-// receiver contract the crypto/replay/handshake-cache/FEC path assumes; a point-to-point tunnel only
-// receives on one server IP at a time, so it is effectively uncontended. The socket is stashed as the
-// reply CANDIDATE (rxConn); it is promoted to the actual reply socket only when a frame AUTHENTICATES and
-// the peer is (re)learned — so an unauthenticated datagram to another pool IP can't hijack the reply source.
+// receiver contract the crypto/replay/handshake-cache/FEC path assumes. The socket is stashed as the
+// reply CANDIDATE and promoted only when a frame AUTHENTICATES and the peer is (re)learned, so an
+// unauthenticated datagram to another pool IP cannot hijack the reply source.
 func (b *UDP) serverReadLoop(c *net.UDPConn) error {
 	buf := make([]byte, maxDatagram)
 	for {
@@ -570,10 +522,9 @@ func (b *UDP) serverReadLoop(c *net.UDPConn) error {
 }
 
 // learnPeer records the authenticated client's source address and, on a server, promotes the socket the
-// frame arrived on (rxConn) to the reply socket, so a pooled server replies from the exact IP the client
-// dialed. Called ONLY after a frame authenticates (crypto) or in clear mode — never for an unauthenticated
-// datagram — so a stray/hostile packet to another pool IP can't move the reply source. On the client the
-// reply socket is the single dial socket, so replyConn is left untouched.
+// frame arrived on to the reply socket, so a pooled server replies from the exact IP the client dialed.
+// Called ONLY after a frame authenticates, or in clear mode. On the client the reply socket is the
+// single dial socket, so replyConn is left untouched.
 func (b *UDP) learnPeer(addr *net.UDPAddr) {
 	// Commit the reply socket BEFORE publishing the peer: tunToNet gates its downstream send on
 	// peer!=nil and then reads replyConn, so ordering the (sequentially-consistent) atomic stores this
@@ -616,23 +567,9 @@ func parseIP4(s string) net.IP {
 }
 
 // adoptableSource resolves a source-pool entry to an IPv4 this host can actually SEND FROM, for the
-// carriers that STAMP the source — into a crafted IP header, or into an IP_PKTINFO control message —
-// instead of binding a socket to it. nil means "do not adopt it"; the caller decides the pool
-// bookkeeping, which differs between a rotation (undo the move) and an operator jump (burn it).
-//
-// raw and flux had no check at all. udp has had rebindSourceTo + rejectCandidate since #189 and tcp
-// got canBindSource + dropUnusableSource in #214; the two crafted-header carriers got neither, so
-// rotateSource*/adoptSource*/SetSourcePool stored whatever the pool handed them, logged "rotated
-// source to X" and published a src-rotate event naming an address the tunnel cannot use.
-//
-// Since #215 that is not cosmetic on the udp and tcp raw profiles: sendViaConn deliberately REFUSES
-// to fall back to the kernel source there — the carrier header's L4 checksum was computed over the
-// pinned one, so a degraded send would put a wrong-checksum segment on the wire — so an unusable
-// source is a total, silent blackout that only a throttled log line mentions. #209 widened the blast
-// radius to effectively every client raw/flux tunnel, by turning bind_ip into a one-entry source pool.
-//
-// It ASKS the kernel (a throwaway bind), for the reasons canBindSource gives: an InterfaceAddrs()
-// comparison is wrong in both directions on the cases that matter.
+// carriers that STAMP the source into a crafted header instead of binding a socket to it — where an
+// unusable source is a silent blackout, since sendViaConn will not fall back to the kernel source with
+// the L4 checksum already computed over the pinned one. nil = do not adopt; the caller owns the burn.
 func adoptableSource(tag string, sp *PeerPool, addr string, warned *sync.Map) net.IP {
 	ip := parseIP4(hostOnly(addr))
 	if ip != nil && canBindSource(ip) {
@@ -655,12 +592,8 @@ func adoptableSource(tag string, sp *PeerPool, addr string, warned *sync.Map) ne
 }
 
 // buildSrcAllow builds the server-side source-IP admit set from a pool's source IPs, keyed by bare
-// 4-byte IPv4. Shared by udp, raw and flux, whose SetPeerSources map-build was byte-identical.
-//
-// It lives HERE, in a portable file, and not beside the raw carrier that used to hold it: udp.go is
-// portable and calls it, so with the definition behind //go:build linux the whole packet failed to
-// compile for any other GOOS with "undefined: buildSrcAllow". Nothing on the fleet cares — the core
-// only runs on linux — but it meant `GOOS=windows go build ./...` could not type-check the tree.
+// 4-byte IPv4. Shared by udp, raw and flux. It lives in a PORTABLE file because portable udp.go calls
+// it: behind a //go:build linux tag the package fails to type-check for any other GOOS.
 func buildSrcAllow(ips []string) map[string]struct{} {
 	m := make(map[string]struct{}, len(ips))
 	for _, s := range ips {
@@ -671,11 +604,10 @@ func buildSrcAllow(ips []string) map[string]struct{} {
 	return m
 }
 
-// replySock is the socket for a SOLICITED reply (a handshake response or a pong, sent while processing an
-// inbound packet under rxMu): the client's single socket, or (server) rxConn — the socket THIS inbound
-// packet arrived on. Using rxConn (not replyConn) means a handshake response egresses from the exact IP
-// the client dialed even before any data frame has authenticated, while a hostile/replayed init only ever
-// echoes back on its own socket and never perturbs the persistent replyConn (which moves only on auth).
+// replySock is the socket for a SOLICITED reply (a handshake response or a pong, sent while processing
+// an inbound packet under rxMu): the client's single socket, or (server) rxConn — the socket THIS packet
+// arrived on. Using rxConn rather than replyConn means a handshake response leaves from the exact IP the
+// client dialed even before any data frame has authenticated, while a hostile init only echoes back.
 func (b *UDP) replySock() *net.UDPConn {
 	if b.isClient {
 		return b.conn.Load()
@@ -788,8 +720,8 @@ func (b *UDP) tunToNet() error {
 		}
 		if c := b.sendConn(); c != nil {
 			if _, err := c.WriteToUDP(frame, peer); err != nil {
-				// Throttled: a failing socket fails at packet rate, and the old unthrottled line wrote
-				// thousands a second into the journal — which hid the fault as effectively as silence.
+				// Throttled: a failing socket fails at packet rate, and an unthrottled line here writes
+				// thousands a second into the journal, which hides the fault as effectively as silence.
 				b.sendErr.note("udp", err)
 			}
 		}
@@ -911,11 +843,10 @@ func (b *UDP) handleCrypto(pkt []byte, addr *net.UDPAddr) {
 			return
 		}
 	}
-	// A frame that did not open under the live session may open under a session STAGED by a recent
-	// init. Only a frame that actually opens under a candidate promotes it (and rebinds the peer), so
-	// a replayed init — which stages a session an attacker cannot produce a frame for — never tears
-	// down the live session or resets its replay window. The live session was tried first above, so an
-	// established tunnel never reaches this loop; on the normal path the set holds one candidate.
+	// A frame that did not open under the live session may open under a session STAGED by a recent init.
+	// Only a frame that actually opens under a candidate promotes it, so a replayed init — which stages a
+	// session an attacker cannot produce a frame for — never tears down the live session or resets its
+	// replay window. The live session is tried first, so an established tunnel never reaches this loop.
 	for _, st := range b.staged {
 		if typ, session, seq, payload, oerr := b.openWith(st.box.s, pkt); oerr == nil && st.rp.ok(session, seq) {
 			b.session.Store(st.box)
@@ -957,15 +888,10 @@ func (b *UDP) tryHandshake(pkt []byte, addr *net.UDPAddr) {
 		b.st.reconnected("udp") // recovery after a self-heal (nil-safe; silent on first connect)
 		return
 	}
-	// server: authenticate an init, reply, and install the fresh session.
-	// Compute-DoS mitigation: an attacker replaying captured valid inits at high rate
-	// would otherwise force a fresh ECDH+HKDF (GenerateEphemeral+SessionSealer) per packet.
-	// If this init matches one we recently answered (while a pending session is current),
-	// just re-send the response we already computed and return before that expensive
-	// crypto. The handshake outcome is unchanged (staged/promote-on-open is untouched); a
-	// genuinely new init falls through to the full handshake below. The cache is a small
-	// LRU (not a single entry) so alternating two captured inits cannot bust it. It is
-	// touched only on this single receive goroutine (like staged), so no locking is needed.
+	// server: authenticate an init, reply, and install the fresh session. Compute-DoS mitigation: an
+	// attacker replaying captured valid inits at high rate would otherwise force a fresh ECDH+HKDF per
+	// packet, so an init matching one we recently answered (while a pending session is current) is served
+	// from a small LRU before that crypto. Receive-goroutine-only, like staged, so no locking is needed.
 	if len(b.staged) > 0 {
 		if resp, ok := b.hsCache.get(pkt); ok {
 			b.writeCtrl(resp, addr)
@@ -998,12 +924,10 @@ func (b *UDP) tryHandshake(pkt []byte, addr *net.UDPAddr) {
 	}
 }
 
-// writeCtrl sends a control/handshake datagram, tagging it passthrough under FEC so
-// the peer's decoder forwards it straight through (never held in a block or parsed as
-// a shard). to may differ from the learned peer (a server's handshake reply). It goes out
-// replySock — on a server, the socket THIS inbound packet arrived on — so a handshake reply
-// or pong egresses from the exact IP the client dialed (writeCtrl is only ever called while
-// processing that inbound packet, under rxMu, so rxConn is the right socket).
+// writeCtrl sends a control/handshake datagram, tagging it passthrough under FEC so the peer's decoder
+// forwards it straight through. to may differ from the learned peer (a server's handshake reply). It
+// goes out replySock — on a server, the socket THIS inbound packet arrived on, which is the right one
+// because writeCtrl is only ever called while processing that packet, under rxMu.
 func (b *UDP) writeCtrl(pkt []byte, to *net.UDPAddr) {
 	if to == nil {
 		return
@@ -1053,23 +977,20 @@ func (b *UDP) clientLoop() {
 			log.Print("core: no reply from the peer's session — re-handshaking (peer likely restarted)")
 			b.st.down("stale", "udp") // precise reason for the panel log (nil-safe when off)
 		}
-		// Clear mode (no crypto) has no handshake whose failure would drive failover, so a dead pool
-		// endpoint would otherwise strand the tunnel forever. Use receive-staleness instead: the peer
-		// pongs our keepalive pings, so once it stops answering (lastRx ages past the dead window) burn
-		// and advance the pool. The baseline is seeded at connect and reset on every rotation, so a
-		// fresh tunnel or a just-jumped-to endpoint gets a full window before it can false-fail.
+		// Clear mode has no handshake whose failure would drive failover, so use receive-staleness instead:
+		// the peer pongs our keepalive pings, so once lastRx ages past the dead window, burn and advance the
+		// pool. The baseline is seeded at connect and reset on every rotation, so a fresh tunnel or a
+		// just-jumped-to endpoint gets a full window before it can false-fail.
 		if !b.cryptoOn && b.sessionStale() {
 			if rc.active() {
 				rc.fail(b.rotatePeerUDP, b.rotateSourceUDP)
 			}
 			b.lastRx.Store(time.Now().UnixNano()) // fresh window even if the pool couldn't move (single endpoint / source-only rotate)
 			b.peerAnswered.Store(false)           // stale -> the current endpoint is no longer proven answering
-			// The event is NOT conditional on a pool. It used to be, and that left one configuration —
-			// clear mode (cipher=none) with no rotation pool — unable to write any event at all: every
-			// other down/up site here is gated on crypto or on a pool. Meanwhile the panel classifies
-			// every udp link as "precise" from the TRANSPORT alone (STATUSRING_TRANSPORTS) and therefore
-			// suppresses its own coarse down/up. The dot still went red off the frozen heartbeat, but the
-			// system log recorded nothing — no drop, no recovery — for the entire life of the tunnel.
+			// The event is NOT conditional on a pool. Every other down/up site here is gated on crypto or on a
+			// pool, so clear mode with no rotation pool could write no event at all — while the panel classifies
+			// every udp link as "precise" from the transport alone and therefore suppresses its own coarse
+			// down/up, leaving the system log empty for the whole life of the tunnel.
 			b.st.down("stale", "udp")
 		}
 		if b.sealer() == nil && b.cryptoOn {
@@ -1080,28 +1001,17 @@ func (b *UDP) clientLoop() {
 				failN = 0
 			}
 		} else {
-			// Clear any transient burn on the endpoints that are proving themselves. Crypto signals this
-			// via a completed handshake (failN>0 then a session); clear mode has no handshake, so use the
-			// data plane: peerAnswered is set when the CURRENT endpoint replies and cleared on rotation,
-			// so healing here can never falsely clear a just-jumped-to (unproven) endpoint's burn.
-			// Heal only what the CURRENT endpoint has EARNED. "failN > 0" alone used to be proof: it could
-			// only be non-zero in crypto mode after handshake retransmits, and reaching this branch at all
-			// meant the handshake had just succeeded. Now that a timed rotation keeps the session, failN
-			// also counts unanswered probes on an endpoint we have merely jumped to — so the old signal
-			// cleared the burn of an endpoint that had proven nothing, and a blocked IP was un-burned on
-			// every visit and never dropped out of rotation. peerAnswered is the proof, in both modes.
+			// Clear any transient burn on an endpoint that is proving itself. Heal only what the CURRENT endpoint
+			// has EARNED: failN alone is not proof, because a timed rotation keeps the session and failN then also
+			// counts unanswered probes on an endpoint we have merely jumped to — which would un-burn a blocked IP
+			// on every visit. peerAnswered is the proof, in both modes.
 			if b.peerAnswered.Load() && (failN > 0 || (!b.cryptoOn && rc.active())) {
 				healEvents(b.st, rc) // this endpoint is answering — clear transient burns, release a landed pin, emit any heal
 			}
-			// BUG #35: clear mode has no handshake to fire st.reconnected(), so a self-heal down() (the
-			// clear-mode failover above, or a peer rotate/pin) would arm wasDown with no matching "up".
-			// Pair it on the data-plane recovery: once the CURRENT endpoint answers again (peerAnswered,
-			// set by deliver and cleared on every rotation), report the reconnect. reconnected() is a
-			// no-op unless a down is pending, so calling it on each answering loop never invents an "up".
-			// Ungated on the pool for the same reason the stale down() above is: without a pool this was
-			// the only site that could pair it, so opening the down alone would leave an UNPAIRED down —
-			// a red log entry that never resolves. peerAnswered is maintained with or without a pool
-			// (deliver sets it; only a rotation clears it), so the pairing is just as sound here.
+			// Clear mode has no handshake to fire st.reconnected(), so a self-heal down() would arm wasDown with
+			// no matching "up". Pair it on the data-plane recovery instead: reconnected() is a no-op unless a down
+			// is pending, so calling it on each answering loop never invents an "up". Ungated on the pool for the
+			// same reason the stale down() above is — otherwise the down stays unpaired, a red entry that never resolves.
 			if !b.cryptoOn && b.peerAnswered.Load() {
 				b.st.reconnected("udp")
 			}
@@ -1111,11 +1021,9 @@ func (b *UDP) clientLoop() {
 			// source. Sending it first meant the ping went to the endpoint we were leaving and the
 			// server did not follow until the next data frame.
 			b.send(typePing, nil, b.peer.Load())
-			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session
-			// survives, no handshake failure will ever say so. Count unanswered ticks here — AFTER the
-			// jump, so the very next wait is already the 1s probe interval — on the same threshold the
-			// handshake path uses. Checking before the rotation cost a full keepalive first, which let
-			// sessionStale (a whole dead window) win the race and turned a blocked IP into a ~30s hole.
+			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session survives,
+			// no handshake failure will ever say so. Count unanswered ticks here — AFTER the jump, so the very
+			// next wait is already the 1s probe interval — on the same threshold the handshake path uses.
 			if unproven = b.cryptoOn && rc.active() && !b.peerAnswered.Load(); unproven {
 				if failN++; failN >= peerFailThreshold {
 					b.session.Store(nil) // not answering: drop back to the handshake path, which burns and advances
@@ -1154,11 +1062,9 @@ func (b *UDP) sendInit() {
 	if peer == nil {
 		return
 	}
-	// Reuse the current ephemeral across retransmits — regenerate ONLY to start a fresh
-	// handshake cycle (ci==nil: first attempt, or after a stale-session reset). Regenerating
-	// every 1s retransmit would race the reply: on a link whose init->resp RTT exceeds the
-	// retransmit interval, the response (checked against the CURRENT ci) would always verify
-	// against a newer ephemeral and be dropped, so the handshake could never complete.
+	// Reuse the current ephemeral across retransmits — regenerate ONLY to start a fresh handshake cycle
+	// (ci==nil). Regenerating on every 1s retransmit races the reply: on a link whose init->resp RTT
+	// exceeds the retransmit interval, the response is checked against a newer ephemeral and always dropped.
 	ci := b.ci.Load()
 	if ci == nil {
 		var err error
