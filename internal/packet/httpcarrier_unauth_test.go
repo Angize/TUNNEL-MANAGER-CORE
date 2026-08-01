@@ -66,8 +66,7 @@ func TestHTTPCPendBufferIsBoundedInBytes(t *testing.T) {
 	b := &TCP{httpcSessions: map[string]*httpcSession{}}
 	const sid = "ffeeddccbbaa99887766554433221100"
 	pr, pw := io.Pipe()
-	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), served: make(chan struct{}), pend: map[uint64][]byte{}}
-	close(s.served)
+	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), pend: map[uint64][]byte{}}
 	b.httpcSessions[sid] = s
 	defer pw.Close()
 
@@ -99,8 +98,7 @@ func TestHTTPCPendAccountingSurvivesRepostedSeq(t *testing.T) {
 	b := &TCP{httpcSessions: map[string]*httpcSession{}}
 	const sid = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
 	pr, pw := io.Pipe()
-	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), served: make(chan struct{}), pend: map[uint64][]byte{}}
-	close(s.served)
+	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), pend: map[uint64][]byte{}}
 	b.httpcSessions[sid] = s
 	defer pw.Close()
 

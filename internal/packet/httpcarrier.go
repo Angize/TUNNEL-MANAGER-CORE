@@ -1069,12 +1069,11 @@ func (b *TCP) dialHTTPCPost(hc *http.Client, closeIdle func(), ctx context.Conte
 // --- server ----------------------------------------------------------------------------------
 
 type httpcSession struct {
-	upR    *io.PipeReader
-	upW    *io.PipeWriter
-	done   chan struct{}
-	served chan struct{} // closed when a downstream GET binds and serve starts (the reap watchdog checks this)
-	start  sync.Once
-	end    sync.Once
+	upR   *io.PipeReader
+	upW   *io.PipeWriter
+	done  chan struct{}
+	start sync.Once
+	end   sync.Once
 
 	upMu    sync.Mutex        // orders upstream POSTs by seq before writing to the upstream pipe
 	nextSeq uint64            // next seq we expect to hand to upW
@@ -1092,9 +1091,8 @@ func (b *TCP) httpcGetOrCreate(sid string) *httpcSession {
 		return s
 	}
 	pr, pw := io.Pipe()
-	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), served: make(chan struct{}), pend: map[uint64][]byte{}}
+	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), pend: map[uint64][]byte{}}
 	b.httpcSessions[sid] = s
-	time.AfterFunc(handshakeTimeout, func() { s.reapIfUnserved(b, sid) })
 	return s
 }
 
@@ -1120,19 +1118,6 @@ func maxPendBytes() int {
 		return n
 	}
 	return 4 << 20
-}
-
-// reapIfUnserved closes a session that never had a downstream GET bind (serve start) within the
-// handshake window. It MUST spare a live session: the guard is s.served (closed when the GET starts
-// serving), NOT s.done (closed only at session END) — checking s.done would reap every healthy
-// http session at handshakeTimeout.
-func (s *httpcSession) reapIfUnserved(b *TCP, sid string) {
-	select {
-	case <-s.served: // a GET bound and serve started -> live session, leave it
-	case <-s.done: // already ended
-	default:
-		s.close(b, sid) // no downstream GET arrived in time -> reap the orphan
-	}
 }
 
 // deliver feeds one upstream chunk into the ordered upstream. Out-of-order chunks are buffered
@@ -1293,12 +1278,18 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
-	s := b.httpcGetOrCreate(sid) // the GET is the only path that may create a session
+	// The Flusher assertion comes BEFORE the create, and that is the whole of the orphan question.
+	// After #200 this is the only place a session can be created, and close(s.served) is a few
+	// statements below it — so the only way to leave a session created-but-never-served was to bail
+	// out in between, and this was the one statement that could. Creating state for a request we are
+	// about to answer 500 was wrong on its own terms; ordering it this way also makes the orphan the
+	// reap watchdog existed for impossible to produce, rather than merely unlikely.
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "", http.StatusInternalServerError)
 		return
 	}
+	s := b.httpcGetOrCreate(sid) // the GET is the only path that may create a session
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no") // ask any nginx/CDN in front not to buffer
@@ -1306,10 +1297,7 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 	fl.Flush()
 	conn := newHTTPCServerConn(w, s.upR, w, fl.Flush, r.RemoteAddr, func() { s.close(b, sid) })
 	// Drive the authenticated core session once (the GET owns the downstream writer).
-	s.start.Do(func() {
-		close(s.served) // tell the reap watchdog a downstream GET bound in time — don't kill this live session at 10s
-		go b.handleServerConn(conn)
-	})
+	s.start.Do(func() { go b.handleServerConn(conn) })
 	<-s.done // hold the GET open (streaming downstream) until the session ends
 }
 
