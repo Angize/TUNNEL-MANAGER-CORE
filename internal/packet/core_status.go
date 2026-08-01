@@ -129,7 +129,52 @@ func (s *coreStatus) setDW(secs int64) {
 func newCoreStatus(path, active string) *coreStatus {
 	s := &coreStatus{path: path, active: active}
 	s.write()
+	adoptCfgWarnSink(func(code, detail string) { s.event("cfg", code, detail) })
 	return s
+}
+
+// cfgWarns carries a startup CONFIGURATION warning — a setting the operator chose that the host did
+// not actually grant — from wherever it is discovered to the status file the panel reads.
+//
+// The sock_buf clamp is the case that showed why this is needed. It was reported with a log.Printf
+// into the core unit's journal, and the node reads that journal from exactly ONE place
+// (_core_last_error), on the failure branch after a build. A core that STARTED and merely had its
+// buffers clamped never goes through that branch, so the warning reached nobody: the panel showed
+// the setting green and the operator had to ssh to the node to find out that their 16 MiB did not
+// take. The change that added the log line closed the core's half and left the operator's open.
+//
+// Sockets are sized while the carrier is built, which is BEFORE main wires the status file, so a note
+// raised before the sink exists is held and flushed the moment it appears. Only the CLIENT wires one;
+// on a server the note stays in the journal, which is where a server-side operator already looks.
+var cfgWarns struct {
+	mu      sync.Mutex
+	pending []cfgWarnNote
+	sink    func(code, detail string)
+}
+
+type cfgWarnNote struct{ code, detail string }
+
+// noteCfgWarn records one configuration warning for the panel. detail is DATA, never prose: the panel
+// owns the Persian (the same split the node/panel event protocol uses everywhere else).
+func noteCfgWarn(code, detail string) {
+	cfgWarns.mu.Lock()
+	defer cfgWarns.mu.Unlock()
+	if cfgWarns.sink != nil {
+		cfgWarns.sink(code, detail)
+		return
+	}
+	cfgWarns.pending = append(cfgWarns.pending, cfgWarnNote{code: code, detail: detail})
+}
+
+// adoptCfgWarnSink installs the status-file sink and flushes everything raised before it existed.
+func adoptCfgWarnSink(f func(code, detail string)) {
+	cfgWarns.mu.Lock()
+	pending := cfgWarns.pending
+	cfgWarns.pending, cfgWarns.sink = nil, f
+	cfgWarns.mu.Unlock()
+	for _, n := range pending {
+		f(n.code, n.detail)
+	}
 }
 
 // event appends one event to the ring (newest kept, capped at coreEventRing) and flushes the file.
