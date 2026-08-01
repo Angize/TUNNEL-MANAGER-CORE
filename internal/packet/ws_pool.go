@@ -1,10 +1,7 @@
-// Edge pool for the ws client: a moving-target rotation over separate clean IP and
-// SNI lists. The core cycles (edge-IP × SNI) combinations so no single IP or domain
-// stays exposed long enough to be fingerprinted, and tracks per-entry HEALTH with a
-// three-state FSM (healthy → suspect → dead) instead of a one-shot burn: a failing
-// entry is pulled from rotation and retested on an exponential backoff, so a merely
-// TEMPORARY block heals itself without a rebuild. The live state is written to a status
-// file the node and panel read to surface and drive the pool.
+// Edge pool for the ws client: a moving-target rotation over separate clean IP and SNI lists. The core
+// cycles (edge-IP × SNI) combinations so no single IP or domain stays exposed long enough to be
+// fingerprinted, and tracks per-entry HEALTH with a three-state FSM (healthy → suspect → dead) instead
+// of a one-shot burn, so a merely TEMPORARY block heals itself. The live state goes to a status file.
 package packet
 
 import (
@@ -90,8 +87,8 @@ type wsPool struct {
 	rotDegraded bool           // true once the healthy-IP count fell below 2 (rotation paused); drives the degraded/restored event
 	dataFail    map[string]int // per-IP count of consecutive short-lived (data-plane-fault) sessions
 	lastGood    int64          // unix time of the last SUSTAINED session on any edge (outage guard)
-	hb          int64          // unix-seconds of the carrier's lastRx — periodic liveness heartbeat (v2.48.3)
-	dw          int64          // resolved dead-window in seconds — the single number a reader ages hb against (v2.48.4)
+	hb          int64          // unix-seconds of the carrier's lastRx — periodic liveness heartbeat
+	dw          int64          // resolved dead-window in seconds — the single number a reader ages hb against
 	events      []coreEvent    // rolling ring of core-observed events (down/burn) for the panel log
 	evSeq       int64          // monotonic sequence so the panel can consume each event exactly once
 	wasDown     bool           // a genuine carrier down is pending its matching "up" (down/reconnect pairing)
@@ -158,14 +155,10 @@ func (p *wsPool) dataSuccess(ip string) {
 	p.mu.Unlock()
 }
 
-// dataFailure records a SHORT-lived session on ip — the handshake succeeded but the data plane
-// died quickly (throttle / blackhole-after-handshake), which the connect-time prober can't see.
-// After dataFailThreshold consecutive short deaths the IP is marked suspect so rotation skips it.
-// Guarded to avoid false burns: autoBurn on; a healthy alternative IP exists (never strand the
-// pool); and a good session happened recently (so a server-side/local outage, where every edge
-// dies fast, does not burn the whole pool). Data-plane suspects start on a LONGER backoff, since
-// the retest can confirm reachability but not throughput — we must not rush a still-throttled
-// edge back into rotation.
+// dataFailure records a SHORT-lived session on ip — the handshake succeeded but the data plane died
+// quickly (throttle / blackhole-after-handshake), which the connect-time prober cannot see. After
+// dataFailThreshold consecutive short deaths the IP is marked suspect so rotation skips it. Guarded
+// against false burns: autoBurn on, a healthy alternative exists, and a good session happened recently.
 func (p *wsPool) dataFailure(ip string) {
 	if !p.autoBurn {
 		return
@@ -184,13 +177,10 @@ func (p *wsPool) dataFailure(ip string) {
 	if recentGood && hasAlt {
 		p.dataFail[ip]++
 		if p.dataFail[ip] >= dataFailThreshold && p.ipHealth[ip] == nil {
-			// A data-plane suspect starts on a LONGER backoff (step 2), but fails MUST match that step
-			// or the FSM runs backwards: retestBackoff does fails++ then reads suspectBackoff[fails], so
-			// leaving fails=0 makes the first failed retest schedule suspectBackoff[1] (=60s) AFTER the
-			// initial suspectBackoff[2] (=120s) — the wait SHRINKS instead of growing. The panel is wrong
-			// too: it derives the countdown length from fails alone (poolStepTotal), so fails=0 against a
-			// 120s remaining pins the bar at 0% for the first 90s. suspectStepAt returns the clamped index
-			// WITH its value precisely so the two cannot drift apart here.
+			// A data-plane suspect starts on a LONGER backoff (step 2), and fails MUST match that step or the FSM
+			// runs backwards: retestBackoff does fails++ then reads suspectBackoff[fails], so leaving fails=0
+			// schedules a SHORTER wait than the initial one. suspectStepAt returns the clamped index together
+			// with its value, precisely so the two cannot drift apart here.
 			step, wait := suspectStepAt(2)
 			p.ipHealth[ip] = &healthRec{state: stateSuspect, fails: step, nextRetest: p.now() + wait}
 			p.dataFail[ip] = 0
@@ -216,10 +206,9 @@ func (p *wsPool) healthMap(kind string) map[string]*healthRec {
 	return p.ipHealth
 }
 
-// current returns the active (ip, sni). It prefers a FULLY-HEALTHY combo, scanning forward
-// from the current index so consecutive dials rotate for variety. When no combo is fully
-// healthy it never dead-ends: it falls back to the least-bad ip and sni (soonest nextRetest,
-// suspect preferred over dead) so the tunnel keeps trying while the retest scheduler works
+// current returns the active (ip, sni). It prefers a FULLY-HEALTHY combo, scanning forward from the
+// current index so consecutive dials rotate for variety. With nothing fully healthy it never dead-ends:
+// it falls back to the least-bad ip and sni, so the tunnel keeps trying while the retest scheduler works
 // the blocked entries back to health. ok=false only if the pool has no IPs or no SNIs.
 func (p *wsPool) current() (string, wsSNIEntry, bool) {
 	p.mu.Lock()
@@ -260,12 +249,10 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 	return ip, sni, true
 }
 
-// updateECH replaces the stored ECHConfigList for the pool SNI matching host with the fresh key the
-// edge returned (RetryConfigList) after an in-band self-heal. Persisting it means the NEXT reconnect
-// presents the fresh key directly, so the stale-key rejection — and its self-heal event — does not
-// recur on every reconnect until the panel's periodic refresh rebuilds the core. Returns true only
-// when the stored key actually changed, giving the caller a transition gate (emit the event once per
-// rotation, not per reconnect; concurrent healers converge — only the first sees a change).
+// updateECH replaces the stored ECHConfigList for the pool SNI matching host with the fresh key the edge
+// returned after an in-band self-heal, so the NEXT reconnect presents it directly instead of hitting the
+// stale-key rejection again on every reconnect. Returns true only when the stored key actually changed,
+// which gives the caller a transition gate — one event per rotation, and concurrent healers converge.
 func (p *wsPool) updateECH(host string, ech []byte) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -289,12 +276,10 @@ const activeSep = " · "
 // activeLabel builds the status-file "active edge" string for an (ip, sni) combo.
 func activeLabel(ip, host string) string { return ip + activeSep + host }
 
-// setActive records the edge the client is ACTUALLY carrying data on right now, for the status
-// file's live "active edge" (and the panel's auto-switch log). current() is intentionally NOT the
-// place for this: it is also called to pick a warm STANDBY's edge, so letting it set p.active would
-// make the file show the standby instead of the live carrier. Only the real active/promoted carrier
-// calls this (from the one dial loop goroutine); an empty combo is ignored so a not-yet-connected
-// state never blanks a good active. Flushes the status file so the node/panel see the switch.
+// setActive records the edge the client is ACTUALLY carrying data on right now, for the status file's
+// live "active edge" and the panel's auto-switch log. current() is deliberately NOT the place for it:
+// current() also picks a warm STANDBY's edge, so letting it write p.active would show the standby
+// instead of the live carrier. An empty combo is ignored, so a not-yet-connected state blanks nothing.
 func (p *wsPool) setActive(combo string) {
 	if combo == "" {
 		return
@@ -417,15 +402,10 @@ func (p *wsPool) stepLocked() {
 	}
 }
 
-// advance rotates to the next combination (proactive rotation timer / post-failure retry) and reports
-// whether the edge the carrier would actually DIAL changed. When every other combination is burned —
-// the common "one edge survived the filter" steady state — a step lands straight back on the same edge,
-// and a caller that drops the live connection anyway pays a re-dial + handshake + traffic gap every
-// interval for no edge change and no log line. The direct pools already make this check through
-// PeerPool.rotateOnce; this is the ws-pool equivalent.
-// The comparison goes through currentLocked() BOTH times rather than looking at the raw cursor, because
-// the cursor always moves — what matters is the resolved edge (a pin forced, else the first fully
-// healthy combo, else the least-bad pair), which is exactly what the next dial will use.
+// advance rotates to the next combination and reports whether the edge the carrier would actually DIAL
+// changed. With every other combination burned a step lands straight back on the same edge, and a caller
+// that drops the live connection anyway pays a re-dial and a traffic gap every interval for nothing. The
+// comparison resolves through currentLocked() both times: the cursor always moves, the resolved edge not.
 func (p *wsPool) advance() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -438,18 +418,10 @@ func (p *wsPool) advance() bool {
 	return beforeIP != afterIP || beforeSNI.host != afterSNI.host
 }
 
-// hasHealthyEdgeOtherThan reports whether the pool can currently produce a HEALTHY (ip · sni) combo
-// that is not `combo`. It is read-only — no cursor movement, no status write — because it answers a
-// question the warm-standby manager asks on every rotation tick: the standby it holds was built on
-// the active's own edge (aimStandby degrades to a plain step when nothing distinct is healthy), so
-// has anything healed since? Without the question the manager could only choose between keeping that
-// standby forever — which froze proactive rotation for the life of the connection, because
-// requestStandby is a no-op while one is held — and rebuilding it every interval, which is a
-// perfectly periodic dial train to the same edge and a signature in its own right.
-//
-// It mirrors currentLocked's health rule (an edge is usable only when BOTH axes are unburned), not
-// aimStandby's IP-only anchor: an SNI-only move on the same IP is a real rotation, so a pool with one
-// healthy IP and two healthy domains must answer true.
+// hasHealthyEdgeOtherThan reports whether the pool can currently produce a HEALTHY (ip · sni) combo that
+// is not `combo`. Read-only — no cursor movement, no status write — because the warm-standby manager asks
+// it every rotation tick: its standby may sit on the active's own edge, so has anything healed since? It
+// mirrors currentLocked's rule (both axes unburned), since an SNI-only move on one IP is a real rotation.
 func (p *wsPool) hasHealthyEdgeOtherThan(combo string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -467,14 +439,9 @@ func (p *wsPool) hasHealthyEdgeOtherThan(combo string) bool {
 }
 
 // aimStandby positions the rotation cursor for the WARM STANDBY dial: onto a HEALTHY edge whose IP
-// differs from the LIVE ACTIVE edge's IP, so the standby is always built on a DIFFERENT edge than the
-// active and can never collide with it. It replaces a blind advance() for the standby path: the shared
-// cursor is NOT anchored to the active edge, so after a standby reconnect (a CDN reaps the idle standby)
-// or a dial-failure advance, a plain step can walk the standby onto the ACTIVE's own IP. Proactive
-// rotation then "promotes" that standby to the SAME edge — no real switch, and setActive sees no change
-// so the panel logs nothing (the "rotation silently stopped" report) while edge diversity is lost.
-// Anchoring to "not the active IP" fixes it at the source. Falls back to a plain step when there is no
-// distinct healthy IP (single-IP pool, or every other IP burned) so the SNI axis still varies where it can.
+// differs from the LIVE ACTIVE edge's, so the standby can never collide with it. A blind advance() will
+// not do — the shared cursor is not anchored to the active edge, so a plain step can walk the standby
+// onto the active's own IP, and promoting that is no switch at all. Falls back to a plain step.
 func (p *wsPool) aimStandby() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -496,18 +463,10 @@ func (p *wsPool) aimStandby() {
 	p.stepLocked() // no distinct healthy IP available — degrade to a plain step (still varies the SNI axis)
 }
 
-// aimNextHealthySNILocked advances the SNI cursor to the next HEALTHY domain, wrapping. aimStandby's
-// IP-anchoring path used to return having written only p.i, so with warm standby on and a healthy pool
-// the SNI axis NEVER advanced and rotation silently degraded to IP-only: the operator configures N IPs
-// x M domains, and only the IPs ever move. That matters twice over — a domain that gets flagged is
-// never rotated off (it takes every IP down with it), and one permanently-reused SNI is itself a stable
-// fingerprint, which is the whole reason to carry several.
-// Landing on a HEALTHY SNI (rather than just stepping) is deliberate: current() scans from (i,j) and
-// calls stepLocked on an unhealthy combo, and stepLocked increments j and — on wrap — i, which would
-// walk the standby straight off the IP aimStandby just picked. Anchoring both axes on healthy entries
-// means current() matches immediately and the chosen IP holds.
-// Leaves the cursor where it is when no SNI is healthy; current() then falls back to the least-bad one.
-// Caller holds the lock.
+// aimNextHealthySNILocked advances the SNI cursor to the next HEALTHY domain, wrapping. Without it
+// aimStandby's IP-anchoring path writes only p.i and rotation degrades to IP-only, so a flagged domain is
+// never rotated off and one permanently-reused SNI becomes a stable fingerprint. Landing on a HEALTHY SNI
+// is deliberate: current() calls stepLocked on an unhealthy combo, walking off the IP just picked.
 func (p *wsPool) aimNextHealthySNILocked() {
 	for off := 1; off <= len(p.snis); off++ {
 		idx := (p.j + off) % len(p.snis)
@@ -552,10 +511,9 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 		m[key] = &healthRec{state: stateSuspect, nextRetest: p.now() + suspectBackoff[0]}
 	}
 	// This burn is a DIFFERENTIALLY-PROVEN block (attributeFailure only reaches here on a
-	// verdictIP/SNIGuilty — a transient failure returns verdictTransient and never burns). If the
-	// proven-blocked edge is the one the operator just pinned, drop the pin so current() stops
-	// forcing the dead edge for the rest of pinTTL and the tunnel recovers on a healthy edge NOW,
-	// instead of hanging the whole force window on an edge we already KNOW is down.
+	// verdictIP/SNIGuilty; a transient failure returns verdictTransient and never burns). If the
+	// proven-blocked edge is the one the operator just pinned, drop the pin so the tunnel recovers NOW
+	// instead of hanging the whole force window on an edge we already know is down.
 	unpinned := p.releasePinLocked(kind, key)
 	p.mu.Unlock()
 	if fresh {
@@ -570,12 +528,10 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 	}
 }
 
-// releasePinLocked drops a manual pin whose target edge has just been PROVEN blocked, so current()
-// stops forcing the dead edge for the rest of pinTTL and the tunnel recovers on a healthy edge at
-// once. A pin still rides out a TRANSIENT outage — that path returns verdictTransient and never
-// burns, so it never reaches here — so only a differentially-proven block ends the pin. Releases
-// only the axis that was burned: an IP-pin held around a guilty SNI (and vice-versa) is untouched,
-// since current() then heals the free axis while keeping the pinned one. Caller holds the lock.
+// releasePinLocked drops a manual pin whose target edge has just been PROVEN blocked, so current() stops
+// forcing the dead edge for the rest of pinTTL. A pin still rides out a TRANSIENT outage — that path
+// returns verdictTransient and never burns, so it never reaches here. Releases only the axis that was
+// burned: an IP-pin held around a guilty SNI is untouched, since current() then heals the free axis.
 func (p *wsPool) releasePinLocked(kind, key string) bool {
 	released := false
 	if kind == "ip" && p.pinIP != "" && p.pinIP == key {
@@ -593,11 +549,9 @@ func (p *wsPool) releasePinLocked(kind, key string) bool {
 }
 
 // reassessRotation emits a ONE-SHOT event when the pool crosses the "can it still rotate its IP axis?"
-// boundary. IP rotation needs >=2 HEALTHY ip endpoints; when a burn/dead leaves only one, the tunnel
-// silently stops switching edges (current() keeps returning the sole healthy IP), which reads in the
-// log as "rotation stopped". Surface that transition ("degraded") and its recovery ("restored") so the
-// operator knows WHY the rotation log went quiet. No-op for a single-ip pool (it never rotated) or when
-// the boundary has not moved since the last call. Call after any ip-health transition; it is idempotent.
+// boundary. IP rotation needs >=2 HEALTHY ip endpoints; with only one left the tunnel silently stops
+// switching edges, which reads in the log as "rotation stopped" — so the transition ("degraded") and its
+// recovery ("restored") are surfaced. No-op for a single-ip pool or an unmoved boundary; idempotent.
 func (p *wsPool) reassessRotation() {
 	p.mu.Lock()
 	if len(p.ips) < 2 {
@@ -766,12 +720,10 @@ func (p *wsPool) probeAllNow() {
 	p.mu.Unlock()
 }
 
-// selectEntry PINS a specific edge as the active one on its axis: current() forces the chosen edge
-// until the carrier actually lands on it (pinApplied clears the pin) or pinTTL elapses with no
-// land — whichever comes first. So it is a "jump exactly here now and keep trying until connected"
-// override that survives a transient outage but self-releases on success (auto-rotation may then
-// drift off it) and on a dead edge. It also clears any suspect/dead mark on the chosen entry so it
-// gets a clean shot. Returns false if the key is unknown.
+// selectEntry PINS a specific edge as the active one on its axis: current() forces the chosen edge until
+// the carrier lands on it (pinApplied clears the pin) or pinTTL elapses with no land. So it is "jump
+// exactly here and keep trying until connected" — it survives a transient outage but self-releases on
+// success and on a dead edge. It also clears any suspect/dead mark. False if the key is unknown.
 func (p *wsPool) selectEntry(kind, key string) bool {
 	p.mu.Lock()
 	ok := false
@@ -897,11 +849,10 @@ func (p *wsPool) echCmdPath() string {
 	return p.statusPath + ".echcmd"
 }
 
-// readECHCmd consumes a pending live ECH-key update (base64 ECHConfigList per SNI host) and hot-swaps
-// it into the pool via updateECH, so the NEXT dial presents the fresh key — no rebuild, no TUN drop.
-// Returns the hosts whose key actually changed (for logging). The file is removed once read (fires once).
-// This is the proactive counterpart to the in-band retry_configs self-heal: the panel pushes the new
-// key BEFORE the old one fails, so the live core never has to hit a stale-key rejection at all.
+// readECHCmd consumes a pending live ECH-key update (base64 ECHConfigList per SNI host) and hot-swaps it
+// into the pool via updateECH, so the NEXT dial presents the fresh key — no rebuild, no TUN drop. Returns
+// the hosts whose key actually changed, and removes the file so it fires once. The proactive counterpart
+// to the in-band self-heal: the panel pushes the key BEFORE the old one fails.
 func (p *wsPool) readECHCmd() []string {
 	cp := p.echCmdPath()
 	if cp == "" {
@@ -947,11 +898,9 @@ func (p *wsPool) writeStatus() {
 	if p.statusPath == "" {
 		return
 	}
-	// Hold writeMu across BOTH the snapshot and the file write, so two concurrent writers can't snapshot
-	// in one order and win the write in the reverse order — an older snapshot must never overwrite a
-	// newer file (as of v2.48.3 beat() also re-publishes every heartbeat period, so a stale file additionally
-	// self-corrects within one interval; the ordering below still matters for two near-simultaneous writes).
-	// p.mu is always released before any caller reaches writeStatus, so writeMu→p.mu never inverts.
+	// Hold writeMu across BOTH the snapshot and the file write, so two concurrent writers cannot snapshot
+	// in one order and win the write in the reverse order — an older snapshot must never overwrite a newer
+	// file. p.mu is always released before any caller reaches writeStatus, so writeMu→p.mu never inverts.
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 	p.mu.Lock()
