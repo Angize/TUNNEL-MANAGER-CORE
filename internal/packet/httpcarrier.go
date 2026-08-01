@@ -1,20 +1,14 @@
-// HTTP carrier: the core stream rides plain HTTP requests instead of a WebSocket upgrade, so
-// it passes through CDNs that block or don't proxy WebSocket (e.g. a Cloudflare account with
-// WebSocket disabled) while still looking like ordinary HTTPS.
+// HTTP carrier: the core stream rides plain HTTP requests instead of a WebSocket upgrade, so it passes
+// through CDNs that block or don't proxy WebSocket while still looking like ordinary HTTPS.
 //
-//	downstream (server -> client): one long-lived GET whose streaming response body carries
-//	                               the sealed frames.
+//	downstream (server -> client): one long-lived GET whose streaming response body carries the frames
 //	upstream   (client -> server): a POST LADDER — each write is a short, discrete POST carrying one
-//	                               chunk plus a monotonic seq. A CDN like Cloudflare buffers a
-//	                               single long streaming request body (which stalled the
-//	                               handshake), but forwards short complete POSTs immediately; the
-//	                               server reassembles them by seq into the upstream byte stream.
-//	correlation: a random session id in the query ties the GET and the POSTs together.
+//	                               chunk plus a monotonic seq, which a CDN forwards at once where it
+//	                               would buffer a single long streaming request body
+//	correlation:                   a random session id in the query ties the GET and the POSTs together
 //
-// Both directions present a byte stream, so httpcConn is a net.Conn and the existing connFramer
-// (length-prefix + AEAD + obfs + keepalive) rides on top unchanged — exactly as over raw TCP, a
-// TLS-cover, or a WebSocket conn. The same fronting fields as ws apply (host/edge/ECH/path); the
-// server stays plain (the CDN terminates TLS).
+// Both directions present a byte stream, so httpcConn is a net.Conn and connFramer rides on top
+// unchanged. The same fronting fields as ws apply; the server stays plain (the CDN terminates TLS).
 package packet
 
 import (
@@ -45,36 +39,21 @@ import (
 )
 
 // chromeUA is the browser User-Agent presented by the ws AND HTTP carriers (single source of truth).
-// Its Chrome MAJOR version MUST match the uTLS ClientHello parrot (utls.HelloChrome_Auto — currently
-// Chrome 133) — otherwise the JA3/JA4 computed on the TLS handshake and the app-layer UA advertise
-// different Chrome versions, a combination no real browser produces and thus a cheap fingerprint.
-// TestUserAgentMatchesTLSParrot fails the build if the two drift apart (e.g. after a uTLS bump).
+// Its Chrome MAJOR version MUST match the uTLS ClientHello parrot, or the JA3/JA4 computed on the TLS
+// handshake and the app-layer UA advertise different Chrome versions — a combination no real browser
+// produces. TestUserAgentMatchesTLSParrot fails the build if the two drift apart.
 const chromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 
-// chromeAcceptEncoding is the Accept-Encoding the SAME Chrome sends. It belongs beside chromeUA
-// because it is part of one identity: Chrome has advertised zstd by default since 123, so a request
-// claiming Chrome 133 while offering only "gzip, deflate, br" is a pre-123 browser wearing a post-123
-// User-Agent. That is exactly the cross-check a CDN's bot management runs, and exactly the class of
-// tell this hand-built header block exists to avoid. TestAcceptEncodingMatchesUAMajor keeps the two
-// in step the next time the parrot moves.
+// chromeAcceptEncoding is the Accept-Encoding the SAME Chrome sends; it is one identity with chromeUA.
+// Chrome has advertised zstd by default since 123, so a request claiming Chrome 133 while offering only
+// "gzip, deflate, br" is a pre-123 browser wearing a post-123 User-Agent — exactly the cross-check a
+// CDN's bot management runs. TestAcceptEncodingMatchesUAMajor keeps the two in step.
 const chromeAcceptEncoding = "gzip, deflate, br, zstd"
 
-// grpcUA is the User-Agent presented in grpc mode. A gRPC call is not something a browser can make —
-// Content-Type: application/grpc and TE: trailers are both forbidden to browser fetch/XHR — so the
-// browser identity the POST ladder wears was self-contradictory there: a request claiming to be Chrome
-// while carrying headers Chrome is not allowed to send, and missing grpc-accept-encoding, which every
-// real gRPC client does send. Any gRPC-aware WAF has an obvious anomaly to key on, and the operator
-// only sees the session failing with `http/grpc: got HTTP 4xx`.
-//
-// This has to move together with the TLS fingerprint, or it just relocates the contradiction: a
-// grpc-go User-Agent under a Chrome JA3 is the same lie told the other way round. grpc-go rides Go's
-// crypto/tls, so grpc mode presents Go's own ClientHello (uEdgeHandshake's goFingerprint path) — the
-// two layers then tell one story. TestGrpcRequestIsNotABrowser and TestGrpcPathUsesTheGoFingerprint
-// are the two halves that keep them together, and TestGrpcModeStillSendsNoBrowserHeaders pins that the
-// browser header block did not leak back in.
-//
-// Bump this when it drifts far from what real fleets run; an implausibly old — or invented — version
-// is its own tell. It must be a version that actually shipped.
+// grpcUA is the User-Agent presented in grpc mode. A gRPC call is not something a browser can make
+// (Content-Type: application/grpc and TE: trailers are forbidden to browser fetch/XHR), so the POST
+// ladder's browser identity would claim Chrome while carrying headers Chrome may not send. It moves
+// together with the TLS fingerprint — grpc mode presents Go's own ClientHello, as grpc-go does.
 const grpcUA = "grpc-go/1.65.0"
 
 // grpcAcceptEncoding is the message-compression list grpc-go advertises with the gzip compressor
@@ -84,17 +63,10 @@ const grpcAcceptEncoding = "gzip"
 // maxPostBody caps a single upstream POST body so a hostile client can't force a huge alloc.
 const maxPostBody = 1 << 20
 
-// httpcHeaderWait bounds the wait for an establishing request's response HEADERS (the downstream
-// GET, or the grpc POST) — the phase the TCP dial and TLS timeouts do NOT cover. A CDN that
-// completes TCP+TLS but never streams the origin leg (a throttled origin, a half-open grpc call, a
-// stale-ECH edge that Cloudflare still TLS-terminates) must not block establishment forever; that
-// stall is what freezes rotation and manual pin. Generous relative to the connect budget, because
-// it also covers the bounded TCP+TLS phases; a healthy edge flushes headers immediately.
-//
-// It is DERIVED from the caller's connect budget rather than fixed, so the same 1:1:3 shape applies
-// whether the establish is a live dial (budget = handshakeTimeout, i.e. the previous fixed 10s/10s/
-// 30s exactly) or a probe (budget = probeTimeout). Before that, an http/grpc probe ignored
-// probe_timeout_secs completely and could run ~50s where the operator had asked for 5.
+// httpcHeaderWait bounds the wait for an establishing request's response HEADERS (the downstream GET,
+// or the grpc POST) — the phase the TCP dial and TLS timeouts do NOT cover. A CDN that completes
+// TCP+TLS but never streams the origin leg would otherwise block establishment forever, which is what
+// freezes rotation and the manual pin. Derived from the caller's budget, so a probe honours its own.
 func httpcHeaderWait(budget time.Duration) time.Duration { return 3 * budget }
 
 // strAddr is a net.Addr for an HTTP-carrier conn (there is no single socket behind it).
@@ -125,31 +97,10 @@ type httpcConn struct {
 
 func (c *httpcConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
-// armWrite makes the pending write deadline BITE for the duration of one write, and returns the
-// func that disarms it again.
-//
-// Recording a deadline and then testing it at the top of Write is not a deadline: connFramer arms
-// now+writeTimeout immediately before every framed write, so the test compares now against a moment
-// 30s in the future and always passes — and then the write underneath parks with no bound at all.
-// Every httpc writer is a park-forever writer: an h2 ResponseWriter whose flow-control window has
-// filled, or an io.Pipe whose reader (Go's h2 transport) has stopped draining the request body.
-//
-// So the deadline has to reach something that can interrupt a write ALREADY in flight:
-//
-//	server (both modes): http.ResponseController.SetWriteDeadline with a past instant — HTTP/1 expires
-//	                     the socket deadline, x/net/http2 resets the stream (onWriteTimeout). It fails
-//	                     only THIS write, rather than touching a ResponseWriter whose handler may be gone.
-//	client grpc:         an io.Pipe offers no such handle, so the conn is closed — which is what a write
-//	                     error causes here anyway (onConnErr re-dials), and the exact shape
-//	                     SetReadDeadline already uses.
-//
-// It fires from a timer rather than by pushing now+30s down on every write, because the deadline
-// underneath OUTLIVES the write that set it: an h2 stream left holding a 30s write deadline is reset
-// 30s later even if nothing is being written, so a tunnel whose keepalive is longer than writeTimeout
-// would be torn down on schedule while perfectly healthy. Armed per write, disarmed on return.
-//
-// The client POST ladder never reaches this: it returns at the top of Write and is bounded inside
-// httpcUp instead (the enqueue and the request each carry the deadline).
+// armWrite makes the pending write deadline BITE for one write and returns the func that disarms it.
+// Every httpc writer parks forever when the far side stalls, so the deadline has to interrupt a write
+// ALREADY in flight: the server expires it through ResponseController (failing only THIS write), the
+// grpc client closes the conn. A timer, because the deadline underneath OUTLIVES the write that set it.
 func (c *httpcConn) armWrite() func() {
 	dl := c.wdl.Load()
 	if dl == 0 {
@@ -184,15 +135,9 @@ func (c *httpcConn) Write(p []byte) (int, error) {
 	}
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
-	// The flush is INSIDE the armed window, and that is the whole point of arming it. c.w.Write does not
-	// touch the socket at the size this carrier really writes: a framed tunnel packet is 2+sealed bytes,
-	// about one TUN MTU, and both server writers buffer it — net/http's HTTP/1 response into its
-	// 2048-byte bufferBeforeChunkingSize bufio, x/net/http2's into its 4 KiB handlerChunkWriteSize
-	// buffer. Both handlers flush after every frame, so each write starts against an EMPTY buffer and
-	// none of them ever reaches the wire in c.w.Write; every byte of socket I/O, and therefore all of
-	// the blocking, happens in c.flush(). Disarming before it left the real write path with no bound at
-	// all — the deadline only ever bit for a write larger than the buffer, which is why the regression
-	// test that used a 64 KiB buffer passed either way.
+	// The flush is INSIDE the armed window, and that is the point of arming it. Both server writers buffer
+	// a frame-sized write (net/http's HTTP/1 bufio, x/net/http2's chunk buffer) and flush after every
+	// frame, so c.w.Write never reaches the wire: all the socket I/O, and all the blocking, is c.flush().
 	disarm := c.armWrite()
 	n, err := c.w.Write(p)
 	if err == nil && c.flush != nil {
@@ -264,11 +209,8 @@ func (c *httpcConn) LocalAddr() net.Addr  { return c.la }
 func (c *httpcConn) RemoteAddr() net.Addr { return c.ra }
 
 // chromeClientHints is the Client Hints / Fetch Metadata block Chrome attaches to EVERY same-origin
-// fetch. The ws path hand-builds Chrome's full header set for exactly this reason; the POST ladder
-// sent four headers and nothing else, so a request claiming Chrome 133 arrived at the CDN without a
-// single sec-* header — something no Chrome has omitted since 89. The brand list and the platform
-// have to agree with chromeUA, or the block is a new contradiction rather than a fix;
-// TestClientHintsMatchTheUA pins that.
+// fetch; no Chrome has omitted it since 89. The brand list and the platform have to agree with
+// chromeUA or the block is a new contradiction rather than a fix — TestClientHintsMatchTheUA pins that.
 var chromeClientHints = [][2]string{
 	{"sec-ch-ua", `"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"`},
 	{"sec-ch-ua-mobile", "?0"},
@@ -279,18 +221,9 @@ var chromeClientHints = [][2]string{
 }
 
 // browserHeaders dresses a POST-ladder request as an ordinary page fetch, matching the Chrome
-// ClientHello uEdgeHandshake presents on that path.
-//
-// Accept-Encoding is set EXPLICITLY, and that is the point: left unset, Go's transport adds its own
-// "Accept-Encoding: gzip", so a request wearing a Chrome 133 User-Agent and a Chrome JA3 offered a
-// single encoding no browser has sent alone in a decade. Setting it also turns OFF Go's transparent
-// response decompression — which is why dialHTTPCPost now refuses a downstream that comes back
-// encoded instead of feeding compressed bytes into the framer.
-//
-// What is NOT fixed here, deliberately: header ORDER. net/http writes http/1.1 headers sorted, and
-// Chrome's order is its own. There is no hook to change that short of writing the request by hand
-// (which is what the ws path does, because it has to speak the upgrade itself). Claiming otherwise
-// in a comment would be worse than the gap.
+// ClientHello uEdgeHandshake presents on that path. Accept-Encoding is set EXPLICITLY: unset, Go's
+// transport adds its own lone "gzip", which no browser sends alone, and setting it also turns OFF Go's
+// transparent decompression — hence the downstream's encoded-body refusal. Header order is not matched.
 func browserHeaders(r *http.Request) {
 	r.Header.Set("User-Agent", chromeUA)
 	r.Header.Set("Accept", "*/*")
@@ -300,36 +233,26 @@ func browserHeaders(r *http.Request) {
 	for _, h := range chromeClientHints {
 		r.Header.Set(h[0], h[1])
 	}
-	// Origin belongs on the POSTs and NOT on the downstream GET. Per the Fetch spec a browser
-	// appends Origin for a CORS request, and otherwise only for methods other than GET and HEAD —
-	// so Chrome sends it on a same-origin POST and never on a same-origin GET. Setting it on both
-	// put a header combination on the wire that no Chrome produces, on the single most distinctive
-	// request this carrier makes: one long-lived GET per session, right next to the
-	// Sec-Fetch-Site: same-origin that is supposed to make it look ordinary.
+	// Origin belongs on the POSTs and NOT on the downstream GET: per the Fetch spec a browser appends it
+	// for a CORS request, and otherwise only for methods other than GET and HEAD. On both it would be a
+	// header combination no Chrome produces, on the most distinctive request this carrier makes.
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.URL != nil && r.URL.Host != "" {
 		r.Header.Set("Origin", "https://"+r.URL.Host)
 	}
 }
 
 // downstreamUnusable reports whether a Content-Encoding on the downstream response means its body
-// cannot be handed to the framer.
-//
-// Setting Accept-Encoding by hand (browserHeaders) turns OFF Go's transparent decompression, and the
-// downstream body IS the data plane — so a real coding has to fail the dial loudly rather than feed
-// compressed bytes into the AEAD. But "" and "identity" both mean NOT ENCODED: identity is the
-// spec's own name for the null coding and a legal thing for an edge to send, and refusing it refused
-// a response that needed no decoding at all. Case and surrounding space are not significant in a
-// header token, so neither may decide whether a tunnel comes up.
+// cannot be handed to the framer. browserHeaders sets Accept-Encoding by hand, which turns OFF Go's
+// transparent decompression, so a real coding has to fail the dial loudly rather than feed compressed
+// bytes into the AEAD. "" and "identity" both mean NOT ENCODED; case and space are not significant.
 func downstreamUnusable(enc string) bool {
 	e := strings.ToLower(strings.TrimSpace(enc))
 	return e != "" && e != "identity"
 }
 
-// grpcHeaders dresses a grpc-mode request as what it actually is: a gRPC call from a gRPC client.
-// None of the browser headers belong here — Accept-Language and Cache-Control on a request that also
-// carries Content-Type: application/grpc is a combination no client in the world produces, because a
-// browser is forbidden from setting those gRPC headers at all. The call-shaped headers themselves
-// (content-type, te, grpc-accept-encoding) are set on the request in dialHTTPCGrpc.
+// grpcHeaders dresses a grpc-mode request as what it actually is: a gRPC call from a gRPC client. None
+// of the browser headers belong here — Accept-Language beside Content-Type: application/grpc is a
+// combination no client produces. The call-shaped headers themselves are set in dialHTTPCGrpc.
 func grpcHeaders(r *http.Request) {
 	r.Header.Set("User-Agent", grpcUA)
 	r.Header.Set("grpc-accept-encoding", grpcAcceptEncoding)
@@ -356,50 +279,10 @@ type seqChunk struct {
 	data []byte
 }
 
-// POST-ladder upstream sizing. This is a request/response ladder — every batch costs one full HTTP
-// round-trip through the CDN — so the numbers below ARE the upstream's bandwidth-delay product, and
-// they were measured rather than guessed. Two separate quantities, easy to conflate:
-//
-//	IN FLIGHT  = upWorkers × maxUpBatch — bytes on the wire at once. This sets CAPACITY:
-//	             capacity ≈ in-flight / RTT. It is not queueing delay; it is the pipe being full.
-//	WAITING    = upChanCap + upWorkCap×maxUpBatch — bytes queued but not yet sent. This is pure
-//	             LATENCY: a keepalive ping (and the inner TCP's acks) sit behind all of it, and the
-//	             obfs length-mask keystream makes reordering illegal, so there is no priority lane —
-//	             the only lever on ping is keeping this small.
-//
-// The old numbers had that backwards: in flight 4×32K = 128K, waiting 256 chunks + 8×32K ≈ 600K.
-// So capacity was tiny AND the queue was huge. Measured in a two-netns lab with netem (both cores
-// on one box, obfs+chacha20, 40–60 Mbit offered upstream):
-//
-//	                          RTT 150ms                    RTT 60ms
-//	                  upstream   ping under load    upstream   ping under load
-//	4×32K, wait 600K   4.4 Mbit   151 → 1550 ms     11.2 Mbit   60 → 518 ms
-//	8×128K, wait 260K  29.7 Mbit  151 →  365 ms     57.8 Mbit   60 → 113 ms
-//
-// and on a deliberately slow 4 Mbit uplink (RTT 60ms) a saturating TCP flow went from 1.33 Mbit at
-// 219 ms to 3.10 Mbit at 161 ms — so the wider window does NOT cost latency on a thin line: the deep
-// waiting queue was the thing hurting it. Downstream (the streaming GET) was never the problem and is
-// untouched: it already ran at ~60 Mbit with ping at 66 ms.
-//
-// Client-side only, and not a wire change: the POST framing, the seq contract and the server's
-// reassembly are all unchanged, and maxUpBatch stays well under maxPostBody (the server's per-POST read
-// cap), so a new client interoperates with an old server and vice versa.
-//
-// THE SHAPE IS PER-CDN, because the constraint is not bandwidth — it is how many requests per second
-// the CDN in front is willing to see from one address. Measured against a real ArvanCloud edge at a
-// ~120ms round-trip, the same tunnel, TCP goodput up/down:
-//
-//	8×128K  (~70 req/s)   BANNED — the source IP is TCP-blocked for ~3.5 minutes
-//	6×256K  (~55 req/s)   BANNED
-//	4×512K  (~33 req/s)   4.2 / 106 Mbit    <- the sweet spot
-//	4×256K  (~33 req/s)   3.7 /  86 Mbit
-//	2×512K  (~18 req/s)   1.4 /  13 Mbit
-//
-// Two things fall out. The threshold is on the WORKER count, not on bytes — a bigger batch costs no
-// extra requests, so at a fixed request budget you max the batch. And the request rate is
-// workers/RTT, which means a fixed worker count is NOT portable: 4 workers is 33 req/s at 120ms but
-// 133 req/s at 30ms, back in the banned range. That is what upMinGap is for — it paces dispatch in
-// TIME, so the same profile behaves the same on a fast path and a slow one.
+// POST-ladder upstream sizing. Every batch costs one full HTTP round-trip, so upWorkers × maxUpBatch is
+// what is IN FLIGHT (capacity ≈ in-flight / RTT) while upChanCap + upWorkCap×maxUpBatch is what is
+// WAITING — pure latency, with no priority lane for a keepalive, since the obfs length mask forbids
+// reordering. The per-CDN ceiling is requests per second from one address; upMinGap paces that in TIME.
 var (
 	// maxUpBatch caps how many bytes the batcher coalesces into ONE upstream POST. Batching amortizes
 	// the per-POST round-trip: without it each ~MTU datagram cost a full HTTP request through the CDN.
@@ -416,11 +299,9 @@ var (
 	// otherwise every other POST pays a fresh TCP+TLS handshake through the CDN. The streaming GET
 	// holds one of these too.
 	upIdleConns = upWorkers * 2
-	// upMinGap is the minimum time between two batch dispatches — an RTT-independent ceiling on
-	// requests per second. Zero (the default) paces nothing. It only ever DELAYS a dispatch when one
-	// happened recently, so an idle link still posts its first chunk immediately; under load the wait
-	// simply lets the next batch grow, trading request rate for batch size, which is exactly the trade
-	// a WAF wants.
+	// upMinGap is the minimum time between two batch dispatches — an RTT-independent ceiling on requests
+	// per second. Zero (the default) paces nothing, and it only ever DELAYS a dispatch when one happened
+	// recently, so an idle link still posts at once while under load the wait lets the next batch grow.
 	upMinGap time.Duration
 )
 
@@ -448,12 +329,10 @@ func SetHTTPUpstream(workers, batchKB, ratePerSec int) {
 	}
 }
 
-// httpcUp is the client's POST-ladder upstream. Writes are copied and queued; a single batcher coalesces
-// them into one POST per batch (tagging each with a monotonic seq so the server reassembles in order)
-// and hands the batch to a small pool of workers that POST it as a short, complete request. Short
-// discrete POSTs (not one long streaming POST a CDN would buffer) are what flow through Cloudflare;
-// coalescing keeps the round-trip cost from throttling upstream throughput. Any POST failure fails the
-// whole conn (once) so dialLoop re-dials a fresh session.
+// httpcUp is the client's POST-ladder upstream. Writes are copied and queued; one batcher coalesces
+// them into a single POST per batch (each tagged with a monotonic seq so the server reassembles in
+// order) and hands it to a small worker pool. Short discrete POSTs are what a CDN forwards at once
+// where it would buffer one long streaming body. Any POST failure fails the whole conn, once.
 type httpcUp struct {
 	hc     *http.Client
 	ctx    context.Context
@@ -484,13 +363,10 @@ func newHTTPCUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string
 	return u
 }
 
-// write queues one upstream chunk, honouring the caller's write deadline (unix-nanos, 0 = none).
-//
-// The deadline matters because this enqueue is a park-forever operation whenever the far edge stops
-// answering: the workers block in post, work (cap 1) fills, the batcher blocks, ch fills, and the
-// send below never completes. It is reached from connFramer.writeFrame UNDER cf.mu, so parking here
-// parks the tunnel's TUN reader and its keepalive loop with it — the whole tunnel freezes on one
-// tarpitting edge, and the dot stays green as long as anything is still arriving downstream.
+// write queues one upstream chunk, honouring the caller's write deadline (unix-nanos, 0 = none). The
+// deadline matters because this enqueue parks forever whenever the far edge stops answering: the
+// workers block in post, work fills, the batcher blocks, ch fills. It is reached from writeFrame UNDER
+// cf.mu, so parking here freezes the tunnel's TUN reader and its keepalive loop with it.
 func (u *httpcUp) write(p []byte, deadline int64) (int, error) {
 	b := make([]byte, len(p))
 	copy(b, p)
@@ -516,14 +392,8 @@ func (u *httpcUp) write(p []byte, deadline int64) (int, error) {
 
 // batcher coalesces queued write chunks into one POST body up to maxUpBatch, tagging each batch with a
 // monotonic seq so the server reassembles in order. It blocks for the first chunk, then drains whatever
-// is ALREADY queued without waiting — so an idle link posts one chunk at once (low latency) while a
-// burst posts a big batch (few round-trips). One goroutine, so seq stays strictly in byte order.
-//
-// A chunk that would push the batch past maxUpBatch is CARRIED to the next one rather than appended:
-// the old loop tested the length before appending, so a batch could overrun the cap by one frame. That
-// was invisible at a 32 KiB cap and stayed under the server's 1 MiB read limit, but it meant maxUpBatch
-// was not actually a bound — raise it to the read limit and the server would truncate, which desyncs a
-// length-prefixed AEAD stream rather than failing cleanly.
+// is ALREADY queued — an idle link posts one chunk at once, a burst posts a big batch. One goroutine,
+// so seq stays strictly in byte order. A chunk that would push past maxUpBatch is CARRIED to the next.
 func (u *httpcUp) batcher() {
 	var carry []byte
 	var lastSend time.Time
@@ -589,12 +459,10 @@ func (u *httpcUp) worker() {
 	}
 }
 
-// upPostTimeout bounds ONE upstream POST end to end. Without it the only bound on hc.Do is the
-// session ctx, i.e. none: an edge that completes TCP+TLS, accepts the body and then simply never
-// answers holds a worker forever, and upWorkers of those hold the whole ladder. It is the same
-// number connFramer promises per framed write, since a POST is how that write reaches the wire.
-// Generous on purpose — a failed POST fails the conn and forces a re-dial, so tripping it on a
-// merely slow path would cost more than the stall it prevents.
+// upPostTimeout bounds ONE upstream POST end to end. Without it the only bound on hc.Do is the session
+// ctx, i.e. none: an edge that accepts the body and then never answers holds a worker forever, and
+// upWorkers of those hold the whole ladder. Generous on purpose — a failed POST forces a re-dial, so
+// tripping it on a merely slow path would cost more than the stall it prevents.
 var upPostTimeout = writeTimeout
 
 func (u *httpcUp) post(sc seqChunk) error {
@@ -637,26 +505,18 @@ func (b *TCP) httpcEdge() (dialAddr, host string, ech []byte, path string, err e
 }
 
 // establishHTTPC (client) opens a fresh HTTP-carrier session to the edge and returns a net.Conn over it.
-// Two upstream styles share the same fronting (TLS+ECH mirror wss) and the same pool rotation
-// (each attempt uses the pool's current IP × SNI; a failure burns the offending IP or SNI):
-//
-//	post (default): a long-lived downstream GET plus short seq-tagged POSTs — most
-//	                     CDN-compatible, since a CDN that buffers request bodies still forwards
-//	                     short complete POSTs at once.
-//	grpc (b.httpcMode=="grpc"): one full-duplex request presented as a
-//	                     real gRPC call — needs HTTP/2 to the edge (ws_tls) so a CDN streams it.
+// Both upstream styles share the same fronting (TLS+ECH mirror wss) and the same pool rotation: post
+// (default) is a long-lived downstream GET plus short seq-tagged POSTs, the most CDN-compatible shape;
+// grpc is one full-duplex request presented as a real gRPC call, which needs HTTP/2 to the edge.
 func (b *TCP) establishHTTPC(attribute bool) (net.Conn, string, string, error) {
 	dialAddr, host, ech, path, err := b.httpcEdge()
 	if err != nil {
 		return nil, "", "", err
 	}
 	conn, err := b.dialHTTPCOnce(dialAddr, host, ech, path, handshakeTimeout)
-	// In-band ECH self-heal (mirrors the ws carrier's tlsToEdge): Cloudflare rotates the ECH key
-	// periodically, and once the config we hold goes stale EVERY edge rejects ECH ("tls: server
-	// rejected ECH") until a rebuild — the exact production stall. The rejection carries a fresh
-	// RetryConfigList; redial ONCE with it BEFORE we blame the edge, so the fleet heals from the
-	// clock with no panel rebuild. errors.As reaches the *utls.ECHRejectionError (uTLS does the
-	// edge handshake) through the http.Client.Do / http2 error chain — for both post and grpc.
+	// In-band ECH self-heal (mirrors the ws carrier's tlsToEdge): once the config we hold goes stale EVERY
+	// edge rejects ECH until a rebuild. The rejection carries a fresh RetryConfigList, so redial ONCE with
+	// it before blaming the edge. errors.As reaches the *utls.ECHRejectionError through the Do error chain.
 	if err != nil && b.wsTLS && len(ech) > 0 {
 		var echErr *utls.ECHRejectionError
 		if errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
@@ -669,14 +529,10 @@ func (b *TCP) establishHTTPC(attribute bool) (net.Conn, string, string, error) {
 			}
 		}
 	}
-	// Attribute the outcome to the health FSM here (one place for both modes): a failure runs
-	// the differential probe to decide IP vs SNI vs transient; a success clears both axes.
-	// attribute is FALSE on the warm-standby build path: that differential probe fires several full
-	// establishes (each bounded by its own connect budget), and running it in the single standby-build
-	// goroutine blocks it for that whole time with standbyBuilding still set — so requestStandby()
-	// no-ops, the standby never becomes ready, and proactive rotation silently freezes while the open
-	// active keeps the tunnel up (the exact "rotation stopped after hours, tunnel still up" report).
-	// The warm standby just retries cheaply; the retest loop attributes/heals edge health on its own.
+	// Attribute the outcome to the health FSM here, one place for both modes: a failure runs the
+	// differential probe to decide IP vs SNI vs transient, a success clears both axes. attribute is FALSE
+	// on the warm-standby build — that probe fires several full establishes and would block the single
+	// standby-build goroutine with standbyBuilding still set, silently freezing proactive rotation.
 	if b.pool != nil {
 		if err != nil {
 			if attribute {
@@ -693,11 +549,9 @@ func (b *TCP) establishHTTPC(attribute bool) (net.Conn, string, string, error) {
 	return conn, dialAddr, combo, err
 }
 
-// dialHTTPCOnce builds a fresh transport/client/context for ONE attempt against (dialAddr, host,
-// ech, path) and opens the session in the configured mode. Split out of establishHTTPC so a stale
-// ECH rejection can be retried with a fresh config — each attempt needs its own transport, since
-// the ECH lives in tr.TLSClientConfig. On error, everything this attempt allocated is already torn
-// down by the dialHTTPC* helper (ctx cancelled, pipes/bodies closed).
+// dialHTTPCOnce builds a fresh transport/client/context for ONE attempt against (dialAddr, host, ech,
+// path) and opens the session in the configured mode. Each attempt needs its own transport, since the
+// ECH lives in tr.TLSClientConfig. On error, everything this attempt allocated is already torn down.
 func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budget time.Duration) (net.Conn, error) {
 	single := b.httpcMode == "grpc" // one full-duplex request over h2
 	h2 := single && b.wsTLS         // grpc over wss rides HTTP/2 to the edge
@@ -708,17 +562,10 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 		return b.dialer(budget).DialContext(ctx, "tcp", dialAddr)
 	}
 
-	// Track every underlying TCP conn this attempt dials so teardown can FORCE them shut. The h2
-	// path is the leak that matters: x/net/http2 multiplexes the whole session over ONE conn and,
-	// when we cancel the session's request on rotation, it only sends RST_STREAM — the TCP conn (its
-	// fd + reader/writer goroutines) stays open. We set no IdleConnTimeout on the h2 transport and
-	// never reuse it, and CloseIdleConnections races the async stream teardown (the stream count may
-	// not be 0 yet at the instant we call it), so the retired conn can linger until the far side
-	// happens to close it — or forever. Over hours of proactive rotation that accumulates fds and
-	// goroutines until a new standby dial can no longer be made: rotation silently stops while the
-	// already-open active conn keeps the tunnel up. Force-closing the raw conn on teardown is what
-	// actually releases it. (Harmless for the http/1.1 POST-ladder path too — those conns are already
-	// idle-reaped, and Close on an already-closed conn is a no-op error we ignore.)
+	// Track every underlying TCP conn this attempt dials so teardown can FORCE them shut. The h2 path is
+	// the one that matters: x/net/http2 multiplexes the whole session over ONE conn and answers our
+	// cancellation with RST_STREAM only, while CloseIdleConnections races the async stream teardown — so a
+	// retired conn can linger, and over hours of rotation that leaks fds until no new dial can be made.
 	var dialedMu sync.Mutex
 	var dialed []net.Conn
 	track := func(c net.Conn) net.Conn {
@@ -742,16 +589,10 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 	var rt http.RoundTripper
 	var closeIdle func()
 	if b.wsTLS && b.httpcTLS == nil {
-		// Production TLS, done here via DialTLSContext so the transport never runs its own.
-		//
-		// The POST ladder wears the ws carrier's Chrome fingerprint and rides http/1.1 (force that
-		// ALPN): those requests really are shaped like page fetches, so a browser identity fits.
-		//
-		// grpc mode does NOT. A gRPC call carries headers a browser is forbidden to send, so a Chrome
-		// ClientHello in front of it is the tell, not the disguise — it advertises a browser making a
-		// call no browser can make. It presents Go's own ClientHello instead, matching the grpc-go
-		// User-Agent the request carries, and offers only h2 (grpc-go offers exactly ["h2"], where
-		// Chrome would offer [h2, http/1.1]).
+		// Production TLS, done here via DialTLSContext so the transport never runs its own. The POST ladder
+		// wears the ws carrier's Chrome fingerprint and rides http/1.1 (force that ALPN): those requests
+		// really are shaped like page fetches. grpc mode does not — it presents Go's own ClientHello,
+		// matching the grpc-go User-Agent the request carries, and offers only h2, exactly as grpc-go does.
 		var alpn []string
 		if h2 {
 			alpn = []string{"h2"}
@@ -764,15 +605,9 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 				return nil, err
 			}
 			// Bound the handshake. Transport.TLSHandshakeTimeout does NOT apply when the caller supplies
-			// DialTLSContext — the transport is not the one handshaking — so BOTH real-TLS paths here
-			// (h2 and the http/1.1 one below) had no bound at all: an edge that completes TCP and then
-			// stalls mid-ClientHello parked the dial indefinitely.
-			//
-			// The budget is PASSED IN rather than armed on the socket here. uEdgeHandshake arms the
-			// deadline itself, so an arm at this line was simply overwritten by its fixed
-			// handshakeTimeout — which is why probe_timeout_secs still did not reach the TLS leg after
-			// #216, and a 5s probe still paid 10s of handshake. Cleared on success, because from that
-			// point h2 owns the conn and a lingering deadline would kill the live stream.
+			// DialTLSContext, so without this an edge that completes TCP and then stalls mid-ClientHello parks
+			// the dial indefinitely. The budget is PASSED IN rather than armed on the socket here, because
+			// uEdgeHandshake arms the deadline itself; cleared on success, since h2 then owns the conn.
 			uc, err := uEdgeHandshake(b.fragWrap(c, host, ech), host, ech, alpn, h2, budget) // split the ClientHello SNI when enabled
 			if err != nil {
 				c.Close()
@@ -863,12 +698,10 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 	return conn, err
 }
 
-// doWithHeaderTimeout runs hc.Do but bounds the wait for the response to BEGIN (headers received),
-// not the streaming body that follows. The request context governs the whole session body, so it
-// cannot also bound just this establishment step; without a separate bound, a CDN edge that
-// completes TCP+TLS yet never starts streaming blocks the dial forever, stalling rotation and pin.
-// On timeout the caller cancels the session ctx, which unblocks the parked goroutine (it returns
-// context.Canceled into the buffered channel — no leak).
+// doWithHeaderTimeout runs hc.Do but bounds the wait for the response to BEGIN (headers received), not
+// the streaming body that follows: the request context governs the whole session body, so it cannot
+// also bound this establishment step. On timeout the caller cancels the session ctx, which unblocks the
+// parked goroutine — it returns into the buffered channel, so nothing leaks.
 func doWithHeaderTimeout(hc *http.Client, req *http.Request, d time.Duration) (*http.Response, error) {
 	type doRes struct {
 		resp *http.Response
@@ -886,12 +719,10 @@ func doWithHeaderTimeout(hc *http.Client, req *http.Request, d time.Duration) (*
 
 // --- gRPC framing (mode "grpc") ---------------------------------------------------------------
 //
-// gRPC rides the same single full-duplex request as stream-one, but presents as a real gRPC call
-// so a CDN treats it as gRPC and connects to the ORIGIN over h2c — streaming the call both ways
-// instead of buffering the request body (which is what stalls a plain stream over a CDN->origin
-// HTTP/1.1 leg). On the wire: Content-Type application/grpc, and each frame is a gRPC length-
-// prefixed message [0][uint32 len][msg] where msg is a minimal protobuf Hunk {bytes data = 1}
-// carrying the payload — so a gRPC-aware proxy sees valid gRPC.
+// gRPC rides one full-duplex request but presents as a real gRPC call, so a CDN treats it as gRPC and
+// streams it to the origin over h2c instead of buffering the request body. On the wire: Content-Type
+// application/grpc, and each frame is a gRPC length-prefixed message [0][uint32 len][msg] where msg is
+// a minimal protobuf Hunk {bytes data = 1} carrying the payload.
 
 const grpcMaxMsg = 1 << 20 // reject an oversized length prefix (hostile/broken peer)
 
@@ -945,16 +776,10 @@ func (g *grpcDeframingReader) Read(p []byte) (int, error) {
 		if _, err := io.ReadFull(g.r, hdr[:]); err != nil {
 			return 0, err
 		}
-		// hdr[0] is gRPC's per-message COMPRESSED flag, and it was never examined — only hdr[1:5], the
-		// length, was. The comment beside the request headers asserted the opposite ("our own deframer
-		// takes the compressed flag from each message's 5-byte prefix"), which is how it stayed unread.
-		//
-		// This is the grpc twin of the POST ladder's Content-Encoding guard. The body IS the data
-		// plane: hand a compressed message to the framer and the AEAD opens garbage, the tunnel comes
-		// up and delivers nothing, and the failure is charged to the edge as a data-plane fault far
-		// from its cause. We advertise grpc-accept-encoding: gzip as camouflage (its absence was the
-		// tell), so an intermediary is invited to compress — and our own server never does, which makes
-		// a set flag someone else's doing by definition. Refuse it loudly and by name instead.
+		// hdr[0] is gRPC's per-message COMPRESSED flag. This is the grpc twin of the POST ladder's
+		// Content-Encoding guard: the body IS the data plane, so a compressed message opens as garbage under
+		// the AEAD and the tunnel comes up delivering nothing. We advertise grpc-accept-encoding: gzip as
+		// camouflage and never compress ourselves, which makes a set flag someone else's doing by definition.
 		if hdr[0] != 0 {
 			return 0, fmt.Errorf("http/grpc: message came back compressed (flag %d) — this path compresses gRPC "+
 				"messages, which the carrier cannot decode; turn message compression off for it at the CDN", hdr[0])
@@ -998,10 +823,9 @@ func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Conte
 	setHdr(req)
 	req.Header.Set("Content-Type", "application/grpc")
 	req.Header.Set("TE", "trailers")
-	// No grpc-encoding: grpc-go sets it only when it is actually compressing (callHdr.SendCompress),
-	// so "identity" on the wire is a small tell of a hand-rolled client. Nothing needs it — the
-	// authority is each message's own 5-byte prefix, which grpcDeframingReader now really does read
-	// (it did not when this comment was written).
+	// No grpc-encoding: grpc-go sets it only when it is actually compressing, so "identity" on the wire is
+	// a small tell of a hand-rolled client. Nothing needs it — the authority is each message's own 5-byte
+	// prefix, which grpcDeframingReader reads.
 	req.ContentLength = -1
 	resp, err := doWithHeaderTimeout(hc, req, httpcHeaderWait(budget))
 	if err != nil {
@@ -1013,19 +837,10 @@ func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Conte
 		resp.Body.Close()
 		cancel()
 		pw.Close()
-		// A 403 from the EDGE has one overwhelmingly likely cause and the bare status hid it.
-		// MEASURED against a live Cloudflare edge, four requests seconds apart, same host, same
-		// method, same path, same Go TLS fingerprint, varying only the headers:
-		//
-		//	Content-Type: application/grpc          -> 403 Forbidden (cloudflare's own error page)
-		//	grpc-go User-Agent, ordinary type       -> 404 (reached the origin routing)
-		//	TE: trailers, ordinary type             -> 404
-		//	no grpc identity at all                 -> 404
-		//
-		// So it is the content type alone, which matches Cloudflare requiring gRPC to be switched on
-		// PER ZONE (Network -> gRPC) before it will carry it. The same shape got a 200 from an
-		// ArvanCloud edge, so this is not universal. Nothing here is wrong with the carrier; the
-		// operator has a switch to flip, and "got HTTP 403" never said so.
+		// A 403 from the EDGE has one overwhelmingly likely cause and the bare status hid it: the
+		// Content-Type: application/grpc header ALONE draws it, which matches Cloudflare requiring gRPC to
+		// be switched on per zone before it will carry it. Other edges answer the same shape 200, so this is
+		// not universal and nothing here is wrong with the carrier — the operator has a switch to flip.
 		if resp.StatusCode == http.StatusForbidden {
 			return nil, fmt.Errorf("http/grpc: the CDN edge refused the gRPC request with HTTP 403 — "+
 				"measured on a live edge, this is the Content-Type: application/grpc header alone, and "+
@@ -1062,13 +877,10 @@ func (b *TCP) dialHTTPCPost(hc *http.Client, closeIdle func(), ctx context.Conte
 		cancel()
 		return nil, fmt.Errorf("httpc: down got HTTP %d (want 200)", gresp.StatusCode)
 	}
-	// The downstream body IS the data plane. browserHeaders sets Accept-Encoding explicitly (so the
-	// request stops advertising Go's lone "gzip" under a Chrome fingerprint), and that also disables
-	// Go's transparent decompression — so if an edge compresses this response anyway, the bytes
-	// reaching the framer are compressed and the tunnel carries garbage. Refuse instead, loudly and
-	// by name: the dial fails, the pool treats the edge as bad, and the operator gets a message that
-	// says which knob to turn rather than a tunnel that connects and delivers nothing. Our origin
-	// serves application/octet-stream, which no CDN compresses by default, so this should never fire.
+	// The downstream body IS the data plane, and browserHeaders' explicit Accept-Encoding disables Go's
+	// transparent decompression — so an edge that compresses this response anyway feeds compressed bytes
+	// to the framer. Refuse loudly and by name: the dial fails, the pool treats the edge as bad, and the
+	// operator gets the knob to turn instead of a tunnel that connects and delivers nothing.
 	if enc := gresp.Header.Get("Content-Encoding"); downstreamUnusable(enc) {
 		gresp.Body.Close()
 		cancel()
@@ -1118,22 +930,19 @@ func (b *TCP) httpcGetOrCreate(sid string) *httpcSession {
 }
 
 // httpcLookup returns an EXISTING session, or nil. The upstream POST path uses this instead of
-// httpcGetOrCreate: a real client opens the downstream GET first and only builds its upstream
-// sender once that GET's response head has arrived (dialHTTPCPost), so by the time it can post a
-// chunk the session always exists. Letting a POST create one meant anyone who could reach the
-// origin — by scanning it directly, or through the CDN — could allocate a pipe plus a whole
-// out-of-order buffer per invented session id, with no handshake and no cap on how many.
+// httpcGetOrCreate: a real client opens the downstream GET first and only builds its upstream sender
+// once that GET's response head has arrived, so by the time it can post a chunk the session exists.
+// Letting a POST create one lets anyone who can reach the origin allocate a pipe per invented id.
 func (b *TCP) httpcLookup(sid string) *httpcSession {
 	b.httpcMu.Lock()
 	defer b.httpcMu.Unlock()
 	return b.httpcSessions[sid]
 }
 
-// maxPendBytes bounds the out-of-order upstream buffer of ONE session. The 1024-entry gap guard
-// alone bounded the entry COUNT, not the bytes, so with maxPostBody at 1 MiB a single session could
-// hold ~1 GiB. A legitimate client can only ever have upWorkers batches of at most maxUpBatch bytes
-// in flight at once (newHTTPCUp), so twice that covers any real reordering; the 4 MiB floor keeps a
-// deliberately tuned-down client (1 worker × 8 KiB) from clipping itself on a lossy path.
+// maxPendBytes bounds the out-of-order upstream buffer of ONE session in BYTES; the 1024-entry gap
+// guard bounds only the entry COUNT, which at a 1 MiB maxPostBody is ~1 GiB. A legitimate client has
+// at most upWorkers batches of maxUpBatch in flight, so twice that covers any real reordering, and the
+// 4 MiB floor keeps a deliberately tuned-down client from clipping itself on a lossy path.
 func maxPendBytes() int {
 	if n := 2 * upWorkers * maxUpBatch; n > 4<<20 {
 		return n
@@ -1141,13 +950,10 @@ func maxPendBytes() int {
 	return 4 << 20
 }
 
-// deliver feeds one upstream chunk into the ordered upstream. Out-of-order chunks are buffered
-// until the gap fills; already-delivered seqs are dropped. Writes happen under upMu so the byte
-// stream stays correctly ordered even with several POSTs in flight.
-//
-// It REPORTS whether the chunk is now the server's to deliver, because the caller answers the POST
-// and a 204 is a promise. Dropping bytes and telling the client they were accepted stalls the stream
-// at nextSeq with nothing on either side able to notice.
+// deliver feeds one upstream chunk into the ordered upstream. Out-of-order chunks are buffered until
+// the gap fills; already-delivered seqs are dropped. Writes happen under upMu so the byte stream stays
+// ordered with several POSTs in flight. It REPORTS whether the chunk is now the server's to deliver,
+// because the caller answers the POST and a 204 is a promise that the bytes are in the stream.
 func (s *httpcSession) deliver(seq uint64, data []byte) bool {
 	s.upMu.Lock()
 	defer s.upMu.Unlock()
@@ -1197,13 +1003,9 @@ func (s *httpcSession) close(b *TCP, sid string) {
 }
 
 // newHTTPCServerConn builds the server side of one httpc session over a ResponseWriter. Both server
-// shapes (the downstream GET and the full-duplex grpc request) go through here so the write deadline
-// is wired from exactly one place: a conn built without setWD silently reverts to a recorded-but-
-// unenforced deadline, and nothing about the resulting conn looks wrong.
-//
-// rd/wr are the session's byte streams, which differ per shape (the GET reads the reassembled POST
-// ladder and writes the response body raw; grpc reads and writes gRPC-framed over the one request),
-// while w is the ResponseWriter underneath both — the only handle able to interrupt a parked write.
+// shapes go through here so the write deadline is wired from exactly one place: a conn built without
+// setWD silently reverts to a recorded-but-unenforced deadline. rd/wr are the session's byte streams,
+// which differ per shape, while w is the ResponseWriter underneath — the only handle able to interrupt.
 func newHTTPCServerConn(w http.ResponseWriter, rd io.Reader, wr io.Writer, flush func(), remote string, closeFn func()) *httpcConn {
 	return &httpcConn{
 		r: rd, w: wr, flush: flush,
@@ -1266,29 +1068,19 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		data, rerr := io.ReadAll(io.LimitReader(r.Body, maxPostBody))
 		if rerr != nil {
-			// A truncated body must NOT be delivered. Upstream is a length-prefixed AEAD stream, so a
-			// short chunk at seq N shifts every following byte: readFrame consumes the next frame's
-			// bytes as this one's payload and the desync cascades until the AEAD open fails — long
-			// after the truncation, and charged to the edge as a data-plane fault. Answering 204
-			// ("chunk accepted") made it worse: the client never learned and never re-dialled.
-			// Dropping it is safe and self-correcting — deliver()'s gap guard stalls at nextSeq and
-			// lets the client fail and re-dial, which restarts the stream cleanly.
+			// A truncated body must NOT be delivered. Upstream is a length-prefixed AEAD stream, so a short
+			// chunk at seq N shifts every following byte and the desync cascades long after the truncation.
+			// Answering 204 ("chunk accepted") makes it worse — the client never learns and never re-dials.
+			// Dropping it is self-correcting: deliver()'s gap guard stalls at nextSeq and forces the re-dial.
 			log.Printf("core/http: truncated upstream chunk seq=%d (%d bytes read): %v — dropping so the client re-dials", seq, len(data), rerr)
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}
 		if !s.deliver(seq, data) {
-			// The chunk was THROWN AWAY: the pending map hit its entry or byte cap, or the upstream
-			// pipe is gone. 204 means "chunk accepted, session stays open", and answering it for a
-			// chunk nobody has is the same mistake the truncated-body branch fifteen lines above
-			// spells out — the client never learns and never re-dials, so the stream stalls at
-			// nextSeq forever while the downstream GET keeps streaming and the dot stays green. The
-			// overflow guard's own comment already claims this "lets the client fail + re-dial";
-			// nothing made that true. A non-2xx does: the POST worker fails the conn (once) and
-			// dialLoop re-dials a fresh session, which is the only thing that can refill the gap.
-			//
-			// A duplicate (seq below nextSeq) is NOT this case — those bytes really were delivered,
-			// so deliver reports success and the retransmit gets its 204.
+			// The chunk was THROWN AWAY: the pending map hit its entry or byte cap, or the upstream pipe is
+			// gone. 204 means "chunk accepted", so answering it for a chunk nobody has stalls the stream at
+			// nextSeq forever while the downstream GET keeps streaming. A non-2xx fails the POST worker, which
+			// fails the conn and forces the re-dial that can refill the gap. A duplicate is not this case.
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}
@@ -1299,12 +1091,9 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
-	// The Flusher assertion comes BEFORE the create, and that is the whole of the orphan question.
-	// After #200 this is the only place a session can be created, and close(s.served) is a few
-	// statements below it — so the only way to leave a session created-but-never-served was to bail
-	// out in between, and this was the one statement that could. Creating state for a request we are
-	// about to answer 500 was wrong on its own terms; ordering it this way also makes the orphan the
-	// reap watchdog existed for impossible to produce, rather than merely unlikely.
+	// The Flusher assertion comes BEFORE the create. This is the only place a session can be created and
+	// close(s.done) is a few statements below it, so putting the one statement that can bail out ahead of
+	// the create makes a created-but-never-served session impossible rather than merely unlikely.
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "", http.StatusInternalServerError)
