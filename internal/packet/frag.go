@@ -47,6 +47,7 @@ const fakeTTL = 64
 type fragConn struct {
 	net.Conn
 	host        string // the SNI we connect with; used to auto-locate the split point (absent under ECH)
+	ech         bool   // does this dial present an ECH config? only the fallback messages read it — see noSplit
 	pos         int    // explicit split offset into the first write; 0 = auto (middle of the cleartext hostname)
 	mode        string // "split" | "disorder" | "fake"
 	ttl         int    // disorder: TTL for the head segment; fake: TTL of the injected decoy (0 = each mode's default)
@@ -101,6 +102,13 @@ func (f *fragConn) fakeDegraded(why string) {
 
 // noSplit reports, once per connection, that sni_split is configured and nothing was split. at is
 // what splitAt returned, so the message can name the actual reason instead of a guess.
+//
+// The last branch used to state ECH as the CAUSE and draw the security conclusion from it — "nothing
+// needs to be [fragmented]: there is no cleartext SNI left for a DPI to read" — while nothing had told
+// this conn whether ECH was on. It fired on ANY failure of the hostname search, so the case that
+// matters most (the configured host simply not matching what the carrier dials with, ECH off, the real
+// SNI on the wire) printed a line saying the operator was covered. f.ech carries the fact, so the two
+// states can say different things: one is genuinely harmless, the other is a live exposure.
 func (f *fragConn) noSplit(p []byte, at int) {
 	f.warnNoSplit.Do(func() {
 		switch {
@@ -109,25 +117,32 @@ func (f *fragConn) noSplit(p []byte, at int) {
 				"nothing was fragmented", f.pos, len(p))
 		case f.host == "":
 			log.Printf("core/tls: sni_split is on but this carrier dials with no SNI — nothing was fragmented")
-		default:
+		case f.ech:
 			log.Printf("core/tls: sni_split is on but the hostname is not in the ClientHello in cleartext " +
 				"(ECH encrypts it) — nothing was fragmented, and nothing needs to be: there is no cleartext " +
 				"SNI left for a DPI to read")
+		default:
+			log.Printf("core/tls: sni_split is on but the hostname %q was not found in the ClientHello, and "+
+				"ECH is NOT on — so this is not the harmless ECH case. Nothing was fragmented and the SNI "+
+				"the client really sent is on the wire in cleartext; check that ws_host matches the SNI "+
+				"this carrier dials with", f.host)
 		}
 	})
 }
 
 // newFragConn wraps c so its first write is split. host is the SNI (for auto split-point location),
 // pos an explicit offset (0 = auto), mode the fragmentation mode, ttl the disorder head-segment TTL,
-// ds the carrier's decoy-transmit reporter (nil is tolerated: a test conn reports into its own).
-func newFragConn(c net.Conn, host string, pos int, mode string, ttl int, ds *desyncSend) *fragConn {
+// ech whether this dial presents an ECH config (so the fallback messages can state the real cause
+// instead of assuming one), ds the carrier's decoy-transmit reporter (nil is tolerated: a test conn
+// reports into its own).
+func newFragConn(c net.Conn, host string, pos int, mode string, ttl int, ech bool, ds *desyncSend) *fragConn {
 	if mode == "" {
 		mode = sniSplitMode
 	}
 	if ds == nil {
 		ds = &desyncSend{}
 	}
-	return &fragConn{Conn: c, host: host, pos: pos, mode: mode, ttl: ttl, dsSend: ds}
+	return &fragConn{Conn: c, host: host, pos: pos, mode: mode, ttl: ttl, ech: ech, dsSend: ds}
 }
 
 // Write splits only the first call; later writes pass through. The split point is the configured

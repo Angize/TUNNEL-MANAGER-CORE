@@ -654,10 +654,12 @@ func (b *TCP) SetSNISplit(on bool, pos int, mode string, ttl int) bool {
 }
 
 // fragWrap wraps conn in a ClientHello-splitting fragConn when SNI fragmentation is enabled, else
-// returns conn unchanged. host is the SNI, used for auto split-point location.
-func (b *TCP) fragWrap(conn net.Conn, host string) net.Conn {
+// returns conn unchanged. host is the SNI, used for auto split-point location; ech is the ECHConfigList
+// this dial will present (empty = no ECH), which the conn needs only so its fallback messages can name
+// the real reason the hostname was not in the ClientHello instead of assuming ECH.
+func (b *TCP) fragWrap(conn net.Conn, host string, ech []byte) net.Conn {
 	if b.sniSplit {
-		return newFragConn(conn, host, b.splitPos, b.sniMode, b.splitTTL, &b.dsSend)
+		return newFragConn(conn, host, b.splitPos, b.sniMode, b.splitTTL, len(ech) > 0, &b.dsSend)
 	}
 	return conn
 }
@@ -1304,7 +1306,7 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 		var uc net.Conn
 		// ALPN forced to http/1.1: the WebSocket upgrade that follows (wsClientHandshake) is
 		// HTTP/1.1, so the edge must not pick h2.
-		uc, err = uEdgeHandshake(b.fragWrap(conn, host), host, ech, []string{"http/1.1"}, false, budget) // split the ClientHello's SNI when enabled
+		uc, err = uEdgeHandshake(b.fragWrap(conn, host, ech), host, ech, []string{"http/1.1"}, false, budget) // split the ClientHello's SNI when enabled
 		if err == nil {
 			if healed && live { // live self-heal: persist the fresh key and surface it (pool or single-edge)
 				b.noteECHSelfHeal(host, ech)

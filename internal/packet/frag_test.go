@@ -26,7 +26,7 @@ func (c *captureConn) RemoteAddr() net.Addr { return nil }
 
 func TestFragConnAutoSplitsInsideHostname(t *testing.T) {
 	cap := &captureConn{}
-	f := newFragConn(cap, "cdn.spacefly.ir", 0, "split", 0, nil) // auto: split in the middle of the hostname
+	f := newFragConn(cap, "cdn.spacefly.ir", 0, "split", 0, false, nil) // auto: split in the middle of the hostname
 	// a ClientHello-shaped buffer with the cleartext SNI embedded
 	hello := append([]byte{0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00}, []byte("....cdn.spacefly.ir....rest....")...)
 	if _, err := f.Write(hello); err != nil {
@@ -55,7 +55,7 @@ func TestFragConnAutoSplitsInsideHostname(t *testing.T) {
 
 func TestFragConnExplicitPos(t *testing.T) {
 	cap := &captureConn{}
-	f := newFragConn(cap, "example.com", 4, "split", 0, nil) // explicit offset overrides auto
+	f := newFragConn(cap, "example.com", 4, "split", 0, false, nil) // explicit offset overrides auto
 	if _, err := f.Write([]byte("ABCDEFGH")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestFragConnExplicitPos(t *testing.T) {
 
 func TestFragConnNoSplitWhenHostAbsent(t *testing.T) {
 	cap := &captureConn{}
-	f := newFragConn(cap, "hidden.example", 0, "split", 0, nil) // ECH-like: hostname not in cleartext
+	f := newFragConn(cap, "hidden.example", 0, "split", 0, false, nil) // ECH-like: hostname not in cleartext
 	if _, err := f.Write([]byte("no matching host here")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestFragConnNoSplitWhenHostAbsent(t *testing.T) {
 
 func TestFragConnOutOfRangePos(t *testing.T) {
 	cap := &captureConn{}
-	f := newFragConn(cap, "", 999, "split", 0, nil) // pos past the buffer -> write whole
+	f := newFragConn(cap, "", 999, "split", 0, false, nil) // pos past the buffer -> write whole
 	if _, err := f.Write([]byte("short")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestFragConnOutOfRangePos(t *testing.T) {
 
 func TestFragConnDisorderFallsBackToSplit(t *testing.T) {
 	cap := &captureConn{} // no SyscallConn -> disorder can't set a per-segment TTL, must still split
-	f := newFragConn(cap, "cdn.spacefly.ir", 0, "disorder", 4, nil)
+	f := newFragConn(cap, "cdn.spacefly.ir", 0, "disorder", 4, false, nil)
 	hello := append([]byte{0x16, 0x03, 0x01}, []byte("xxcdn.spacefly.iryy")...)
 	if _, err := f.Write(hello); err != nil {
 		t.Fatalf("write: %v", err)
@@ -103,7 +103,7 @@ func TestFragConnDisorderFallsBackToSplit(t *testing.T) {
 
 func TestFragConnFakeFallsBackToSplit(t *testing.T) {
 	cap := &captureConn{} // no *net.TCPAddr / no raw fd -> fake can't inject, must still split
-	f := newFragConn(cap, "cdn.spacefly.ir", 0, "fake", 4, nil)
+	f := newFragConn(cap, "cdn.spacefly.ir", 0, "fake", 4, false, nil)
 	hello := append([]byte{0x16, 0x03, 0x01}, []byte("xxcdn.spacefly.iryy")...)
 	if _, err := f.Write(hello); err != nil {
 		t.Fatalf("write: %v", err)
