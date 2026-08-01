@@ -37,19 +37,52 @@ func TestRawChecksumBindsSourceMatchesTheEncapsulation(t *testing.T) {
 // TestRawChecksumBindsSourceCoversEveryProfile: the switch keys off the protocol number, so a
 // profile name it does not know silently answers "independent" — the answer that lets a packet out.
 // Every name in the authoritative map must be a name it has an opinion about.
+//
+// It used to open with `for profile := range rawProfiles { if _, ok := rawProfiles[profile]; !ok {…} }`
+// — iterating a map's keys and then looking each key up in the same map. `ok` was true by
+// construction, so the Fatalf was unreachable for every possible state of the code, and the loop
+// called rawChecksumBindsSource zero times. The coverage the doc comment promises was not being
+// enforced here at all; only the sibling test above enforced anything.
+//
+// The two lists below carry that promise instead. Between them they must name EVERY key of
+// rawProfiles, so a newly registered profile fails this test until someone states which side it is
+// on — which is the whole point, because the silent default is the dangerous answer.
 func TestRawChecksumBindsSourceCoversEveryProfile(t *testing.T) {
+	bindsSource := []string{"udp", "tcp"}                        // L4 checksum folds in the IPv4 pseudo-header
+	independent := []string{"bip", "ipip", "gre", "icmp", "esp"} // bytes do not depend on the source
+
+	classified := map[string]bool{}
+	for _, p := range bindsSource {
+		classified[p] = true
+	}
+	for _, p := range independent {
+		classified[p] = true
+	}
 	for profile := range rawProfiles {
-		if _, ok := rawProfiles[profile]; !ok {
-			t.Fatalf("%s is not in rawProfiles", profile)
+		if !classified[profile] {
+			t.Fatalf("raw/%s is registered in rawProfiles and this test does not say whether its "+
+				"encapsulation binds the source. rawChecksumBindsSource keys off the protocol number, so a "+
+				"name it does not recognise silently answers \"independent\" — the answer that lets a "+
+				"wrong-checksum packet onto the wire from sendViaConn's degraded send", profile)
 		}
 	}
+	for p := range classified {
+		if _, ok := rawProfiles[p]; !ok {
+			t.Fatalf("this test classifies raw/%s, which is no longer a registered profile — the lists "+
+				"above have drifted from rawProfiles and can no longer prove they cover it", p)
+		}
+	}
+
 	if rawChecksumBindsSource("not-a-profile") {
 		t.Fatal("an unknown profile must not be treated as source-bound")
 	}
-	if !rawChecksumBindsSource("udp") || !rawChecksumBindsSource("tcp") {
-		t.Fatal("udp and tcp carry an L4 checksum over the pseudo-header")
+	for _, p := range bindsSource {
+		if !rawChecksumBindsSource(p) {
+			t.Fatalf("raw/%s carries an L4 checksum over the pseudo-header, so its bytes are only valid "+
+				"from the source they were built for", p)
+		}
 	}
-	for _, p := range []string{"bip", "ipip", "gre", "icmp", "esp"} {
+	for _, p := range independent {
 		if rawChecksumBindsSource(p) {
 			t.Fatalf("raw/%s does not checksum the source — dropping its degraded send would lose a valid packet", p)
 		}
