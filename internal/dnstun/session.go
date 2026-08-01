@@ -261,12 +261,25 @@ func (sc *sessionConn) recvPump(inCh <-chan []byte, onHandshake func([]byte)) {
 				sc.tryStaged(d[1:], true, &liveProven) // a data frame's KCP SYN adopts a proven new client
 			case kindPing:
 				if _, _, _, err := sc.sealer.Load().Open(d[1:], nil); err == nil {
-					liveProven = true
+					// NOT liveProven. A ping proves the peer is ALIVE; liveProven means the KCP session
+					// is ESTABLISHED, and those are different facts. tryStaged tears down instead of
+					// adopting only because "an established conv-0 KCP session can't be retrofitted" —
+					// and a ping establishes no KCP: it is a sealed keepalive one layer below it.
+					//
+					// Setting it here undid the v2.48.8 / #132 adopt-in-place recovery for any client
+					// that lived long enough to send ONE keepalive. That client then vanishes (a crash,
+					// a changed address), a new one dials, and the server tears the session down and
+					// makes the carrier reconnect instead of serving the new client in place — which is
+					// the exact case #132 exists to make fast. lastRx and the pong are untouched: those
+					// ARE about liveness, which is what a ping really carries.
 					sc.lastRx.Store(time.Now().UnixNano())
 					sc.sendKind(kindPong) // server: echo so the client's keepalive sees a live session
 					continue
 				}
-				sc.tryStaged(d[1:], false, &liveProven) // an idle re-dialed client's ping still forces the tear-down
+				// A ping under a STAGED sealer proves a new client is alive but carries no KCP frame to
+				// feed, so tryStaged has nothing to adopt with: it tears down if the live session is
+				// already established, and otherwise waits for that client's first data frame.
+				sc.tryStaged(d[1:], false, &liveProven)
 			case kindPong:
 				if _, _, _, err := sc.sealer.Load().Open(d[1:], nil); err == nil {
 					sc.lastRx.Store(time.Now().UnixNano()) // client: our keepalive was answered -> session live
