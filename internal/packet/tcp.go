@@ -1,14 +1,13 @@
-// This file implements the core carrier over TCP. It mirrors udp.go (same
-// type frame and Sealer contract) but adapts to a byte stream.
+// This file implements the core carrier over TCP. It mirrors udp.go (same type frame and Sealer
+// contract) but adapts to a byte stream.
 //
 // Legacy framing (obfs off) — length-prefixed so the reader can reframe:
 //
 //	[0:2] uint16 big-endian N = length of the frame that follows (magic+type+payload)
 //	[2]   magic = 0xB1
 //	[3]   type  = 0 data | 1 ping | 2 pong
-//	[4:]  payload — when crypto is on this is sealed(nonce||ct) for EVERY type
-//	      (ping/pong seal an empty payload) so control frames are authenticated;
-//	      with crypto off it is the raw IP packet for data, empty for ping/pong
+//	[4:]  payload — sealed(nonce||ct) for EVERY type when crypto is on (ping/pong seal an empty
+//	      payload); the raw IP packet for data, empty for ping/pong, when crypto is off
 //
 // Obfs framing (obfs on) — no constant bytes on the wire:
 //
@@ -16,14 +15,8 @@
 //	per frame: [0:2] uint16 length XOR ChaCha20-keystream(PSK,salt)
 //	           [2:]  AEAD-sealed [type][realLen][payload][random-pad]
 //
-// Roles: the "server" listens and accepts; the "client" dials and reconnects
-// automatically with a short backoff. Because a core tunnel is a single
-// point-to-point link, one connection carries data at a time, but the server keeps
-// up to maxAuthConns authenticated connections open at once (a warm-standby client
-// holds a second live carrier) rather than closing the previous one when a new one
-// authenticates. A single TUN reader feeds
-// whichever connection is currently live via an atomic pointer, so no L3 packet
-// is bound to a connection that may have dropped.
+// The server holds up to maxAuthConns authenticated connections at once (a warm-standby client keeps a
+// second live carrier); one TUN reader feeds whichever one is live via an atomic pointer.
 package packet
 
 import (
@@ -83,11 +76,9 @@ const (
 	// probe budget) and minLiveness (shortest healthy session) are operator-tunable package vars now,
 	// defined with their defaults in tuning.go.
 
-	// maxAuthConns bounds concurrent AUTHENTICATED server connections. A warm-standby client
-	// keeps a second live carrier up (make-before-break), so the server must NOT evict the
-	// previous connection when a new one authenticates; instead it holds up to this many and,
-	// when over the cap, reaps the oldest idle one (the per-connection idle read-deadline reaps
-	// a truly dead conn anyway). 3 leaves headroom for the brief active+standby+handoff overlap.
+	// maxAuthConns bounds concurrent AUTHENTICATED server connections. A new connection never evicts
+	// the previous one (a warm-standby client keeps a second live carrier); over the cap the oldest
+	// idle one is reaped. 3 leaves headroom for the active+standby+handoff overlap.
 	maxAuthConns = 3
 )
 
@@ -119,21 +110,14 @@ type connFramer struct {
 	writeKS  *chacha20.Cipher
 	readKS   *chacha20.Cipher
 	saltSent bool
-	// saltPend holds the salt after sendSalt prepared it and before a frame has carried it. The salt
-	// used to get a conn.Write of its own, which on tcp+cover is one TLS record and on ws one
-	// WebSocket frame — a 24-byte record of exactly the same size on every connection, in both
-	// directions, immediately after the handshake. All of obfsSeal's random padding was bypassed for
-	// that one write. It now rides in the SAME write as the next frame, whose size is padded.
-	// Guarded by mu, like every other write-side field.
+	// saltPend holds the salt after sendSalt prepared it and before a frame has carried it. A write of
+	// its own is a fixed-size record right after the handshake, in both directions, bypassing obfsSeal's
+	// padding — so it rides the SAME write as the next frame instead. Guarded by mu.
 	saltPend []byte
 
-	// rp is this connection's inbound anti-replay window. It is PER-CONNECTION (not
-	// shared across connections) so two briefly-overlapping connections during a
-	// client reconnect cannot flip-flop a shared window's session id and let a
-	// captured frame from either session slip through. A single connection only ever
-	// carries one peer session and is read by exactly one goroutine (the handler that
-	// authenticates its first frame and then runs serve), so the lock-free
-	// replayGuard is safe here.
+	// rp is this connection's inbound anti-replay window. It is PER-CONNECTION, so two briefly
+	// overlapping connections cannot flip-flop a shared window's session id. One connection carries one
+	// peer session and is read by exactly one goroutine, so the lock-free replayGuard is safe here.
 	rp replayGuard
 
 	// unanswered counts CLIENT keepalive pings sent with no inbound frame in between.
@@ -145,20 +129,14 @@ type connFramer struct {
 	// rxAt is the unix-nano of the last authenticated inbound frame ON THIS CONNECTION — its own
 	// liveness, kept for every carrier including a warm standby that carries no traffic. The crypto
 	// handshake seeds it (the responder answering is inbound proof a CDN edge cannot fake) and readLoop
-	// advances it. It is what the tunnel-level b.lastRx adopts when this carrier goes live, so a
-	// promoted standby publishes the truth it has been collecting instead of waiting for its next frame.
-	// Written by the dialing goroutine and the read goroutine, read by the manager -> atomic.
+	// advances it; adoptRx publishes it as the tunnel's b.lastRx when this carrier goes live.
 	rxAt atomic.Int64
 }
 
-// sendSalt prepares our per-connection salt once and arms the write keystream. The server calls it
-// only AFTER it has authenticated the client's first frame, so a peer that does not know the PSK gets
-// zero bytes back (probe resistance).
-//
-// It does NOT write. The salt is queued in saltPend and leaves in the SAME conn.Write as the next
-// frame — see that field for why a write of its own was a fingerprint. Both callers send a frame
-// immediately after (the client's prime ping, the server's pong to it); flushSalt is the backstop for
-// any path that does not, so a peer can never be left waiting on a salt parked in a buffer.
+// sendSalt prepares our per-connection salt once and arms the write keystream. The server calls it only
+// AFTER it has authenticated the client's first frame, so a peer that does not know the PSK gets zero
+// bytes back. It does NOT write: the salt is queued in saltPend and leaves in the same conn.Write as the
+// next frame, with flushSalt as the backstop for any path that sends none.
 func (cf *connFramer) sendSalt() error {
 	if cf.saltSent {
 		return nil
@@ -340,11 +318,9 @@ type TCP struct {
 	coverHint sync.Once        // client: one line naming the two causes of a cover handshake that "succeeds" into the real site
 	coverSrv  *tlscover.Server // server-side REALITY responder (nil on the client)
 
-	// WebSocket carrier (transport "ws"): the stream is wrapped in RFC 6455 binary
-	// frames after an HTTP Upgrade, so it can be fronted through a CDN. ws is
-	// mutually exclusive with cover. On the client, wsTLS wraps the connection in a
-	// standard TLS session (ServerName=wsHost) BEFORE the upgrade, so the client
-	// speaks wss:// to a CDN edge; the server stays plain (the CDN terminates TLS).
+	// WebSocket carrier (transport "ws"): the stream is wrapped in RFC 6455 binary frames after an HTTP
+	// Upgrade, so it can be fronted through a CDN. Mutually exclusive with cover. The client wraps the
+	// connection in TLS (ServerName=wsHost) before the upgrade; the server stays plain (the CDN terminates).
 	ws     bool
 	wsHost string // client: Host header + TLS SNI (the fronting/origin domain)
 	wsPath string // client: the request path to ask for; ws server: the ONLY path it answers 101 on (default "/")
@@ -355,21 +331,12 @@ type TCP struct {
 	rotate time.Duration // client: proactive pool-rotation interval (0 = failover-only)
 	st     *coreStatus   // client + single-edge ws/http: self-heal event ring -> status file (nil = off / pool / server)
 	stTag  string        // carrier label prefix ("tcp"/"cover"/"ws"/"http") for setActive on a direct-pool rotation; set alongside st
-	lastRx atomic.Int64  // client: unix-nano of the last authenticated INBOUND frame on the LIVE carrier — feeds the status-file heartbeat (v2.48.3). Advanced only by readLoop while cf==b.cur, and by adoptRx from the carrier's own rxAt when it goes live; never stamp it for a frame we sent (a carrier that reconnects forever behind a CDN would read "alive" while nothing flows, v2.48.5), nor for a carrier that is not the tunnel's — a warm standby or a parked rotation carrier keeps its proof in cf.rxAt until it is promoted/adopted
+	lastRx atomic.Int64  // client: unix-nano of the last authenticated INBOUND frame on the LIVE carrier (status-file heartbeat)
 
 	// lastRxData is the unix-nano of the last real DATA frame that ARRIVED (never ping/pong, and never
-	// anything we sent). It drives opportunistic keepalive: an inbound frame is itself proof the peer is
-	// alive and answering, so the standalone ping is redundant for that period and an ACTIVE tunnel
-	// emits no periodic beacon.
-	//
-	// INBOUND ONLY — that restriction IS the feature. tunLoop used to stamp this on every successful
-	// outbound write too, which made a RECEIVE-direction blackhole undetectable: the inner TCP
-	// retransmits, so outbound data never stops on its own; the stamp then suppressed the keepalive
-	// ping, and tunLoop's write-liveness refresh pushed the read deadline forward — so BOTH
-	// dead-detection paths were held open forever. b.lastRx froze (the panel dot went red) while the
-	// core never reconnected, never failed over and never logged a line. A write proves only that our
-	// own socket accepted bytes; only a frame FROM the peer may say the peer is alive.
-	// Stamped by handleFrame's typeData case, and nowhere else.
+	// anything we sent) — it lets an active tunnel skip the standalone keepalive. INBOUND ONLY: stamping it
+	// on an outbound write suppresses the ping forever and hides a receive-direction blackhole, because the
+	// inner TCP retransmits and outbound data never stops. Stamped by handleFrame's typeData case only.
 	lastRxData atomic.Int64
 
 	// warmNext holds a connection that was fully dialled and handshaked BEFORE the live one was
@@ -378,12 +345,10 @@ type TCP struct {
 	// Drained on dialLoop exit so a conn built as Close fired cannot leak its fd.
 	warmNext chan *warmDial
 
-	// pp is the DESTINATION rotation pool for the direct TCP carriers (plain tcp / tcp+cover): the
-	// client cycles the peer IPs and burns a blocked one so a single filtered server IP doesn't kill
-	// the tunnel. It is the direct-transport analogue of the ws edge pool (which owns rotation on the
-	// ws path), so it is only ever set on a non-ws client. nil = single fixed peer (b.addr), no
-	// rotation. Unlike the datagram carriers' atomic peer swap, TCP rotates by re-dialing: dialTarget
-	// reads the pool's current endpoint and dialLoop burns/advances it on a dead/blocked dial.
+	// pp is the DESTINATION rotation pool for the direct TCP carriers (plain tcp / tcp+cover): the client
+	// cycles the peer IPs and burns a blocked one, so a single filtered server IP does not kill the tunnel.
+	// Only ever set on a non-ws client (the ws path has its own edge pool). nil = the fixed peer b.addr.
+	// Unlike the datagram carriers' atomic peer swap, TCP rotates by re-dialing.
 	pp *PeerPool
 	// sp is the SOURCE rotation pool: the local IP the client dials FROM. TCP applies it via the
 	// dialer's LocalAddr, so a rotation is picked up on the next re-dial (sourceIP reads sp.current()).
@@ -411,22 +376,17 @@ type TCP struct {
 	// connection" is a consequence (we closed it) and is deliberately never stored.
 	lastErr atomic.Value // string
 
-	// warmStandby (client + pool) keeps a SECOND, fully-handshaked carrier connection to another
-	// pool edge warm in the background. On the active carrier's failure OR a proactive rotation
-	// the standby is promoted instantly (an atomic b.cur swap) instead of dialing fresh, so the
-	// TUN never waits on a cold dial. Only the client's warm loop uses standby/standbyConn; the
-	// server-side change (no connect-time eviction + downstream-follows-data) is always on and
-	// stays behaviorally identical for a single connection.
+	// warmStandby (client + pool) keeps a SECOND, fully-handshaked carrier to another pool edge warm in
+	// the background, so the active's failure or a proactive rotation promotes it with an atomic b.cur
+	// swap instead of making the TUN wait on a cold dial.
 	warmStandby bool
 	standby     atomic.Pointer[connFramer] // client+warm: the warm standby framer (nil when none)
 	standbyConn atomic.Pointer[net.Conn]   // client+warm: the standby's live conn (for teardown)
 
-	// HTTP carrier (transport "ws" with ws_httpc): the core stream rides an HTTP request
-	// pair (post: GET-down + seq-POSTs-up) or a single full-duplex request
-	// (stream-one) instead of a WebSocket upgrade, so it passes CDNs that block WebSocket.
-	// Same fronting fields (wsHost/wsTLS/wsECH/wsPath) apply. Because the client carries
-	// core frames directly over these requests (the HTTP layer replaces the WS upgrade),
-	// the server must NOT run wsServerHandshake on an HTTP-carrier conn — see handleServerConn.
+	// HTTP carrier (transport "ws" with ws_httpc): the stream rides an HTTP request pair (post: GET-down +
+	// seq-POSTs-up) or one full-duplex request (stream-one) instead of a WebSocket upgrade, so it passes a
+	// CDN that blocks WebSocket. The same fronting fields apply, but the server must NOT run
+	// wsServerHandshake on such a conn — see handleServerConn.
 	httpc         bool
 	httpcMode     string                      // client: "grpc" (single full-duplex request) else "post"
 	httpcTLS      *tls.Config                 // test-only: overrides the client edge TLS config (nil in production)
@@ -437,16 +397,11 @@ type TCP struct {
 	isClient bool
 	addr     string // server: listen addr; client: peer addr
 	bindIP   string // client: source IP to dial FROM (empty = kernel default); tcp/ws/http only
-	// srcWarned holds the sources already reported as unbindable, one line each. It was a single
-	// sync.Once, i.e. ONE line for the whole process: a source pool that rotated onto a second dead
-	// IP was then completely silent, and the operator had no way to tell one bad entry from several.
-	// destRot counts destination burns since the last healthy session, so the SOURCE is only walked
-	// once the destination pool has cycled through every endpoint against it. Written from TWO
-	// goroutines — dialLoop's post-serve classification, and the rotation timer, which reaches
-	// burnAdvance through buildWarm — so it is an atomic: a plain int was a data race the moment
-	// make-before-break handed a burn to the timer.
+	// destRot counts destination burns since the last healthy session, so the SOURCE pool is only walked
+	// once the destination pool has cycled through every endpoint against it. Written by the dial loop and
+	// by the rotation timer (which reaches burnAdvance through buildWarm), hence atomic.
 	destRot   atomic.Int64
-	srcWarned sync.Map    // source string -> struct{}
+	srcWarned sync.Map    // sources already reported as unbindable (one log line per source)
 	probing   atomic.Bool // a retest batch is in flight; keeps the retest tick free for the operator pin
 	// lastSrc is the source the dialer really BOUND to — empty when no bind was applied (none
 	// configured, or the IP is not on this host). Releasing a source pin is conditioned on it, so a
@@ -454,22 +409,19 @@ type TCP struct {
 	// read at the pin-release site.
 	lastSrc atomic.Pointer[string]
 
-	// TCP-segment injection desync (client, optional): after each kernel TCP connect we inject a
-	// few decoy TCP segments on the real 4-tuple (low-TTL, so they die before the edge/server) to
-	// mis-sync a stateful DPI, leaving the kernel-owned connection untouched. Primitive fields
-	// (not the linux-only desyncCfg) so this compiles on every platform; the linux sendTCPFakes
-	// reads them. Best-effort: needs CAP_NET_RAW (AF_PACKET); a failure just skips the decoys.
+	// TCP-segment injection desync (client, optional): after each kernel TCP connect, sendTCPFakes injects
+	// `count` low-TTL decoy segments on the real 4-tuple to mis-sync a stateful DPI, leaving the
+	// kernel-owned connection untouched. Primitive fields (not the linux-only desyncCfg) so this compiles
+	// everywhere; best-effort, since it needs CAP_NET_RAW.
 	dsOn       bool
 	dsTTL      int
 	dsCount    int
 	dsMode     string
 	dsFailOnce sync.Once  // logs an AF_PACKET/capability failure at most once (fired per connect)
 	dsSend     desyncSend // outcome of the decoy TRANSMITS — opening the injector succeeding says nothing about them
-	// dsWatch is a TEST SEAM, nil in production: sendTCPFakes calls it with the conn it is about to
-	// mirror, before the dsOn gate. The property that matters here is WHEN the decoys go out relative
-	// to the cover/WebSocket handshake, and that is not observable from the byte stream — the decoys
-	// leave through AF_PACKET, not through conn. Calling it ahead of the dsOn gate also lets a test
-	// assert the ordering without switching real packet injection on (the box runs the suite as root).
+	// dsWatch is a TEST SEAM, nil in production: sendTCPFakes calls it with the conn it is about to mirror,
+	// before the dsOn gate, so a test can assert WHEN the decoys go out relative to the cover/WebSocket
+	// handshake — not observable from the byte stream, since they leave through AF_PACKET.
 	dsWatch func(net.Conn)
 
 	ln      net.Listener               // server: primary/first listener (ws/http use only this)
@@ -548,29 +500,10 @@ func (b *TCP) sourceIP() string {
 	return b.bindIP
 }
 
-// burnAdvance burns+advances the destination pool and, once that pool has cycled through every
-// endpoint against the current source, walks the SOURCE too (the same policy the datagram carriers'
-// rotationController applies). It PUBLISHES NOTHING ITSELF — every event for the move is the caller's
-// to write. Make-before-break needs exactly that: the endpoint it burned is one the live carrier never
-// moved to, so naming it as active, or logging it as a rotation, describes a move that did not happen.
-// Returns the endpoint the pool now points at.
-//
-// carrierGone decides BOTH whether the source is burned and whether the source walk is announced,
-// because those two are the same question asked twice:
-//
-//	false  a failed WARM build (make-before-break). The live carrier is still up and still bound to
-//	       this source, so the source has proven NOTHING. It used to call rotateSourceTCP(false) here
-//	       — the failover form — which burns the live, working source out of rotation AND logs
-//	       "rotated source to X" and publishes a src-rotate for a move the tunnel never made. That is
-//	       the premature-announcement class the #179/#189 proactive-vs-failover split exists to close:
-//	       the gate was added on the destination and the source kept the failover form. proactive=true
-//	       is exactly "advance without burning and without publishing".
-//	true   the dial/handshake/post-serve death paths. The carrier really is gone and the destination
-//	       pool has cycled through every endpoint against this source, so burning it and announcing
-//	       the move are both right.
-//
-// It is a method rather than a closure inside dialLoop so a test can drive the REAL callback that
-// buildWarm receives. The stub the warm-rotate test passed instead is why this went unnoticed.
+// burnAdvance burns+advances the destination pool and, once that pool has cycled through every endpoint
+// against the current source, walks the SOURCE too. Returns the endpoint the pool now points at, and
+// PUBLISHES NOTHING — the caller owns every event, because make-before-break burns an endpoint the live
+// carrier never went to. carrierGone=false (a failed warm build) advances without burning or announcing.
 func (b *TCP) burnAdvance(carrierGone bool) (string, bool) {
 	if (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned()) {
 		return "", false // an operator pin freezes failover: current()/sourceIP() force the pinned endpoint
@@ -591,15 +524,9 @@ func (b *TCP) burnAdvance(carrierGone bool) (string, bool) {
 }
 
 // rotateSourceTCP advances the source pool so the NEXT dial binds to a new local IP, returning the new
-// source and whether it actually moved (the proactive timer uses moved to decide whether to force a
-// re-dial). It performs no teardown itself — the caller (a dead dial, or the proactive timer that closes
-// the conn) drives the re-dial that picks up sourceIP(). No-op / ("", false) without a source pool.
-//
-// FAILOVER (proactive=false) publishes the src-rotate event NOW: the tunnel really is moving off a dead
-// source, paired with the destination burn. The PROACTIVE timer (proactive=true) publishes NOTHING here
-// and carries the returned addr to the adoption site, where the warm carrier actually goes live on the
-// new source — announcing it before make-before-break proved the move described a rotation a failed warm
-// build never made (the source mirror of the destination fix in #179, whose comment says exactly this).
+// source and whether it actually moved. It performs no teardown — the caller drives the re-dial that
+// picks up sourceIP(). A FAILOVER (proactive=false) publishes the src-rotate event here; the PROACTIVE
+// timer publishes nothing and carries the address to the adoption site, where the move becomes real.
 func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
 	if b.sp == nil {
 		return "", false
@@ -616,35 +543,27 @@ func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
 	return addr, moved
 }
 
-// SetDesync (client, optional) turns on TCP-segment injection desync for the tcp/cover/ws
-// carriers: after each connect, sendTCPFakes injects `count` decoy segments on the real
-// 4-tuple to mis-sync a stateful DPI. Stores the config; the actual injection is Linux-only
-// (AF_PACKET). No-op on the server. Call before Run(). The same config surface (fake_*) the
-// raw/flux carriers use — main wires it via the same SetDesync type assertion.
+// SetDesync (client, optional) turns on TCP-segment injection desync for the tcp/cover/ws carriers:
+// after each connect, sendTCPFakes injects `count` decoy segments on the real 4-tuple to mis-sync a
+// stateful DPI. Stores the config; the injection itself is Linux-only. No-op on the server. Call
+// before Run().
 func (b *TCP) SetDesync(on bool, ttl, count int, mode string) {
 	if !b.isClient || !on {
 		return
 	}
-	// Say the cap out loud, here, at the one place that knows it applies. Every decoy on THIS carrier
-	// rides the real connection's 4-tuple, so specsTCP clamps the TTL to injectMaxTTL — while a higher
-	// fake_ttl was accepted by config.go, stored by the node, echoed back by the panel's edit form and
-	// printed verbatim by main's "fake-desync on (… ttl=N …)" line. Every layer reported a hop budget
-	// the wire never carried. The clamp is right; the silence was not.
+	// Say the cap out loud here, at the one place that knows it applies: every decoy on THIS carrier rides
+	// the real connection's 4-tuple, so specsTCP clamps the TTL to injectMaxTTL while config, node and
+	// panel all still report the operator's number.
 	if ttl > injectMaxTTL {
 		log.Printf("core/tcp: fake_ttl=%d is capped to %d on this carrier — its decoys ride the real connection's 4-tuple, so one that reached the server would draw an RST", ttl, injectMaxTTL)
 	}
 	b.dsOn, b.dsTTL, b.dsCount, b.dsMode = true, ttl, count, mode
 }
 
-// SetSNISplit (client, ws/http) turns on SNI fragmentation: the TLS ClientHello to the edge is
-// written across two TCP segments so the cleartext SNI is split, defeating a stateless SNI-blocklist
-// DPI. pos is the split offset into the ClientHello (0 = auto: the middle of the hostname). Only
-// meaningful with wss; a no-op on the server or a non-ws carrier. main wires it via the shared
-// SetSNISplit type assertion. Call before Run().
-// It REPORTS whether it took. The knob splits a TLS ClientHello, so it means nothing on a carrier
-// that never sends one — but the caller could not tell an applied setting from a discarded one, and
-// logged "SNI fragmentation on" either way. On transport=tcp that line was simply false: this
-// method returned at the first condition and no ClientHello was ever split.
+// SetSNISplit (client, ws/http) turns on SNI fragmentation: the TLS ClientHello to the edge is written
+// across two TCP segments so the cleartext SNI is split, defeating a stateless SNI-blocklist DPI. pos is
+// the split offset (0 = auto: the middle of the hostname). It REPORTS whether it took — the knob means
+// nothing on a carrier that never sends a ClientHello, and the caller logs off this answer.
 func (b *TCP) SetSNISplit(on bool, pos int, mode string, ttl int) bool {
 	if !b.isClient || !on || !b.ws {
 		return false
@@ -664,11 +583,9 @@ func (b *TCP) fragWrap(conn net.Conn, host string, ech []byte) net.Conn {
 	return conn
 }
 
-// SetStatusPath (client, single-edge ws/http) wires a status-file event ring so the carrier's
-// precise self-heal events (e.g. an in-band ECH self-heal) reach the node/panel system log — the
-// same file shape the datagram carriers write. A pool writes its own richer status file, so this is
-// skipped when a pool is configured; the server never wires it. main wires it via the shared
-// SetStatusPath type assertion. Call before Run().
+// SetStatusPath (client, single-edge ws/http) wires a status-file event ring so the carrier's self-heal
+// events reach the node/panel system log, in the same file shape the datagram carriers write. Skipped
+// when a pool is configured (it writes its own richer status file) and on the server. Call before Run().
 func (b *TCP) SetStatusPath(path string) {
 	if !b.isClient || path == "" || b.pool != nil {
 		return
@@ -690,30 +607,21 @@ func (b *TCP) SetStatusPath(path string) {
 }
 
 // dialer returns a net.Dialer that, when a source IP is pinned, binds the outbound socket to it
-// (LocalAddr). Only an IP that is actually configured on this host is bound.
-//
-// The old comment claimed a non-local IP was "ignored"; only a MALFORMED one was. A well-formed IP
-// that is no longer on any interface — the node's address changed, a secondary IP was not re-added
-// after a provider event — was still installed as LocalAddr, and every dial then failed instantly with
-// EADDRNOTAVAIL. dialLoop charges a failed dial to the DESTINATION, so one bad SOURCE burned the whole
-// destination pool one endpoint at a time while the peers were perfectly reachable. Skipping the bind
-// keeps the tunnel up on the kernel's default source, and the log names the real cause.
+// (LocalAddr). Only an IP that is actually configured on this host is bound: a well-formed address no
+// longer on any interface fails every dial with EADDRNOTAVAIL, and dialLoop charges a failed dial to the
+// DESTINATION — so one bad source would burn the whole destination pool while the peers are reachable.
 func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 	d := &net.Dialer{Timeout: timeout}
 	src := b.sourceIP() // rotation pool's current source, or the fixed bindIP
 	// lastSrc records what the socket will really leave from, so it is set ONLY on the branch that
-	// installs LocalAddr. It used to be stamped here, before the checks below — so a source that was
-	// silently dropped was still reported as bound, and the source pin released against it: the panel
-	// showed the operator's jump as landed while the tunnel left from the kernel's default IP.
+	// installs LocalAddr: a silently dropped source reported as bound also releases the source pin
+	// against a dial that actually left from the kernel's default IP.
 	unbound := ""
 	b.lastSrc.Store(&unbound)
 	if src != "" {
-		// Tolerate an accidental "ip:port", exactly as config.go's validatePoolEndpoint promises it will
-		// ("tolerate an accidental ip:port") and as udp (rebindSourceTo) and raw/flux (hostOnly) already
-		// do. tcp was the one carrier that did not: ParseIP("10.0.0.5:0") is nil, and because everything
-		// below sits inside `if ip != nil`, not even the srcWarn line fired — the single path where a
-		// configured source is dropped with ZERO output while the tunnel quietly leaves from the kernel's
-		// default IP.
+		// Tolerate an accidental "ip:port", as config.go's validatePoolEndpoint promises and as udp
+		// (rebindSourceTo) and raw/flux (hostOnly) already do: ParseIP("10.0.0.5:0") is nil, and everything
+		// below sits inside `if ip != nil`.
 		host := src
 		if h, _, e := net.SplitHostPort(src); e == nil {
 			host = h
@@ -728,19 +636,10 @@ func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 	return d
 }
 
-// dropUnusableSource handles a configured source the socket cannot actually leave from: the IP is
-// no longer on any interface (a secondary address not re-added after a provider event), or the
-// string is not an IP at all. This dial still goes out on the kernel default rather than failing,
-// because dialLoop charges a failed dial to the DESTINATION and one bad source would otherwise burn
-// the whole destination pool one endpoint at a time while the peers are perfectly reachable.
-//
-// But it must not be a no-op beyond a log line, which is what it was: the entry stayed HEALTHY and
-// ACTIVE in the pool, so every rotation came straight back to it, the panel showed the tunnel
-// sourced from an IP it never leaves from, and the whole source-rotation feature was silently off.
-// Burning it is the honest report — the same thing udp's rejectCandidate does when its rebind fails
-// — and rotation then walks onto an IP that works. A pinned entry is left alone: fail() refuses to
-// burn under a pin, and with lastSrc empty the pin is never released against this dial either, so
-// it simply lapses on its TTL and normal rotation resumes.
+// dropUnusableSource handles a configured source the socket cannot actually leave from: the IP is no
+// longer on any interface, or the string is not an IP at all. The dial still goes out on the kernel
+// default rather than failing, because dialLoop charges a failed dial to the DESTINATION. The entry is
+// burned too, so rotation walks onto a source that works; a pinned one is left alone and lapses on TTL.
 func (b *TCP) dropUnusableSource(src, host string, parsed bool) {
 	if _, dup := b.srcWarned.LoadOrStore(src, struct{}{}); !dup {
 		if parsed {
@@ -752,11 +651,9 @@ func (b *TCP) dropUnusableSource(src, host string, parsed bool) {
 	if b.sp == nil {
 		return
 	}
-	// An operator jump aimed HERE is over: we have just proven this IP cannot be used, and a jump is a
-	// momentary move within the rotation, not a lock. Ending it now instead of letting pinTTL run out
-	// also unblocks the burn below — fail() refuses to touch a pinned entry, so without this the pool
-	// spent the whole window forcing a source that could not bind, with the panel showing a jump still
-	// in progress and nothing explaining why.
+	// An operator jump aimed HERE is over: this IP has just proven it cannot be used, and a jump is a
+	// momentary move within the rotation, not a lock. Ending it now also unblocks the burn below —
+	// fail() refuses to touch a pinned entry.
 	if b.sp.pinCannotLand(src) {
 		log.Printf("core/tcp: manual jump to source %s abandoned — that IP is not configured on this host", src)
 	}
@@ -765,14 +662,10 @@ func (b *TCP) dropUnusableSource(src, host string, parsed bool) {
 	b.sp.failUnusable() // pull it from rotation so the NEXT dial gets a source that can actually bind
 }
 
-// canBindSource reports whether the kernel will let us bind an outbound socket to ip.
-//
-// It ASKS the kernel rather than comparing against InterfaceAddrs(): an exact-address comparison is
-// wrong on the very cases that matter. Loopback aliases (127.0.0.2, used by TestSourceIPBind and by
-// real multi-IP setups) are bindable while the interface reports only 127.0.0.1/8, and a subnet-
-// contains test is too loose in the other direction — it would accept the peer's own address. A
-// throwaway bind on port 0 is the same question the dial itself asks, one cheap syscall pair per dial
-// attempt, and it is not on the data path.
+// canBindSource reports whether the kernel will let us bind an outbound socket to ip. It ASKS the kernel
+// rather than comparing against InterfaceAddrs(): loopback aliases are bindable while the interface
+// reports only 127.0.0.1/8, and a subnet-contains test would accept the peer's own address. A throwaway
+// bind on port 0 is the same question the dial asks, and it is not on the data path.
 func canBindSource(ip net.IP) bool {
 	l, err := net.ListenTCP("tcp", &net.TCPAddr{IP: ip, Port: 0})
 	if err != nil {
@@ -833,11 +726,9 @@ func DialWS(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cry
 		idle: idleFor(keepalive), isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
 }
 
-// DialWSPool is DialWS over a rotating edge POOL: the client cycles (edge-IP × SNI)
-// combinations from the pool (each SNI with its own ECH), moving before any single
-// edge is fingerprinted and burning a blocked one. rotate is the proactive rotation
-// interval (0 = rotate only on failure). wsTLS is always on (the pool is a wss set).
-// warmStandby keeps a second edge fully handshaked in the background for instant failover.
+// DialWSPool is DialWS over a rotating edge POOL: the client cycles (edge-IP × SNI) combinations, each
+// SNI with its own ECH, moving before any single edge is fingerprinted and burning a blocked one.
+// rotate is the proactive interval (0 = failover only); warmStandby keeps a second edge handshaked.
 func DialWSPool(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, pool *wsPool, rotate time.Duration, httpc bool, httpcMode string, warmStandby bool) (*TCP, error) {
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
 		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, pool: pool, rotate: rotate, warmStandby: warmStandby,
@@ -874,11 +765,9 @@ func ListenHTTPC(listenAddr string, dev *tun.Device, keepalive time.Duration, ob
 		preAuth: make(chan struct{}, maxPreAuthConns), httpcSessions: make(map[string]*httpcSession)}, nil
 }
 
-// ListenWS (server role) accepts WebSocket connections (plain HTTP upgrade; a CDN
-// in front terminates TLS and forwards the WebSocket to us). Anything that is not a
-// well-formed upgrade for wsPath gets a plausible 404 and is dropped, so the port
-// looks like an ordinary web endpoint. wsPath is the operator's ws_path, which both
-// ends carry ("" means "/", matching config.applyDefaults).
+// ListenWS (server role) accepts WebSocket connections (plain HTTP upgrade; a CDN in front terminates
+// TLS). Anything that is not a well-formed upgrade for wsPath gets a plausible 404 and is dropped, so
+// the port looks like an ordinary web endpoint. wsPath is the operator's ws_path ("" means "/").
 func ListenWS(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher, wsPath string) (*TCP, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
@@ -889,13 +778,10 @@ func ListenWS(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs,
 		preAuth: make(chan struct{}, maxPreAuthConns)}, nil
 }
 
-// ListenTCP (server role) binds each addr in listenAddrs and accepts connections on all of them.
-// A single-IP server passes one addr; a server under a destination rotation pool passes each of its
-// selected IPs, so it accepts on exactly the IPs the client dials across (and each accepted TCP
-// connection's local address — hence its reply source — is the IP that client dialed). When cover is
-// set it builds a REALITY responder that authenticates our clients by a token in their ClientHello and
-// transparently proxies every other connection (probes, scanners, the censor) to the real coverSNI:443,
-// so active probing sees that site's genuine certificate.
+// ListenTCP (server role) binds each addr in listenAddrs and accepts on all of them, so a server under a
+// destination rotation pool accepts on exactly the IPs the client dials across. With cover set it builds
+// a REALITY responder that authenticates our clients by a token in their ClientHello and transparently
+// proxies every other connection to the real coverSNI:443, so active probing sees that site's cert.
 func ListenTCP(listenAddrs []string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string) (*TCP, error) {
 	if len(listenAddrs) == 0 {
 		return nil, errors.New("tcp listen: no listen address")
@@ -933,22 +819,17 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, keepalive time.Duration, o
 // Run blocks until Close is called. The TUN reader runs for the whole lifetime;
 // the connection side either accepts (server) or dials-with-retry (client).
 func (b *TCP) Run() error {
-	// The TUN reader's death must REACH here. It used to be a fire-and-forget `go b.tunLoop()`: a TUN
-	// read error killed the reader and nothing noticed, while keepaliveLoop went on pinging and the
-	// pongs kept b.lastRx advancing — so the panel read GREEN with not one byte able to move, which is
-	// the worst failure this carrier can have. udp/raw/flux all hand this error back from Run, main
-	// logs it and exits, and systemd restarts the process onto a fresh TUN; tcp/ws/http silently did
-	// not. Buffered so neither sender can block once the other has won.
+	// The TUN reader's death must REACH here. Fire-and-forget lets keepaliveLoop go on pinging and the
+	// pongs go on advancing b.lastRx while not one byte can move — the panel reads GREEN on a dead
+	// tunnel. Buffered so neither sender can block once the other has won.
 	errc := make(chan error, 2)
 	go func() { errc <- b.tunLoop() }()
 	if b.isClient {
 		go b.keepaliveLoop()
 		go b.diagLoop() // low-rate goroutine-count heartbeat so a slow session leak is visible in the log
-		// Do NOT seed the heartbeat: lastRx stays 0 until a GENUINE inbound frame arrives (a handshake
-		// response or a keepalive/data frame). That lets the node distinguish "connecting" (hb still 0,
-		// brief) from "connected" (hb advancing), so a freshly (re)built tunnel reads YELLOW — not green —
-		// until the peer actually answers, and a carrier that never connects ages to red instead of
-		// looking alive from a startup seed.
+		// Do NOT seed the heartbeat: lastRx stays 0 until a GENUINE inbound frame arrives, so the node can
+		// tell "connecting" (hb still 0) from "connected" (hb advancing), and a carrier that never comes up
+		// ages to red instead of looking alive from a startup seed.
 		dw := int64(b.idle.Seconds()) // b.idle IS the resolved stream dead-window (idle backstop / dead_after)
 		if b.st != nil {
 			b.st.setDW(dw)                               // publish it so the reader ages hb against it...
@@ -1091,13 +972,10 @@ func (b *TCP) acceptLoopOn(ln net.Listener) {
 	}
 }
 
-// handleServerConn serves one accepted connection. Whenever crypto is on (obfs
-// or plain TCP) the connection is authenticated BEFORE it is published as live:
-// the first frame must AEAD-open and pass anti-replay, so an unauthenticated
-// peer (a probe, a port scan, `nc`) can no longer evict the real client by
-// simply connecting. In obfs mode the salt is also withheld until then, so the
-// server stays invisible to an active probe. Only clear mode (no crypto) — which
-// offers no authentication by definition — publishes at once.
+// handleServerConn serves one accepted connection. Whenever crypto is on, the connection is
+// authenticated BEFORE it is published as live: the first frame must AEAD-open and pass anti-replay, so
+// an unauthenticated peer cannot evict the real client by simply connecting. In obfs mode the salt is
+// withheld until then too. Only clear mode — no authentication by definition — publishes at once.
 func (b *TCP) handleServerConn(conn net.Conn) {
 	// Take a pre-auth permit; shed load if too many handshakes are already in
 	// flight. The permit is released the moment the connection becomes live
@@ -1181,13 +1059,10 @@ func (b *TCP) handleServerConn(conn net.Conn) {
 	b.serve(cf)
 }
 
-// publishServerConn (server) registers a freshly-authenticated connection. It does NOT evict
-// the previous one: a warm-standby client keeps a second live carrier up, so a new connect must
-// not tear down the active tunnel. The new conn becomes the downstream target only if there is
-// no downstream yet (CompareAndSwap on nil) — so a single connection behaves exactly as before,
-// while a warm standby never steals downstream just by connecting. From here the downstream
-// target follows the connection the client last sent a DATA frame on (see handleFrame). The
-// conn is tracked in authConns and, when over maxAuthConns, the oldest idle one is reaped.
+// publishServerConn (server) registers a freshly-authenticated connection. It does NOT evict the
+// previous one — a warm-standby client keeps a second live carrier, so a new connect must not tear down
+// the active tunnel. It becomes the downstream target only when there is none yet (CAS on nil); from
+// there downstream follows the connection the client last sent DATA on (see handleFrame).
 func (b *TCP) publishServerConn(cf *connFramer) {
 	b.cur.CompareAndSwap(nil, cf)
 	b.authMu.Lock()
@@ -1224,22 +1099,10 @@ func (b *TCP) publishServerConn(cf *connFramer) {
 	}
 }
 
-// reelectDownstream (server) re-points the downstream at another AUTHENTICATED connection once the
-// live one has died and been dropped from authConns. Without it b.cur simply stayed nil: publishServerConn
-// only claims an EMPTY downstream (so a second connection never steals it just by connecting) and
-// handleFrame is the only other writer, deliberately moving it on a DATA frame and never on ping/pong.
-// So with a warm standby — or a parked destination-rotation carrier — up, every server->client packet
-// was dropped until the client happened to send DATA. Inside the tunnel a TCP flow recovers in
-// milliseconds off its own ACKs, but a one-way download (UDP video, a large file the client is only
-// receiving) stayed dark for as long as the client had nothing to send.
-//
-// CAS on nil, so a connection handleFrame elected meanwhile is never displaced — the client's own
-// choice always wins, and the promotion still flips the server within one frame. The newest survivor
-// is preferred: that is the warm standby the client is about to promote. A pick the client has already
-// abandoned costs one failed write, whose onConnErr runs this again, so a stale pick self-corrects.
-//
-// The heartbeat invariant is untouched: b.lastRx is client-only (Run wires the heartbeat inside
-// `if b.isClient`), so electing a downstream on the server cannot stamp a tunnel liveness mark.
+// reelectDownstream (server) re-points the downstream at another AUTHENTICATED connection once the live
+// one has died. publishServerConn claims only an EMPTY downstream and handleFrame moves it only on a
+// DATA frame, so without this a one-way flow the client is merely receiving stays dark. CAS on nil so
+// the client's own choice always wins; a stale pick self-corrects through the failed write's onConnErr.
 func (b *TCP) reelectDownstream() {
 	b.authMu.Lock()
 	var pick *connFramer
@@ -1285,20 +1148,10 @@ func (b *TCP) noteECHSelfHeal(host string, ech []byte) {
 	}
 }
 
-// tlsToEdge performs the client-side TLS handshake to the CDN edge over an
-// already-dialed conn, using uTLS with a Chrome fingerprint so the ClientHello is
-// indistinguishable from a real browser's (Go's crypto/tls has a distinctive JA3
-// a censor can block even under ECH). ServerName=wsHost is the SNI; when wsECH is
-// set that SNI is encrypted (ECH) — uTLS carries the real ECH inside the
-// Chrome-shaped hello, so we keep both the fingerprint and the hidden SNI. If the
-// edge rejects a stale ECH config it returns a fresh RetryConfigList — we redial
-// once and retry with it, so Cloudflare's periodic ECH-key rotation self-heals
-// without a rebuild. On any failure the passed (or redialed) conn is closed.
-//
-// budget bounds EVERY leg this owns — each handshake attempt and the self-heal redial in between. It
-// is the caller's connect budget (handshakeTimeout on the live dial, probe_timeout_secs on a probe),
-// because a probe that walks the ECH self-heal used to cost a fixed 10s dial plus two fixed 10s
-// handshakes no matter what the operator asked for.
+// tlsToEdge performs the client-side TLS handshake to the CDN edge over an already-dialed conn, using
+// uTLS with a Chrome fingerprint so the ClientHello is indistinguishable from a real browser's.
+// ServerName=wsHost is the SNI, encrypted when wsECH is set; a stale-ECH rejection carries a fresh
+// RetryConfigList, so we redial once with it. budget bounds every leg, and a failed conn is closed.
 func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live bool, budget time.Duration) (net.Conn, error) {
 	var err error
 	healed := false // set once we redial with a fresh RetryConfigList
@@ -1323,12 +1176,9 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 			if conn, err = b.dialer(budget).Dial("tcp", dialAddr); err != nil {
 				return nil, err
 			}
-			// A FRESH 4-tuple needs its own decoys. establishWS injected on the conn it dialled, and we
-			// closed that one five lines up — the connection this function goes on to hand back is a
-			// different one, and it was getting none at all. handshakeAndPrime's comment claims "each
-			// connection is still covered exactly once", which this path made false. The rule is simply:
-			// every TCP connection this carrier dials gets one pass, on the bare 4-tuple, before any of
-			// our own bytes flow.
+			// A FRESH 4-tuple needs its own decoys: establishWS injected on the conn we closed five lines up, so
+			// without this the connection handed back would get none. Every TCP connection this carrier dials
+			// gets one pass, on the bare 4-tuple, before any of our own bytes flow.
 			b.sendTCPFakes(conn)
 			continue
 		}
@@ -1337,20 +1187,10 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 	return nil, err
 }
 
-// uEdgeHandshake performs one client-side uTLS handshake to a CDN edge over conn, presenting a
-// current-Chrome ClientHello so our JA3 matches a real browser's — Go's crypto/tls does not, a gap
-// ECH cannot close (ECH hides the SNI, not the fingerprint). ServerName=host is the SNI; when ech
-// is set uTLS injects the real Encrypted ClientHello in place of Chrome's GREASE-ECH, keeping BOTH
-// the fingerprint and the hidden SNI. A stale ECH key surfaces as a *utls.ECHRejectionError with a
-// fresh RetryConfigList for the caller's self-heal. Shared by the ws (tlsToEdge) and HTTP carriers.
-//
-// budget bounds the handshake, and it is a PARAMETER because this function is the only thing that can
-// bound it: it arms the socket deadline itself, so anything the caller armed first is overwritten and
-// lost. That is how probe_timeout_secs stayed inert on the TLS leg after #216 — the httpc probe set
-// `SetDeadline(now+budget)` immediately before calling in here, and this arm (a fixed handshakeTimeout,
-// which ApplyTuning does not touch) replaced it. An operator asking for a 5s probe still paid 10s of
-// TLS on every retest and every differential-probe arm, on the transports where a probe is a full
-// establish.
+// uEdgeHandshake performs one client-side uTLS handshake to a CDN edge, presenting a current-Chrome
+// ClientHello so our JA3 matches a real browser's (ECH hides the SNI, not the fingerprint). With ech set
+// uTLS carries the real Encrypted ClientHello instead of Chrome's GREASE-ECH; a stale key comes back as
+// *utls.ECHRejectionError with fresh RetryConfigs. budget is a parameter — this arms the socket deadline.
 func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFingerprint bool, budget time.Duration) (net.Conn, error) {
 	cfg := &utls.Config{ServerName: host}
 	var echPub []string
@@ -1362,15 +1202,10 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFin
 		cfg.EncryptedClientHelloConfigList = ech
 		echPub = echPublicNames(ech) // the SNIs the edge may present a cert for when it REJECTS our ECH
 		if len(echPub) > 0 {
-			// G1 self-heal on ECH REJECTION-with-cert-mismatch. When our ECH key is stale, the edge
-			// completes the OUTER handshake against the ECH public-name cert (e.g. cloudflare-ech.com),
-			// not `host`. uTLS's default reject path verifies THAT cert against `host`, fails with
-			// "certificate is valid for cloudflare-ech.com", and returns BEFORE it can surface the fresh
-			// RetryConfigList the rejection carries — so the core never sees the fresh key and stalls
-			// until a panel rebuild. We ACCEPT the outer cert at this hook so uTLS proceeds, stores the
-			// outer peer certs, and returns *utls.ECHRejectionError with the fresh key. We can't verify
-			// here — uTLS calls this hook BEFORE it populates ConnectionState.PeerCertificates — so the
-			// real authentication happens just below, once Handshake returns and the certs are readable.
+			// Self-heal on an ECH REJECTION with a cert mismatch. When our key is stale the edge completes the
+			// OUTER handshake against the ECH public-name cert, and uTLS's default reject path fails hostname
+			// verification before it can surface the fresh RetryConfigList. Accept the outer cert at this hook so
+			// uTLS proceeds and returns the key; the real authentication happens below, once the certs are readable.
 			cfg.EncryptedClientHelloRejectionVerify = func(utls.ConnectionState) error {
 				echRejected = true
 				return nil
@@ -1380,12 +1215,10 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFin
 	var uc *utls.UConn
 	var err error
 	if goFingerprint {
-		// grpc mode. A gRPC call is not something a browser can make, so a Chrome ClientHello under
-		// Content-Type: application/grpc + TE: trailers is a combination that exists nowhere — the
-		// browser identity is the anomaly here, not the camouflage. Real gRPC traffic to a CDN comes
-		// from gRPC clients, and grpc-go rides Go's own crypto/tls, so Go's ClientHello is the
-		// fingerprint that MATCHES the grpc-go User-Agent the request carries (see grpcUA). Changing
-		// only one of the two would just relocate the mismatch.
+		// grpc mode. A browser cannot make a gRPC call, so a Chrome ClientHello under
+		// Content-Type: application/grpc + TE: trailers is a combination that exists nowhere. Real gRPC
+		// clients ride Go's crypto/tls, so Go's ClientHello is the fingerprint that MATCHES the grpc-go
+		// User-Agent the request carries (see grpcUA); changing only one would just relocate the mismatch.
 		cfg.NextProtos = alpn // HelloGolang takes ALPN from the config, not from a spec
 		uc = utls.UClient(conn, cfg, utls.HelloGolang)
 	} else {
@@ -1400,12 +1233,10 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFin
 	}
 	conn.SetDeadline(time.Now().Add(budget))
 	if err = uc.Handshake(); err != nil {
-		// On an ECH rejection uTLS hands back a fresh RetryConfigList (for the in-band self-heal) after
-		// completing the outer handshake against the ECH public-name cert — which we accepted unverified
-		// at the hook above. Authenticate that outer cert NOW, against the public name and chaining to
-		// system roots, before the caller redials with the fresh key: a forged/unauthenticated reject is
-		// downgraded to a plain error so the self-heal never adopts attacker-supplied ECH configs (which
-		// would let a MITM decrypt the redial's inner ClientHello and unmask the real SNI).
+		// On an ECH rejection uTLS hands back a fresh RetryConfigList after completing the outer handshake
+		// against the public-name cert, which the hook above accepted unverified. Authenticate that cert NOW,
+		// before the caller redials, so the self-heal never adopts attacker-supplied ECH configs — those would
+		// let a MITM decrypt the redial's inner ClientHello and unmask the real SNI.
 		var echErr *utls.ECHRejectionError
 		if len(echPub) > 0 && errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
 			if verr := verifyECHPublicName(uc.ConnectionState().PeerCertificates, echPub); verr != nil {
@@ -1414,13 +1245,9 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFin
 		}
 		return nil, err
 	}
-	// A SUCCESSFUL handshake that went through the blanket-accept hook means uTLS skipped certificate
-	// verification and then let us through anyway — we would be holding a TLS session nobody
-	// authenticated. That cannot happen with the uTLS we build against: it refuses to offer anything
-	// below TLS 1.3 once an ECH config list is set (so there is no downgrade that reaches the hook and
-	// then completes), and a rejected ECH always ends in alertECHRequired + *ECHRejectionError before
-	// the handshake is marked complete. But nothing in OUR code made that true, and a uTLS bump could
-	// take it away silently — the hook is a hole held shut by someone else's invariant. Fail closed.
+	// A SUCCESSFUL handshake that went through the blanket-accept hook would mean uTLS skipped certificate
+	// verification and let us through anyway. The uTLS we build against cannot do that, but nothing in OUR
+	// code makes it true and a version bump could take it away silently. Fail closed.
 	if echRejected {
 		uc.Close()
 		return nil, errors.New("ech-reject: handshake completed with an unverified outer certificate")
@@ -1433,21 +1260,14 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFin
 // other-versioned config in the list is skipped. Kept in sync with utls' extensionEncryptedClientHello.
 const echConfigVersion uint16 = 0xfe0d
 
-// echPublicNames parses an ECHConfigList and returns the public_name of EVERY usable config — the
-// SNIs the edge may present a certificate for when it REJECTS our (stale) ECH. Empty on any parse
-// failure (the reject-verify hook is then left unset, falling back to uTLS' default behaviour). The
-// wire layout mirrors utls' parseECHConfig exactly: ECHConfigList = u16-len-prefixed configs; each
-// config = u16 version + u16-len-prefixed contents; contents = config_id(u8) kem_id(u16)
-// public_key(u16) suites(u16) max_name_len(u8) public_name(u8) ... .
+// echPublicNames parses an ECHConfigList and returns the public_name of EVERY usable config — the SNIs
+// the edge may present a certificate for when it REJECTS our stale ECH. Empty on any parse failure. ALL
+// of them, not just the first: uTLS picks the first config it can actually USE, and that support set
+// lives in an internal package we cannot import. The layout mirrors utls' parseECHConfig:
 //
-// ALL of them, not just the first: uTLS picks the first config it can actually USE (pickECHConfig
-// also requires a supported KEM/AEAD/KDF, a syntactically valid DNS name and no mandatory extension),
-// and those support sets live in an internal package we cannot import. Returning the first
-// version-matching name instead meant that on a multi-config list where uTLS skipped an earlier
-// config, we verified the reject against a name the edge never presented and refused a legitimate
-// self-heal. Accepting any name from the list is not a weakening: the list is OUR configured ECH
-// record, so every name in it is one we already trust to belong to the ECH provider — and the
-// certificate still has to chain to a public root and be valid for that name.
+//	ECHConfigList = u16-len-prefixed configs
+//	config        = u16 version + u16-len-prefixed contents
+//	contents      = config_id(u8) kem_id(u16) public_key(u16) suites(u16) max_name_len(u8) public_name(u8) …
 func echPublicNames(list []byte) []string {
 	s := cryptobyte.String(list)
 	var configs cryptobyte.String
@@ -1518,14 +1338,10 @@ func verifyOuterCert(certs []*x509.Certificate, publicName string, roots *x509.C
 	return err
 }
 
-// chromeSpec returns a freshly built current-Chrome ClientHelloSpec. When alpn is non-nil it
-// overrides Chrome's ALPN VALUES (Chrome offers [h2, http/1.1]) — we force ["http/1.1"] for the
-// WebSocket/POST-ladder carriers so the edge does not pick h2, and pass nil for the grpc carrier to
-// keep Chrome's h2. Only the ALPN values change, not the extension SET, so the JA3 still matches
-// Chrome (the ApplicationSettings extension keeps its authentic h2; only ALPN drives negotiation).
-// UTLSIdToSpec builds a fresh spec each call, so mutating its ALPN cannot disturb a shared parrot;
-// the spec keeps Chrome's GREASE-ECH placeholder, which uTLS replaces with real ECH when a config
-// carries an ECHConfigList.
+// chromeSpec returns a freshly built current-Chrome ClientHelloSpec. A non-nil alpn overrides Chrome's
+// ALPN VALUES — ["http/1.1"] for the WebSocket/POST-ladder carriers so the edge does not pick h2, nil for
+// grpc to keep Chrome's h2. Only the values change, not the extension set, so the JA3 still matches
+// Chrome. UTLSIdToSpec builds a fresh spec per call, so mutating its ALPN disturbs no shared parrot.
 func chromeSpec(alpn []string) (utls.ClientHelloSpec, error) {
 	spec, err := utls.UTLSIdToSpec(utls.HelloChrome_Auto)
 	if err != nil {
@@ -1541,13 +1357,10 @@ func chromeSpec(alpn []string) (utls.ClientHelloSpec, error) {
 	return spec, nil
 }
 
-// establishWS opens one WebSocket connection: it picks the current pool edge (or the
-// single configured edge), dials it, does the wss TLS+ECH, and performs the upgrade.
-// In pool mode ANY failure is handed to attributeFailure, which runs a differential probe
-// to decide by TRUTH — not a guess — whether the IP, the SNI, or neither is at fault, and
-// pulls the guilty axis into the health FSM. A successful connect clears both axes.
-// attribute is FALSE on the warm-standby build path — see establishHTTPC for why the differential
-// probe must not run there (it blocks the standby-build goroutine and silently freezes rotation).
+// establishWS opens one WebSocket connection: it picks the current pool edge (or the single configured
+// one), dials it, does the wss TLS+ECH, and performs the upgrade. In pool mode any failure goes to
+// attributeFailure, which probes to decide whether the IP, the SNI or neither is at fault; a successful
+// connect clears both axes. attribute is FALSE on the warm-standby build — see establishHTTPC for why.
 func (b *TCP) establishWS(attribute bool) (net.Conn, string, string, error) {
 	dialAddr, host, ech, path := b.addr, b.wsHost, b.wsECH, b.wsPath
 	if b.pool != nil {
@@ -1571,9 +1384,8 @@ func (b *TCP) establishWS(attribute bool) (net.Conn, string, string, error) {
 		attrib()
 		return nil, dialAddr, "", err
 	}
-	// Decoys go out on the bare 4-tuple, BEFORE the wss handshake and the WebSocket upgrade below.
-	// They used to be sent from handshakeAndPrime, which runs after both, so on this carrier the DPI
-	// had already seen the ClientHello and the Upgrade before the first decoy arrived.
+	// Decoys go out on the bare 4-tuple, BEFORE the wss handshake and the WebSocket upgrade below, so
+	// the DPI has not yet seen the ClientHello or the Upgrade when the first decoy arrives.
 	b.sendTCPFakes(conn)
 	if b.wsTLS {
 		tc, terr := b.tlsToEdge(conn, dialAddr, host, ech, true, handshakeTimeout) // live carrier: a self-heal is panel-worthy
@@ -1606,44 +1418,28 @@ const (
 	verdictSNIGuilty                     // a healthy IP proved the SNI the culprit
 )
 
-// probeEdgeFull is a higher-fidelity reachability probe than probeEdge: it completes the FULL
-// client control path to (ip, sni) — TCP + (wss TLS+ECH) + WebSocket UPGRADE — then closes, with
-// no data and no pool-state changes. Because a LIVE success requires the upgrade (not just TLS),
-// using this for retests/attribution stops a broken ws/origin path (TLS completes, upgrade 502s
-// — the steady state of a dead origin behind a CDN that terminates TLS for anyone) from being
-// mislabeled "reachable" the way a TLS-only probe would, and from falsely healing a suspect.
+// probeEdgeFull completes the FULL client control path to (ip, sni) — TCP + wss TLS/ECH + the WebSocket
+// UPGRADE — then closes, with no data and no pool-state changes. A LIVE success requires the upgrade, so
+// a TLS-only probe would read a broken ws/origin path behind a CDN as "reachable" and falsely heal it.
 func (b *TCP) probeEdgeFull(ip string, sni wsSNIEntry) bool {
 	if b.httpc {
-		// The SAME reasoning as the ws upgrade check applies to http/grpc — even more so, since a CDN
-		// terminates TLS for ANY of its anycast IPs, so a TLS-only probe (probeEdge) reports "reachable"
-		// for a blocked edge whose real http/grpc path to the origin is dead or 502s. Using TLS-only
-		// here would falsely HEAL a dead httpc edge on retest AND defeat the manual-pin auto-release
-		// (attribution would read a genuine block as transient — the reproduce step "succeeds" on TLS —
-		// so it never burns and the pin hangs the whole window). So run a REAL establish: open an
-		// http/grpc session (which validates the origin's 200, not just the TLS front) and tear it
-		// straight down. dialHTTPCOnce cleans up everything it allocated on both success and error.
+		// The same reasoning applies to http/grpc, more so: a CDN terminates TLS for ANY of its anycast IPs,
+		// so a TLS-only probe reports "reachable" for an edge whose path to the origin is dead or 502s — it
+		// would falsely heal it on retest and defeat the manual-pin auto-release. Run a REAL establish and
+		// tear it straight down; dialHTTPCOnce cleans up everything it allocated either way.
 		host := sni.host
 		if host == "" {
 			host = ip
 		}
-		// probeTimeout is the operator's edge-probe budget, and the httpc branch used to ignore it
-		// entirely: a hardcoded 10s dial, a TLS handshake bounded only by a fixed 10s of its own, and a
-		// fixed 30s header wait meant a probe could run ~50s where probe_timeout_secs said 5. Every
-		// retest and every differential-probe arm runs through here, so the knob decided nothing about
-		// how fast a blocked http/grpc edge is judged. The budget now reaches all three legs — the TLS
-		// one only because uEdgeHandshake TAKES it: that function arms the socket deadline itself, so
-		// arming one before calling it (which is what #216 did) is overwritten and lost.
+		// probeTimeout is the operator's edge-probe budget, and it has to reach all three legs — the dial, the
+		// TLS handshake and the header wait. The TLS one only because uEdgeHandshake TAKES it: that function
+		// arms the socket deadline itself, so arming one before calling it is overwritten and lost.
 		conn, err := b.dialHTTPCOnce(ip, host, sni.ech, sni.path, probeTimeout)
 		if err != nil {
-			// Retry ONCE with the fresh key on a stale-ECH rejection, exactly as the live path
-			// (establishHTTPC) and the ws probe (tlsToEdge, which has this built in) already do.
-			// Without it a rotated Cloudflare ECH key made every retest of a suspect/dead httpc entry
-			// fail forever: it walked the backoff to dead and could never come back, so the self-heal
-			// FSM — whose whole purpose is that a TEMPORARY block recovers without a rebuild — was
-			// dead on this transport. Multi-domain pools were worst: only the SNI the LIVE dial happens
-			// to use ever got its key refreshed, leaving every other domain permanently stale. It also
-			// poisoned attribution, since differentialProbe's reproduce step and both isolation arms
-			// all failed for a reason that had nothing to do with the edge.
+			// Retry ONCE with the fresh key on a stale-ECH rejection, exactly as the live path and the ws probe
+			// already do. Without it a rotated ECH key makes every retest of a suspect httpc entry fail forever —
+			// it walks the backoff to dead and can never come back — and poisons attribution too, since the
+			// reproduce step and both isolation arms then fail for a reason unrelated to the edge.
 			var echErr *utls.ECHRejectionError
 			if !errors.As(err, &echErr) || len(echErr.RetryConfigList) == 0 {
 				return false
@@ -1682,22 +1478,10 @@ func (b *TCP) probeEdgeFull(ip string, sni wsSNIEntry) bool {
 	return werr == nil
 }
 
-// differentialProbe attributes a failed (ip, sni) connect to a specific axis. It is
-// REPRODUCE-FIRST and deterministic (no race), because the old racing version blamed a
-// random axis whenever every edge was actually reachable — a transient blip could sideline
-// a perfectly good IP purely on goroutine scheduling. The steps:
-//
-//  1. Re-probe the EXACT failing combo. If it works now, the failure was a transient blip
-//     (or an origin/ws-upgrade issue that TLS-probing can't see) -> blame nothing.
-//  2. The combo is confirmed down. Change ONE variable against a KNOWN-HEALTHY partner:
-//     - healthy IP + failSNI still works  -> the SNI is fine, so the IP is guilty
-//     - healthy IP + failSNI also fails    -> the SNI itself is blocked -> SNI guilty
-//     (and symmetrically via a healthy SNI when no alternate IP exists).
-//  3. If both isolated probes fail though both partners are healthy, the IP and SNI are both
-//     down: pin the IP (the coarser axis); the SNI heals on its own retest.
-//
-// With no healthy alternative on either axis (a single edge) there is nowhere to move and
-// nothing to compare, so the verdict is UNKNOWN — blame nothing.
+// differentialProbe attributes a failed (ip, sni) connect to a specific axis. It REPRODUCES first (a
+// combo that works on retry was a transient blip, so nothing is blamed), then changes ONE variable
+// against a known-healthy partner: the axis that still works convicts the other. Both failing while both
+// partners are healthy pins the IP, once a known-good combo has cleared our own uplink; else UNKNOWN.
 func (b *TCP) differentialProbe(failIP string, failSNI wsSNIEntry) probeVerdict {
 	probe := b.probeEdgeFull // full TLS+ws-upgrade path, so a dead origin isn't read as "reachable"
 	if b.probeFn != nil {
@@ -1827,12 +1611,9 @@ func (b *TCP) retestLoop() {
 				// so the live core stays ahead of Cloudflare's key rotation instead of failing first.
 				log.Printf("core/ws: live ECH key updated for %v (no rebuild)", hosts)
 			}
-			// Probe OFF the tick. Each due entry costs a full TLS + ws-upgrade round trip, and they ran
-			// inline and serially — so after an outage left several edges suspect, the next tick (and
-			// with it readSelectCmd, the operator's "pin this edge") waited behind the whole batch. The
-			// pin is the control the operator reaches for exactly when the pool is in that state.
-			// One batch at a time: probing is a background heal, so skipping a tick while a batch is
-			// still running is correct — it must never pile up concurrent probes on a struggling edge.
+			// Probe OFF the tick. Each due entry costs a full TLS + ws-upgrade round trip, and running them
+			// inline made the next tick — and with it the operator's "pin this edge" — wait behind the whole
+			// batch. One batch at a time, so probes never pile up on a struggling edge.
 			if due := b.pool.dueRetests(); len(due) > 0 && b.probing.CompareAndSwap(false, true) {
 				go func(due []retestSpec) {
 					defer b.probing.Store(false)
@@ -1851,12 +1632,9 @@ func (b *TCP) retestLoop() {
 }
 
 // readECHCmdSingle consumes a pending live ECH-key push for a SINGLE (non-pool) ws/http edge and
-// hot-swaps b.wsECH so the NEXT dial presents the fresh key — the single-edge counterpart to the pool's
-// readECHCmd (a pool keys off p.snis and has no b.st; a single edge keys off b.wsECH and has no pool).
-// The node writes the SAME <status>.echcmd sidecar for both. No-op unless this is a single ws edge with
-// a status file wired, the file exists, and it carries a genuinely different key for our host. Called
-// only from dialLoop (the sole writer of b.wsECH, alongside the also-dialLoop-driven noteECHSelfHeal),
-// so b.wsECH needs no lock.
+// hot-swaps b.wsECH so the NEXT dial presents it — the single-edge counterpart to the pool's readECHCmd,
+// off the same <status>.echcmd sidecar the node writes for both. Called only from dialLoop, the sole
+// writer of b.wsECH, so no lock is needed.
 func (b *TCP) readECHCmdSingle() bool {
 	if !b.ws || b.wsHost == "" || b.st == nil {
 		return false // pools (b.st nil) and non-ws carriers never carry a single-edge ECH key here
@@ -1886,11 +1664,9 @@ func (b *TCP) readECHCmdSingle() bool {
 }
 
 const (
-	// reconnectBase / reconnectMax bound the client re-dial backoff. A dead/blocked destination must NOT
-	// be re-probed on a fixed 1s clock — a periodic SYN/handshake train to a filtered IP is itself a
-	// tunnel signature and positively confirms the endpoint to a censor. The delay doubles from
-	// reconnectBase toward reconnectMax (jittered) while dials keep failing, and resets to base once a
-	// connection is established.
+	// reconnectBase / reconnectMax bound the client re-dial backoff. A periodic SYN/handshake train to a
+	// filtered IP is itself a tunnel signature that confirms the endpoint to a censor, so the delay
+	// doubles (jittered) while dials keep failing and resets to base once a connection is established.
 	reconnectBase = 1 * time.Second
 	reconnectMax  = 60 * time.Second
 )
@@ -1923,22 +1699,10 @@ type warmDial struct {
 	dstMoved bool
 }
 
-// buildWarm dials and handshakes the destination pool's CURRENT endpoint (the rotation timer has
-// already advanced it) and parks the result for dialLoop, WITHOUT touching the live connection. It
-// returns false if the new endpoint would not come up — the caller then keeps the healthy connection
-// rather than trading it for a dead one, which is the whole point of make-before-break.
-//
-// Failures are attributed exactly like a primary dial (dialCarrier(true) + burn on a failed
-// handshake), so a rotation onto a blocked IP still burns it.
-// dstPrev is the destination the LIVE connection is on, and it is restored on every failure path
-// below. burn() runs fail(), which burns the candidate (right) and then advances the cursor again and
-// publishes that as Active (wrong): the tunnel deliberately never left dstPrev, so without this the
-// pool named an endpoint it had never been on — the panel drew the wrong IP as live, and the next
-// beat "rotated" onto the endpoint the tunnel was already using. The burn itself is kept; only the
-// cursor is corrected. Empty (and nil-safe) when there is no destination pool, i.e. a source-only beat.
-//
-// It lives HERE rather than at the call site so it cannot be forgotten by one of the three ways this
-// function returns false, and so a test can drive the real thing.
+// buildWarm dials and handshakes the destination pool's CURRENT endpoint and parks the result for
+// dialLoop, WITHOUT touching the live connection. It returns false when that endpoint will not come up,
+// so the caller keeps the healthy one. A failure is attributed like a primary dial (it still burns) and
+// the cursor goes back to dstPrev, so the pool never publishes an endpoint the tunnel never left for.
 func (b *TCP) buildWarm(burn func(), srcAddr string, dstMoved bool, dstPrev string) bool {
 	if b.closed.Load() {
 		return false
@@ -1956,11 +1720,9 @@ func (b *TCP) buildWarm(burn func(), srcAddr string, dstMoved bool, dstPrev stri
 		b.pp.keepCursorOn(dstPrev)
 		return false
 	}
-	// Anything already parked belongs to a dialLoop iteration that never adopted it — its connection
-	// died while that build was in flight. Adopting such a conn later logs a connect on a carrier that
-	// has sat idle for a whole connection and then dies at once, so close it and park the fresh one.
-	// Failing here instead (the first version) wedged rotation for as long as the stale entry sat in
-	// the channel: every later beat dialled, handshaked and threw the result away.
+	// Anything already parked belongs to a dialLoop iteration that never adopted it: its connection died
+	// while that build was in flight. Adopting it later logs a connect on a carrier that then dies at
+	// once, and failing here instead wedges rotation — so close the stale one and park the fresh one.
 	if stale := b.takeWarm(); stale != nil {
 		stale.conn.Close()
 	}
@@ -1998,16 +1760,10 @@ func (b *TCP) dialLoop() {
 			w.conn.Close() // built just as Close fired — do not leak the fd
 		}
 	}()
-	// direct-tcp peer/source pools: burnAdvance burns+advances the destination and, once the dest pool
-	// has cycled through every endpoint against the current source, walks the source too (same policy
-	// as the datagram carriers' rotationController). succeedBoth clears transient burns after a healthy
-	// session.
-	// burnDest is burnAdvance plus a refresh of the active label: the carrier is gone, so the endpoint the
-	// pool advanced onto IS where the tunnel is heading. announce=true also writes a "peer-rotate" down —
-	// used on the dial/handshake-failure paths, where this IS the only event for the drop. announce=false
-	// burns SILENTLY (active only, no event): the post-serve death path already emits a single precise
-	// classified down() for the drop below, so a "peer-rotate" down here too double-counted every short
-	// death (two 'down's, one 'up' per drop). nil-safe (ws-pool/server).
+	// burnDest burns+advances the destination and refreshes the active label: the carrier is gone, so the
+	// endpoint the pool advanced onto IS where the tunnel is heading. announce=true also writes a
+	// "peer-rotate" down, for the dial/handshake-failure paths where this is the drop's only event;
+	// announce=false burns silently, because the post-serve path emits its own classified down().
 	burnDest := func(announce bool) {
 		if addr, burned := b.burnAdvance(true); burned { // the carrier is gone: this IS a failover
 			b.st.setActive(b.stTag + " · " + addr)
@@ -2046,13 +1802,10 @@ func (b *TCP) dialLoop() {
 		// iteration costs neither a connect nor a handshake — that is what removes the rotation gap.
 		w := b.takeWarm()
 		if w != nil && b.directPinInForce() {
-			// A parked rotation carrier resolved its endpoint at BUILD time (buildWarm -> dialCarrier ->
-			// dialTarget -> pp.current()), i.e. before this pin existed, and the adoption path below
-			// reuses that connection verbatim without re-consulting the pool. Adopting it under a pin
-			// published the ROTATION's endpoint as active, logged a peer-rotate naming it, and then
-			// released the pin as if it had landed: the panel reported the operator's jump as done while
-			// the tunnel sat on a different IP, with nothing in the log naming the pin. Drop it and dial
-			// fresh — dialCarrier re-reads current(), which forces the pinned endpoint.
+			// A parked rotation carrier resolved its endpoint at BUILD time, before this pin existed, and the
+			// adoption path below reuses that connection verbatim. Adopting it under a pin would publish the
+			// rotation's endpoint as active and release the pin as if it had landed, while the tunnel sat on a
+			// different IP. Drop it and dial fresh — dialCarrier re-reads current(), which forces the pin.
 			log.Printf("core/tcp: dropping the pre-built rotation carrier — an operator pin is pending")
 			w.conn.Close()
 			w = nil
@@ -2062,36 +1815,18 @@ func (b *TCP) dialLoop() {
 		var cf *connFramer
 		if w != nil {
 			conn, label, combo, cf = w.conn, w.label, w.combo, w.cf
-			// A timed rotation only becomes REAL here, when the warm carrier goes live — so this is
-			// where it is published, with the endpoint the connection is genuinely on (for a direct
-			// pool `label` is dialCarrier's target, i.e. pp.current() at build time). event() rather
-			// than down(): the changeover is seamless, so arming a "reconnect" would make every timed
-			// rotation read in the panel as a drop plus a self-heal. Mirrors rotatePeerUDP.
-			// Only when the DESTINATION really advanced. A beat fires when either pool moves, so gating
-			// this on `b.pp != nil` alone announced a destination rotation — naming the endpoint the
-			// tunnel is still on — every time the SOURCE rotated and the destination did not (the common
-			// steady state once every other destination is burned, i.e. exactly when an operator is
-			// reading the log to find out what is blocked).
+			// A timed rotation only becomes REAL here, when the warm carrier goes live, so it is published here
+			// with the endpoint the connection is genuinely on. event() rather than down(): the changeover is
+			// seamless, and arming a reconnect would make every rotation read as a drop plus a self-heal. Only
+			// when the DESTINATION really advanced — a beat fires when either pool moves.
 			if b.pp != nil && w.dstMoved {
 				b.st.setActive(b.stTag + " · " + label)
 				b.st.event("down", "peer-rotate", "ip:"+label)
 			}
-			// A proactive source rotation is announced HERE — where the warm carrier actually goes
-			// live on the new source — not in the timer, so a failed warm build never logs a source
-			// move that did not happen (the source mirror of the dest peer-rotate just above).
-			//
-			// Built-and-adopted is still not enough on its own: dialer() installs no LocalAddr when the
-			// source the beat rotated onto is not on this host (an IP removed from the interface but
-			// still in the pool), takes the dropUnusableSource branch, and the socket leaves from the
-			// KERNEL DEFAULT — while the connect and handshake succeed exactly as before, so the
-			// carrier is adopted and the event fired for an IP the tunnel never left from. That is the
-			// last corner of the same announce-before-it-is-true class #179/#189 closed. lastSourceUsed()
-			// is stamped only on the branch that really binds, and this is the identical comparison the
-			// pin release makes 80 lines below (pinLandedOn), against the identical raw pool string.
-			//
-			// It can only SUPPRESS: a rotation that burns its target and lands somewhere else instead
-			// goes unannounced rather than announced wrongly, and dropUnusableSource logs that case by
-			// name anyway.
+			// A proactive source rotation is announced HERE, where the warm carrier actually goes live, so a
+			// failed warm build never logs a move that did not happen. Adoption alone is not enough: dialer()
+			// installs no LocalAddr for a source that is not on this host, so the socket leaves from the KERNEL
+			// DEFAULT while the connect still succeeds — hence the lastSourceUsed() compare, which only suppresses.
 			if w.srcAddr != "" && b.lastSourceUsed() == w.srcAddr {
 				b.st.event("down", "src-rotate", "ip:"+w.srcAddr)
 			}
@@ -2113,13 +1848,10 @@ func (b *TCP) dialLoop() {
 			cf, err = b.handshakeAndPrime(conn)
 			if err != nil {
 				conn.Close()
-				// Attribute this exactly like a failed dial. A TCP connect that COMPLETES and then fails the
-				// core handshake is the signature of a DPI that lets the SYN through and kills the payload —
-				// the most common interference shape on this fleet's paths — so the endpoint is as unusable as
-				// one that never answered. Without this the branch fell straight through to the backoff: the
-				// pool never advanced and the direct-tcp endpoint was never burned, so the client re-dialed
-				// the SAME blocked endpoint forever and destination/source rotation was inert for the one
-				// failure mode it exists to escape. (The dial-failure branch 20 lines up has always done this.)
+				// Attribute this exactly like a failed dial. A TCP connect that COMPLETES and then fails the core
+				// handshake is the signature of a DPI that lets the SYN through and kills the payload, so the
+				// endpoint is as unusable as one that never answered — without the burn the client re-dials the
+				// same blocked endpoint forever and rotation is inert for the failure mode it exists to escape.
 				if b.pool != nil {
 					b.pool.advance() // rotate to the next combo; edge health stays for attributeFailure/dataFailure
 				} else {
@@ -2138,12 +1870,9 @@ func (b *TCP) dialLoop() {
 		// Single-edge (non-pool) self-heal: pair this recovery with a prior carrier-loss "down". nil-safe
 		// (no-op when no status file is wired) and silent on the first connect (only a pending down emits).
 		b.st.reconnected(label)
-		// Clear a STALE manual-switch flag before this connection's death is ever accounted. rotate1
-		// sets manualSwitch unconditionally, but during an outage (no live curConn to drop) the flag is
-		// set with no death to consume it; left pending it would mask the NEXT genuine death as a clean
-		// switch (no down/up, bad edge not burned). A pin/rotate that drops THIS carrier re-sets it
-		// during the connection's life, so only the stale one is wiped. (Cleared before curConn.Store
-		// so a rotate1 that actually drops this carrier — only possible after the store — always wins.)
+		// Clear a STALE manual-switch flag before this connection's death is ever accounted. rotate1 sets it
+		// unconditionally, so one issued during an outage has no death to consume it and would mask the NEXT
+		// genuine death as a clean switch. A pin that drops THIS carrier re-sets it during its life.
 		b.manualSwitch.Store(false)
 		b.cur.Store(cf)
 		b.adoptRx(cf) // this carrier is the tunnel now: publish the heartbeat it already proved
@@ -2161,12 +1890,9 @@ func (b *TCP) dialLoop() {
 			// non-warm loop must too. No-op when no pin is in force (single-locked, no TOCTOU).
 			b.pool.pinApplied(label, strings.TrimPrefix(combo, label+" · "))
 		} else {
-			// Direct pp/sp: release an operator pin that has now landed (a pin behaves as "jump here and
-			// keep trying until connected"). pinLandedOn is single-locked and a no-op when no pin is in
-			// force — no TOCTOU between the check and clear — and it COMPARES: a pin is only ever
-			// consumed by a carrier that actually came up on it, never by one that resolved its endpoint
-			// before the pin existed. `label` is dialCarrier's target, i.e. the pool entry we are on;
-			// lastSrc is what the dialer really bound to.
+			// Direct pp/sp: release an operator pin that has now landed (a pin is "jump here and keep trying
+			// until connected"). pinLandedOn is single-locked, a no-op when no pin is in force, and it COMPARES —
+			// a pin is never consumed by a carrier that resolved its endpoint before the pin existed.
 			if b.pp != nil {
 				b.pp.pinLandedOn(label)
 			}
@@ -2179,22 +1905,17 @@ func (b *TCP) dialLoop() {
 		// keeps the same edge — the timer is stopped before that path runs.
 		var rot *time.Timer
 		var rotated atomic.Bool
-		// timerLive gates the rotation callback's SELF re-arm. A pinned/no-move beat re-arms via
-		// rot.Reset, which races the rot.Stop() below when this connection dies on the same beat: Stop
-		// can run first (sees the timer fired, no-op) and then the callback re-arms, leaving a stray
-		// timer firing spurious rotations. Clearing timerLive BEFORE Stop makes any post-teardown fire
-		// return at once without advancing or re-arming, so a leaked beat self-terminates immediately.
+		// timerLive gates the rotation callback's SELF re-arm. A pinned/no-move beat re-arms via rot.Reset,
+		// which races the rot.Stop() below; clearing timerLive BEFORE Stop makes any post-teardown fire
+		// return at once without advancing or re-arming, so a leaked beat self-terminates.
 		var timerLive atomic.Bool
 		timerLive.Store(true)
 		if b.pool != nil && b.rotate > 0 {
 			c := conn
-			// Arm the rotation timer regardless of the CURRENT pin state and re-check the pin when it
-			// FIRES. A pin is applied by re-dialing onto the chosen edge, so isPinned() is true at THIS
-			// connection's setup; gating the ARM on it (the old behaviour) suppressed the timer for the
-			// whole connection — and because the pin lands and clears mid-connection while the timer is
-			// only armed once, rotation stayed frozen for the life of a healthy (never-dying) connection.
-			// Now the pin only freezes rotation for its OWN window: while still pinned at fire time, skip
-			// this beat and re-arm; once the pin has cleared, rotate normally.
+			// Arm the rotation timer regardless of the CURRENT pin state and re-check the pin when it FIRES. A
+			// pin is applied by re-dialing onto the chosen edge, so isPinned() is true at this connection's
+			// setup — gating the ARM on it froze rotation for the whole life of a healthy connection. Now the
+			// pin only holds rotation off for its own window.
 			rot = time.AfterFunc(b.rotate, func() {
 				if !timerLive.Load() {
 					return // this connection is being torn down — do not advance or re-arm
@@ -2203,12 +1924,10 @@ func (b *TCP) dialLoop() {
 					rot.Reset(b.rotate) // still pinned — hold rotation off, but keep checking (never freeze)
 					return
 				}
-				// Only drop the live connection when the pool can actually reach a DIFFERENT edge.
-				// With every other combo burned, advance() resolves straight back to this one, and
-				// closing anyway costs a re-dial + handshake + traffic gap every interval for no edge
-				// change and no log line. Same guard the direct-pool branch below applies via
-				// rotateOnce(); rotated is set only once the close is really happening, so a skipped
-				// beat is never mistaken for a deliberate rotation.
+				// Only drop the live connection when the pool can actually reach a DIFFERENT edge. With every other
+				// combo burned, advance() resolves straight back to this one, and closing anyway costs a
+				// re-dial + handshake + traffic gap every interval for nothing. `rotated` is set only once the
+				// close is really happening, so a skipped beat is never mistaken for a deliberate rotation.
 				if !b.pool.advance() {
 					rot.Reset(b.rotate) // re-arm so rotation resumes as soon as another edge heals
 					return
@@ -2248,7 +1967,7 @@ func (b *TCP) dialLoop() {
 					}
 				}
 				moved := dstMoved
-				// srcMovedTo is announced at the adoption site, not here (see rotateSourceTCP / #179).
+				// srcMovedTo is announced at the adoption site, not here — see rotateSourceTCP.
 				srcMovedTo := ""
 				if a, m := b.rotateSourceTCP(true); m { // advances the source pool; re-dial applies the new LocalAddr
 					moved = true
@@ -2258,11 +1977,9 @@ func (b *TCP) dialLoop() {
 					rot.Reset(iv) // every other endpoint burned this beat — re-arm so rotation resumes once one heals
 					return
 				}
-				// MAKE BEFORE BREAK. A connection-oriented carrier cannot carry its session across a
-				// destination change the way the datagram carriers now do, so build the NEXT one first
-				// and only then drop this one: dialLoop adopts the parked carrier without dialing, and
-				// the changeover costs no connect and no handshake. Measured on the shipped code, closing
-				// first cost 0.20-0.25s of blackout at every rotation.
+				// MAKE BEFORE BREAK. A connection-oriented carrier cannot carry its session across a destination
+				// change the way the datagram carriers do, so build the NEXT one first and only then drop this one:
+				// dialLoop adopts the parked carrier without dialing, so the changeover costs no connect.
 				if !b.buildWarm(func() { b.burnAdvance(false) }, srcMovedTo, dstMoved, dstPrev) { // live carrier stays: silent, its source is not burned, its endpoint is still Active
 					// The endpoint we advanced onto will not come up. KEEP the healthy connection —
 					// trading it for a dead one is exactly what make-before-break exists to prevent —
@@ -2315,12 +2032,10 @@ func (b *TCP) dialLoop() {
 				}
 			}
 		} else if (b.pp != nil || b.sp != nil) && !b.closed.Load() {
-			// Direct-tcp peer/source pool: a scheduled proactive rotation OR an operator "make this active"
-			// (manualSwitch) is deliberate (clear any transient burns; no fault, no "down" — a manual jump
-			// is logged SILENTLY like the ws edge pool, only the active endpoint changes). A genuine death
-			// that came too soon means the endpoint connected but couldn't carry data (throttle/blackhole)
-			// — burn + advance off it (and walk the source once dests cycle). A death after a healthy
-			// lifetime is an ordinary drop (server restart): keep the endpoints and clear stale burns.
+			// Direct-tcp peer/source pool: a proactive rotation or an operator jump is deliberate — clear
+			// transient burns, no fault, no "down". A death sooner than minLiveness means the endpoint connected
+			// but could not carry data (throttle/blackhole), so burn+advance off it. A death after a healthy
+			// lifetime is an ordinary drop: keep the endpoints and clear stale burns.
 			if b.manualSwitch.Swap(false) || rotated.Load() {
 				deliberate = true
 				succeedBoth()
@@ -2330,19 +2045,15 @@ func (b *TCP) dialLoop() {
 				succeedBoth()
 			}
 		}
-		// Single-edge (non-pool) status file: surface a GENUINE carrier loss as a precise "down" event
-		// (paired with the "up" the next successful dial emits via reconnected), mirroring the datagram
-		// carriers. b.st is only ever wired on a non-pool carrier, so the ws-pool branch above (b.st==nil
-		// there) is untouched; nil-safe and skipped for a deliberate switch or Close. The non-pool branches
-		// don't consume takeLastErr, so the death cause is still available here.
+		// Single-edge (non-pool) status file: surface a GENUINE carrier loss as a precise "down", paired with
+		// the "up" the next successful dial emits. b.st is only ever wired on a non-pool carrier; nil-safe,
+		// and skipped for a deliberate switch or Close. The branches above do not consume takeLastErr.
 		if b.st != nil && !deliberate && !b.closed.Load() {
 			b.st.down(classifyErr(b.takeLastErr()), label)
 		}
-		// Only back off before re-dialing on a GENUINE drop. A deliberate, healthy rotation (proactive
-		// timer or operator pin) re-dials immediately, so the switch gap is just the reconnect+handshake
-		// (~1 RTT) instead of reconnect + a fixed 1s — which a live stream would feel every rotation. A
-		// re-dialed edge that then dies for real hits this backoff on its NEXT (non-deliberate) drop, so
-		// a bad edge still can't be hammered.
+		// Only back off before re-dialing on a GENUINE drop. A deliberate, healthy rotation re-dials at once,
+		// so the switch gap is one reconnect+handshake rather than that plus a fixed second. A re-dialed edge
+		// that then dies for real hits this backoff on its NEXT, non-deliberate drop.
 		if !deliberate {
 			backoff = nextReconnectDelay(backoff)
 			if b.sleep(backoff) {
@@ -2352,12 +2063,10 @@ func (b *TCP) dialLoop() {
 	}
 }
 
-// dialCarrier opens the transport connection for ONE dial attempt: a pool/single ws or httpc
-// edge (with failure attribution inside establishWS/establishHTTPC), or a plain/cover TCP dial.
-// It returns the live conn and a label for logging, and logs the specific transport-level
-// failure itself so callers only decide retry/rotation policy. It does NOT frame or handshake.
-// attribute gates the differential-probe failure attribution: true on the primary/active dial,
-// false on the warm-standby build (whose goroutine must not block in the probe — see establishHTTPC).
+// dialCarrier opens the transport connection for ONE dial attempt: a pool/single ws or httpc edge (with
+// failure attribution inside establishWS/establishHTTPC), or a plain/cover TCP dial. It returns the live
+// conn and a label for logging, and logs the transport-level failure itself so callers only decide retry
+// policy. It does NOT frame or handshake. attribute is false on the warm-standby build.
 func (b *TCP) dialCarrier(attribute bool) (net.Conn, string, string, error) {
 	if b.ws { // pool or single edge: dial + wss(+ECH) + upgrade, burning on failure
 		var c net.Conn
@@ -2380,9 +2089,8 @@ func (b *TCP) dialCarrier(attribute bool) (net.Conn, string, string, error) {
 		log.Printf("core/tcp: dial %s failed: %v", target, err)
 		return nil, target, "", err
 	}
-	// Decoys go out on the bare 4-tuple, BEFORE the TLS cover handshake below. They used to be sent
-	// from handshakeAndPrime, which runs after it — so with cover on, the DPI had already seen the
-	// whole ClientHello before the first decoy arrived. Only plain tcp happened to be correct.
+	// Decoys go out on the bare 4-tuple, BEFORE the TLS cover handshake below, so the DPI has not yet
+	// seen the ClientHello when the first decoy arrives.
 	b.sendTCPFakes(c)
 	if b.cover { // wrap in a Chrome-fingerprinted TLS session carrying the auth token
 		tconn, cerr := tlscover.ClientConn(c, b.coverSNI, b.psk, time.Now().Add(handshakeTimeout))
@@ -2396,20 +2104,10 @@ func (b *TCP) dialCarrier(attribute bool) (net.Conn, string, string, error) {
 	return c, target, target, nil
 }
 
-// coverProbeHint names the two causes that produce ONE indistinguishable symptom on a cover tunnel:
-// the TLS handshake succeeds and the core handshake behind it then fails.
-//
-// tlscover's server reads an auth token out of the ClientHello session id. When the token does not
-// open — a mismatched PSK, or either clock off by more than tlscover's 120s replay window — the
-// server does exactly what it does for a censor's probe: it proxies the connection to the REAL cover
-// site. That is the correct answer to a probe, and it is why the carrier is probe-resistant. But our
-// own client is on the other end of it, so it completes a perfectly valid TLS session with a site
-// that has never heard of the core protocol, and the failure surfaces as a generic handshake error
-// with nothing pointing at the clock.
-//
-// This cannot be fixed by signalling: any hint the server sends our client, a censor's probe can
-// also collect. So the hint has to be client-side and local, which is what this is. Once per carrier
-// (sync.Once): the dial loop retries forever, and a line per retry is a line per second.
+// coverProbeHint names the two causes behind ONE indistinguishable symptom on a cover tunnel: the TLS
+// handshake succeeds and the core handshake behind it fails. tlscover answers an auth token it cannot
+// open — mismatched PSK, or a clock outside its replay window — by proxying to the REAL cover site,
+// which is what makes the carrier probe-resistant, so the hint has to be local. Once per carrier.
 func (b *TCP) coverProbeHint() {
 	if !b.cover {
 		return
@@ -2428,11 +2126,9 @@ func (b *TCP) coverProbeHint() {
 // On any failure the returned error is non-nil and the caller closes conn. On success the framer
 // is fully established and ready for serve/readLoop.
 func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
-	// The decoy injection is NOT here. It has to land on the freshly-connected 4-tuple before ANY of
-	// our own bytes flow, and by this point conn may already be a TLS-cover or WebSocket session — its
-	// handshake is done, so the DPI has seen it. It now runs in dialCarrier/establishWS, on the bare
-	// TCP conn each of them just dialled. Every path here is reached through dialCarrier (dialLoop,
-	// warmEstablish, and the single-edge retest dial), so each connection is still covered exactly once.
+	// The decoy injection is NOT here: it has to land on the freshly-connected 4-tuple before ANY of our
+	// own bytes flow, and by this point conn may already be a TLS-cover or WebSocket session. It runs in
+	// dialCarrier/establishWS instead, on the bare TCP conn each of them just dialled.
 	cf := b.newFramer(conn)
 	conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	if b.cryptoOn { // ephemeral handshake first: establishes the session sealer
@@ -2442,10 +2138,8 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 		}
 		// A completed crypto handshake means the SERVER answered — an end-to-end authentication a CDN edge
 		// cannot fake — so this is genuine INBOUND proof. It is recorded on THIS CONNECTION, not on the
-		// tunnel: handshakeAndPrime also builds carriers that are not (yet) the tunnel's — the warm
-		// standby and the parked rotation carrier — and crediting the tunnel for those is a false green.
-		// b.lastRx adopts this the moment the carrier actually goes live, which keeps the fast green on a
-		// real connect. A dead origin fails clientHandshake above and never reaches here.
+		// tunnel: this also builds carriers that are not (yet) the tunnel's, and crediting those is a false
+		// green. adoptRx publishes it the moment the carrier actually goes live.
 		cf.rxAt.Store(time.Now().UnixNano())
 	}
 	if b.obfs {
@@ -2453,23 +2147,16 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 			return nil, err
 		}
 	}
-	// The prime ping is the client's first real write on this connection — and since the obfs salt
-	// stopped travelling on its own, the ONLY one on this path: sendSalt above just fills saltPend and
-	// can now fail on RNG/cipher errors alone, so the `if err := cf.sendSalt()` guard no longer covers
-	// any I/O at all. Discarding this error meant handshakeAndPrime returned (cf, nil) — success — for
-	// a connection whose very first byte never left the box. The caller then adopts that carrier and
-	// logs a connect, and only the read side notices, moments later. It is worse for a warm standby,
-	// which is built and PARKED: a carrier that was already dead when it was built sits waiting to
-	// replace a healthy one. The salt rides this same write when obfs is on, so its failure surfaces
-	// here too.
+	// The prime ping is the client's first real write on this connection, and the only one on this path:
+	// sendSalt above only fills saltPend, so it can fail on RNG/cipher errors alone. Discarding this error
+	// would report success for a connection whose very first byte never left the box — worst for a warm
+	// standby, which is then parked, already dead, waiting to replace a healthy carrier.
 	if err := cf.writeFrame(typePing, nil); err != nil { // prime + authenticate us to the server
 		return nil, err
 	}
 	// Deliberately do NOT stamp b.lastRx here: this ping is something WE sent, and lastRx means "last
-	// authenticated INBOUND frame". Crediting it refreshed the status-file heartbeat on every reconnect,
-	// so a pooled/httpc client whose dial+TLS always succeeds (a CDN edge always accepts) but which never
-	// receives a frame back reported "connected" forever while the tunnel carried nothing — green dot,
-	// 100% in-tunnel ping loss. Only readLoop's fresh authenticated inbound frame may stamp it.
+	// authenticated INBOUND frame". Crediting it lets a client whose dial always succeeds but which never
+	// receives a frame report "connected" forever. Only readLoop may stamp it.
 	return cf, nil
 }
 
@@ -2484,12 +2171,10 @@ func (b *TCP) warmEstablish(standby bool) (*connFramer, net.Conn, string, string
 		// rotation into a silent no-op switch onto the same edge and loses edge diversity.
 		b.pool.aimStandby()
 	}
-	// A STANDBY build must NOT run the differential-probe attribution: it fires several full
-	// establishes and would block this single standby-build goroutine for that whole time with
-	// standbyBuilding still set — starving requestStandby() and silently freezing proactive rotation
-	// (goroutine dump: the builder parked in attributeFailure->differentialProbe->probeEdgeFull while
-	// the manager waited on a standby that never arrived). It just retries; the retest loop attributes
-	// edge health independently. The warm ACTIVE dial still attributes (attribute = !standby).
+	// A STANDBY build must NOT run the differential-probe attribution: it fires several full establishes
+	// and would block this single build goroutine with standbyBuilding still set, starving
+	// requestStandby() and silently freezing proactive rotation. It just retries; the retest loop
+	// attributes edge health independently. The warm ACTIVE dial still attributes.
 	conn, label, combo, err := b.dialCarrier(!standby)
 	if err != nil {
 		if b.pool != nil {
@@ -2517,17 +2202,10 @@ type warmConn struct {
 	combo string // the full "ip · sni" for the status file's live active edge
 }
 
-// dialLoopWarm is the make-before-break client loop for a ws edge pool: it keeps the ACTIVE
-// carrier (b.cur) and a fully-handshaked warm STANDBY (b.standby, to another edge) up at once.
-// On the active's failure or a proactive rotation the standby is promoted atomically — a single
-// b.cur swap; the next TUN packet flips the server's downstream via downstream-follows-data — and
-// a fresh standby is then built in the background, so the TUN never waits on a cold dial. If no
-// standby is ready when the active dies it falls back to a fresh dial that runs in the BACKGROUND
-// (dialActiveAsync -> activeReady) so the select loop stays responsive to rotation/pins during a
-// full outage — the startup dial is the only blocking one. ALL pointer transitions happen in THIS
-// goroutine; network dials run in
-// workers that hand their result back over buffered channels, so b.cur/b.standby are mutated from
-// exactly one place — no data races.
+// dialLoopWarm is the make-before-break client loop for a ws edge pool: it keeps the ACTIVE carrier and
+// a fully-handshaked warm STANDBY to another edge up at once, so a failure or a proactive rotation
+// promotes with one atomic swap instead of a cold dial. With no standby ready it dials in the
+// BACKGROUND, keeping the loop responsive to rotation and pins. All pointer transitions happen here.
 func (b *TCP) dialLoopWarm() {
 	exits := make(chan *connFramer, 8)    // a per-conn reader finished (its conn died)
 	ready := make(chan warmConn, 2)       // a background standby dial completed
@@ -2590,7 +2268,7 @@ func (b *TCP) dialLoopWarm() {
 	// establish retries with a short backoff until a conn comes up or Close fires; on success it
 	// delivers the warm conn on out, or closes it if Close won the race against the buffered send.
 	dialWorker := func(wantStandby bool, out chan warmConn) {
-		var backoff time.Duration // #148's exponential+jittered retry; see the note in dialActiveBlocking
+		var backoff time.Duration // exponential+jittered retry; see the note in dialActiveBlocking
 		for {
 			if b.closed.Load() {
 				return
@@ -2628,11 +2306,10 @@ func (b *TCP) dialLoopWarm() {
 		standbyBuilding = true
 		go dialWorker(true, ready)
 	}
-	// dropStandby retires the held standby so requestStandby can build a fresh one — it is a hard
-	// no-op while one is held, so anything that makes the held standby the WRONG one has to clear it
-	// here first. standbyBuilding is cleared unconditionally, including the standby==nil-but-still-
-	// dialing case: leaving it set makes every later requestStandby() a permanent no-op, which stops
-	// proactive rotation (it works by promoting a READY standby) for good.
+	// dropStandby retires the held standby so requestStandby can build a fresh one — it is a hard no-op
+	// while one is held, so anything that makes the held standby the WRONG one must clear it here first.
+	// standbyBuilding is cleared unconditionally, including the still-dialing case: leaving it set makes
+	// every later requestStandby() a permanent no-op, which stops proactive rotation for good.
 	dropStandby := func() {
 		if standby != nil {
 			standby.conn.Close()
@@ -2689,10 +2366,10 @@ func (b *TCP) dialLoopWarm() {
 	// and as the fallback when the active dies with no warm standby ready. Returns false if Close
 	// fired during the retry.
 	dialActiveBlocking := func() bool {
-		// Exponential + jittered, like dialLoop since #148. A fixed 1s retry against a filtered edge is
-		// a perfectly periodic SYN/TLS train — a tunnel signature that positively confirms the endpoint
-		// to a censor, and one that never stops here: the standby path skips attributeFailure, so a
-		// blocked edge is never burned and the beacon is permanent rather than transient.
+		// Exponential + jittered, like dialLoop. A fixed 1s retry against a filtered edge is a perfectly
+		// periodic SYN/TLS train — a tunnel signature that confirms the endpoint to a censor, and one that
+		// never stops here: the standby path skips attributeFailure, so a blocked edge is never burned and
+		// the beacon is permanent rather than transient.
 		var backoff time.Duration
 		for {
 			if b.closed.Load() {
@@ -2707,22 +2384,17 @@ func (b *TCP) dialLoopWarm() {
 				continue
 			}
 			log.Printf("core/tcp: connected to %s", label)
-			// Consume a stale manual-switch flag, exactly as dialLoop does after its own connect and as
-			// both adopt paths below already do. RotateIP/SelectEdge set it unconditionally, so one issued
-			// DURING an outage — when there is no live conn to drop — leaves it pending with no death to
-			// consume it. This blocking dial was the only setActive site that did not clear it, so the
-			// fresh active it establishes would have its NEXT genuine death read as an operator switch:
-			// no down/up pair in the log, and the edge that actually failed never burned.
+			// Consume a stale manual-switch flag, exactly as every other setActive site does. RotateIP/SelectEdge
+			// set it unconditionally, so one issued DURING an outage has no death to consume it and would make
+			// this fresh active's NEXT genuine death read as an operator switch.
 			b.manualSwitch.Store(false)
 			setActive(cf, conn, label, combo)
 			return true
 		}
 	}
-	// dialActiveAsync (re)establishes a fresh active in the BACKGROUND — the outage/failover
-	// counterpart to dialActiveBlocking. It keeps the manager's select loop live so proactive
-	// rotation ticks, standby-ready reports and (crucially) operator pins keep being serviced while
-	// every edge is unreachable: each retry re-reads current(), so a pin placed mid-outage is honored
-	// the moment its edge recovers. The result arrives on activeReady; at most one runs at a time.
+	// dialActiveAsync (re)establishes a fresh active in the BACKGROUND, so the manager keeps servicing
+	// proactive rotation, standby reports and operator pins while every edge is unreachable: each retry
+	// re-reads current(), so a pin placed mid-outage is honored the moment its edge recovers.
 	dialActiveAsync := func() {
 		if activeBuilding || b.closed.Load() {
 			return
@@ -2761,13 +2433,10 @@ func (b *TCP) dialLoopWarm() {
 					b.pool.down(classifyErr(cause), activeLabel) // arms the paired "up" the next reconnect emits
 					if time.Since(activeSince) < minLiveness {
 						b.pool.dataFailure(activeLabel)
-						// ...and MOVE OFF it, exactly as dialLoop does ("don't re-stick on the bad edge").
-						// Without this the cursor stays put, current() still reports the dead edge healthy,
-						// and dialActiveAsync re-dials the SAME one — and because that dial SUCCEEDS there
-						// is no sleep on the path, so the tunnel spins connect -> die-in-<minLiveness ->
-						// reconnect-same-edge back to back. On a freshly built tunnel it never even burns:
-						// wsPool.lastGood is 0, so dataFailure's recentGood gate is false and the fail
-						// counter never increments. Advancing is what makes the failover actually fail over.
+						// ...and MOVE OFF it, exactly as dialLoop does. Without this the cursor stays put,
+						// current() still reports the dead edge healthy, and dialActiveAsync re-dials the SAME
+						// one — and because that dial succeeds there is no sleep on the path, so the tunnel
+						// spins connect -> die -> reconnect back to back without ever burning.
 						b.pool.advance()
 					} else {
 						b.pool.dataSuccess(activeLabel)
@@ -2806,18 +2475,11 @@ func (b *TCP) dialLoopWarm() {
 				continue
 			}
 			if active == nil && (b.pool == nil || !b.pool.isPinned()) {
-				// Mid-outage this standby is already up while the async active dial is still retrying —
-				// adopt it as the ACTIVE now instead of discarding it and waiting; the in-flight async
-				// dial is harmlessly dropped when it lands (activeReady guards on active!=nil).
-				//
-				// EXCEPT under an operator pin: this carrier was dialed for the STANDBY slot, i.e. a
-				// DIFFERENT edge than the active, so it may not be the pinned edge — while dialActiveAsync
-				// is already re-dialing the active onto current()'s PINNED edge. Adopting it as active
-				// would land the operator on the wrong edge ("I pinned it but it didn't switch"). Hold it
-				// as the standby instead and let the pinned active land; rotation promotes it later.
-				b.manualSwitch.Store(false) // symmetric with the activeReady adopt: consume a manual flag left
-				//                             pending by a mid-outage RotateIP (no live conn to drop) so it
-				//                             cannot mask this fresh active's next genuine death as a switch.
+				// Mid-outage this standby is already up while the async active dial is still retrying — adopt it as
+				// the ACTIVE now; the in-flight dial is dropped when it lands. EXCEPT under an operator pin: this
+				// carrier was dialed for the STANDBY slot, i.e. a DIFFERENT edge, while dialActiveAsync is already
+				// re-dialing the active onto the pinned one. Hold it as the standby and let the pinned active land.
+				b.manualSwitch.Store(false) // a mid-outage rotate can leave this pending with no death to consume it
 				log.Printf("core/tcp: adopting ready standby as active during outage")
 				setActive(wc.cf, wc.conn, wc.label, wc.combo)
 				requestStandby()
@@ -2844,17 +2506,10 @@ func (b *TCP) dialLoopWarm() {
 				continue
 			}
 			if b.pool != nil && !b.pool.pinMatches(wc.label, strings.TrimPrefix(wc.combo, wc.label+" · ")) {
-				// This dial resolved its edge BEFORE the pin. It can only get here through one window:
-				// the outage-adopt arm above hands a ready standby to setActive and deliberately leaves
-				// the in-flight active dial to be "harmlessly dropped when it lands" — but it leaves
-				// activeBuilding set, so a pin arriving in that window found dialActiveAsync already
-				// building and silently started nothing. The active then died (rotate1 drops it for the
-				// pin), and this stale result was adopted on the pre-pin edge. Because that edge does not
-				// match, pinApplied did not clear the pin either, so proactive rotation stayed frozen for
-				// the rest of pinTTL: "I pinned it, it switched to the wrong edge, then rotation went
-				// quiet for half a minute". Discard it and dial again — activeBuilding is already false
-				// above, so this starts exactly one fresh dial, and warmEstablish reads current(), which
-				// forces the pinned edge.
+				// This dial resolved its edge BEFORE the pin. The outage-adopt arm above leaves an in-flight active
+				// dial to be dropped when it lands, but leaves activeBuilding set — so a pin arriving in that window
+				// starts nothing, and this stale result would be adopted on the pre-pin edge without clearing the
+				// pin, freezing rotation for the rest of pinTTL. Discard it; warmEstablish reads current().
 				log.Printf("core/tcp: discarding a pre-pin active dial on %s — re-dialing on the pinned edge", wc.label)
 				wc.conn.Close()
 				dialActiveAsync()
@@ -2874,32 +2529,19 @@ func (b *TCP) dialLoopWarm() {
 			// pin freezes the edge, so proactive rotation is skipped entirely while pinned.
 			if b.pool != nil && b.pool.isPinned() {
 				// Pinned: rotation is intentionally frozen until the pin lands or lapses. Log it so a
-				// "rotation stopped" report can be told apart from a genuine stall (this branch used to
-				// be silent, which is exactly why a quiet rotation looked like a hang).
+				// "rotation stopped" report can be told apart from a genuine stall.
 				log.Printf("core/tcp: proactive rotation skipped — edge is pinned")
 				continue
 			}
-			// The standby must actually be on a DIFFERENT edge, or this "rotation" is pure churn. When the
-			// pool is down to one healthy combo (the ordinary "one edge survived the filter" state, and any
-			// 1IP x 1SNI pool) aimStandby finds no distinct healthy IP, degrades to a plain step, and
-			// currentLocked resolves straight back to the only healthy combo, so the standby is built on the
-			// SAME edge as the active. Promoting it retires a healthy carrier and immediately rebuilds an
-			// identical one: a full TCP+TLS+WS-upgrade+core-handshake to the same edge every ws_rotate_secs,
-			// forever. setActive sees no change, so nothing is logged and the operator just sees the rotation
-			// log fall silent while connection churn continues. Same shape as the guard #152 added to the
-			// non-warm loop. Compared on the COMBO, not the label: the label is only the IP, so an SNI-only
-			// rotation on the same IP is a real rotation and must not be skipped.
+			// The standby must actually be on a DIFFERENT edge, or this "rotation" is pure churn. Down to one
+			// healthy combo, aimStandby finds no distinct healthy IP, degrades to a plain step, and the standby
+			// lands on the active's own edge; promoting it would retire a healthy carrier and rebuild an
+			// identical one every interval, silently. Compared on the COMBO, since an SNI-only move is real.
 			if standby != nil && standbyCombo == activeCombo {
-				// This standby was built when nothing distinct was healthy (aimStandby degrades to a plain
-				// step then), so promoting it would retire a healthy carrier and immediately rebuild an
-				// identical one. Skipping is right — but ONLY skipping left the stale standby held forever,
-				// and requestStandby() is a hard no-op while one is held. So once the pool healed there was
-				// no way to build a standby on the edge that came back: every later tick landed here, and
-				// proactive rotation stayed frozen for the life of the connection — the "rotation just
-				// stopped" report, which no pin or probe could clear. Retire it as soon as the pool can
-				// actually offer another edge and the NEXT tick rotates for real. While nothing else is
-				// healthy we still just skip: rebuilding every interval would be a periodic dial train to
-				// the same edge, a signature in its own right.
+				// Skipping alone would leave the stale standby held forever, and requestStandby() is a hard no-op
+				// while one is held — so once the pool healed there was no way to build a standby on the edge that
+				// came back. Retire it as soon as another edge is actually available and the NEXT tick rotates for
+				// real; while nothing else is healthy we still just skip, since rebuilding is a dial train of its own.
 				if b.pool != nil && b.pool.hasHealthyEdgeOtherThan(activeCombo) {
 					log.Printf("core/tcp: the pool healed — retiring the same-edge warm standby (%s) so the next rotation is real", activeCombo)
 					dropStandby()
@@ -2913,12 +2555,9 @@ func (b *TCP) dialLoopWarm() {
 				log.Printf("core/tcp: proactive rotation — promoted warm standby")
 				requestStandby()
 			} else {
-				// No warm standby was ready to promote, so this tick is a no-op. This branch used to be
-				// SILENT — the sole reason a stalled rotation left no trace in the log and looked like a
-				// hang. Log the exact state, and (belt-and-suspenders) make sure a standby build is
-				// actually in flight: requestStandby() self-guards, so if one is already building this is
-				// a no-op, but if the state ever wedged with no standby and no build pending, this
-				// self-heals it instead of freezing rotation for good.
+				// No warm standby was ready to promote, so this tick is a no-op. Log the exact state, and make sure
+				// a build is actually in flight: requestStandby() self-guards, so this is a no-op when one is
+				// already building and self-heals a state that ever wedged with neither.
 				log.Printf("core/tcp: proactive rotation skipped — no warm standby ready (building=%v); ensuring a rebuild", standbyBuilding)
 				requestStandby()
 			}
@@ -3028,25 +2667,18 @@ func (b *TCP) handleFrame(cf *connFramer, typ byte, payload []byte) {
 	}
 }
 
-// serve reads framed messages from one connection until it errors or closes.
-// onConnErr clears the live pointer on exit, so both the client (which redials)
-// and the server converge on "no live connection" without extra bookkeeping.
-// The read deadline is refreshed every frame in ALL modes so a peer that dies
-// without a FIN/RST is reaped instead of pinning a goroutine forever.
+// serve reads framed messages from one connection until it errors or closes. onConnErr clears the live
+// pointer on exit, so both the client (which redials) and the server converge on "no live connection"
+// without extra bookkeeping. The read deadline is refreshed every frame in ALL modes, so a peer that
+// dies without a FIN/RST is reaped instead of pinning a goroutine forever.
 func (b *TCP) serve(cf *connFramer) {
 	b.onConnErr(cf, b.readLoop(cf))
 }
 
 // adoptRx moves the TUNNEL's heartbeat onto the carrier that has just become live, taking that carrier's
-// OWN last authenticated inbound frame: its crypto handshake, or — for a promoted warm standby — the
-// keepalive pongs it has been answering all along. Called right after every client-side b.cur publish
-// (dialLoop, setActive, promote), which is what keeps the green instant on a real connect now that
-// building a carrier no longer stamps the tunnel.
-//
-// hb only ever moves FORWARD. A warm standby built minutes ago can carry an older rxAt than the frame the
-// outgoing active received a moment before it died, and publishing that would age a healthy tunnel toward
-// red on a rotation. The CAS loop also settles the harmless race with the carrier's own reader, which is
-// live from the instant b.cur is published.
+// OWN last authenticated inbound frame — its crypto handshake, or the keepalive pongs a promoted warm
+// standby has been answering all along. hb only ever moves FORWARD (a standby can hold an older rxAt
+// than the outgoing active's last frame), and the CAS settles the race with the carrier's own reader.
 func (b *TCP) adoptRx(cf *connFramer) {
 	if cf == nil {
 		return
@@ -3060,12 +2692,10 @@ func (b *TCP) adoptRx(cf *connFramer) {
 	}
 }
 
-// readLoop reads framed messages from one connection until it errors or closes, dispatching
-// each to handleFrame. It does NOT touch b.cur/authConns, so the warm-standby manager can run
-// it directly in a per-connection goroutine and own the pointer transitions itself; serve wraps
-// it with onConnErr for the single-connection client and every server connection. The read
-// deadline is refreshed every frame in ALL modes so a peer that dies without a FIN/RST is
-// reaped instead of pinning a goroutine forever.
+// readLoop reads framed messages from one connection until it errors or closes, dispatching each to
+// handleFrame. It does NOT touch b.cur/authConns, so the warm-standby manager can run it per-connection
+// and own the pointer transitions itself; serve wraps it with onConnErr for the single-connection client
+// and every server connection. The read deadline is refreshed every frame in ALL modes.
 func (b *TCP) readLoop(cf *connFramer) error {
 	for {
 		cf.conn.SetReadDeadline(time.Now().Add(b.idle))
@@ -3074,23 +2704,18 @@ func (b *TCP) readLoop(cf *connFramer) error {
 			return err
 		}
 		if cf.sealer != nil && !cf.rp.ok(session, seq) {
-			// Authenticated but replayed/duplicate -> ignore and keep the connection, but do NOT credit
-			// it as liveness: a replay can be a stale network duplicate or an on-path re-injection of a
-			// captured frame, so resetting ping-loss here would let an attacker (or a lossy path) keep a
-			// silently black-holed carrier pinned "alive" and defeat the fast ping-loss self-heal. Only a
-			// FRESH (non-replayed) frame proves the live peer is still answering.
+			// Authenticated but replayed/duplicate -> ignore and keep the connection, but do NOT credit it as
+			// liveness: a replay can be a stale duplicate or an on-path re-injection of a captured frame, so
+			// resetting ping-loss here would pin a black-holed carrier "alive". Only a FRESH frame proves the peer.
 			continue
 		}
 		cf.unanswered.Store(0) // a fresh inbound frame proves the peer is alive -> reset ping-loss
 		now := time.Now().UnixNano()
 		cf.rxAt.Store(now) // THIS connection's own liveness — true for a standby as much as for the active
-		// ...but only the LIVE carrier may stamp the TUNNEL's heartbeat. Under warm standby every carrier
-		// runs its own readLoop and keepaliveLoop pings the standby too, so an unguarded stamp let the
-		// STANDBY's pongs keep hb fresh while b.cur was empty — an operator pin re-dialing an edge that
-		// will not come up, or a failover with nothing promoted yet. The panel read green for the whole
-		// pin_ttl while 100% of the packets were dropped, which is the exact false-green lastRx exists to
-		// prevent. b.cur is set before the reader starts on every client path (dialLoop, setActive,
-		// promote), so the live carrier's own frames are never missed.
+		// ...but only the LIVE carrier may stamp the TUNNEL's heartbeat. Under warm standby every carrier runs
+		// its own readLoop and keepaliveLoop pings the standby too, so an unguarded stamp lets the STANDBY's
+		// pongs keep hb fresh while b.cur is empty — green on the panel while every packet is dropped. b.cur is
+		// set before the reader starts on every client path, so the live carrier's own frames are never missed.
 		if cf == b.cur.Load() {
 			b.lastRx.Store(now)
 		}
@@ -3146,24 +2771,17 @@ func (b *TCP) tunLoop() error {
 			b.onConnErr(cf, err)
 			continue
 		}
-		// Write succeeded: real DATA moved OUTBOUND. Treat that as liveness for the IDLE REAPER only —
-		// a one-way flow (server->client download, or client->server upload) reads nothing back, so
-		// without this the silent side's readLoop would idle-reap a healthy, actively-used connection.
-		//
-		// It deliberately does NOT stamp b.lastRxData. A successful write means our own socket accepted
-		// the bytes; it says nothing about whether the peer received them, so it must never suppress the
-		// keepalive ping. While it did, a receive-direction blackhole could not be detected at all: the
-		// ping that would have gone unanswered was never sent, and this very deadline refresh kept the
-		// idle reaper from firing either. See the b.lastRxData field comment.
+		// Write succeeded: real DATA moved OUTBOUND. That counts as liveness for the IDLE REAPER only — a
+		// one-way flow reads nothing back, so without it the silent side would reap a healthy, actively-used
+		// connection. It deliberately does NOT stamp b.lastRxData: a successful write means only that our own
+		// socket accepted the bytes, so suppressing the keepalive on it hides a receive-direction blackhole.
 		cf.conn.SetReadDeadline(time.Now().Add(b.idle))
 	}
 }
 
-// diagLoop (client) emits a low-rate heartbeat of the process goroutine count. A carrier session
-// that is retired on rotation but not fully reaped (its reader, upstream POST workers, or an underlying
-// h2 conn left dangling) shows up here as a steadily climbing number in journald — turning an
-// "it worked for hours then rotation just stopped" report into a measurable trend instead of a
-// guess. One line every few minutes is negligible log volume and never touches the data path.
+// diagLoop (client) emits a low-rate heartbeat of the process goroutine count, so a carrier session that
+// is retired on rotation but not fully reaped shows up in journald as a climbing number — a measurable
+// trend instead of an "it worked for hours then rotation stopped" report. Never touches the data path.
 func (b *TCP) diagLoop() {
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
@@ -3188,11 +2806,9 @@ func (b *TCP) keepaliveLoop() {
 		case <-b.closeCh:
 			return
 		case <-time.After(keepaliveInterval(b.keepalive, b.psk)):
-			// Opportunistic: skip the ACTIVE connection's keepalive when real data ARRIVED within the
-			// last period — that frame already proved the peer is alive and answering, so a busy tunnel
-			// emits no standalone beacon. Outbound data must not count (see recentData): it is the ping,
-			// not the data we send, that detects a peer which has stopped answering. The warm standby
-			// carries no data, so it is always pinged below.
+			// Opportunistic: skip the ACTIVE connection's keepalive when real data ARRIVED within the last
+			// period — that frame already proved the peer is alive and answering. Outbound data must not count
+			// (see recentData). The warm standby carries no data, so it is always pinged below.
 			if cf := b.cur.Load(); cf != nil && !b.recentData() {
 				if ok, err := b.pingOne(cf); !ok {
 					if b.warmStandby {
@@ -3236,14 +2852,10 @@ func (b *TCP) pingOne(cf *connFramer) (ok bool, err error) {
 	return true, nil
 }
 
-// recentData reports whether a real DATA frame ARRIVED within the last keepalive period. When one did,
-// the standalone keepalive ping is redundant — the inbound frame already proved the peer is alive and
-// answering — so the client suppresses the ping and an active tunnel emits no periodic beacon. The base
-// keepalive (not the jittered interval) is the window; a connection that has received nothing yet
-// (lastRxData==0) keeps the normal keepalive so it is not idle-reaped before any data flows.
-//
-// Only INBOUND data may suppress the ping. Counting outbound data here is what made a receive-direction
-// blackhole invisible — see the b.lastRxData field.
+// recentData reports whether a real DATA frame ARRIVED within the last keepalive period; when one did,
+// the standalone ping is redundant and an active tunnel emits no periodic beacon. The base keepalive
+// (not the jittered interval) is the window, and a connection that has received nothing yet keeps the
+// normal keepalive. Only INBOUND data may suppress the ping — see the b.lastRxData field.
 func (b *TCP) recentData() bool {
 	last := b.lastRxData.Load()
 	if last == 0 {
