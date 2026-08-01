@@ -67,7 +67,14 @@ type Device struct {
 
 	nSuper, nSeg atomic.Uint64 // GSO diagnostic: super-packets split and segments produced
 	nUnsplit     atomic.Uint64 // GSO super-packets handed back unsegmented (unknown/legacy gso_type, or a header segment() would not parse)
-	nOversize    atomic.Uint64 // packets dropped by Read because they did not fit the caller's buffer
+	// nOversize counts packets Read DROPPED because they did not fit the caller's buffer. It is a
+	// guard on an exported API, not a diagnostic: no caller in this binary can trip it, because rbuf
+	// is vnetHdrLen+65535 so a segment is at most 65535 bytes, and every caller passes exactly
+	// maxDatagram = 65535. It is therefore reported only when it is NON-ZERO — a permanent
+	// "0 oversize dropped" on the operator's GSO line is noise in a line whose whole job is to answer
+	// "is this knob doing anything?", and it also read as evidence that something was being checked
+	// when nothing could ever be counted.
+	nOversize atomic.Uint64
 
 	// Reporting state, touched ONLY by the single reader goroutine (readGSO), so no lock.
 	repAt   time.Time // when the reporting window last restarted
@@ -122,8 +129,8 @@ func (d *Device) reportGSO() {
 		}
 	}
 	d.repAt, d.repSeen, d.repSaid = now, cur, true
-	log.Printf("tun %s: gso %d super-packets -> %d segments, %d unsplit, %d oversize dropped",
-		d.Name, cur[0], cur[1], cur[2], cur[3])
+	log.Printf("tun %s: gso %d super-packets -> %d segments, %d unsplit%s",
+		d.Name, cur[0], cur[1], cur[2], oversizeNote(cur[3]))
 }
 
 // Open creates the TUN interface, assigns addr (CIDR, e.g. "10.200.0.1/24"),
@@ -241,11 +248,15 @@ func (d *Device) Read(buf []byte) (int, error) {
 		}
 		seg := d.q[0]
 		d.q = d.q[1:]
-		// A packet that does not fit is DROPPED, not truncated. copy() silently shortens, and
-		// the carrier would then have shipped a header claiming a length the body no longer has —
-		// a corrupt packet the far end cannot even diagnose. Only an unsegmentable super-packet
-		// can get here (a real segment is MSS-sized), so dropping costs one packet and is
-		// counted; truncating costs a byte stream that goes quietly wrong.
+		// A packet that does not fit is DROPPED, not truncated. copy() silently shortens, and the
+		// carrier would then have shipped a header claiming a length the body no longer has — a
+		// corrupt packet the far end cannot even diagnose.
+		//
+		// No caller in THIS binary can reach it, and the commit that added it claimed otherwise: rbuf
+		// is vnetHdrLen+65535, so a segment is at most 65535 bytes, and every production caller passes
+		// exactly maxDatagram = 65535 — the comparison is 65535 > 65535 on every possible input. Read
+		// is an exported method though, so this stays as the boundary guard it is; what changed is that
+		// its counter is no longer printed when it is zero, which was always.
 		if len(seg) > len(buf) {
 			d.nOversize.Add(1)
 			continue
@@ -311,13 +322,24 @@ func (d *Device) Write(pkt []byte) (int, error) {
 	return n, err
 }
 
+// oversizeNote renders the oversize-drop count for the GSO report, and renders NOTHING when it is
+// zero — which, for every caller in this binary, is always (see nOversize). A count that cannot move
+// is not diagnostics; it is a number the operator has to learn to ignore, sitting in the one line
+// that is supposed to tell them whether the knob does anything. If it ever does move, it appears.
+func oversizeNote(n uint64) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d oversize dropped", n)
+}
+
 // Close removes the interface (non-persistent).
 func (d *Device) Close() error {
 	if d.gso && (d.nSuper.Load() > 0 || d.nUnsplit.Load() > 0 || d.nOversize.Load() > 0) {
 		// log, not fmt: this is the closing entry of the same series reportGSO writes while the
 		// tunnel runs, so it belongs in the journal beside them and not on a stdout nobody reads.
-		log.Printf("tun %s: gso final: %d super-packets -> %d segments, %d unsplit, %d oversize dropped",
-			d.Name, d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), d.nOversize.Load())
+		log.Printf("tun %s: gso final: %d super-packets -> %d segments, %d unsplit%s",
+			d.Name, d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), oversizeNote(d.nOversize.Load()))
 	}
 	return d.f.Close()
 }

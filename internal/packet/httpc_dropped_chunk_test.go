@@ -106,7 +106,7 @@ func TestOverflowedUpstreamChunkIsNotAnswered204(t *testing.T) {
 // which pushes a megabyte through the upstream pipe into the core framer.
 func TestDeliverReportsSuccessForADuplicateItAlreadyDelivered(t *testing.T) {
 	pr, pw := io.Pipe()
-	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), served: make(chan struct{}), pend: map[uint64][]byte{}}
+	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), pend: map[uint64][]byte{}}
 	drained := make(chan struct{})
 	go func() { io.Copy(io.Discard, pr); close(drained) }()
 	defer func() { pw.Close(); <-drained }()

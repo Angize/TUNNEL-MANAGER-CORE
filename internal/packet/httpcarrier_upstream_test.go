@@ -318,7 +318,7 @@ func TestXhUpCoalescesAndReassemblesOutOfOrder(t *testing.T) {
 	// Now reassemble exactly the way the server does, but hand the chunks over in REVERSE seq order —
 	// the pathological case for the in-order buffer that concurrent workers make routine.
 	pr, pw := io.Pipe()
-	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), served: make(chan struct{}),
+	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}),
 		pend: map[uint64][]byte{}}
 	var out []byte
 	var rerr error
