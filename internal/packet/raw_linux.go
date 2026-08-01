@@ -528,6 +528,23 @@ func (r *Raw) replyAddr(addr *net.IPAddr) *net.IPAddr {
 	return r.link.replyTo(addr)
 }
 
+// ipFlagDF is the IPv4 Don't-Fragment bit in the flags/fragment-offset field (bit 14).
+const ipFlagDF = 1 << 14
+
+// ipIDCounter backs nextIPID. It starts at a random point so two cores on one host do not emit the
+// same sequence, and it is incremented per packet — the same shape Linux's own counter has, which is
+// what the flow this camouflage sits in looks like.
+var ipIDCounter atomic.Uint32
+
+func init() {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	ipIDCounter.Store(binary.BigEndian.Uint32(b[:]))
+}
+
+// nextIPID returns the Identification value for one crafted packet.
+func nextIPID() uint16 { return uint16(ipIDCounter.Add(1)) }
+
 // buildIP4 assembles an IPv4 header (TTL 64, valid checksum) in front of payload.
 func buildIP4(src, dst net.IP, proto int, payload []byte) []byte {
 	return buildIP4Ext(src, dst, proto, 64, false, payload)
@@ -550,6 +567,21 @@ func buildIP4Ext(src, dst net.IP, proto, ttl int, badSum bool, payload []byte) [
 	h := make([]byte, 20+len(payload))
 	h[0] = 0x45 // version 4, IHL 5 (no options)
 	binary.BigEndian.PutUint16(h[2:4], uint16(len(h)))
+	// Identification and the Don't-Fragment bit. Leaving both at their zero value made every packet
+	// this builds differ from the flow it is supposed to belong to, MEASURED in a netns against a
+	// real tunnel: the raw carrier's own data goes out through conn.WriteToIP, where the kernel sets
+	// DF=1 and a varying ID, and an ordinary Linux UDP socket in the same namespace does the same.
+	// A packet built here carried DF=0 — one bit that separates every decoy from every real frame of
+	// the flow it is imitating, and on flux and the spoof link (which build ALL their traffic here)
+	// it is every packet of the tunnel.
+	//
+	// The ID half is narrower than it looks and that is worth writing down: on an IP_HDRINCL socket
+	// the kernel FILLS IN a zero ID (raw(7)), so those packets were already fine — measured at
+	// 34107/34108 on a decoy pair. It is the AF_PACKET paths (the bad-checksum decoy, the tcp-inject
+	// decoy, the sni_mode=fake decoy) that bypass the kernel completely and really did put ID=0 on
+	// the wire. Setting it here covers both without depending on which socket the caller uses.
+	binary.BigEndian.PutUint16(h[4:6], nextIPID())
+	binary.BigEndian.PutUint16(h[6:8], ipFlagDF)
 	h[8] = byte(ttl)
 	h[9] = byte(proto)
 	copy(h[12:16], src.To4())
