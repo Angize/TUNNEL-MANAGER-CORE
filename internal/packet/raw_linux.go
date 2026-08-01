@@ -205,10 +205,6 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 	r.desync = d
 }
 
-// sendFakes emits the configured decoy packets toward the peer just before a real
-// handshake. Each decoy shares the real flow's src/dst/proto (mirroring writeOut's forge
-// choices, so a DPI sees them as the same flow) with a per-decoy TTL/checksum and random
-// payload. Guarded by sendMu/sendDown exactly like writeOut so Close can't race the fd shut.
 // decoySeq is the per-decoy carrier sequence for decoy index i in one batch: the live stream's
 // current sequence, offset by fakeSeqGap so a decoy never collides with a real frame, plus i so the
 // decoys of one batch are distinct from each other (a real ping/tcp stream increments per packet).
@@ -220,6 +216,10 @@ func (r *Raw) decoySeq(i int) uint32 {
 	return r.seq.Load() + fakeSeqGap + uint32(i)
 }
 
+// sendFakes emits the configured decoy packets toward the peer just before a real
+// handshake. Each decoy shares the real flow's src/dst/proto (mirroring writeOut's forge
+// choices, so a DPI sees them as the same flow) with a per-decoy TTL/checksum and random
+// payload. Guarded by sendMu/sendDown exactly like writeOut so Close can't race the fd shut.
 func (r *Raw) sendFakes(to *net.IPAddr) {
 	if !r.desync.on || to == nil {
 		return
@@ -1086,12 +1086,16 @@ func (r *Raw) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	}
 }
 
+// deadWin is the session-stale window this carrier enforces: sessionStaleWindow over the
+// keepalive and the per-tunnel dead_after_secs. Published as `dw` in the status file so the
+// panel judges the dot by the same number the carrier acts on.
+func (r *Raw) deadWin() time.Duration { return sessionStaleWindow(r.keepalive, r.deadAfterSecs) }
+
 // sessionStale reports that the client has heard nothing authenticated from the server for long
 // enough that the peer most likely restarted with a fresh session, so the client should drop its
 // dead session and re-handshake. Without it a SERVER restart wedges the tunnel: the client keeps
 // pinging under a key the fresh server can't open and never re-initiates. See UDP.sessionStale.
-func (r *Raw) deadWin() time.Duration { return sessionStaleWindow(r.keepalive, r.deadAfterSecs) }
-func (r *Raw) sessionStale() bool     { return staleSince(r.lastRx.Load(), r.deadWin()) }
+func (r *Raw) sessionStale() bool { return staleSince(r.lastRx.Load(), r.deadWin()) }
 
 // markRx stamps a genuine inbound frame: both the failover clock (lastRx) and the liveness heartbeat
 // (hbRx). hbRx is set ONLY here (proven inbound), so hb stays 0 until the peer answers — a connecting

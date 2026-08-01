@@ -1477,16 +1477,16 @@ func echPublicNames(list []byte) []string {
 	return names
 }
 
-// verifyECHPublicName checks the OUTER (ECH-reject) certificate chains to a public root for one of the
-// ECH public names, so a network attacker can't feed the core forged RetryConfigs by presenting any
-// random cert. This gates the fresh-key HARVEST before the redial: without it a MITM could inject its
-// own ECH config and decrypt the redial's inner ClientHello (unmasking the real SNI).
 // echVerifyRoots is a TEST SEAM and is nil in production, where nil means the system trust store.
 // The ECH self-heal REDIAL is only reachable through a rejection that carries retry configs, and this
 // verification stands between the rejection and that redial — so with no seam the redial path cannot be
 // driven by a test at all, which is how a connection that gets no desync decoys survived in it.
 var echVerifyRoots *x509.CertPool
 
+// verifyECHPublicName checks the OUTER (ECH-reject) certificate chains to a public root for one of the
+// ECH public names, so a network attacker can't feed the core forged RetryConfigs by presenting any
+// random cert. This gates the fresh-key HARVEST before the redial: without it a MITM could inject its
+// own ECH config and decrypt the redial's inner ClientHello (unmasking the real SNI).
 func verifyECHPublicName(certs []*x509.Certificate, publicNames []string) error {
 	if len(publicNames) == 0 {
 		return errors.New("ech-reject: no ECH public name to verify against")
@@ -1848,10 +1848,6 @@ func (b *TCP) retestLoop() {
 	}
 }
 
-// dialLoop (client) keeps a connection to the server alive, retrying on drop. For a
-// ws pool it rotates edges: each attempt uses the pool's current (IP × SNI), a
-// failure burns the offending IP/SNI (establishWS), and a proactive timer tears the
-// connection down after b.rotate so the client moves before the edge is fingerprinted.
 // readECHCmdSingle consumes a pending live ECH-key push for a SINGLE (non-pool) ws/http edge and
 // hot-swaps b.wsECH so the NEXT dial presents the fresh key — the single-edge counterpart to the pool's
 // readECHCmd (a pool keys off p.snis and has no b.st; a single edge keys off b.wsECH and has no pool).
@@ -1989,6 +1985,10 @@ func (b *TCP) takeWarm() *warmDial {
 	}
 }
 
+// dialLoop (client) keeps a connection to the server alive, retrying on drop. For a
+// ws pool it rotates edges: each attempt uses the pool's current (IP × SNI), a
+// failure burns the offending IP/SNI (establishWS), and a proactive timer tears the
+// connection down after b.rotate so the client moves before the edge is fingerprinted.
 func (b *TCP) dialLoop() {
 	b.warmNext = make(chan *warmDial, 1)
 	defer func() {
@@ -2394,7 +2394,6 @@ func (b *TCP) dialCarrier(attribute bool) (net.Conn, string, string, error) {
 	return c, target, target, nil
 }
 
-// handshakeAndPrime wraps a freshly-dialed conn in a framer, runs the client ephemeral handshake
 // coverProbeHint names the two causes that produce ONE indistinguishable symptom on a cover tunnel:
 // the TLS handshake succeeds and the core handshake behind it then fails.
 //
@@ -2422,6 +2421,7 @@ func (b *TCP) coverProbeHint() {
 	})
 }
 
+// handshakeAndPrime wraps a freshly-dialed conn in a framer, runs the client ephemeral handshake
 // (crypto) and the obfs salt exchange, then primes the server with a ping that authenticates us.
 // On any failure the returned error is non-nil and the caller closes conn. On success the framer
 // is fully established and ready for serve/readLoop.

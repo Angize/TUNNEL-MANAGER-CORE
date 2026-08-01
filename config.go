@@ -22,9 +22,6 @@ type CryptoCfg struct {
 	Cipher  string `json:"cipher"` // "aes-256-gcm" (default / only for now)
 }
 
-// Config is the full contract between the Python node agent and this core.
-// The node writes it to core-<id>.json and launches the binary with
-// --config <path>. Nothing here is invented at runtime; the node owns it.
 // WSSNI is one fronting domain in the ws edge pool, with its own base64 ECHConfigList
 // (empty = no ECH for this domain) and request path (empty = "/").
 type WSSNI struct {
@@ -45,6 +42,9 @@ func (c *Config) cdnMode() string {
 	return "post"
 }
 
+// Config is the full contract between the Python node agent and this core.
+// The node writes it to core-<id>.json and launches the binary with
+// --config <path>. Nothing here is invented at runtime; the node owns it.
 type Config struct {
 	Role    string `json:"role"`    // "server" (public, listens) | "client" (behind NAT, dials)
 	Mode    string `json:"mode"`    // "packet" (only mode implemented in this slice)

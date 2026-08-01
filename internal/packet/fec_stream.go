@@ -252,7 +252,9 @@ func newFecDecoder(deliver func([]byte)) *fecDecoder {
 //
 // Evicting the least-recently-used entry keeps the same bound and makes the attack unstickable:
 // the worst a sprayer can achieve is forcing the live geometry's codec to be rebuilt, which is one
-// k×n table of GF(256) divisions — at most 256 of them.
+// k×n table of GF(256) divisions — exactly k*n of them (newFECCodec), so at the panel's 10+3 that is
+// 30, and at the widest geometry the codec itself accepts (n+k <= 256) it peaks around 16k. Still
+// trivial, which is why the conclusion holds; "at most 256" was simply the wrong number.
 func (d *fecDecoder) codec(n, k int) *fecCodec {
 	key := n<<8 | k
 	d.codecTick++
