@@ -247,9 +247,10 @@ func (b *UDP) SetSourcePool(sp *PeerPool) {
 				// ...and BURN it, which loudness alone never did. The socket stayed on the kernel
 				// default while the pool went on calling this entry Active, so the panel named a source
 				// the datagram path had never adopted; and because nothing marked it bad, every later
-				// heal treated it as a healthy IP that simply had not been tried. fail() burns it and
-				// advances, so the first rotation lands on an entry that binds.
-				b.sp.fail()
+				// heal treated it as a healthy IP that simply had not been tried. failUnusable() burns it
+				// and advances, so the first rotation lands on an entry that binds — unconditionally,
+				// because the kernel's refusal is not the remote-reachability question auto-burn gates.
+				b.sp.failUnusable()
 			}
 			if err == nil {
 				applyConnSockBuf(nc)
@@ -382,12 +383,13 @@ func (b *UDP) adoptSourceUDP() {
 	//
 	// This is the treatment #214 gave tcp (dropUnusableSource) and this batch gave raw/flux
 	// (adoptableSource); udp is where it stopped. End the jump — it is momentary, not a lock — and
-	// burn the entry so rotation stops coming back to it. fail() refuses to touch a pinned entry, so
-	// the order matters.
+	// burn the entry so rotation stops coming back to it. failWith refuses to touch a pinned entry, so
+	// the order matters. Unconditional (failUnusable): see that method for why the kernel's refusal is
+	// not the remote-reachability question auto-burn is a policy for.
 	if b.sp.pinCannotLand(addr) {
 		log.Printf("core/udp: manual jump to source %s abandoned — that IP will not bind on this host", addr)
 	}
-	b.sp.fail()
+	b.sp.failUnusable()
 }
 
 // ProbeAllNow retests every suspect/dead endpoint on both pools at once (the panel "probe now" control,
