@@ -73,13 +73,13 @@ func (c *Codec) MaxUpstream() int { return c.maxUp }
 // Zone returns the fully-qualified delegated zone (trailing dot).
 func (c *Codec) Zone() string { return c.zone }
 
-// zoneWireLen is the wire length of the zone name (label length-octets + bytes + the root octet).
 // ErrBareZone is returned by DecodeName for a query on the zone apex itself ("<zone>", no nonce
 // label). Our client never sends one — EncodeName always prepends a nonce, so even a payload-free
 // poll is "<nonce>.<zone>" — which makes this the one caller-visible way to tell "not our client"
 // from "our client, polling". The server uses it to answer without touching the session.
 var ErrBareZone = errors.New("dns codec: bare-zone query (no nonce label)")
 
+// zoneWireLen is the wire length of the zone name (label length-octets + bytes + the root octet).
 func zoneWireLen(zone string) int {
 	n := 1 // root label (0x00)
 	for _, lbl := range strings.Split(strings.TrimSuffix(zone, "."), ".") {
@@ -141,7 +141,9 @@ func (c *Codec) EncodeName(data []byte, nonce string) (string, error) {
 // DecodeName extracts the datagram from a query name under the zone, tolerating a missing/extra
 // trailing dot and any 0x20 case randomization the resolver applied. The leftmost label is the
 // per-query nonce (see EncodeName) and is discarded; the remaining labels are the base32 data. A
-// nonce-only name ("<nonce>.<zone>") or the bare zone carries zero upstream bytes (a poll).
+// nonce-only name ("<nonce>.<zone>") carries zero upstream bytes — that is a poll. The BARE zone
+// is not: it returns ErrBareZone, because no client of ours can produce it and answering it from
+// the downstream queue is how `dig TXT <zone>` used to drain the real client's stream.
 func (c *Codec) DecodeName(name string) ([]byte, error) {
 	nl := normName(name) // lower-case, trimmed, single trailing dot — same normalization as the zone form
 	// Require a real label boundary before the zone: "<labels>.<zone>" or a bare "<zone>" query.

@@ -102,12 +102,15 @@ func (d desyncCfg) specsTCP() []fakeSpec {
 	return out
 }
 
-// fakePayload returns a random-length, random-content payload sized like a small
-// handshake/keepalive frame. Our real frames are AEAD ciphertext (indistinguishable from
-// random on the wire), so a random decoy of a plausible size resembles a real flow packet.
-// fakeSeqGap offsets a decoy's sequence/counter away from the live stream's, so a decoy can never land
-// inside the real frame's sequence space and be mistaken for it by the peer (which drops it anyway on
-// the AEAD) or, worse, by a middlebox reassembling the flow.
+// fakeSeqGap offsets a decoy's sequence/counter away from the live stream's, so a decoy does not land
+// inside the sequence space the real frames are USING when it is sent and get mistaken for one by the
+// peer (which drops it anyway on the AEAD) or, worse, by a middlebox reassembling the flow. It is a
+// distance, not an impossibility: every counter here wraps or advances, so the live stream does
+// eventually reach the value a decoy carried. Decoys fire once per fresh handshake, when the counter
+// is near its start, and the gap sets how far away that moment is — about 32768 frames on icmp (only
+// uint16(seq) reaches the wire, rawprofile.go) and about a megabyte of tunnelled traffic on the tcp
+// profile (decoySeq is a BYTE counter, tcpISN+tcpBytes+gap). By then the decoy is long gone from any
+// middlebox's state.
 //
 // The low 15 bits matter as much as the size. The icmp profile stamps only uint16(seq), and the old
 // value 1<<20 is exactly 16×2^16 — so modulo the 16-bit field the offset was ZERO and every decoy
@@ -120,6 +123,9 @@ func (d desyncCfg) specsTCP() []fakeSpec {
 // is the furthest a wrapping 16-bit counter can be from the live value in either direction.
 const fakeSeqGap = 1<<20 + 1<<15
 
+// fakePayload returns a random-length, random-content payload sized like a small
+// handshake/keepalive frame. Our real frames are AEAD ciphertext (indistinguishable from
+// random on the wire), so a random decoy of a plausible size resembles a real flow packet.
 func fakePayload() []byte {
 	var lb [1]byte
 	_, _ = rand.Read(lb[:])

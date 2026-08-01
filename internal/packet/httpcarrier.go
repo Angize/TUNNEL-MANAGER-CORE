@@ -69,7 +69,9 @@ const chromeAcceptEncoding = "gzip, deflate, br, zstd"
 // This has to move together with the TLS fingerprint, or it just relocates the contradiction: a
 // grpc-go User-Agent under a Chrome JA3 is the same lie told the other way round. grpc-go rides Go's
 // crypto/tls, so grpc mode presents Go's own ClientHello (uEdgeHandshake's goFingerprint path) — the
-// two layers then tell one story. TestGrpcIdentityIsNotABrowser keeps them together.
+// two layers then tell one story. TestGrpcRequestIsNotABrowser and TestGrpcPathUsesTheGoFingerprint
+// are the two halves that keep them together, and TestGrpcModeStillSendsNoBrowserHeaders pins that the
+// browser header block did not leak back in.
 //
 // Bump this when it drifts far from what real fleets run; an implausibly old — or invented — version
 // is its own tell. It must be a version that actually shipped.

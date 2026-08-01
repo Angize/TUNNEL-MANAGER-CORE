@@ -438,15 +438,6 @@ func (p *wsPool) advance() bool {
 	return beforeIP != afterIP || beforeSNI.host != afterSNI.host
 }
 
-// aimStandby positions the rotation cursor for the WARM STANDBY dial: onto a HEALTHY edge whose IP
-// differs from the LIVE ACTIVE edge's IP, so the standby is always built on a DIFFERENT edge than the
-// active and can never collide with it. It replaces a blind advance() for the standby path: the shared
-// cursor is NOT anchored to the active edge, so after a standby reconnect (a CDN reaps the idle standby)
-// or a dial-failure advance, a plain step can walk the standby onto the ACTIVE's own IP. Proactive
-// rotation then "promotes" that standby to the SAME edge — no real switch, and setActive sees no change
-// so the panel logs nothing (the "rotation silently stopped" report) while edge diversity is lost.
-// Anchoring to "not the active IP" fixes it at the source. Falls back to a plain step when there is no
-// distinct healthy IP (single-IP pool, or every other IP burned) so the SNI axis still varies where it can.
 // hasHealthyEdgeOtherThan reports whether the pool can currently produce a HEALTHY (ip · sni) combo
 // that is not `combo`. It is read-only — no cursor movement, no status write — because it answers a
 // question the warm-standby manager asks on every rotation tick: the standby it holds was built on
@@ -475,6 +466,15 @@ func (p *wsPool) hasHealthyEdgeOtherThan(combo string) bool {
 	return false
 }
 
+// aimStandby positions the rotation cursor for the WARM STANDBY dial: onto a HEALTHY edge whose IP
+// differs from the LIVE ACTIVE edge's IP, so the standby is always built on a DIFFERENT edge than the
+// active and can never collide with it. It replaces a blind advance() for the standby path: the shared
+// cursor is NOT anchored to the active edge, so after a standby reconnect (a CDN reaps the idle standby)
+// or a dial-failure advance, a plain step can walk the standby onto the ACTIVE's own IP. Proactive
+// rotation then "promotes" that standby to the SAME edge — no real switch, and setActive sees no change
+// so the panel logs nothing (the "rotation silently stopped" report) while edge diversity is lost.
+// Anchoring to "not the active IP" fixes it at the source. Falls back to a plain step when there is no
+// distinct healthy IP (single-IP pool, or every other IP burned) so the SNI axis still varies where it can.
 func (p *wsPool) aimStandby() {
 	p.mu.Lock()
 	defer p.mu.Unlock()

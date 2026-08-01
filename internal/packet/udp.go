@@ -390,8 +390,6 @@ func (b *UDP) adoptSourceUDP() {
 	b.sp.fail()
 }
 
-// ProbeAllNow retests every suspect/dead endpoint on both pools at once (the panel "probe now" control,
-// delivered as SIGHUP). No-op unless pooled.
 // probeAllPools pulls every suspect/dead endpoint's retest forward on both of a carrier's pools (the
 // "probe now" control). Shared by udp/raw/flux, which differ only by which struct fields hold the pools.
 func probeAllPools(pp, sp *PeerPool) {
@@ -418,6 +416,8 @@ func runPinPoll(rc *rotationController, closeCh <-chan struct{}, adoptPeer, adop
 	}
 }
 
+// ProbeAllNow retests every suspect/dead endpoint on both pools at once (the panel "probe now" control,
+// delivered as SIGHUP). No-op unless pooled.
 func (b *UDP) ProbeAllNow() {
 	probeAllPools(b.pp, b.sp)
 }
@@ -453,14 +453,18 @@ func (b *UDP) SetStatusPath(path string) {
 	b.st = newCoreStatus(path, "udp · "+peer)
 }
 
+// deadWin is the session-stale window this carrier enforces: sessionStaleWindow over the
+// keepalive and the per-tunnel dead_after_secs. Published as `dw` in the status file so the
+// panel judges the dot by the same number the carrier acts on.
+func (b *UDP) deadWin() time.Duration { return sessionStaleWindow(b.keepalive, b.deadAfterSecs) }
+
 // sessionStale reports that the client has heard nothing it could authenticate from the server
 // for long enough that the peer has most likely restarted with a fresh session. The client then
 // drops its now-useless session and re-handshakes. Without this a SERVER restart wedges the tunnel:
 // the client keeps pinging under a key the fresh server cannot open and — because it still holds a
 // session — never re-initiates on its own. A false positive (a few lost pings on a healthy link)
 // only costs one harmless re-handshake. Only meaningful with crypto on.
-func (b *UDP) deadWin() time.Duration { return sessionStaleWindow(b.keepalive, b.deadAfterSecs) }
-func (b *UDP) sessionStale() bool     { return staleSince(b.lastRx.Load(), b.deadWin()) }
+func (b *UDP) sessionStale() bool { return staleSince(b.lastRx.Load(), b.deadWin()) }
 
 // markRx stamps a genuine inbound frame: it advances BOTH the failover clock (lastRx) and the liveness
 // heartbeat (hbRx) to the same instant. hbRx is set ONLY here — on proven inbound — so hb reads 0 until
@@ -839,12 +843,6 @@ func (b *UDP) deliver(pkt []byte, addr *net.UDPAddr) {
 	b.dispatch(pkt[1], iff(pkt[1] == typeData, pkt[2:], nil), addr)
 }
 
-// openWith tries to open one datagram under a specific session sealer, returning the
-// authenticated frame. It touches no session/replay state, so a frame can safely be tried
-// against both the live and a pending session.
-// openFrame is the shared receive-side frame opener for the datagram carriers (udp/raw/flux): obfs
-// path when obfs is on, else parse the magic/type header and authenticate the type byte via the
-// sealer. The three carriers' openWith methods differ only by the obfs field, so they delegate here.
 // sealBody builds one outbound frame for typ/payload: obfs, crypto (magic+type+sealed), or clear
 // (magic+type+payload). The send-side mirror of openFrame; shared by udp/raw/flux, which each pass their
 // own padMax (padMaxFor for udp/raw, fluxPadMax for flux — both pure reads, so evaluating eagerly at the
@@ -869,6 +867,9 @@ func sealBody(s Sealer, obfs bool, typ byte, payload []byte, padMax int) ([]byte
 	return out, nil
 }
 
+// openFrame is the shared receive-side frame opener for the datagram carriers (udp/raw/flux): obfs
+// path when obfs is on, else parse the magic/type header and authenticate the type byte via the
+// sealer. The three carriers' openWith methods differ only by the obfs field, so they delegate here.
 func openFrame(s Sealer, data []byte, obfs bool) (typ byte, session, seq uint64, payload []byte, oerr error) {
 	if obfs {
 		return obfsOpen(s, data)
@@ -881,6 +882,9 @@ func openFrame(s Sealer, data []byte, obfs bool) (typ byte, session, seq uint64,
 	return 0, 0, 0, nil, errBadFrame
 }
 
+// openWith tries to open one datagram under a specific session sealer, returning the
+// authenticated frame. It touches no session/replay state, so a frame can safely be tried
+// against both the live and a pending session.
 func (b *UDP) openWith(s Sealer, pkt []byte) (typ byte, session, seq uint64, payload []byte, oerr error) {
 	return openFrame(s, pkt, b.obfs)
 }

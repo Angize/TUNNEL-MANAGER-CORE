@@ -781,12 +781,16 @@ func (f *Flux) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	}
 }
 
+// deadWin is the session-stale window this carrier enforces: sessionStaleWindow over the
+// keepalive and the per-tunnel dead_after_secs. Published as `dw` in the status file so the
+// panel judges the dot by the same number the carrier acts on.
+func (f *Flux) deadWin() time.Duration { return sessionStaleWindow(f.keepalive, f.deadAfterSecs) }
+
 // sessionStale mirrors Raw.sessionStale: if the client has heard nothing
 // authenticated for ~3×keepalive (min 10s) the server probably restarted, so the
 // client drops the dead session and re-handshakes rather than pinging forever
 // under a key the fresh server cannot open.
-func (f *Flux) deadWin() time.Duration { return sessionStaleWindow(f.keepalive, f.deadAfterSecs) }
-func (f *Flux) sessionStale() bool     { return staleSince(f.lastRx.Load(), f.deadWin()) }
+func (f *Flux) sessionStale() bool { return staleSince(f.lastRx.Load(), f.deadWin()) }
 
 // markRx stamps a genuine inbound frame: both the failover clock (lastRx) and the liveness heartbeat
 // (hbRx). hbRx is set ONLY here (proven inbound), so hb stays 0 until the peer answers — a connecting
