@@ -61,9 +61,15 @@ func TestDesyncSpecs(t *testing.T) {
 	}
 }
 
-// TestBuildIP4Ext verifies the header fields, that buildIP4 is byte-identical to the
-// explicit (ttl 64, good checksum) form, that a good checksum verifies to zero, and that
-// badSum deliberately breaks it.
+// TestBuildIP4Ext verifies the header fields, that buildIP4 matches the explicit
+// (ttl 64, good checksum) form, that a good checksum verifies to zero, and that badSum
+// deliberately breaks it.
+//
+// "Byte-identical" was the original wording and it can no longer hold: Identification is now
+// per-packet (it was left at 0, which put ID=0 on the wire from every AF_PACKET path — measured).
+// The promise that matters is unchanged, so it is stated field-wise instead: buildIP4 IS
+// buildIP4Ext(ttl=64, badSum=false) in everything except the two fields that are per-packet by
+// design — the ID, and the checksum that follows from it.
 func TestBuildIP4Ext(t *testing.T) {
 	src := net.IPv4(10, 0, 0, 1)
 	dst := net.IPv4(10, 0, 0, 2)
@@ -71,8 +77,20 @@ func TestBuildIP4Ext(t *testing.T) {
 
 	base := buildIP4(src, dst, protoBIP, payload)
 	ext := buildIP4Ext(src, dst, protoBIP, 64, false, payload)
-	if string(base) != string(ext) {
-		t.Fatal("buildIP4 must equal buildIP4Ext(...,64,false,...) byte-for-byte")
+	if len(base) != len(ext) {
+		t.Fatalf("lengths differ: %d vs %d", len(base), len(ext))
+	}
+	for i := range base {
+		if i >= 4 && i < 6 { // Identification: different every packet, deliberately
+			continue
+		}
+		if i >= 10 && i < 12 { // header checksum: follows the Identification
+			continue
+		}
+		if base[i] != ext[i] {
+			t.Fatalf("byte %d differs (%#x vs %#x): buildIP4 must stay buildIP4Ext(ttl=64, badSum=false) "+
+				"in every field except the ones that are per-packet by design", i, base[i], ext[i])
+		}
 	}
 	if base[8] != 64 {
 		t.Fatalf("default TTL byte = %d, want 64", base[8])
@@ -102,7 +120,10 @@ func TestBuildIP4Ext(t *testing.T) {
 	if binary.BigEndian.Uint16(bad[10:12]) == binary.BigEndian.Uint16(good[10:12]) {
 		t.Fatal("badSum checksum must differ from the correct one")
 	}
-	bad[10], bad[11] = good[10], good[11]
+	// Normalise the two fields that are per-packet by design (the Identification, and therefore the
+	// checksum) and require everything else to match: badSum must touch the checksum and nothing else.
+	copy(bad[4:6], good[4:6])
+	copy(bad[10:12], good[10:12])
 	if string(bad) != string(good) {
 		t.Fatal("badSum must corrupt ONLY the checksum field, nothing else")
 	}
@@ -111,17 +132,39 @@ func TestBuildIP4Ext(t *testing.T) {
 // TestBuildIP4ExtBadSumZeroTwin locks in the one's-complement zero-twin fix: when the correct
 // header checksum is 0x0000, its bitwise complement 0xffff ALSO verifies (both are valid
 // representations of zero), so a naive ^sum would leave a VALID checksum. buildIP4Ext must
-// still produce an invalid one. src=10.0.0.0 dst=192.168.1.0 proto=253 ttl=238 len(payload)=69
-// is a header whose correct checksum is exactly 0x0000.
+// still produce an invalid one.
+//
+// The header used to be pinned by hand (src=10.0.0.0 dst=192.168.1.0 proto=253 ttl=238, 69-byte
+// payload summed to exactly 0x0000). Identification is per-packet now, so that premise is no longer
+// reproducible from the inputs alone — and the ID contributes linearly to the one's-complement sum,
+// so for this header EXACTLY ONE ID value produces the 0x0000 twin. The counter is package-level and
+// this test is in-package, so it is set directly and the right ID is searched for exhaustively:
+// deterministic, no probability involved.
 func TestBuildIP4ExtBadSumZeroTwin(t *testing.T) {
 	src := net.IPv4(10, 0, 0, 0)
 	dst := net.IPv4(192, 168, 1, 0)
 	payload := make([]byte, 69)
 
+	saved := ipIDCounter.Load()
+	defer ipIDCounter.Store(saved)
+	found := false
+	for id := 0; id <= 0xffff; id++ {
+		ipIDCounter.Store(uint32(id) - 1) // nextIPID adds 1 before returning
+		if binary.BigEndian.Uint16(buildIP4Ext(src, dst, protoBIP, 238, false, payload)[10:12]) == 0x0000 {
+			ipIDCounter.Store(uint32(id) - 1)
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("no Identification value makes this header sum to the 0x0000 twin — the test premise " +
+			"is broken, not the code")
+	}
 	good := buildIP4Ext(src, dst, protoBIP, 238, false, payload)
 	if binary.BigEndian.Uint16(good[10:12]) != 0x0000 {
 		t.Fatalf("test premise broken: correct checksum should be 0x0000, got %#04x", binary.BigEndian.Uint16(good[10:12]))
 	}
+	ipIDCounter.Store(ipIDCounter.Load() - 1) // rebuild the SAME header for the badSum twin
 	if onesComplementSum(good[:20]) != 0 {
 		t.Fatal("the 0x0000-checksum header must itself verify")
 	}
