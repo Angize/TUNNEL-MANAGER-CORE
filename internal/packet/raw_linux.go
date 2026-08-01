@@ -1,15 +1,9 @@
 //go:build linux
 
-// This file implements the "raw" transport: the same core frames as the UDP
-// carrier (udp.go), but each frame is wrapped in a raw-IP profile header
-// (rawEncap) and shipped over a raw IPv4 socket of the profile's protocol
-// number instead of over UDP. It mirrors UDP's structure — ephemeral X25519
-// handshake, replay guard, obfs and clear/crypto modes — so only the socket and
-// the per-frame profile wrap differ.
-//
-// A raw socket needs CAP_NET_RAW (root). Because it receives EVERY packet of the
-// chosen protocol addressed to the host, frames are filtered by peer source
-// address and then authenticated by the inner AEAD; anything else is dropped.
+// This file implements the "raw" transport: the same core frames as the UDP carrier (udp.go), but each
+// frame is wrapped in a raw-IP profile header (rawEncap) and shipped over a raw IPv4 socket of the
+// profile's protocol number. Only the socket and the profile wrap differ. A raw socket needs CAP_NET_RAW
+// and receives EVERY packet of that protocol, so frames are source-filtered and then AEAD-authenticated.
 package packet
 
 import (
@@ -43,7 +37,7 @@ type Raw struct {
 	cipher        string
 	profile       string
 	isClient      bool
-	icmpID        uint16 // ICMP echo identifier; PSK-derived + shared by both ends for the icmp profile so the server's replies match the client's requests through stateful ICMP filters (random for other profiles; the core itself ignores it on receive)
+	icmpID        uint16 // ICMP echo identifier; PSK-derived and shared by both ends on the icmp profile so replies match requests through a stateful ICMP filter (random elsewhere, ignored on receive)
 	spi           uint32 // per-session ESP Security Parameters Index (esp profile; constant like a real SA)
 
 	proto int
@@ -55,15 +49,10 @@ type Raw struct {
 
 	localIP atomic.Pointer[net.IPAddr] // our source IP toward the peer (for TCP/UDP checksums)
 	peer    atomic.Pointer[net.IPAddr] // current known peer (server learns it)
-	// replySrc (server, non-decoy) is the local IP the client dialed = the source to answer FROM, so a
-	// destination-pool client that rotates across our IPs gets each reply from the SAME IP it dialed
-	// (else the kernel picks our default IP, the client's source filter drops it, and that pool IP burns).
-	// Set per received frame in recvConnLoop BEFORE the frame is handled, so even the handshake RESP (sent
-	// synchronously inside handleRaw) already answers from the dialed IP. Tracks destination rotation.
-	// It is committed post-source-filter but pre-AEAD: the synchronous replies (RESP/pong) read the same
-	// frame's dst on the same goroutine so they are always correct; only the ASYNC download source could
-	// be momentarily steered by a source-spoofing attacker (availability-only, self-corrects on the next
-	// genuine frame) — accepted over threading the dst through every synchronous reply path.
+	// replySrc (server, non-decoy) is the local IP the client dialed, i.e. the source to answer FROM, so a
+	// destination-pool client that rotates across our IPs gets each reply from the SAME IP it dialed. Set
+	// per received frame in recvConnLoop BEFORE the frame is handled, so even the handshake RESP answers
+	// from the dialed IP. Committed pre-AEAD, so only the ASYNC download source could be briefly steered.
 	replySrc  atomic.Pointer[net.IP]
 	noPktinfo sync.Once           // one-shot warning: server frames arrived without IP_PKTINFO, so replySrc stays unset
 	srcWarned sync.Map            // source string -> struct{}: sources already reported as unusable, one line each (see adoptableSource)
@@ -83,7 +72,7 @@ type Raw struct {
 	tcpAck   uint32
 	tcpBytes atomic.Uint32 // cumulative tcp-profile payload bytes; drives the realistic seq advance
 	lastRx   atomic.Int64  // unix-nano of the last authenticated frame (client staleness)
-	hbRx     atomic.Int64  // unix-nano of the last REAL inbound frame — feeds the status heartbeat; 0 until the peer answers (v2.48.7)
+	hbRx     atomic.Int64  // unix-nano of the last REAL inbound frame — feeds the status heartbeat; 0 until the peer answers
 	// peerAnswered gates the clear-mode heal: set when the CURRENT endpoint replies, cleared on
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
 	peerAnswered atomic.Bool
@@ -99,19 +88,17 @@ type Raw struct {
 	sendMu   sync.RWMutex // senders RLock around a bare-fd Sendto (the link's spoofFd or the desync fakeFd); Close write-locks before closing either
 	sendDown bool         // set under sendMu.Lock in Close: no more Sendto on the (about-to-be-closed) fds
 
-	// Fake-packet desync (client only). desync holds the decoy parameters; fakeFd is a
-	// dedicated IP_HDRINCL socket for low-TTL decoys, opened only when desync is on AND
-	// spoofing did not already open one to borrow (the link's fakeFD) — -1 when unused. inj is an
-	// AF_PACKET injector for bad-checksum decoys (IP_HDRINCL rewrites the checksum, so those
-	// must bypass it); nil unless a badsum/both mode is on and the socket opened.
+	// Fake-packet desync (client only). desync holds the decoy parameters; fakeFd is a dedicated
+	// IP_HDRINCL socket for low-TTL decoys, opened only when desync is on AND spoofing did not already
+	// open one to borrow (-1 when unused). inj is an AF_PACKET injector for bad-checksum decoys, which
+	// must bypass IP_HDRINCL because it rewrites the checksum.
 	desync desyncCfg
 	fakeFd int
 	inj    *l2inject
 	dsSend desyncSend // outcome of the decoy TRANSMITS — opening fakeFd/inj says nothing about them
-	// openFakeFd overrides the IP_HDRINCL opener (nil => openHdrincl, the real syscall). The
-	// cannot-open branch in SetDesync is unreachable any other way: the fleet and the test box both
-	// run as root, where the real call always succeeds — which is exactly how that branch came to
-	// disable a mode it has no bearing on. Same shape as l2inject.resolve.
+	// openFakeFd overrides the IP_HDRINCL opener (nil => openHdrincl, the real syscall). The cannot-open
+	// branch in SetDesync is unreachable any other way, since the fleet and the test box both run as root.
+	// Same shape as l2inject.resolve.
 	openFakeFd func(int) (int, error)
 
 	closeCh   chan struct{}
@@ -149,11 +136,10 @@ func (r *Raw) SetStatusPath(path string) {
 	r.st = newCoreStatus(path, "raw:"+r.profile+" · "+peer)
 }
 
-// SetDesync (client, optional) turns on fake-packet desync: `count` decoy packets go out
-// just before each fresh handshake to mis-sync a stateful DPI. It needs an IP_HDRINCL
-// socket to stamp the decoy TTL/checksum; when spoofing already opened one (spoofFd) it is
-// reused, otherwise a dedicated socket is opened here. Failure to open only disables the
-// decoys (it never fails the tunnel). Call before Run(). No-op on the server.
+// SetDesync (client, optional) turns on fake-packet desync: `count` decoy packets go out just before
+// each fresh handshake to mis-sync a stateful DPI. It needs an IP_HDRINCL socket to stamp the decoy
+// TTL/checksum, reusing the one spoofing already opened when there is one. A failure to open disables
+// only the decoys, never the tunnel. Call before Run(). No-op on the server.
 func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 	if !r.isClient {
 		return
@@ -162,12 +148,9 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 	if !d.on {
 		return
 	}
-	// Only the modes that emit a LOW-TTL decoy need an IP_HDRINCL socket. mode "badsum" emits none:
-	// every one of its decoys goes out through the AF_PACKET injector below, which is a different
-	// socket for the opposite reason (IP_HDRINCL would repair the forged checksum). Opening it
-	// unconditionally — and bailing out on failure — meant a host where that socket cannot open lost
-	// the whole of a badsum-only desync it did not need the socket for, and said "fake-desync
-	// disabled" without mentioning that the mode chosen was unaffected.
+	// Only the modes that emit a LOW-TTL decoy need an IP_HDRINCL socket. mode "badsum" emits none: all
+	// of its decoys go out through the AF_PACKET injector below, which is a different socket for the
+	// opposite reason — IP_HDRINCL would repair the forged checksum.
 	if d.usesLowTTL() && r.link.fakeFD() < 0 { // no spoof socket to borrow — open a dedicated one
 		open := r.openFakeFd
 		if open == nil {
@@ -232,15 +215,10 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 	var sa syscall.SockaddrInet4
 	copy(sa.Addr[:], to.IP.To4())
 	for i, sp := range r.desync.specs() {
-		// Wrap the decoy in the SAME profile header the real frames carry. Sending fakePayload() bare
-		// only worked for bip/ipip, whose encap is a no-op; on icmp/gre/udp/tcp/esp it put random bytes
-		// where the carrier header belongs, so the decoy was not a well-formed packet of the protocol it
-		// claims in the IPv4 header. That inverts the whole point: a DPI cannot be desynced by something
-		// it discards as malformed, and a stream of proto-1 packets that are not valid ICMP is itself a
-		// cheap signature. Decoys take their own sequence space so they never collide with a real frame.
-		// The per-decoy +i (in decoySeq) keeps the decoys in ONE batch distinct: without it every decoy
-		// of a batch carried an identical seq (and, on icmp, an identical id+seq) — two byte-for-byte-
-		// header echo requests in a row is itself a signature, and a real ping stream increments its seq.
+		// Wrap the decoy in the SAME profile header the real frames carry. A bare payload is well-formed only
+		// on bip/ipip, whose encap is a no-op; elsewhere it puts random bytes where the carrier header belongs,
+		// and a DPI cannot be desynced by something it discards as malformed. Decoys take their own sequence
+		// space so they never collide with a real frame, and the per-decoy +i keeps one batch's decoys distinct.
 		dseq := r.decoySeq(i)
 		var dack uint32
 		if r.proto == protoTCP {
@@ -252,15 +230,10 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 			continue
 		}
 		if sp.badSum {
-			// Bad-checksum decoy: inject at L2 so the forged checksum survives (IP_HDRINCL
-			// would repair it). Best-effort — a cold next-hop neighbour just drops this one;
-			// the injector has its own fd guard, so it is safe against a concurrent Close.
-			// Frame it for `to.IP` — the address the tunnel ROUTES to — which is what the real
-			// data path and the TTL sibling below both hand the kernel (forgedLink.send Sendtos
-			// to.IP even when the header carries a forged dst, and the sa above is built from it).
-			// On a direct link that IS the header dst, so a destination rotation is still followed;
-			// on a spoof-dst link it is NOT, and passing the forged decoy made this one packet of
-			// the flow pick its first hop by a different address than everything else around it.
+			// Bad-checksum decoy: inject at L2 so the forged checksum survives (IP_HDRINCL would repair it).
+			// Best-effort — a cold next-hop neighbour just drops this one. Framed for `to.IP`, the address the
+			// tunnel ROUTES to, which is what the real data path hands the kernel: on a spoof-dst link the
+			// header dst is different, and using it would make this one packet pick a different first hop.
 			if r.inj != nil {
 				r.dsSend.note("raw", r.inj.sendTo(to.IP, out))
 			}
@@ -284,11 +257,9 @@ func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs, cryptoOn 
 	if spi < 256 {
 		spi += 256 // SPIs 0..255 are IANA-reserved; a real SA uses >= 256
 	}
-	// ICMP profile: derive the echo identifier from the PSK so BOTH ends use the SAME id. A stateful
-	// ICMP filter/conntrack (e.g. Iran's) only lets an echo REPLY through when its id matches an echo
-	// REQUEST it saw leave; with per-process random ids the server's replies look unsolicited and get
-	// dropped, so the tunnel never establishes. A shared PSK-derived id makes the server's replies
-	// match the client's requests and pass stateful ICMP tracking. Other profiles don't use icmpID.
+	// ICMP profile: derive the echo identifier from the PSK so BOTH ends use the SAME id. A stateful ICMP
+	// filter only lets an echo REPLY through when its id matches a REQUEST it saw leave, so with
+	// per-process random ids the server's replies look unsolicited and the tunnel never establishes.
 	icmpID := binary.BigEndian.Uint16(idb[0:2])
 	if profile == "icmp" {
 		h := sha256.Sum256([]byte("tnl-core|v2|icmp-id|" + psk))
@@ -302,11 +273,10 @@ func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs, cryptoOn 
 	}
 }
 
-// dialRawBase opens the client-side raw socket for profile+rawProto and targets peerIP, returning a
-// Raw with everything wired EXCEPT the ipLink (the caller sets it) and FEC. Shared by DialRaw (which
-// adds a directLink) and DialSpoof (which adds a forgedLink); the datapath is identical, only the
-// addressing layer differs. peerIP may be a plain IPv4 or an "ip:port" (the port is ignored — raw IP
-// has no ports of its own; the tcp/udp profiles carry synthetic ones).
+// dialRawBase opens the client-side raw socket for profile+rawProto and targets peerIP, returning a Raw
+// with everything wired EXCEPT the ipLink (the caller sets it) and FEC. Shared by DialRaw (directLink)
+// and DialSpoof (forgedLink): the datapath is identical, only the addressing layer differs. peerIP may
+// carry a port, which is ignored — raw IP has none of its own.
 func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, rawProto int) (*Raw, error) {
 	proto, ok := rawEffProto(profile, rawProto)
 	if !ok {
@@ -348,12 +318,10 @@ func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs, cry
 	if err != nil {
 		return nil, err
 	}
-	// The socket buffers are NOT sized here. Whether this IPConn is the data path at all is decided by
-	// the link the caller installs afterwards: a spoof DECOY server reads via AF_PACKET and writes via
-	// IP_HDRINCL, so it never touches this conn — and sizing it there pinned a multi-MiB receive buffer
-	// on a socket nothing ever drains. ListenRaw and the non-decoy ListenSpoof branch size it themselves.
-	// server: learn which of our IPs each frame targeted, to answer from it (dest-pool rotation).
-	// A failure is survivable but must never be silent — it degrades to the pre-v2.48.23 behaviour.
+	// The socket buffers are NOT sized here: whether this IPConn is the data path at all is decided by the
+	// link the caller installs afterwards. A spoof DECOY server reads via AF_PACKET and writes via
+	// IP_HDRINCL, so sizing here would pin a multi-MiB receive buffer on a socket nothing drains.
+	// server: learn which of our IPs each frame targeted, to answer from it — survivable, but never silent.
 	if err := enablePktinfoDst(conn); err != nil {
 		log.Printf("raw: WARNING IP_PKTINFO could not be enabled (%v) — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one", err)
 	}
@@ -494,22 +462,10 @@ func (r *Raw) writeOut(pkt []byte, to *net.IPAddr) {
 	r.link.send(pkt, to) // directLink: kernel-headered conn send; forgedLink: IP_HDRINCL Sendto
 }
 
-// pinnedSrc is the local IP this send must leave FROM, or nil to let the kernel choose. Two callers,
-// one mechanism (the IP_PKTINFO control message, which sets ipi_spec_dst = the outgoing source):
-//
-//   - SERVER: replySrc, the IP the client dialed — so a destination-pool client that rotates across our
-//     addresses gets every reply from the exact one it targeted (see replySrc's own note).
-//   - CLIENT with a SOURCE pool: the pool's current source. Without this the whole source-rotation
-//     feature was inert on raw: rotateSourceRaw stored localIP, logged, and moved the pool's status
-//     file, while every packet still left from the kernel-default address — the source only reached
-//     the wire through the forgedLink's IP_HDRINCL send, which exists ONLY when spoofing is configured,
-//     and rotateSourceRaw deliberately no-ops under a forged source. The two conditions are mutually
-//     exclusive, so the pool could never take effect. (flux was always correct: it crafts every header.)
-//     Pinning here also re-aligns the tcp/udp raw profiles' L4 checksum, which rawEncap computes over
-//     srcIP() — with the kernel picking a different source, every synthetic segment after the first
-//     rotation carried an invalid checksum, the exact forged-packet tell those profiles exist to avoid.
-//
-// A plain single-source client has nothing to pin and keeps the previous routing-picked behaviour.
+// pinnedSrc is the local IP this send must leave FROM, or nil to let the kernel choose — one mechanism
+// (the IP_PKTINFO control message) for two callers: a SERVER answers from replySrc, the IP the client
+// dialed, and a CLIENT under a source pool sends from the pool's current source. The client half also
+// re-aligns the tcp/udp profiles' L4 checksum, which rawEncap computes over srcIP() and not the kernel's.
 func (r *Raw) pinnedSrc() net.IP {
 	if rs := r.replySrc.Load(); rs != nil { // server (non-decoy)
 		return *rs
@@ -550,11 +506,9 @@ func buildIP4(src, dst net.IP, proto int, payload []byte) []byte {
 	return buildIP4Ext(src, dst, proto, 64, false, payload)
 }
 
-// buildIP4Ext is buildIP4 with an explicit TTL and an option to store a deliberately
-// WRONG header checksum — the two knobs a fake-packet desync needs: a low TTL makes a
-// decoy expire a few hops out (before the server), and a bad checksum makes the server's
-// IP stack drop it. ttl is clamped to 1..255. With ttl=64 and badSum=false it is byte-for-
-// byte identical to the original buildIP4, so the normal carrier path is unchanged.
+// buildIP4Ext is buildIP4 with an explicit TTL and an option to store a deliberately WRONG header
+// checksum — the two knobs a fake-packet desync needs: a low TTL expires a decoy a few hops out, and a
+// bad checksum makes the receiver's IP stack drop it. ttl is clamped to 1..255.
 func buildIP4Ext(src, dst net.IP, proto, ttl int, badSum bool, payload []byte) []byte {
 	if len(payload) > 0xffff-20 {
 		return nil // the IPv4 total-length field is 16-bit; refuse rather than truncate it (MTU-bounded, so defensive)
@@ -567,19 +521,10 @@ func buildIP4Ext(src, dst net.IP, proto, ttl int, badSum bool, payload []byte) [
 	h := make([]byte, 20+len(payload))
 	h[0] = 0x45 // version 4, IHL 5 (no options)
 	binary.BigEndian.PutUint16(h[2:4], uint16(len(h)))
-	// Identification and the Don't-Fragment bit. Leaving both at their zero value made every packet
-	// this builds differ from the flow it is supposed to belong to, MEASURED in a netns against a
-	// real tunnel: the raw carrier's own data goes out through conn.WriteToIP, where the kernel sets
-	// DF=1 and a varying ID, and an ordinary Linux UDP socket in the same namespace does the same.
-	// A packet built here carried DF=0 — one bit that separates every decoy from every real frame of
-	// the flow it is imitating, and on flux and the spoof link (which build ALL their traffic here)
-	// it is every packet of the tunnel.
-	//
-	// The ID half is narrower than it looks and that is worth writing down: on an IP_HDRINCL socket
-	// the kernel FILLS IN a zero ID (raw(7)), so those packets were already fine — measured at
-	// 34107/34108 on a decoy pair. It is the AF_PACKET paths (the bad-checksum decoy, the tcp-inject
-	// decoy, the sni_mode=fake decoy) that bypass the kernel completely and really did put ID=0 on
-	// the wire. Setting it here covers both without depending on which socket the caller uses.
+	// Identification and the Don't-Fragment bit. At their zero value every packet built here differs from
+	// the flow it is supposed to belong to: the kernel sets DF=1 and a varying ID on the raw carrier's own
+	// conn.WriteToIP sends, as it does for an ordinary socket. The ID half only ever mattered on the
+	// AF_PACKET paths, since an IP_HDRINCL socket fills in a zero ID itself (raw(7)).
 	binary.BigEndian.PutUint16(h[4:6], nextIPID())
 	binary.BigEndian.PutUint16(h[6:8], ipFlagDF)
 	h[8] = byte(ttl)
@@ -589,11 +534,9 @@ func buildIP4Ext(src, dst net.IP, proto, ttl int, badSum bool, payload []byte) [
 	sum := onesComplementSum(h[:20]) // checksum field is 0 during the sum
 	binary.BigEndian.PutUint16(h[10:12], sum)
 	if badSum {
-		// Corrupt it so an on-path DPI / the receiver's IP stack sees an invalid checksum.
-		// ^sum alone is NOT always wrong: one's complement has two representations of zero
-		// (0x0000 and 0xffff both verify), so when the correct sum is 0x0000 its complement
-		// 0xffff still validates. Store the complement, then verify it actually fails (the
-		// whole header must NOT sum to zero) and flip a bit if we hit that zero-twin case.
+		// Corrupt it so an on-path DPI / the receiver's IP stack sees an invalid checksum. ^sum alone is NOT
+		// always wrong: one's complement has two representations of zero, so when the correct sum is 0x0000
+		// its complement 0xffff still validates. Store the complement, then verify it really fails.
 		binary.BigEndian.PutUint16(h[10:12], ^sum)
 		if onesComplementSum(h[:20]) == 0 {
 			binary.BigEndian.PutUint16(h[10:12], ^sum^0x0001)
@@ -675,39 +618,22 @@ func openAfpacket() (int, error) {
 	return fd, nil
 }
 
-// rawSendMark tags the raw carrier's OWN outgoing packets (SO_MARK on its socket) so the icmp
-// anti-leak rule can tell them from the kernel's answer. It is needed for exactly one profile:
-// on icmp the server's downstream frames ARE echo replies to the peer, byte-for-byte the same
-// shape as the mirrored reply the kernel generates for the client's echo requests — and the
-// kernel copies the request's id, so nothing inside the packet distinguishes them. Measured in a
-// veth namespace pair: the rule without this exemption dropped all 10 of the server's own frames
-// (and returned EPERM on every send), i.e. it black-holed the download.
+// rawSendMark tags the raw carrier's OWN outgoing packets (SO_MARK on its socket) so the icmp anti-leak
+// rule can tell them from the kernel's answer. It is needed for exactly one profile: on icmp the
+// server's downstream frames ARE echo replies to the peer, byte-for-byte the shape of the kernel's
+// mirrored reply — and the kernel copies the request's id, so nothing inside the packet separates them.
 const rawSendMark = 0x746e6c01 // "tnl\x01"
 
-// rawDropMatches returns the filter-OUTPUT match arguments for the answers this profile provokes
-// from the receiving kernel, or nil for a profile no kernel handler answers.
+// rawDropMatches returns the filter-OUTPUT match arguments for the answers this profile provokes from
+// the receiving kernel, or nil for a profile no kernel handler answers. OUTPUT and not inbound: the raw
+// carrier reads a net.ListenIP socket the kernel delivers after PREROUTING and INPUT, so an inbound DROP
+// takes our own receive down with it. It keys off the PROFILE, not the effective protocol number.
 //
-// Why OUTPUT and not the inbound suppression flux uses: flux taps at AF_PACKET, before netfilter,
-// so it can drop the frame on the way IN. The raw carrier reads a net.ListenIP socket, which the
-// kernel delivers in ip_protocol_deliver_rcu — after PREROUTING *and* INPUT — so an inbound DROP
-// takes our own receive down with it (measured: raw-PREROUTING and filter-INPUT each took the
-// receiver from 10 frames to 0). The kernel's answer has to be suppressed on its way OUT instead.
-//
-// Measured per profile, 10 crafted carrier packets each, both directions observed:
-//
-//	icmp  the SERVER's kernel mirrors every echo request back — carrying our own ciphertext.
-//	      The client's kernel answers nothing (our downstream frames are echo replies), so the
-//	      rule is server-only, and it must not match the server's own replies: see rawSendMark.
-//	udp   BOTH kernels answer with an ICMP port-unreachable that QUOTES the packet (nothing is
-//	      bound to the synthetic port). Our frames are UDP, never ICMP — no exemption needed.
-//	tcp   BOTH kernels answer with a RST. A reset REVERSES the segment it could not deliver, and
-//	      since the carrier's flow reverses too (rawPorts), the kernel's reset leaves on exactly
-//	      the port pair OUR OWN frames use at this end — so the ports do not separate the two and
-//	      the RST flag is the whole discriminator. Ours are PSH|ACK.
-//
-// The switch keys off the PROFILE, not the effective protocol number: a bip carrier that
-// overrides raw_proto to 1/6/17 carries no well-formed L4 header for that protocol, so there is
-// no coherent answer to suppress (and no coherent rule to write).
+//	icmp  the SERVER's kernel mirrors every echo request back, carrying our own ciphertext. The client's
+//	      kernel answers nothing, so the rule is server-only and must exempt our own replies (rawSendMark).
+//	udp   BOTH kernels answer an ICMP port-unreachable quoting the packet. Ours are UDP, never ICMP.
+//	tcp   BOTH kernels answer a RST, and since the carrier's flow reverses too it leaves on exactly the
+//	      port pair OUR frames use at this end — so the RST flag is the whole discriminator. Ours are PSH|ACK.
 func rawDropMatches(peer net.IP, profile string, isClient, marked bool) [][]string {
 	d := peer.String()
 	switch profile {
@@ -840,11 +766,9 @@ func (r *Raw) tunToNet() error {
 	}
 }
 
-// recvConnLoop receives raw packets on the AF_INET socket, strips the profile header,
-// authenticates, and writes data frames into the TUN. It is the receive path for every
-// configuration except a decoy server (which reads off the wire via the forgedLink's
-// AF_PACKET loop instead). Both a directLink and a forgedLink whose source is forged but
-// whose destination is not (a spoof-src client, or a spoof-src-only server) use this.
+// recvConnLoop receives raw packets on the AF_INET socket, strips the profile header, authenticates, and
+// writes data frames into the TUN. It is the receive path for every configuration except a decoy server,
+// which reads off the wire through the forgedLink's AF_PACKET loop instead.
 func (r *Raw) recvConnLoop() error {
 	buf := make([]byte, maxDatagram)
 	oob := make([]byte, 128) // room for the IP_PKTINFO control message (server dst capture)
@@ -868,8 +792,8 @@ func (r *Raw) recvConnLoop() error {
 				r.replySrc.Store(&d)
 			} else {
 				// setsockopt reported success but the kernel delivers no (or an unparseable) cmsg —
-				// replies fall back to the default source. Warn ONCE: silent is how this class of
-				// breakage cost days of debugging before.
+				// replies fall back to the default source. Warn ONCE, because silently is the worst way
+				// for this to break.
 				r.noPktinfo.Do(func() {
 					log.Printf("raw: WARNING inbound frames carry no IP_PKTINFO — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one")
 				})
@@ -879,11 +803,10 @@ func (r *Raw) recvConnLoop() error {
 	}
 }
 
-// afpacketLoop owns the AF_PACKET receive loop shared by the raw and flux carriers: one reusable
-// buffer, the blocking Recvfrom, the close/EINTR/EAGAIN control flow, the PACKET_OUTGOING self-frame
-// skip, and the IPv4 header validation. It calls handle(pkt, ihl) for each accepted IPv4 frame; the
-// carrier-specific per-frame `continue`s become plain returns from handle. Runs until Close (nil) or a
-// real Recvfrom error.
+// afpacketLoop owns the AF_PACKET receive loop shared by the raw and flux carriers: one reusable buffer,
+// the blocking Recvfrom, the close/EINTR/EAGAIN control flow, the PACKET_OUTGOING self-frame skip and the
+// IPv4 header validation. It calls handle(pkt, ihl) per accepted frame, so a carrier's per-frame
+// `continue` becomes a plain return. Runs until Close (nil) or a real Recvfrom error.
 func afpacketLoop(fd int, closeCh <-chan struct{}, handle func(pkt []byte, ihl int)) error {
 	buf := make([]byte, maxDatagram+64) // room for the IPv4 header ahead of the frame
 	for {
@@ -996,23 +919,10 @@ func (r *Raw) learnPeer(addr *net.IPAddr) {
 		r.peer.Store(addr)
 	}
 	r.learnLocalIP(addr.IP)
-	// ASYNC: this runs on the receive goroutine, which IS the data path. A rotation/pin has normally
-	// already re-scoped to this peer, so the common case is the atomic-load fast path and nothing
-	// happens; the hand-off covers what a rotation cannot know up front — the server learning its
-	// client at all, and then following that client's SOURCE rotation.
-	//
-	// It scopes to the CURRENT peer, not to whoever sent this frame, and the difference is the whole
-	// bug. The rule set is single-scoped: pointing it at one address takes it OFF the previous one. On
-	// a pooled CLIENT the branch above deliberately does NOT adopt the sender — and SetPeerPool just as
-	// deliberately keeps admitting the endpoint a rotation left, so frames from it keep arriving for a
-	// while. Passing addr here handed each of those frames the power to drag the rules back onto the
-	// OLD destination, i.e. off the one the tunnel is now using: the #211 kernel-answer leak, re-opened
-	// on the live endpoint by every straggler, on every rotation. install-before-remove does not help —
-	// it closes the sub-millisecond gap between two rules, not a scope pointed at the wrong address.
-	//
-	// Where the sender IS the peer this is identical: on a server, and on a single-peer client, the
-	// store above has just made them the same value. provenFrom next door already draws exactly this
-	// distinction for the same class of frame.
+	// ASYNC: this runs on the receive goroutine, which IS the data path, so the common case is the
+	// atomic-load fast path. It scopes to the CURRENT peer, not to whoever sent this frame: the rule set is
+	// single-scoped, and a pooled client keeps admitting the endpoint a rotation left, so the sender could
+	// otherwise drag the rules back onto the OLD destination and re-open the leak on the live one.
 	if p := r.peer.Load(); p != nil {
 		r.leak.scopeAsync(p.IP)
 	}
@@ -1054,14 +964,10 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr) {
 		r.st.reconnected("raw") // recovery after a self-heal (nil-safe; silent on first connect)
 		return
 	}
-	// Compute-DoS mitigation: an attacker replaying captured valid inits at high rate
-	// would otherwise force a fresh ECDH+HKDF (GenerateEphemeral+SessionSealer) per packet.
-	// If this init matches one we recently answered (while a pending session is current),
-	// re-send the already-computed response and return before that expensive crypto. The
-	// handshake outcome is unchanged (staged/promote-on-open is untouched); a genuinely new
-	// init falls through to the full handshake below. The cache is a small LRU (not a
-	// single entry) so alternating two captured inits cannot bust it. It is touched only on
-	// this single receive goroutine (like staged), so no locking is needed.
+	// Compute-DoS mitigation: an attacker replaying captured valid inits at high rate would otherwise force
+	// a fresh ECDH+HKDF per packet, so an init matching one we recently answered (while a pending session is
+	// current) is served from a small LRU before that crypto; a genuinely new init falls through.
+	// Receive-goroutine-only, like staged, so no locking is needed.
 	if len(r.staged) > 0 {
 		if resp, ok := r.hsCache.get(body); ok {
 			r.writeCtrl(resp, r.replyAddr(addr))
@@ -1140,10 +1046,8 @@ func (r *Raw) markRx() {
 
 // provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for
 // about one RTT after a jump the endpoint we LEFT is still answering; those frames are ours and are
-// delivered, but they say nothing about the endpoint we just moved to — counting them as proof is what
-// let a blocked IP hide behind the one it replaced. A frame from any address that is NOT another pool
-// endpoint is unattributable (a server that replies from one fixed IP rather than the dialed one) and
-// still counts, so an unusual listen config degrades to the old behaviour instead of a rotation storm.
+// delivered, but counting them as proof is what lets a blocked IP hide behind the one it replaced. A
+// frame from an address that is not another pool endpoint is unattributable and still counts.
 func (r *Raw) provenFrom(ip net.IP) {
 	if ip != nil && len(r.poolIPs) > 0 {
 		if p := r.peer.Load(); p != nil && !p.IP.Equal(ip) {
@@ -1165,14 +1069,10 @@ func (r *Raw) SetPeerPool(pp *PeerPool) {
 	if r.isClient {
 		r.pp = pp
 		if pp != nil {
-			// ONE map, two readers, so the two views of the pool can never drift apart:
-			//  - poolIPs: see provenFrom — tells "the endpoint we left" apart from "an unattributable source".
-			//  - srcAllow: admit every pool endpoint as a reply source. A timed rotation keeps the session
-			//    (see rotatePeerRaw), so for about one RTT after the jump the server is still answering from
-			//    the endpoint we just left — those frames open under the same keys and are ours, but the
-			//    strict single-source filter in recvConnLoop would drop them and turn a seamless rotation back
-			//    into a small loss burst. All pool addresses belong to the same server node, and the AEAD
-			//    still authenticates every frame, so this widens nothing an attacker can use.
+			// ONE map, two readers, so the two views of the pool can never drift apart. poolIPs is provenFrom's
+			// "the endpoint we left" test; srcAllow admits every pool endpoint as a reply source, because a timed
+			// rotation keeps the session and the server still answers from the endpoint we just left for about
+			// one RTT. All pool addresses belong to one node, and the AEAD still authenticates every frame.
 			m := buildSrcAllow(pp.all())
 			r.poolIPs = m
 			if len(m) > 0 {
@@ -1223,10 +1123,9 @@ func (r *Raw) SetSourcePool(sp *PeerPool) {
 		return
 	}
 	if r.link.pinsSource() {
-		// spoof_src owns the source field, so a rotation pool cannot also drive it. Refusing is right;
-		// refusing SILENTLY was not — main.go logs "source pool: N source IPs rotate=..." immediately
-		// after this call and has no way to know it was dropped, so the operator read a pool as active
-		// that never existed. Config validation rejects the combination now; this stays as the guard.
+		// spoof_src owns the source field, so a rotation pool cannot also drive it. Refusing must not be
+		// silent: main.go logs "source pool: N source IPs rotate=..." right after this call and has no way to
+		// know it was dropped. Config validation rejects the combination; this stays as the guard.
 		log.Printf("core/raw: source pool ignored — spoof_src pins the source IP (remove one of them)")
 		return
 	}
@@ -1261,12 +1160,9 @@ func (r *Raw) rotateSourceRaw(proactive bool) {
 	}
 	ip := adoptableSource("raw", r.sp, addr, &r.srcWarned)
 	if ip == nil {
-		// The pool advanced onto a source this host cannot send from (the IP was removed from the
-		// interface but not from the pool). Undo the move, exactly as rotateSourceUDP does: not one
-		// packet left prev, so publishing a src-rotate naming the new one would describe a move that
-		// never happened, the healthy in-use source would stay burned, and a later success() would
-		// heal-clear an IP that was never tried. The old code returned here in silence with the pool
-		// already moved, which is the same defect one layer up.
+		// The pool advanced onto a source this host cannot send from. Undo the move, exactly as
+		// rotateSourceUDP does: not one packet left prev, so publishing a src-rotate naming the new one would
+		// describe a move that never happened, and a later success() would heal-clear an IP never tried.
 		r.sp.rejectCandidate(prev)
 		return
 	}
@@ -1278,14 +1174,9 @@ func (r *Raw) rotateSourceRaw(proactive bool) {
 }
 
 // rotatePeerRaw points the client at the next pool endpoint. No-op when the pool did not move or the
-// endpoint is not valid IPv4 (raw is IPv4-only).
-//
-// A TIMED rotation keeps the AEAD session, so not one packet is dropped: every pool endpoint is an
-// address of the SAME server process and the session is independent of the address. The server stamps
-// its reply source from the IP each received frame was sent to (IP_PKTINFO), so it follows on the
-// first frame, and SetPeerPool admits the endpoint we just left as a reply source for the frames still
-// in flight from it. A FAILOVER rotation still clears — that endpoint stopped answering, and the
-// handshake retransmit is what drives burn+advance. Mirrors rotatePeerUDP.
+// endpoint is not valid IPv4 (raw is IPv4-only). A TIMED rotation keeps the AEAD session — every pool
+// endpoint is an address of the SAME server process, which follows on the first frame via IP_PKTINFO,
+// and SetPeerPool admits the endpoint we left for what is still in flight. A FAILOVER clears it.
 func (r *Raw) rotatePeerRaw(proactive bool) {
 	if r.pp == nil {
 		return
@@ -1339,19 +1230,16 @@ func (r *Raw) adoptPeerRaw() {
 	r.st.setActive("raw:" + r.profile + " · " + ip.String()) // refresh the frozen active descriptor to the new destination (matches SetStatusPath)
 	r.session.Store(nil)
 	r.ci.Store(nil)
-	// The same two resets rotatePeerRaw performs, and for the same reason: a pin jumps to an endpoint
-	// that has proven NOTHING yet. Leaving peerAnswered true from the PREVIOUS endpoint lets the very
-	// next loop tick treat the newly pinned one as proven — clearing its burn, emitting a false heal,
-	// and releasing the pin through pinLanded() before it had actually landed, which resumes normal
-	// rotation and defeats the operator pick. lastRx likewise stayed recent from the old endpoint, so
-	// the dead window for the new one was measured from a frame it never sent.
+	// The same two resets rotatePeerRaw performs, and for the same reason: a pin jumps to an endpoint that
+	// has proven NOTHING yet. Leaving peerAnswered true from the PREVIOUS endpoint lets the very next tick
+	// treat the pinned one as proven — clearing its burn, emitting a false heal and releasing the pin
+	// before it landed — and its dead window would be measured from a frame it never sent.
 	r.lastRx.Store(time.Now().UnixNano())
 	r.peerAnswered.Store(false)
 	log.Printf("raw: pinned destination to %s", ip)
 	// "Make this active" is a deliberate operator jump — SILENT, like udp/tcp and the ws edge pool: only
 	// the active endpoint changes, no down/up in the event ring. The session clear above still forces the
-	// re-handshake onto the pinned peer and setActive (above) keeps "active" tracking it. Emitting
-	// down("peer-pin") here armed a paired reconnect and surfaced a manual jump as a rotation event.
+	// re-handshake onto the pinned peer, and setActive keeps "active" tracking it.
 }
 
 // adoptSourceRaw swaps the crafted-header source to the pool's CURRENT source (an operator source pin).
@@ -1420,16 +1308,10 @@ func (r *Raw) clientLoop() {
 				failN = 0
 			}
 		} else {
-			// Heal transient burns on endpoints proving themselves. Crypto signals via a completed
-			// handshake (failN>0); clear mode has no handshake, so use the data plane (peerAnswered set
-			// when the CURRENT endpoint replies, cleared on rotation) so a just-jumped-to endpoint's burn
-			// is never falsely cleared. Mirrors UDP.
-			// Heal only what the CURRENT endpoint has EARNED. "failN > 0" alone used to be proof: it could
-			// only be non-zero in crypto mode after handshake retransmits, and reaching this branch at all
-			// meant the handshake had just succeeded. Now that a timed rotation keeps the session, failN
-			// also counts unanswered probes on an endpoint we have merely jumped to — so the old signal
-			// cleared the burn of an endpoint that had proven nothing, and a blocked IP was un-burned on
-			// every visit and never dropped out of rotation. peerAnswered is the proof, in both modes.
+			// Heal transient burns on an endpoint proving itself. Crypto signals that via a completed handshake;
+			// clear mode has none, so it uses the data plane (peerAnswered, set when the CURRENT endpoint replies
+			// and cleared on rotation). Heal only what that endpoint has EARNED: failN alone is not proof, because
+			// a timed rotation keeps the session and failN then also counts probes we merely jumped into.
 			if r.peerAnswered.Load() && (failN > 0 || (!r.cryptoOn && rc.active())) {
 				healEvents(r.st, rc) // this endpoint is answering — clear transient burns, release a landed pin, emit any heal
 			}
@@ -1437,11 +1319,9 @@ func (r *Raw) clientLoop() {
 			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the
 			// NEW destination sees, and it is what makes the server stamp its replies from that IP.
 			r.send(typePing, nil, r.peer.Load())
-			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session
-			// survives, no handshake failure will ever say so. Count unanswered ticks here — AFTER the
-			// jump, so the very next wait is already the 1s probe interval — on the same threshold the
-			// handshake path uses. Checking before the rotation cost a full keepalive first, which let
-			// sessionStale (a whole dead window) win the race and turned a blocked IP into a ~30s hole.
+			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session survives,
+			// no handshake failure will ever say so. Count unanswered ticks here — AFTER the jump, so the very
+			// next wait is already the 1s probe interval — on the same threshold the handshake path uses.
 			if unproven = r.cryptoOn && rc.active() && !r.peerAnswered.Load(); unproven {
 				if failN++; failN >= peerFailThreshold {
 					r.session.Store(nil) // not answering: drop back to the handshake path, which burns and advances
