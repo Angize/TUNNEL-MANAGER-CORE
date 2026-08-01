@@ -55,6 +55,12 @@ func newDesyncCfg(on bool, ttl, count int, mode string) desyncCfg {
 // carrier knows to set up the AF_PACKET injector (IP_HDRINCL would repair the checksum).
 func (d desyncCfg) usesBadsum() bool { return d.on && (d.mode == "badsum" || d.mode == "both") }
 
+// usesLowTTL is the mirror of usesBadsum: whether any decoy this config emits is a low-TTL one, so a
+// carrier knows whether it needs the IP_HDRINCL socket at all. mode "badsum" emits none — every one
+// of its decoys goes out through the AF_PACKET injector — so a carrier that cannot open an
+// IP_HDRINCL socket can still deliver that mode in full.
+func (d desyncCfg) usesLowTTL() bool { return d.on && (d.mode == "ttl" || d.mode == "both") }
+
 // fakeSpec is one decoy's IP-header knobs. A ttl decoy keeps a valid checksum (it must be
 // forwarded until the TTL runs out mid-path); a badsum decoy keeps a normal TTL (it must
 // reach the server host to be dropped there). The two are complementary, so "both"

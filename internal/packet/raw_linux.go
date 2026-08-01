@@ -108,6 +108,11 @@ type Raw struct {
 	fakeFd int
 	inj    *l2inject
 	dsSend desyncSend // outcome of the decoy TRANSMITS — opening fakeFd/inj says nothing about them
+	// openFakeFd overrides the IP_HDRINCL opener (nil => openHdrincl, the real syscall). The
+	// cannot-open branch in SetDesync is unreachable any other way: the fleet and the test box both
+	// run as root, where the real call always succeeds — which is exactly how that branch came to
+	// disable a mode it has no bearing on. Same shape as l2inject.resolve.
+	openFakeFd func(int) (int, error)
 
 	closeCh   chan struct{}
 	closeOnce sync.Once
@@ -157,13 +162,31 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 	if !d.on {
 		return
 	}
-	if r.link.fakeFD() < 0 { // no spoof socket to borrow — open a dedicated one for the low-TTL decoys
-		fd, err := openHdrincl(r.proto)
-		if err != nil {
-			log.Printf("raw: fake-desync disabled (cannot open raw socket: %v)", err)
-			return
+	// Only the modes that emit a LOW-TTL decoy need an IP_HDRINCL socket. mode "badsum" emits none:
+	// every one of its decoys goes out through the AF_PACKET injector below, which is a different
+	// socket for the opposite reason (IP_HDRINCL would repair the forged checksum). Opening it
+	// unconditionally — and bailing out on failure — meant a host where that socket cannot open lost
+	// the whole of a badsum-only desync it did not need the socket for, and said "fake-desync
+	// disabled" without mentioning that the mode chosen was unaffected.
+	if d.usesLowTTL() && r.link.fakeFD() < 0 { // no spoof socket to borrow — open a dedicated one
+		open := r.openFakeFd
+		if open == nil {
+			open = openHdrincl
 		}
-		r.fakeFd = fd
+		fd, err := open(r.proto)
+		if err != nil {
+			// Mirror the AF_PACKET failure handling below: "both" keeps the half that still works,
+			// "ttl" has no other half and really is off. sendFakes skips a low-TTL decoy on its own
+			// when fd < 0, so nothing else has to know.
+			if d.mode == "both" {
+				log.Printf("raw: low-TTL decoys disabled (cannot open raw socket: %v) — the bad-checksum decoys still fire", err)
+			} else {
+				log.Printf("raw: fake-desync disabled (cannot open raw socket: %v) — mode=ttl has no bad-checksum decoys", err)
+				return
+			}
+		} else {
+			r.fakeFd = fd
+		}
 	}
 	if d.usesBadsum() { // bad-checksum decoys must bypass IP_HDRINCL (which repairs the checksum)
 		// The injector carries no peer — sendFakes passes the CURRENT destination per decoy — so it
