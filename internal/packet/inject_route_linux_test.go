@@ -112,3 +112,64 @@ func TestRawBadsumDecoyFollowsDestination(t *testing.T) {
 			"the badsum injector must follow the tunnel to %s", last[len(last)-1], second.IP)
 	}
 }
+
+// TestRawBadsumDecoyFramesForTheRoutedPeer closes the whole class: whatever the link forges into the
+// decoy's IPv4 HEADER, the Ethernet frame it is injected in must be built for the address the tunnel
+// actually ROUTES to. Every other packet of the flow picks its first hop that way — forgedLink.send
+// Sendtos to.IP even while the header carries the decoy, and the low-TTL decoy sibling uses the same
+// `sa` — so a badsum decoy framed for the forged destination is the one packet that can leave by a
+// different next hop than the flow it exists to camouflage.
+//
+// The matrix is over the FORGE axes, because that is what decides whether header dst == to.IP:
+// a direct link (they agree, so the old code happened to be right) and each forgedLink combination
+// (spoof-src only agrees too; anything with spoofDst does not). fake_desync is accepted on the spoof
+// transport (config.go), so these are reachable configurations, not hypotheticals.
+//
+// It drives Raw.sendFakes, not the injector helper. What it does NOT cover: that the header still
+// carries the forged decoy — that is forgedLink.header's contract and TestIPLinkAddressingMatrix
+// pins it.
+func TestRawBadsumDecoyFramesForTheRoutedPeer(t *testing.T) {
+	peer := &net.IPAddr{IP: net.IPv4(203, 0, 113, 5)}
+	decoy := net.IPv4(198, 51, 100, 200)
+	forgedSrc := net.IPv4(192, 0, 2, 44)
+
+	for _, tc := range []struct {
+		name string
+		link func(r *Raw) ipLink
+	}{
+		{"direct", func(r *Raw) ipLink { return &directLink{r: r} }},
+		{"forge src", func(r *Raw) ipLink {
+			return &forgedLink{r: r, spoofFd: -1, pktFd: -1, spoofSrc: forgedSrc}
+		}},
+		{"forge dst", func(r *Raw) ipLink {
+			return &forgedLink{r: r, spoofFd: -1, pktFd: -1, spoofDst: decoy}
+		}},
+		{"forge both", func(r *Raw) ipLink {
+			return &forgedLink{r: r, spoofFd: -1, pktFd: -1, spoofSrc: forgedSrc, spoofDst: decoy}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeResolver{}
+			r := &Raw{isClient: true, proto: protoBIP, profile: "bip", fakeFd: -1}
+			r.link = tc.link(r)
+			r.localIP.Store(&net.IPAddr{IP: net.IPv4(192, 0, 2, 1)})
+			r.desync = newDesyncCfg(true, 4, 2, "badsum") // every decoy is badsum -> every one goes via the injector
+			r.inj = testInjector(f)
+			r.peer.Store(peer)
+
+			r.sendFakes(peer)
+
+			asked := f.asked()
+			if len(asked) == 0 {
+				t.Fatal("no badsum decoy was framed at all — the injector was never asked for a route")
+			}
+			for _, a := range asked {
+				if a != peer.IP.String() {
+					t.Fatalf("a badsum decoy was L2-framed for %s; it must follow the address the tunnel "+
+						"routes to (%s), which is what forgedLink.send and the low-TTL decoy both use — "+
+						"framing it for the forged header dst sends it out a next hop of its own", a, peer.IP)
+				}
+			}
+		})
+	}
+}

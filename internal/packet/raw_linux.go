@@ -232,10 +232,14 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 			// Bad-checksum decoy: inject at L2 so the forged checksum survives (IP_HDRINCL
 			// would repair it). Best-effort — a cold next-hop neighbour just drops this one;
 			// the injector has its own fd guard, so it is safe against a concurrent Close.
-			// Pass the SAME dst the decoy's IPv4 header carries, so after a destination rotation
-			// the frame goes to the gateway that serves the new destination, not the startup one.
+			// Frame it for `to.IP` — the address the tunnel ROUTES to — which is what the real
+			// data path and the TTL sibling below both hand the kernel (forgedLink.send Sendtos
+			// to.IP even when the header carries a forged dst, and the sa above is built from it).
+			// On a direct link that IS the header dst, so a destination rotation is still followed;
+			// on a spoof-dst link it is NOT, and passing the forged decoy made this one packet of
+			// the flow pick its first hop by a different address than everything else around it.
 			if r.inj != nil {
-				r.dsSend.note("raw", r.inj.sendTo(dst, out))
+				r.dsSend.note("raw", r.inj.sendTo(to.IP, out))
 			}
 			continue
 		}
