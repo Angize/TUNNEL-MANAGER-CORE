@@ -225,7 +225,8 @@ func TestDNSMessageHelpersRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := []byte{0x00, 0x01, 0xff, 0xfe, 'x', 'y'}
-	resp, err := buildResponse(0x1234, qn, dnsmessage.TypeTXT, []dnsmessage.Resource{txtResource(qn, []string{string(payload)})})
+	resp, err := buildResponse(0x1234, qn, dnsmessage.TypeTXT,
+		[]dnsmessage.Resource{txtResource(qn, []string{string(payload)})}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

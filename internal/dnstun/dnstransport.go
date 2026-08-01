@@ -139,11 +139,12 @@ func parseQuery(buf []byte) (id uint16, name string, qtype dnsmessage.Type, ok b
 // resolver querying a zone's own nameserver iteratively (RD=0) requires AA on the answer — without
 // it the delegation looks lame and the lookup SERVFAILs, so this bit is what makes the carrier work
 // through real resolvers rather than only a direct-to-server dig.
-func buildResponse(id uint16, qname dnsmessage.Name, qtype dnsmessage.Type, answers []dnsmessage.Resource) ([]byte, error) {
+func buildResponse(id uint16, qname dnsmessage.Name, qtype dnsmessage.Type, answers, authority []dnsmessage.Resource) ([]byte, error) {
 	msg := dnsmessage.Message{
-		Header:    dnsmessage.Header{ID: id, Response: true, Authoritative: true},
-		Questions: []dnsmessage.Question{{Name: qname, Type: qtype, Class: dnsmessage.ClassINET}},
-		Answers:   answers,
+		Header:      dnsmessage.Header{ID: id, Response: true, Authoritative: true},
+		Questions:   []dnsmessage.Question{{Name: qname, Type: qtype, Class: dnsmessage.ClassINET}},
+		Answers:     answers,
+		Authorities: authority,
 	}
 	return msg.Pack()
 }
@@ -679,7 +680,8 @@ func (s *dnsServer) serveLoop() {
 			if !s.underZone(qname) {
 				continue
 			}
-			resp, berr := buildResponse(id, qn, qtype, s.apexAnswers(qname, qtype))
+			ans := s.apexAnswers(qname, qtype)
+			resp, berr := buildResponse(id, qn, qtype, ans, s.negativeAuthority(ans))
 			if berr == nil {
 				if _, err := s.conn.WriteToUDP(resp, addr); err != nil {
 					s.sendErr.note("dns/apex", err)
@@ -700,7 +702,22 @@ func (s *dnsServer) serveLoop() {
 			// datagram per query, so a stranger who read the zone off the public delegation could
 			// starve the tunnel. The payload is AEAD-sealed, so nothing was disclosed; what was stolen
 			// was the stream itself.
-			s.write(id, qn, nil, addr)
+			//
+			// "Empty" has to mean NODATA — NOERROR with an empty ANSWER section and the SOA in
+			// AUTHORITY — and not an empty TXT RECORD, which is what it used to send: write() always
+			// attaches txtResource(EncodeTXT(down)) and EncodeTXT(nil) is []string{""}, so `dig TXT
+			// <zone>` came back with `<zone>. 0 IN TXT ""`. Essentially no real zone answers that, so
+			// the one probe this branch exists for was the one that most clearly marked the zone as
+			// not an ordinary authoritative server. The branch reasoned only about not being SILENT
+			// and never asked what its non-silent answer looked like. NODATA is also the TRUTH here:
+			// this zone has no apex TXT — every tunnel record lives under "<nonce>.<zone>" — and it is
+			// the shape the non-TXT path above already chose for exactly the same reason.
+			resp, berr := buildResponse(id, qn, dnsmessage.TypeTXT, nil, s.negativeAuthority(nil))
+			if berr == nil {
+				if _, err := s.conn.WriteToUDP(resp, addr); err != nil {
+					s.sendErr.note("dns/apex", err)
+				}
+			}
 			continue
 		}
 		if derr != nil {
@@ -766,7 +783,8 @@ func (s *dnsServer) replyNoHold(id uint16, qn dnsmessage.Name, addr *net.UDPAddr
 
 // write packs the TXT answer carrying down (empty TXT when nil) and sends it to addr.
 func (s *dnsServer) write(id uint16, qn dnsmessage.Name, down []byte, addr *net.UDPAddr) {
-	resp, berr := buildResponse(id, qn, dnsmessage.TypeTXT, []dnsmessage.Resource{txtResource(qn, s.codec.EncodeTXT(down))})
+	resp, berr := buildResponse(id, qn, dnsmessage.TypeTXT,
+		[]dnsmessage.Resource{txtResource(qn, s.codec.EncodeTXT(down))}, nil)
 	if berr != nil {
 		return
 	}
@@ -793,6 +811,18 @@ func (s *dnsServer) apexAnswers(qname string, qtype dnsmessage.Type) []dnsmessag
 		return []dnsmessage.Resource{s.ns}
 	}
 	return nil
+}
+
+// negativeAuthority returns the AUTHORITY section for an answer that carries no records: the zone's
+// SOA, which is what a real authoritative server sends with a NODATA so a resolver can negatively
+// cache it. Without it the reply is a NODATA that no resolver can remember and that no ordinary zone
+// produces — two tells for the price of one. Returns nil when there ARE answers, where an authority
+// section would be noise.
+func (s *dnsServer) negativeAuthority(answers []dnsmessage.Resource) []dnsmessage.Resource {
+	if len(answers) > 0 {
+		return nil
+	}
+	return []dnsmessage.Resource{s.soa}
 }
 
 // normName lowercases, trims, and ensures a single trailing dot so a query name compares cleanly

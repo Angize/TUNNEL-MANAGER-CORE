@@ -87,7 +87,7 @@ func rcodeResolver(t *testing.T, rejecting *atomic.Bool, rc dnsmessage.RCode) st
 				continue
 			}
 			resp, berr := buildResponse(id, qn, dnsmessage.TypeTXT,
-				[]dnsmessage.Resource{txtResource(qn, []string{"\x01payload"})})
+				[]dnsmessage.Resource{txtResource(qn, []string{"\x01payload"})}, nil)
 			if berr == nil {
 				_, _ = pc.WriteToUDP(resp, addr)
 			}
