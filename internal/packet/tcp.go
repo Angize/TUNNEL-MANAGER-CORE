@@ -417,6 +417,7 @@ type TCP struct {
 	dsTTL      int
 	dsCount    int
 	dsMode     string
+	pc         pingClock  // times the keepalive round trip (see coreStatus.roundTrip)
 	dsFailOnce sync.Once  // logs an AF_PACKET/capability failure at most once (fired per connect)
 	dsSend     desyncSend // outcome of the decoy TRANSMITS — opening the injector succeeding says nothing about them
 	// dsWatch is a TEST SEAM, nil in production: sendTCPFakes calls it with the conn it is about to mirror,
@@ -2651,7 +2652,9 @@ func (b *TCP) handleFrame(cf *connFramer, typ byte, payload []byte) {
 	case typePing:
 		_ = cf.writeFrame(typePong, nil)
 	case typePong:
-		// keepalive ack
+		// The answer to our own ping: the ONE locally observable fact that covers both directions at
+		// once. This carrier already counts the UNanswered ones (cf.unanswered); this is the other half.
+		b.st.roundTrip(b.pc.rtt())
 	case typeData:
 		b.lastRxData.Store(time.Now().UnixNano()) // real INBOUND data -> the keepalive ping is redundant this interval
 		// Downstream follows upstream DATA (server only): the connection the client most
@@ -2843,6 +2846,7 @@ func (b *TCP) keepaliveLoop() {
 // pings (errPingTimeout). A silently black-holed connection trips the latter well before the idle
 // deadline. readLoop resets the counter on any inbound frame.
 func (b *TCP) pingOne(cf *connFramer) (ok bool, err error) {
+	b.pc.mark()
 	if err := cf.writeFrame(typePing, nil); err != nil {
 		return false, err
 	}
