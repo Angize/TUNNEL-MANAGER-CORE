@@ -1,19 +1,7 @@
-// This file implements the optional "obfs" (anti-DPI) framing shared by both
-// core carriers. When obfuscation is on the wire carries NO constant bytes:
-//
-//   - The frame type (data/ping/pong) is folded into the AEAD-sealed plaintext
-//     instead of riding in a cleartext header, so the old constant magic byte
-//     (0xB1) — a trivial DPI signature — is gone entirely.
-//   - Random padding of variable length is appended before sealing, so packet
-//     sizes no longer form a fixed pattern (keepalives especially).
-//   - Over TCP the 2-byte length prefix is masked with a ChaCha20 keystream
-//     derived from the PSK and a per-connection random salt, so even the framing
-//     length looks random.
-//
-// The result on the wire is a stream/datagram of bytes indistinguishable from
-// random. A peer that cannot AEAD-open a frame (a DPI active-probe, a wrong
-// PSK) is dropped without any identifying response — this is what gives the
-// carrier its probe resistance.
+// This file implements the optional "obfs" (anti-DPI) framing shared by both core carriers. With it on
+// the wire carries NO constant bytes: the frame type is folded into the AEAD-sealed plaintext instead of
+// a cleartext magic byte, variable-length random padding hides the size pattern, and over TCP the length
+// prefix is masked with a PSK+salt ChaCha20 keystream. An unopenable frame is dropped without a reply.
 package packet
 
 import (
@@ -30,11 +18,9 @@ import (
 const (
 	obfsSaltLen = 24 // XChaCha20 nonce size; sent in the clear (uniformly random)
 
-	// Padding budgets. Control frames (ping/pong) are tiny and the most
-	// fingerprintable, so they get padded up to a larger random size to look
-	// like data; data frames get a small random jitter to avoid pushing a
-	// full-MTU packet far past the path MTU. obfsDataPadMax is also reserved in
-	// the node's MTU math so a padded data frame never fragments.
+	// Padding budgets. Control frames (ping/pong) are tiny and the most fingerprintable, so they are
+	// padded up to a larger random size to look like data; data frames get a small jitter so a full-MTU
+	// packet is not pushed past the path MTU. obfsDataPadMax is reserved in the node's MTU math too.
 	obfsDataPadMax = 64
 	obfsCtrlPadMax = 256
 
@@ -57,11 +43,9 @@ func newObfsStream(psk string, salt []byte) (*chacha20.Cipher, error) {
 	return chacha20.NewUnauthenticatedCipher(deriveObfsKey(psk), salt)
 }
 
-// randUint returns a random int UNIFORM in [0, max]. It uses
-// rejection sampling rather than `% (max+1)`: modulo of a single byte biases the
-// low lengths (e.g. for max=64, 256 mod 65 leaves 0..60 slightly more likely and
-// values > 255 unreachable), which narrows the size histogram a DPI classifier
-// sees. Rejection keeps the distribution flat.
+// randUint returns a random int UNIFORM in [0, max]. It uses rejection sampling rather than
+// `% (max+1)`: modulo of a single byte biases the low lengths and makes values above 255 unreachable,
+// which narrows the size histogram a DPI classifier sees. Rejection keeps the distribution flat.
 func randUint(max int) (int, error) {
 	if max <= 0 {
 		return 0, nil
@@ -80,13 +64,10 @@ func randUint(max int) (int, error) {
 	}
 }
 
-// obfsSeal packs [type][realLen][payload][pad] and AEAD-seals it. The returned bytes carry no constant
-// fields (the sealer prepends a random nonce). Only the pad LENGTH matters (it's the size-shaping defense
-// and is random via randUint); its bytes do NOT — the pad rides INSIDE the AEAD envelope and obfsOpen
-// strips it by realLen without reading it. So the pad region is just left as make()'s zero fill: under a
-// non-repeating nonce the sealed ciphertext over a zero pad is keystream, i.e. still indistinguishable
-// from random on the wire, so this skips a per-packet crypto/rand fill of up to padMax bytes with no
-// change to the wire-looks-random property and no security effect (AEAD IND-CPA covers any plaintext).
+// obfsSeal packs [type][realLen][payload][pad] and AEAD-seals it; the returned bytes carry no constant
+// fields. Only the pad LENGTH matters — it is the size-shaping defence — and its bytes do not, since the
+// pad rides INSIDE the AEAD envelope and obfsOpen strips it by realLen. So the pad is left as make()'s
+// zero fill: under a non-repeating nonce the ciphertext over it is keystream, still random on the wire.
 func obfsSeal(s Sealer, typ byte, payload []byte, padMax int) ([]byte, error) {
 	n, err := randUint(padMax)
 	if err != nil {
@@ -131,22 +112,10 @@ func frac53(b []byte) float64 {
 	return float64(binary.BigEndian.Uint64(b)>>11) / float64(uint64(1)<<53)
 }
 
-// keepaliveInterval returns the next client keepalive delay. A fixed clock — or even a bare
-// symmetric ±33% jitter — is a passive TIMING fingerprint: an adversary that averages the
-// inter-arrival of a long-lived flow's small control packets recovers the mean exactly, and a whole
-// fleet pinned to the same keepalive beacons in lockstep (a cross-flow correlation signal). Two
-// defenses over jitter():
-//
-//   - a per-TUNNEL mean shift derived from the PSK. Keepalive is client-local (the peer only
-//     reflects pongs), so the two ends need not agree on the period; deriving it from the PSK gives
-//     each tunnel a different, stable mean, so there is no single fleet-wide constant to recover and
-//     different tunnels do not step together.
-//   - a wider, TRIANGULAR per-fire spread (mean of two uniforms) so one flow's own mean is harder to
-//     average out than a tight uniform band.
-//
-// The result is clamped to [0.6,1.3]×base so a live-but-idle client still pings well within the
-// server's idleMult×keepalive read deadline (idleMult>=4 ⇒ 1.3×base ≪ 4×base) and the
-// pingLossThreshold dead-detection window stays bounded (<= pingLossThreshold×1.3×base).
+// keepaliveInterval returns the next client keepalive delay. A fixed clock — or a bare symmetric jitter —
+// is a passive TIMING fingerprint: averaging a long-lived flow's control packets recovers the mean, and a
+// fleet on one keepalive beacons in lockstep. So the mean is shifted per TUNNEL from the PSK, and each
+// fire is spread TRIANGULARLY. Clamped to [0.6,1.3]×base, well inside the server's idle read deadline.
 func keepaliveInterval(base time.Duration, psk string) time.Duration {
 	if base <= 0 {
 		return base

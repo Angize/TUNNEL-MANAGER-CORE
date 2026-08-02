@@ -1,16 +1,7 @@
-// Server-side compute-DoS cache for handshake inits, shared by the datagram
-// carriers (udp.go, raw_linux.go, flux_linux.go). Each server re-sends the
-// response it already computed for a recently-seen init instead of re-running a
-// fresh ECDH+HKDF (GenerateEphemeral+SessionSealer) per packet.
-//
-// It replaces an earlier single-(lastInit,lastResp) pair: caching only ONE init
-// let an attacker alternate two captured valid inits so every packet missed the
-// cache and forced a full handshake. A tiny fixed-size LRU keyed on a cheap hash
-// of the init bytes closes that — after each distinct init is seen once, its
-// replays are served from the cache.
-//
-// Like staged/rp/lastRx, an initCache is driven ONLY from a carrier's single receive
-// goroutine (tryHandshake runs only on the receive path), so it needs no locking.
+// Server-side compute-DoS cache for handshake inits, shared by the datagram carriers. Each server
+// re-sends the response it already computed for a recently-seen init instead of re-running a fresh
+// ECDH+HKDF per packet. A tiny fixed-size LRU, not a single pair: caching one init lets an attacker
+// alternate two captured ones so every packet misses. Single receive goroutine only, so no locking.
 package packet
 
 import "bytes"

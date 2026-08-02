@@ -38,12 +38,10 @@ func (f *fragConn) ttlOpt() (int, int) {
 	return syscall.IPPROTO_IP, syscall.IP_TTL
 }
 
-// writeDisorder sends the HEAD segment at a low TTL so it dies in transit — an on-path DPI ingests
-// it but the server never does; the kernel then retransmits it at the normal TTL, so the server
-// reassembles the real ClientHello while the DPI saw the segments out of order. It reaches under the
-// TLS conn to the raw fd (net.TCPConn.SyscallConn) to set the hop limit per segment; TCP_NODELAY
-// (Go's default) makes each Write flush a segment while its TTL is in effect. Falls back to a plain
-// split when the raw fd is unavailable.
+// writeDisorder sends the HEAD segment at a low TTL so it dies in transit — an on-path DPI ingests it but
+// the server never does; the kernel then retransmits it at the normal TTL, so the server reassembles the
+// real ClientHello while the DPI saw the segments out of order. It reaches under the TLS conn to the raw
+// fd to set the hop limit per segment. Falls back to a plain split when the raw fd is unavailable.
 func (f *fragConn) writeDisorder(p []byte, at int) (int, error) {
 	sc, ok := f.Conn.(syscall.Conn)
 	if !ok {
@@ -92,20 +90,9 @@ func readSeqs(raw syscall.RawConn) (snd, rcv uint32, ok bool) {
 			return
 		}
 		// -1, not 0. The kernel treats them differently on the way OUT of repair mode: 0 also calls
-		// tcp_send_window_probe(), which on an ESTABLISHED socket transmits a bare ACK immediately.
-		// readSeqs runs on an idle, just-connected socket at the ClientHello point, so that ACK landed
-		// between the handshake and the ClientHello on EVERY sni_mode=fake connection — an exchange
-		// that appears on exactly the connections trying not to stand out. -1 leaves repair mode with
-		// the identical effect and no probe.
-		//
-		// MEASURED on DE with tcpdump, not reasoned from the kernel source (which is what the finding
-		// did): with 0 the capture carries an extra `Flags [.], ack 1` from us AND the peer's answering
-		// ACK, and /proc/net/netstat's TCPWinProbe goes up by one; with -1 neither appears and the
-		// counter does not move.
-		//
-		// Falling back to 0 if -1 is refused is not version tolerance for our own code — it is the one
-		// case where failing is worse than the probe: a socket LEFT IN REPAIR MODE does not behave like
-		// a TCP socket at all, and this deferred call is the only thing that takes it out.
+		// tcp_send_window_probe(), which on an ESTABLISHED socket transmits a bare ACK — an extra exchange
+		// between the handshake and the ClientHello, on exactly the connections trying not to stand out.
+		// Falling back to 0 if -1 is refused is still right: only this call takes the socket out of repair.
 		defer func() {
 			if syscall.SetsockoptInt(f, syscall.IPPROTO_TCP, optTCPRepair, repairOffNoProbe) != nil {
 				syscall.SetsockoptInt(f, syscall.IPPROTO_TCP, optTCPRepair, repairOff)
@@ -126,17 +113,10 @@ func readSeqs(raw syscall.RawConn) (snd, rcv uint32, ok bool) {
 	return
 }
 
-// writeFake injects a fake ClientHello — a copy of the real one with the SNI overwritten by a decoy
-// — as a raw TCP segment at the SAME sequence as the real ClientHello, carrying a deliberately BAD
-// TCP checksum so the server's stack drops it. A stateful DPI reassembles the fake (decoy SNI) at
-// that sequence and clears the flow; the server discards the fake (bad checksum) and gets the real
-// ClientHello, written normally right after (the socket's sequence is untouched, because the fake
-// goes out via AF_PACKET, not the socket). Killing by checksum instead of a low TTL is
-// hop-independent — it works even when the server is a nearby CDN edge, where no TTL window exists.
-// AF_PACKET SOCK_RAW hands the frame to the driver with CHECKSUM_NONE, so TX offload does not repair
-// the checksum. This defeats a DPI that reassembles the stream — which plain split/disorder do not.
-// IPv4 only (the raw injector builds IPv4); falls back to disorder on IPv6 or when any primitive is
-// unavailable. Needs CAP_NET_RAW + CAP_NET_ADMIN, which the core holds (it runs as root).
+// writeFake injects a fake ClientHello — a copy of the real one with the SNI overwritten by a decoy — as
+// a raw TCP segment at the SAME sequence, with a deliberately BAD TCP checksum so the server drops it. A
+// reassembling DPI resolves the overlap to the decoy and clears the flow; the server gets the real one,
+// written right after. AF_PACKET frames carry CHECKSUM_NONE, so TX offload cannot repair the checksum.
 func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 	// Build the decoy FIRST: it depends on nothing about the socket, and the one case that cannot
 	// produce a decoy at all should not poke TCP_REPAIR or open an AF_PACKET socket on the way to
@@ -145,13 +125,10 @@ func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 	copy(fake, p)
 	i := bytes.Index(fake, []byte(f.host))
 	if i < 0 {
-		// The hostname is not in the ClientHello in cleartext. With nothing to overwrite, the "decoy"
-		// would be a BYTE-IDENTICAL copy of the real ClientHello, injected at the same sequence with a
-		// corrupt checksum. A DPI resolving that overlap recovers exactly the SNI it would have seen
-		// anyway: zero benefit, and a duplicate segment carrying a bad checksum is itself a signature.
-		// So the fallback is right either way — but the REASON is not the same, and this used to name
-		// ECH without being told whether ECH was on. Under ECH there is nothing left to hide; without
-		// it, the hostname search simply failed and the real SNI is on the wire.
+		// The hostname is not in the ClientHello in cleartext. With nothing to overwrite, the "decoy" would be
+		// a BYTE-IDENTICAL copy injected at the same sequence with a corrupt checksum: zero benefit, and a
+		// duplicate segment with a bad checksum is itself a signature. f.ech separates the two causes — under
+		// ECH there is nothing left to hide, without it the real SNI is on the wire.
 		why := "the hostname is not in the ClientHello in cleartext"
 		if f.ech {
 			why += " (ECH encrypts it)"

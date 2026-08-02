@@ -1,7 +1,5 @@
-// Wire layer for FEC on the datagram carriers: it turns the stream of sealed frames
-// into FEC blocks (n data + k parity) on send, and reassembles+reconstructs them on
-// receive. It sits between the carrier's frame layer and its socket, so both flux and
-// the udp carrier can share it.
+// Wire layer for FEC on the datagram carriers: it turns the stream of sealed frames into FEC blocks
+// (n data + k parity) on send, and reassembles+reconstructs them on receive, so flux and udp share it.
 //
 // When FEC is on, EVERY packet carries a 1-byte type tag so the receiver can route it:
 //
@@ -10,14 +8,10 @@
 //	type 2  parity shard: [2][hdr][shard]  shard = RS parity bytes
 //	hdr = [block:4][idx:1][n:1][k:1][count:1][shardLen:2]     (count = real data shards in the block)
 //
-// A block is flushed when it fills (n data frames) or a short timer fires; a partial
-// block is zero-padded to n for the RS math but only its `count` real shards are sent
-// (the receiver synthesizes the pad shards as zeros).
-//
-// The code is SYSTEMATIC, so a data shard already carries its own payload: the receiver
-// delivers each one the moment it arrives and uses the parity only to fill the gaps,
-// reconstructing as soon as any n of the block's n+k shards are in. Nothing a receiver
-// physically got is ever held hostage to the rest of its block.
+// A block is flushed when it fills or a short timer fires; a partial block is zero-padded to n for the
+// RS math but only its `count` real shards are sent. The code is SYSTEMATIC, so a data shard already
+// carries its own payload: the receiver delivers each one on arrival and uses parity only to fill gaps.
+// Nothing a receiver physically got is ever held hostage to the rest of its block.
 package packet
 
 import (
@@ -27,12 +21,9 @@ import (
 	"time"
 )
 
-// newFecPair builds the encoder/decoder a datagram carrier needs to run FEC, or
-// (nil, nil) when fec is off or the geometry is bad (logged, so the carrier just
-// runs without FEC rather than failing). emit sends one ready wire packet (the
-// carrier wraps + transmits it to the peer); deliver receives each recovered frame
-// (the carrier feeds it back into its normal crypto/clear path). This keeps the
-// three datagram carriers (udp, raw, flux) sharing one FEC wiring.
+// newFecPair builds the encoder/decoder a datagram carrier needs to run FEC, or (nil, nil) when fec is
+// off or the geometry is bad (logged, so the carrier runs without FEC rather than failing). emit sends
+// one ready wire packet; deliver receives each recovered frame. Keeps udp/raw/flux on one wiring.
 func newFecPair(fec bool, data, parity int, name string, emit, deliver func([]byte)) (*fecEncoder, *fecDecoder) {
 	if !fec {
 		return nil, nil
@@ -64,23 +55,16 @@ const (
 	fecKeepBlocks = 64                        // receiver: how many recent blocks to retain
 	fecMaxBytes   = 64 << 20                  // receiver: cap total bytes buffered across live blocks (anti-amplification)
 
-	// fecMaxCodecs caps the number of DISTINCT (n,k) Reed-Solomon codecs the decoder caches. A real
-	// encoder uses one fixed (n,k) (or a tiny handful), but fecDecoder.input runs BEFORE peer auth, so
-	// an unauthenticated peer can spray unique (n,k) block headers; each cached codec pins a k×n
-	// GF(256) matrix that fecMaxBytes does NOT budget, so an unbounded cache is a memory-exhaustion
-	// DoS (~32k valid pairs -> hundreds of MB). 64 covers any legitimate config with wide headroom.
-	// The cap is enforced by evicting the least-recently-used entry, never by refusing to cache —
-	// see codec().
+	// fecMaxCodecs caps the number of DISTINCT (n,k) Reed-Solomon codecs the decoder caches. input runs
+	// BEFORE peer auth, so an unauthenticated peer can spray unique (n,k) headers, and each cached codec
+	// pins a k×n GF(256) matrix that fecMaxBytes does NOT budget. The cap evicts least-recently-used,
+	// never refuses to cache — see codec().
 	fecMaxCodecs = 64
 
-	// fecMaxShardLen caps the shard length a peer may declare in a block header. A real
-	// shard is one sealed frame ([len:2]+ciphertext) zero-padded to the block's largest
-	// shard, so it is MTU-bounded — well under this even for jumbo frames. Rejecting a
-	// larger shardLen blocks a forged block with maximal geometry (n=255, count=1,
-	// shardLen~65495) from reserving (n-count)*shardLen ~= 16 MB of pad out of a single
-	// ~64 KB packet; a few such never-completed blocks could otherwise pin the whole
-	// fecMaxBytes budget until process exit (amplification DoS). 16 KiB never rejects a
-	// legitimate shard.
+	// fecMaxShardLen caps the shard length a peer may declare in a block header. A real shard is one
+	// sealed frame zero-padded to the block's largest, so it is MTU-bounded. Rejecting a larger value
+	// stops a forged block with maximal geometry from reserving megabytes of pad out of a single packet
+	// and pinning the whole fecMaxBytes budget until process exit.
 	fecMaxShardLen = 16 << 10
 )
 
@@ -201,11 +185,9 @@ type fecBlock struct {
 	bytes                 int    // bytes buffered for this block (for the decoder byte budget)
 	arrival               uint64 // decoder-local insertion order; the eviction key
 	done                  bool
-	// gaveOut marks data slots [0,count) that were handed to deliver() but NOT retained, because the
-	// decoder's byte budget was exhausted when they arrived. They are neither present (parity may
-	// still have to reconstruct the block around them) nor owed (the payload already went out), so
-	// the reconstruct loop must skip them or the peer gets the same frame twice. nil until one
-	// happens, which on a healthy tunnel is never.
+	// gaveOut marks data slots that were handed to deliver() but NOT retained, because the byte budget
+	// was exhausted when they arrived. They are neither present (parity may still reconstruct around
+	// them) nor owed (the payload already went out), so the reconstruct loop must skip them.
 	gaveOut []bool
 }
 
@@ -234,21 +216,10 @@ func newFecDecoder(deliver func([]byte)) *fecDecoder {
 		maxBytes: fecMaxBytes, deliver: deliver}
 }
 
-// codec returns the Reed-Solomon codec for one block geometry, building and caching it on first
-// use. Caller holds d.mu.
-//
-// The cache must stay bounded because input runs pre-auth: an unauthenticated peer can name any
-// (n,k) it likes and each cached codec pins a k×n GF(256) matrix that fecMaxBytes does not budget.
-// But a bound alone was a PERMANENT poison — nothing ever pruned d.codecs, so one cheap burst of
-// fecMaxCodecs distinct geometries, sent before the tunnel ever carries traffic, locked the cache
-// shut and the real geometry could never be cached again for the life of the process. FEC recovery
-// was then off for good, silently, with the panel still showing it on.
-//
-// Evicting the least-recently-used entry keeps the same bound and makes the attack unstickable:
-// the worst a sprayer can achieve is forcing the live geometry's codec to be rebuilt, which is one
-// k×n table of GF(256) divisions — exactly k*n of them (newFECCodec), so at the panel's 10+3 that is
-// 30, and at the widest geometry the codec itself accepts (n+k <= 256) it peaks around 16k. Still
-// trivial, which is why the conclusion holds; "at most 256" was simply the wrong number.
+// codec returns the Reed-Solomon codec for one block geometry, building and caching it on first use.
+// Caller holds d.mu. The cache stays bounded because input runs pre-auth — but a bound alone is a
+// PERMANENT poison, since one burst of distinct geometries would lock it shut and the real geometry
+// could never be cached again. LRU eviction keeps the bound: the worst a sprayer forces is one rebuild.
 func (d *fecDecoder) codec(n, k int) *fecCodec {
 	key := n<<8 | k
 	d.codecTick++
@@ -329,11 +300,10 @@ func (d *fecDecoder) input(pkt []byte) {
 		// if the decoder's total buffered bytes would exceed the budget: an unauthenticated
 		// peer must not be able to pin ~n*shardLen*fecKeepBlocks of RAM (amplification DoS).
 		padBytes := (n - count) * shardLen
-		// Byte-pressure eviction: a few large-geometry partial blocks can drive d.bytes to
-		// fecMaxBytes with fewer than fecKeepBlocks blocks, so the count-based evictLocked never
-		// fires and every new block is refused below — permanently disabling FEC recovery for an
-		// unauthenticated peer (pre-auth DoS). Drop oldest-by-arrival blocks until there is room
-		// (or nothing left to evict), THEN refuse only if still over budget.
+		// Byte-pressure eviction: a few large-geometry partial blocks can drive d.bytes to fecMaxBytes with
+		// fewer than fecKeepBlocks blocks, so the count-based evictLocked never fires and every new block is
+		// refused — FEC recovery permanently off, for an unauthenticated peer. Drop oldest-by-arrival until
+		// there is room, THEN refuse only if still over budget.
 		for d.bytes+padBytes+shardLen > d.maxBytes && len(d.blocks) > 0 {
 			if !d.evictOldestLocked() {
 				break
@@ -365,18 +335,10 @@ func (d *fecDecoder) input(pkt []byte) {
 		return
 	}
 	if d.bytes+shardLen > d.maxBytes {
-		// Over the decoder's byte budget, so this shard cannot be RETAINED — but a data shard is its
-		// own payload (the code is systematic) and deliverShard copies straight out of the wire buffer,
-		// so handing it on costs no storage whatsoever. Only the b.shards[slot] retention does.
-		// Returning outright made the file-header promise above ("nothing a receiver physically got is
-		// ever held hostage to the rest of its block") false in exactly the case it was written for:
-		// under a pre-auth amplification flood, packets that arrived intact were thrown away by the FEC
-		// layer instead of being handed on — with FEC on, the decoder is the ONLY path these frames
-		// have, so that is a hard hole in the stream with no log, no counter and no event.
-		//
-		// No new pre-auth exposure: deliver() is already reached unbudgeted by every fecTypePass packet
-		// above, and by every in-budget data shard. gaveOut records the hand-over so the reconstruct
-		// loop below does not deliver the same frame a second time if parity later fills this slot.
+		// Over the decoder's byte budget, so this shard cannot be RETAINED — but a data shard IS its own
+		// payload (the code is systematic) and deliverShard copies straight out of the wire buffer, so
+		// handing it on costs no storage; only retention does. gaveOut records the hand-over so the
+		// reconstruct loop does not deliver the same frame twice if parity later fills this slot.
 		if typ == fecTypeData {
 			if b.gaveOut == nil {
 				b.gaveOut = make([]bool, b.count)
@@ -390,15 +352,10 @@ func (d *fecDecoder) input(pkt []byte) {
 	b.present++
 	b.bytes += shardLen
 	d.bytes += shardLen
-	// A data shard IS its payload (the code is systematic), so hand it over the moment it
-	// arrives instead of holding it until the whole block can be reconstructed. Holding it is
-	// what made a block that never completes cost 100% of its payload rather than only the
-	// shards that were really lost: with FEC on, tunToNet never writes a frame itself, so the
-	// decoder is the ONLY path these frames have, and a discarded block is a hard hole in the
-	// stream. Above the geometry's repair budget (~17% loss at 10+3) that made FEC WORSE than
-	// no FEC at all. Delivering here also drops the up-to-a-whole-block delay the receiver used
-	// to add even when nothing was lost. Delivery order becomes wire-arrival order, i.e. exactly
-	// what the same carrier does with FEC off; parity fills the gaps below.
+	// A data shard IS its payload (the code is systematic), so hand it over the moment it arrives instead
+	// of holding it until the whole block can be reconstructed. Holding it makes a block that never
+	// completes cost 100% of its payload rather than only the shards really lost, and adds up to a whole
+	// block of delay even when nothing was lost. Delivery order is wire-arrival order; parity fills gaps.
 	if typ == fecTypeData {
 		d.deliverShard(shard)
 	}
@@ -439,11 +396,9 @@ func (d *fecDecoder) deliverShard(s []byte) {
 	}
 }
 
-// evictLocked bounds the number of live blocks by dropping the OLDEST-INSERTED ones. Eviction
-// is keyed on a decoder-local arrival counter, NOT the wire block id, so (a) a peer cannot pin the
-// eviction horizon with a forged block number — a single packet with block=0xFFFFFFFF used to make
-// every real (small-id) block satisfy the old maxSeen-distance test and get evicted forever — and
-// (b) there is no uint32 block-id wraparound hazard. Caller holds d.mu.
+// evictLocked bounds the number of live blocks by dropping the OLDEST-INSERTED ones. Eviction keys on a
+// decoder-local arrival counter, NOT the wire block id, so a peer cannot pin the eviction horizon with a
+// forged block number and there is no uint32 block-id wraparound hazard. Caller holds d.mu.
 func (d *fecDecoder) evictLocked() {
 	for len(d.blocks) > fecKeepBlocks {
 		if !d.evictOldestLocked() {
@@ -452,11 +407,9 @@ func (d *fecDecoder) evictLocked() {
 	}
 }
 
-// evictOldestLocked drops the single OLDEST-INSERTED block (keyed on the decoder-local arrival
-// counter, not the wire block id) and returns true if one was removed. Shared by the count-based
-// evictLocked and the byte-pressure eviction on the new-block path, so both use the same
-// oldest-by-arrival selection. d.bytes is decremented by the dropped block and clamped so it can
-// never go negative. Caller holds d.mu.
+// evictOldestLocked drops the single OLDEST-INSERTED block (keyed on the decoder-local arrival counter)
+// and returns true if one was removed. Shared by the count-based evictLocked and the byte-pressure path.
+// d.bytes is decremented by the dropped block and clamped so it can never go negative. Caller holds d.mu.
 func (d *fecDecoder) evictOldestLocked() bool {
 	var oldID uint32
 	var oldB *fecBlock

@@ -52,14 +52,10 @@ func applyFdRcvBuf(fd, n int) {
 	sizeBuf(fd, n, soRcvbufForce, syscall.SO_RCVBUF, 1, "receive", "rmem_max")
 }
 
-// sizeBuf applies one direction's buffer and REPORTS when the kernel did not give what was asked.
-//
-// Both setsockopts used to be discarded outright and nothing was ever read back. When the FORCE
-// variant is refused — no CAP_NET_ADMIN, i.e. a container or a hardened unit with a reduced
-// capability set — the plain option is clamped to net.core.{w,r}mem_max, so an operator's 16 MiB
-// silently became the host default: the panel saved it green, the node forwarded it, the core
-// accepted it, and the throughput the setting exists to buy never arrived, with nothing at any layer
-// saying so. Reading it back costs one getsockopt per socket, once, at startup.
+// sizeBuf applies one direction's buffer and REPORTS when the kernel did not give what was asked. When
+// the FORCE variant is refused — no CAP_NET_ADMIN, i.e. a container or a hardened unit — the plain option
+// is clamped to net.core.{w,r}mem_max, so an operator's 16 MiB silently becomes the host default with
+// nothing at any layer saying so. Reading it back costs one getsockopt per socket, once, at startup.
 func sizeBuf(fd, n, forceOpt, plainOpt, warnIdx int, dir, sysctl string) {
 	if fd < 0 || n <= 0 {
 		return

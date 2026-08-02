@@ -2,13 +2,10 @@ package packet
 
 import "time"
 
-// Operational self-heal / pool-health timing knobs. These were compile-time constants; they are now
-// package-level vars so the panel can tune fleet-wide self-heal behaviour via the core config. It is
-// SAFE for them to be mutable package state because one tnl-core process serves exactly ONE tunnel —
-// ApplyTuning runs once at startup (before any carrier or pool is built), so there is no cross-tunnel
-// bleed and nothing races the writes. A zero/empty config value leaves the default below untouched.
-//
-// Category 1 — pool health FSM (direct/peer pool + WS-CDN pool share these):
+// Operational self-heal / pool-health timing knobs, package-level vars so the panel can tune fleet-wide
+// behaviour via the core config. Mutable package state is safe here: one tnl-core process serves exactly
+// ONE tunnel and ApplyTuning runs once at startup, before any carrier or pool is built. A zero/empty
+// config value leaves the default untouched. Category 1 below — the pool health FSM, shared by both pools:
 var (
 	// suspectBackoff is the retest schedule (seconds) for a SUSPECT pool entry: it enters suspect
 	// scheduled +[0] out, and each FAILED retest walks one step further down the list. Running off
@@ -120,15 +117,9 @@ func ApplyTuning(t TuningInput) {
 }
 
 // suspectStepAt returns the i-th suspect backoff step AND the index it actually used, clamped to the
-// LAST element when the (config-tunable) schedule is shorter than i+1 — so a short custom
-// suspect_backoff (e.g. [30]) can't index out of range and panic the core. ApplyTuning only ever
-// installs a non-empty schedule, so len>=1 and the clamp always yields a valid element.
-//
-// It returns the INDEX as well because a caller that enters the FSM at a fixed step must stamp
-// healthRec.fails with that same index: retestBackoff does fails++ and then reads
-// suspectBackoff[fails], so an entry whose fails disagrees with the step it entered on walks the
-// schedule from the wrong place — which is exactly how the data-plane backoff once ran backwards.
-// Returning both from one place is what keeps the pair from drifting again.
+// LAST element when the config-tunable schedule is shorter than i+1, so a short custom suspect_backoff
+// cannot index out of range. It returns the INDEX because a caller entering the FSM at a fixed step must
+// stamp healthRec.fails with that same index — retestBackoff does fails++ and then reads the schedule.
 func suspectStepAt(i int) (int, int64) {
 	if n := len(suspectBackoff); i >= n {
 		i = n - 1

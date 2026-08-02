@@ -7,30 +7,20 @@ import (
 	"syscall"
 )
 
-// ipLink is the ONE thing that differs between an ordinary raw-IP carrier and a
-// spoofing one: how a wrapped packet reaches the wire, how frames are received,
-// where a server answers, and whether the peer source filter applies. Everything
-// above it — the AEAD framing, replay guard, ephemeral handshake, keepalive,
-// FEC, rotation and the TUN plumbing — is shared Raw code and must never be
-// forked (a copied datapath is the exact class of bug this split exists to kill).
+// ipLink is the ONE thing that differs between an ordinary raw-IP carrier and a spoofing one: how a
+// wrapped packet reaches the wire, how frames are received, where a server answers, and whether the peer
+// source filter applies. Everything above it — framing, replay guard, handshake, keepalive, FEC, rotation
+// and the TUN plumbing — is shared Raw code and must never be forked.
 //
-// Two implementations, chosen once at construction from the config:
+//	directLink  sends and receives on the AF_INET raw socket, answers the packet's own source, and
+//	            filters by the peer source address. Nothing is forged.
+//	forgedLink  parametric, so one type covers every spoof combination: spoofFd >=0 builds the whole
+//	            IPv4 header and Sendtos it, pktFd >=0 receives decoy-dst frames via AF_PACKET,
+//	            fixedPeer is the reply address when the client forged its source, and spoofSrc/Dst
+//	            are the forged outer fields.
 //
-//   - directLink: today's raw carrier. Sends on the AF_INET raw socket (r.conn),
-//     receives on it, answers the packet's own source, and filters by the peer
-//     source address. Nothing is forged.
-//
-//   - forgedLink: any configuration that forges an outer IPv4 field or pins the
-//     reply address. It is parametric so it covers every spoof combination with
-//     one type (the addressing axes are not independent, so two rigid types could
-//     not express them):
-//     spoofFd >=0  -> build the whole IPv4 header and Sendto it (else send on r.conn)
-//     pktFd   >=0  -> receive decoy-dst frames via AF_PACKET (else receive on r.conn)
-//     fixedPeer    -> the client forged its source, so answer this configured IP
-//     spoofSrc/Dst -> forge the outer source / destination
-//
-// A pure header() method returns the (src,dst) an outgoing packet should carry;
-// it opens no socket, so its full matrix is unit-testable without CAP_NET_RAW.
+// A pure header() method returns the (src,dst) an outgoing packet should carry, so its full matrix is
+// unit-testable without CAP_NET_RAW.
 type ipLink interface {
 	// send ships one already-wrapped packet toward the real peer `to`.
 	send(pkt []byte, to *net.IPAddr)
@@ -184,21 +174,15 @@ func sendViaConn(r *Raw, pkt []byte, to *net.IPAddr) {
 		if _, _, err := r.conn.WriteMsgIP(pkt, pktinfoOOB(src), to); err == nil {
 			return
 		} else {
-			// Degrade to a default-source send rather than dropping — but say so. The pinned source is
-			// normally one of our own local IPs, so this means it stopped being one mid-session (a pool
-			// IP removed from the interface, a provider agent re-adding a secondary after a flap). Every
-			// reply then leaves from the host default, the peer's source filter drops it, and the tunnel
-			// blackholes. #151 made the setsockopt and missing-cmsg cases loud; this was the third.
+			// Degrade to a default-source send rather than dropping — but say so. The pinned source is normally
+			// one of our own local IPs, so this means it stopped being one mid-session; every reply then leaves
+			// from the host default, the peer's source filter drops it, and the tunnel blackholes.
 			r.sendErr.note("raw/pinned-source", err)
 			if rawChecksumBindsSource(r.profile) {
-				// ...except on udp/tcp, where the carrier header's checksum was computed over the
-				// pinned source (rawEncap -> l4Checksum's pseudo-header). Sending these bytes from a
-				// different source puts a segment with a WRONG L4 checksum on the wire, on every packet,
-				// for as long as the source is gone. Our own receiver would not notice — a raw socket
-				// does not verify the L4 checksum — but a stateful firewall or NAT on the path drops
-				// them, and a "TCP" flow whose every segment fails its checksum is about as clear a
-				// tunnel signature as there is. The degraded send is only worth making when the bytes
-				// stay VALID, so here we drop and let the inner stream retransmit.
+				// ...except on udp/tcp, where the carrier header's checksum was computed over the pinned source.
+				// Sending those bytes from a different source puts a wrong-checksum segment on the wire on every
+				// packet: our own receiver would not notice, but a stateful firewall or NAT drops them, and a "TCP"
+				// flow whose every segment fails its checksum is about as clear a tunnel signature as there is.
 				return
 			}
 		}

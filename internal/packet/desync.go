@@ -9,11 +9,10 @@ import (
 	"time"
 )
 
-// injectMaxTTL caps the TTL of a kernel-TCP inject decoy (tcp / tcp+cover / ws). Unlike a raw/flux
-// decoy — sent to a peer we hold no live kernel connection to — an inject decoy rides a REAL
-// connection's 4-tuple, so a well-formed segment that actually reached the server would draw an RST
-// or a challenge-ACK and could disturb the real flow. Clamping guarantees the decoy expires on the
-// path (where the DPI still ingests it) no matter how high the operator set fake_ttl.
+// injectMaxTTL caps the TTL of a kernel-TCP inject decoy (tcp / tcp+cover / ws). Unlike a raw/flux decoy
+// — sent to a peer we hold no live kernel connection to — an inject decoy rides a REAL connection's
+// 4-tuple, so a segment that actually reached the server would draw an RST and disturb the real flow.
+// Clamping guarantees it expires on the path, where the DPI still ingests it.
 const injectMaxTTL = 8
 
 // desyncReportEvery paces the repeat below. The first failure is reported at once; after that a
@@ -21,19 +20,10 @@ const injectMaxTTL = 8
 // visible in the journal without a line per decoy.
 const desyncReportEvery = 5 * time.Minute
 
-// desyncSend is the outcome of the decoy TRANSMITS, which every carrier used to throw away with
-// `_ =`. Decoys are best-effort by design — one lost decoy must never fail a tunnel — but
-// "best-effort" was implemented as "unobservable": an L2 next hop that will not resolve, a
-// container without the capability, an interface that has gone down, and every decoy fails
-// identically and silently while startup has already printed
-//
-//	tnl-core: fake-desync on (2 decoys, ttl=4, mode=ttl)
-//
-// So the panel says the camouflage is on, the log says it is on, and the DPI sees nothing — and
-// when the tunnel is then blocked there is no way to tell that the camouflage never ran. The
-// counters make the difference legible; nothing here changes what is sent.
-//
-// The zero value is ready to use, and note is safe from several goroutines.
+// desyncSend is the outcome of the decoy TRANSMITS. Decoys are best-effort by design — one lost decoy
+// must never fail a tunnel — but discarding the result made "best-effort" mean "unobservable": an
+// unresolvable next hop, a missing capability or a downed interface all fail silently while startup has
+// already printed that the camouflage is on. Zero value ready to use; note is goroutine-safe.
 type desyncSend struct {
 	ok   atomic.Int64
 	bad  atomic.Int64

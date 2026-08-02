@@ -1,13 +1,9 @@
 //go:build linux
 
-// TCP-segment injection desync for the kernel-socket TCP-family carriers (tcp / cover / ws).
-// The real connection stays kernel-owned; right after it connects we inject a few DECOY TCP
-// segments on its exact 4-tuple, wrapped in a low-TTL IPv4 header and pushed at L2 via
-// AF_PACKET. A stateful DPI on the path ingests them and mis-syncs its per-flow state, while
-// the decoys expire before the edge/server (low TTL) so they never enter the real stream —
-// the kernel's TCP is untouched. This is the "inject fake segments alongside a real flow"
-// (zapret/nfqws) model; it works on our AEAD ciphertext because it is content-agnostic (it
-// disrupts flow-tracking, not content). See inject_linux.go for the AF_PACKET primitive.
+// TCP-segment injection desync for the kernel-socket TCP-family carriers (tcp / cover / ws). The real
+// connection stays kernel-owned; right after it connects we inject a few DECOY TCP segments on its exact
+// 4-tuple, wrapped in a low-TTL IPv4 header and pushed at L2 via AF_PACKET. A stateful DPI ingests them
+// and mis-syncs, while the decoys expire before the server so the kernel's TCP is untouched.
 package packet
 
 import (
@@ -17,11 +13,10 @@ import (
 	"net"
 )
 
-// sendTCPFakes injects the configured decoy segments on conn's 4-tuple just after connect. It
-// is best-effort: httpc's synthetic conn addresses fail the *net.TCPAddr assertion and are
-// skipped; a missing CAP_NET_RAW (AF_PACKET) or an unresolvable next hop just drops the decoys.
-// The injector is one-shot per connect — the next-hop neighbour is guaranteed warm here (the
-// kernel just completed the 3-way handshake through it), so resolveL2 succeeds immediately.
+// sendTCPFakes injects the configured decoy segments on conn's 4-tuple just after connect. Best-effort:
+// httpc's synthetic conn fails the *net.TCPAddr assertion and is skipped, and a missing CAP_NET_RAW or an
+// unresolvable next hop just drops the decoys. One-shot per connect, when the next-hop neighbour is
+// guaranteed warm — the kernel has just completed the three-way handshake through it.
 func (b *TCP) sendTCPFakes(conn net.Conn) {
 	if b.dsWatch != nil {
 		b.dsWatch(conn) // test seam; see the field comment. Before the dsOn gate on purpose.

@@ -1,19 +1,9 @@
 //go:build linux
 
-// L2 packet injection: send fully hand-crafted IPv4 packets to a peer via an AF_PACKET
-// SOCK_RAW socket, so the kernel does NOT touch the L3 header. This exists because an
-// IP_HDRINCL raw socket ALWAYS recomputes the IPv4 header checksum (raw(7)), which silently
-// "repairs" a deliberately-bad checksum before it hits the wire — so a bad-checksum desync
-// decoy is a no-op over IP_HDRINCL. AF_PACKET hands the frame to the driver verbatim, so a
-// forged checksum (or a hand-built TCP segment for the tcp-inject carrier) survives.
-//
-// To send at L2 we need the Ethernet header the kernel would use for the peer: the egress
-// interface (its ifindex + MAC) and the next-hop MAC. We learn both from the kernel's own
-// routing + neighbour tables (/proc/net/route + /proc/net/arp) rather than re-implementing
-// routing — the next hop is the gateway for an off-subnet peer, or the peer itself on-link.
-// Resolution is lazy and cached: the first send after the neighbour is warm (a gateway MAC
-// is essentially always cached) succeeds; a still-cold neighbour just fails that best-effort
-// decoy.
+// L2 packet injection: send fully hand-crafted IPv4 packets to a peer via an AF_PACKET SOCK_RAW socket,
+// so the kernel does NOT touch the L3 header. An IP_HDRINCL raw socket ALWAYS recomputes the IPv4 header
+// checksum, which silently repairs a deliberately-bad one; AF_PACKET hands the frame to the driver
+// verbatim. The Ethernet header comes from the kernel's own routing + neighbour tables, resolved lazily.
 package packet
 
 import (
@@ -37,17 +27,10 @@ type l2route struct {
 	dst     [6]byte
 }
 
-// l2inject injects raw IPv4 packets over AF_PACKET. The DESTINATION is supplied per send, not
-// frozen at construction: the route (egress interface + next-hop MAC) is resolved lazily, cached
-// in rt, and re-resolved whenever the destination changes or a send fails. Until the next hop is
-// resolvable, sendTo returns an error and transmits nothing. mu also serializes sendTo() against
-// close() so Sendto never runs on a closed (or kernel-reused) fd.
-//
-// Freezing the peer here was a real bug: a raw/flux tunnel with a rotating destination pool kept
-// injecting every bad-checksum decoy over the FIRST destination's next hop, forever. The decoy's
-// IPv4 header carried the new destination while the Ethernet frame went to the old gateway, so on
-// a host whose destinations take different routes the decoys never reached the DPI on the new path
-// — silently, because handing a frame to the NIC succeeds and nothing re-resolves on success.
+// l2inject injects raw IPv4 packets over AF_PACKET. The DESTINATION is supplied per send, not frozen at
+// construction: a rotating destination pool would otherwise keep injecting every decoy over the FIRST
+// destination's next hop, the decoy's IPv4 header carrying the new destination while the Ethernet frame
+// went to the old gateway. mu also serializes sendTo against close so Sendto never hits a reused fd.
 type l2inject struct {
 	mu   sync.Mutex
 	fd   int
@@ -95,14 +78,10 @@ func (l *l2inject) close() {
 	}
 }
 
-// sendTo injects one IPv4 packet (full IP header + payload) toward peer, prepending the Ethernet
-// header for peer's next hop. peer must be the destination the tunnel ROUTES to — the same address
-// the real send path hands the kernel — so the frame is handed to the gateway that actually serves
-// it. On a spoof-dst link that is NOT the forged dst in the packet's own IPv4 header: the header
-// carries the decoy while the kernel routes by the real peer, and an injected frame has to make the
-// same choice or it leaves by a different first hop than the flow it is camouflaging. The route is resolved lazily,
-// cached, and re-resolved when the destination changes or after a send failure. Returns an error
-// (sending nothing) when the socket is closed or the next hop isn't resolvable yet.
+// sendTo injects one IPv4 packet toward peer, prepending the Ethernet header for peer's next hop. peer
+// must be the destination the tunnel ROUTES to — on a spoof-dst link that is NOT the forged dst in the
+// packet's own header, and an injected frame has to make the same choice or it leaves by a different
+// first hop than the flow it is camouflaging. The route is cached and re-resolved after a failure.
 func (l *l2inject) sendTo(peer net.IP, ipPkt []byte) error {
 	p := peer.To4()
 	if p == nil {
