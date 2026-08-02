@@ -24,14 +24,9 @@ func (b *TCP) sendTCPFakes(conn net.Conn) {
 	if !b.dsOn || conn == nil {
 		return
 	}
-	la, ok1 := conn.LocalAddr().(*net.TCPAddr)
-	ra, ok2 := conn.RemoteAddr().(*net.TCPAddr)
-	if !ok1 || !ok2 {
-		return // synthetic addrs (httpc) — no real 4-tuple to mirror
-	}
-	src, dst := la.IP.To4(), ra.IP.To4()
-	if src == nil || dst == nil {
-		return // an IPv6 4-tuple — the raw IPv4 injector can't mirror it
+	dst, pkts := b.tcpFakeSegs(conn)
+	if len(pkts) == 0 {
+		return
 	}
 	inj, err := newL2Inject()
 	if err != nil {
@@ -41,13 +36,36 @@ func (b *TCP) sendTCPFakes(conn net.Conn) {
 		return
 	}
 	defer inj.close()
+	for _, ip := range pkts {
+		b.dsSend.note("tcp", inj.sendTo(dst, ip))
+	}
+}
+
+// tcpFakeSegs builds the decoy IPv4 packets for conn's 4-tuple — one per configured spec, each a PSH|ACK
+// segment carrying the SAME TCP options the connection's real segments carry, so the decoys are not
+// separable on header shape. Returns no packets when there is no real IPv4 4-tuple to mirror, which is
+// also why it runs before the AF_PACKET socket is opened. The option block is read once: real segments
+// sent back-to-back share a timestamp, so the decoys of one burst must too.
+func (b *TCP) tcpFakeSegs(conn net.Conn) (net.IP, [][]byte) {
+	la, ok1 := conn.LocalAddr().(*net.TCPAddr)
+	ra, ok2 := conn.RemoteAddr().(*net.TCPAddr)
+	if !ok1 || !ok2 {
+		return nil, nil // synthetic addrs (httpc) — no real 4-tuple to mirror
+	}
+	src, dst := la.IP.To4(), ra.IP.To4()
+	if src == nil || dst == nil {
+		return nil, nil // an IPv6 4-tuple — the raw IPv4 injector can't mirror it
+	}
+	opts := tcpTimestampOpts(conn)
 	d := newDesyncCfg(b.dsOn, b.dsTTL, b.dsCount, b.dsMode)
+	var pkts [][]byte
 	for _, sp := range d.specsTCP() {
-		seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), randSeq32(), randSeq32(), tcpPshAck, 0xffff, fakePayload())
+		seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), randSeq32(), randSeq32(), tcpPshAck, 0xffff, opts, fakePayload())
 		if ip := buildIP4Ext(src, dst, protoTCP, sp.ttl, sp.badSum, seg); ip != nil {
-			b.dsSend.note("tcp", inj.sendTo(dst, ip))
+			pkts = append(pkts, ip)
 		}
 	}
+	return dst, pkts
 }
 
 // randSeq32 returns a random 32-bit value for a decoy segment's sequence/ack fields.

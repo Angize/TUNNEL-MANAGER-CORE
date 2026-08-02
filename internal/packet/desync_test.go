@@ -224,7 +224,7 @@ func TestSpecsTCP(t *testing.T) {
 func TestBuildTCPSeg(t *testing.T) {
 	src := net.IPv4(10, 0, 0, 1)
 	dst := net.IPv4(10, 0, 1, 2)
-	seg := buildTCPSeg(src, dst, 40000, 443, 0x11223344, 0x55667788, tcpPshAck, 0xffff, []byte("decoy-body"))
+	seg := buildTCPSeg(src, dst, 40000, 443, 0x11223344, 0x55667788, tcpPshAck, 0xffff, nil, []byte("decoy-body"))
 	if binary.BigEndian.Uint16(seg[0:2]) != 40000 || binary.BigEndian.Uint16(seg[2:4]) != 443 {
 		t.Fatal("ports not stamped correctly")
 	}
