@@ -1098,7 +1098,7 @@ func (f *Flux) clientLoop() {
 		}
 		wait := keepaliveInterval(f.keepalive, f.psk)
 		if (f.cryptoOn && f.sealer() == nil) || unproven {
-			wait = time.Second // retransmit the handshake — or re-probe an unproven endpoint — faster than keepalive
+			wait = handshakeRetransmitWait() // retransmit the handshake, or re-probe an unproven endpoint, faster than keepalive
 		}
 		select {
 		case <-f.closeCh:

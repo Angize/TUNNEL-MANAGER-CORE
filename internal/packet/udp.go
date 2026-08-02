@@ -144,6 +144,16 @@ func (b *UDP) SetPeerPool(pp *PeerPool) {
 // to ride out a slow handshake / brief loss, short enough to fail over from a blocked IP quickly.
 const peerFailThreshold = 12
 
+// handshakeRetransmit is the base gap between handshake inits, and between probes of an endpoint a
+// timed rotation jumped to. Faster than keepalive on purpose: nothing is established yet.
+const handshakeRetransmit = time.Second
+
+// handshakeRetransmitWait is that gap with jitter. An unestablished datagram carrier sends on this
+// clock and nothing else, so a fixed value is a 1 Hz beacon a passive observer can lock onto with no
+// payload analysis at all — and it runs for exactly as long as the tunnel cannot come up, which is
+// when a filtered path is most worth fingerprinting.
+func handshakeRetransmitWait() time.Duration { return jitterFrac(handshakeRetransmit) }
+
 // pinFailRelease is how many proven-dead rounds (each already peerFailThreshold retransmits, or a full
 // clear-mode staleness window, with no session) a manual pin absorbs before it auto-releases, so the
 // tunnel recovers instead of freezing on a blocked endpoint for the rest of pinTTL. Two rounds keeps a
@@ -1045,7 +1055,7 @@ func (b *UDP) clientLoop() {
 		}
 		var wait time.Duration
 		if (b.sealer() == nil && b.cryptoOn) || unproven {
-			wait = time.Second // retransmit the handshake — or re-probe an unproven endpoint — faster than keepalive
+			wait = handshakeRetransmitWait() // retransmit the handshake, or re-probe an unproven endpoint, faster than keepalive
 		} else {
 			wait = keepaliveInterval(b.keepalive, b.psk)
 		}

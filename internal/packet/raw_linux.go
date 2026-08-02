@@ -1343,7 +1343,7 @@ func (r *Raw) clientLoop() {
 		}
 		wait := keepaliveInterval(r.keepalive, r.psk)
 		if (r.cryptoOn && r.sealer() == nil) || unproven {
-			wait = time.Second // retransmit the handshake — or re-probe an unproven endpoint — faster than keepalive
+			wait = handshakeRetransmitWait() // retransmit the handshake, or re-probe an unproven endpoint, faster than keepalive
 		}
 		select {
 		case <-r.closeCh:
