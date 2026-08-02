@@ -42,10 +42,10 @@ func (b *TCP) sendTCPFakes(conn net.Conn) {
 }
 
 // tcpFakeSegs builds the decoy IPv4 packets for conn's 4-tuple — one per configured spec, each a PSH|ACK
-// segment carrying the SAME TCP options the connection's real segments carry, so the decoys are not
-// separable on header shape. Returns no packets when there is no real IPv4 4-tuple to mirror, which is
-// also why it runs before the AF_PACKET socket is opened. The option block is read once: real segments
-// sent back-to-back share a timestamp, so the decoys of one burst must too.
+// segment carrying the SAME TCP options and advertised window the connection's real segments carry, so
+// the decoys are not separable on header shape. Returns no packets when there is no real IPv4 4-tuple to
+// mirror, which is also why it runs before the AF_PACKET socket is opened. The shape is read once: real
+// segments sent back-to-back share a timestamp and a window, so the decoys of one burst must too.
 func (b *TCP) tcpFakeSegs(conn net.Conn) (net.IP, [][]byte) {
 	la, ok1 := conn.LocalAddr().(*net.TCPAddr)
 	ra, ok2 := conn.RemoteAddr().(*net.TCPAddr)
@@ -56,11 +56,11 @@ func (b *TCP) tcpFakeSegs(conn net.Conn) (net.IP, [][]byte) {
 	if src == nil || dst == nil {
 		return nil, nil // an IPv6 4-tuple — the raw IPv4 injector can't mirror it
 	}
-	opts := tcpTimestampOpts(conn)
+	opts, window := tcpDecoyShape(conn)
 	d := newDesyncCfg(b.dsOn, b.dsTTL, b.dsCount, b.dsMode)
 	var pkts [][]byte
 	for _, sp := range d.specsTCP() {
-		seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), randSeq32(), randSeq32(), tcpPshAck, 0xffff, opts, fakePayload())
+		seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), randSeq32(), randSeq32(), tcpPshAck, window, opts, fakePayload())
 		if ip := buildIP4Ext(src, dst, protoTCP, sp.ttl, sp.badSum, seg); ip != nil {
 			pkts = append(pkts, ip)
 		}

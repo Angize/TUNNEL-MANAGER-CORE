@@ -175,9 +175,11 @@ func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 		return f.writeDisorder(p, at)
 	}
 	defer inj.close()
-	// The kernel writes the real ClientHello through this same socket a few lines down, so the decoy
-	// has to carry the option block that segment will carry, or the two are told apart on data offset.
-	seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), snd, rcv, tcpPshAck, 0xffff, tcpTimestampOpts(f.Conn), fake)
+	// The kernel writes the real ClientHello through this same socket a few lines down, so the decoy has
+	// to carry the header shape that segment will carry, or the two are told apart on data offset and on
+	// a window no real segment holds constant.
+	opts, window := tcpDecoyShape(f.Conn)
+	seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), snd, rcv, tcpPshAck, window, opts, fake)
 	badTCPChecksum(seg) // the SERVER drops the fake (bad L4 checksum); the DPI still ingests it
 	if ip := buildIP4Ext(src, dst, protoTCP, f.fakeSegTTL(), false, seg); ip != nil {
 		f.dsSend.note("tcp/sni-fake", inj.sendTo(dst, ip))
