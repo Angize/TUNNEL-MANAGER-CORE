@@ -113,6 +113,7 @@ type UDP struct {
 	// SINCE we (re)pointed at it — never a false heal on a just-jumped-to (unproven) endpoint.
 	peerAnswered atomic.Bool
 
+	pc     pingClock                   // times the keepalive round trip (see coreStatus.roundTrip)
 	fecEnc *fecEncoder                 // non-nil when FEC is on: buffers data frames into RS blocks on send
 	fecDec *fecDecoder                 // non-nil when FEC is on: reassembles + reconstructs blocks on receive
 	rxAddr atomic.Pointer[net.UDPAddr] // src of the packet currently feeding fecDec (deliver reads it)
@@ -959,7 +960,9 @@ func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {
 	case typePing:
 		b.send(typePong, nil, addr)
 	case typePong:
-		// keepalive ack
+		// The answer to our own ping: the ONE locally observable fact that covers both
+		// directions at once — it got there, and the reply got back.
+		b.st.roundTrip(b.pc.rtt())
 	case typeData:
 		if _, err := b.dev.Write(payload); err != nil {
 			log.Printf("core: tun write error: %v", err)
@@ -1032,6 +1035,7 @@ func (b *UDP) clientLoop() {
 			// NEW destination sees, and it is what makes the server promote that socket as its reply
 			// source. Sending it first meant the ping went to the endpoint we were leaving and the
 			// server did not follow until the next data frame.
+			b.pc.mark()
 			b.send(typePing, nil, b.peer.Load())
 			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session survives,
 			// no handshake failure will ever say so. Count unanswered ticks here — AFTER the jump, so the very

@@ -22,6 +22,31 @@ type coreStatus struct {
 	wasDown bool  // a disconnect is pending a matching recovery -> the next connect is a reconnect
 	hb      int64 // unix-seconds of the last authenticated inbound frame (lastRx); a periodic liveness heartbeat
 	dw      int64 // this carrier's RESOLVED dead-window in seconds — the single number a reader uses to age hb
+	// rt/rtt come from a keepalive PONG, the only signal a single end has that speaks about BOTH
+	// directions: the pong proves our ping arrived AND that the answer came back. hb proves only the
+	// second half, so a tunnel blackholed upstream keeps hb fresh while rt freezes.
+	rt  int64 // unix-seconds of the last answered keepalive
+	rtt int64 // milliseconds that round trip took, measured on the carrier itself
+}
+
+// pingClock times a keepalive round trip. mark() stamps the send; rtt() reports how long ago that was,
+// which is the round trip when a pong is what triggers it. Pings go one at a time per carrier and a pong
+// follows its ping immediately, so the newest send is the right one to measure against without putting a
+// nonce on the wire.
+type pingClock struct{ sent atomic.Int64 }
+
+func (p *pingClock) mark() { p.sent.Store(time.Now().UnixNano()) }
+
+// rtt returns the elapsed time since the last mark(), or 0 when none was taken or the clock jumped.
+func (p *pingClock) rtt() time.Duration {
+	at := p.sent.Load()
+	if at <= 0 {
+		return 0
+	}
+	if d := time.Duration(time.Now().UnixNano() - at); d > 0 {
+		return d
+	}
+	return 0
 }
 
 // hbInterval is the CEILING on how often a client carrier republishes its lastRx heartbeat into the
@@ -95,6 +120,21 @@ func (s *coreStatus) beat(sec int64) {
 	s.hb = sec
 	s.mu.Unlock()
 	s.write()
+}
+
+// roundTrip records an answered keepalive: the peer received what we sent and its reply reached us. The
+// file is not flushed here — the heartbeat loop republishes on its own period, and a pong arrives on that
+// same keepalive cadence, so writing per pong would only double the I/O for the same freshness.
+func (s *coreStatus) roundTrip(d time.Duration) {
+	if s == nil || s.path == "" {
+		return
+	}
+	s.mu.Lock()
+	s.rt = time.Now().Unix()
+	if d > 0 {
+		s.rtt = d.Milliseconds()
+	}
+	s.mu.Unlock()
 }
 
 // setDW publishes this carrier's resolved dead-window (seconds) so a reader ages hb against the SAME
@@ -222,14 +262,18 @@ func (s *coreStatus) write() {
 	active := s.active
 	hb := s.hb
 	dw := s.dw
+	rt := s.rt
+	rtt := s.rtt
 	s.mu.Unlock()
 	payload := struct {
 		Active string      `json:"active"`
 		Events []coreEvent `json:"events"`
 		HB     int64       `json:"hb"`
 		DW     int64       `json:"dw"`
+		RT     int64       `json:"rt"`
+		RTT    int64       `json:"rtt_ms"`
 		TS     int64       `json:"ts"`
-	}{Active: active, Events: evs, HB: hb, DW: dw, TS: time.Now().Unix()}
+	}{Active: active, Events: evs, HB: hb, DW: dw, RT: rt, RTT: rtt, TS: time.Now().Unix()}
 	buf, err := json.Marshal(payload)
 	if err != nil {
 		return

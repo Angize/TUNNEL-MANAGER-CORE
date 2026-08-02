@@ -77,6 +77,7 @@ type Raw struct {
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
 	peerAnswered atomic.Bool
 
+	pc     pingClock                  // times the keepalive round trip (see coreStatus.roundTrip)
 	fecEnc *fecEncoder                // non-nil when FEC is on: buffers data frames into RS blocks on send
 	fecDec *fecDecoder                // non-nil when FEC is on: reassembles + reconstructs blocks on receive
 	rxAddr atomic.Pointer[net.IPAddr] // src of the packet currently feeding fecDec (deliver reads it)
@@ -1018,7 +1019,9 @@ func (r *Raw) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	case typePing:
 		r.send(typePong, nil, r.replyAddr(addr))
 	case typePong:
-		// keepalive ack
+		// The answer to our own ping: the ONE locally observable fact that covers both
+		// directions at once — it got there, and the reply got back.
+		r.st.roundTrip(r.pc.rtt())
 	case typeData:
 		if _, err := r.dev.Write(payload); err != nil {
 			log.Printf("raw: tun write error: %v", err)
@@ -1320,6 +1323,7 @@ func (r *Raw) clientLoop() {
 			rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
 			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the
 			// NEW destination sees, and it is what makes the server stamp its replies from that IP.
+			r.pc.mark()
 			r.send(typePing, nil, r.peer.Load())
 			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session survives,
 			// no handshake failure will ever say so. Count unanswered ticks here — AFTER the jump, so the very
