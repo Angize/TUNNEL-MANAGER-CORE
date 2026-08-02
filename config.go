@@ -603,8 +603,12 @@ func (c *Config) validate() error {
 			default:
 				return errors.New("sni_mode must be \"split\", \"disorder\", or \"fake\"")
 			}
-			if c.SplitTTL < 0 || c.SplitTTL > 255 {
-				return errors.New("split_ttl must be between 0 and 255")
+			// The disorder head exists to EXPIRE in transit. A hop budget the peer can be reached
+			// with makes it arrive whole, so the mode silently becomes a plain split while the
+			// panel, the node and this core all keep reporting disorder.
+			if c.SplitTTL < 0 || c.SplitTTL > packet.MaxHopBudget {
+				return fmt.Errorf("split_ttl must be between 0 and %d (0 = default); above that the "+
+					"disorder head reaches the server and the mode is a no-op", packet.MaxHopBudget)
 			}
 		}
 		// httpc upstream style: post (default) or grpc. grpc is a single full-duplex

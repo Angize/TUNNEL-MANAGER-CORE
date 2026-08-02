@@ -15,6 +15,13 @@ import (
 // Clamping guarantees it expires on the path, where the DPI still ingests it.
 const injectMaxTTL = 8
 
+// MaxHopBudget is the ceiling for every knob whose whole job is to die in transit: the inject decoy's
+// fake_ttl, and the disorder head's split_ttl. ONE number, because it encodes ONE physical claim —
+// far enough to pass the on-path DPI, never far enough to reach the peer. A split_ttl above it makes
+// the head arrive intact, so sni_mode=disorder degrades to a plain split while every layer keeps
+// reporting disorder.
+const MaxHopBudget = injectMaxTTL
+
 // desyncReportEvery paces the repeat below. The first failure is reported at once; after that a
 // still-failing carrier says so on this cadence, so a condition that persists for hours stays
 // visible in the journal without a line per decoy.
