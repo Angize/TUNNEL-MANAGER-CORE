@@ -1,8 +1,7 @@
-// Package dnstun implements the DNS-tunnel carrier's reliable session layer and
-// DNS codec: a kcp-go reliable stream rides over an unreliable, poll-based DNS
-// channel, and every KCP datagram is AEAD-sealed so the KCP header never appears
-// in cleartext. The pieces here are transport-agnostic and unit-testable without
-// a real resolver — the DNS I/O itself lives in the carrier (internal/packet).
+// Package dnstun implements the DNS-tunnel carrier's reliable session layer and DNS codec: a kcp-go
+// reliable stream rides over an unreliable, poll-based DNS channel, and every KCP datagram is AEAD-sealed
+// so the KCP header never appears in cleartext. The pieces here are transport-agnostic and unit-testable
+// without a real resolver — the DNS I/O itself lives in the carrier (internal/packet).
 package dnstun
 
 import "encoding/hex"

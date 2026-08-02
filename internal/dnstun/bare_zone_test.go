@@ -5,17 +5,10 @@ import (
 	"testing"
 )
 
-// TestBareZoneIsNotAPoll is the regression test for the downstream drain.
-//
-// In user terms: the delegated zone is PUBLIC — it has to be, or resolvers could not reach the
-// server. `DecodeName` answered a bare `dig TXT <zone>` exactly as it answered a real client poll
-// (`[]byte{}, nil`), and the server's reply path then took one datagram off the server->client
-// queue to attach to it. So anyone who read the zone off the delegation could run that query in a
-// loop and starve the tunnel of its own downstream. The payload is AEAD-sealed, so nothing leaked;
-// what was stolen was the stream.
-//
-// The distinction is structural and needs no wire change: our client's EncodeName ALWAYS prepends a
-// nonce label, so even a payload-free poll is "<nonce>.<zone>". A bare zone cannot be our client.
+// TestBareZoneIsNotAPoll is the regression test for the downstream drain. The delegated zone is PUBLIC —
+// it has to be, or resolvers could not reach the server — and DecodeName answered a bare `dig TXT <zone>`
+// exactly as it answered a real poll, so the reply path took a datagram off the server->client queue.
+// Our client's EncodeName ALWAYS prepends a nonce label, so a bare zone cannot be our client.
 func TestBareZoneIsNotAPoll(t *testing.T) {
 	c, err := NewCodec("t.example.com")
 	if err != nil {

@@ -273,11 +273,10 @@ func buildTypedQuery(id uint16, name string, qtype dnsmessage.Type) []byte {
 	return b
 }
 
-// TestDNSServerAuthoritativeBehavior drives the server transport the way a real recursive resolver
-// does — probing the zone with SOA/NS/A queries and minimizing intermediate names — and asserts the
-// replies are authoritative (AA set), echo the queried type, carry SOA/NS at the apex, and return an
-// authoritative NODATA (AA set, no answers) everywhere else. Before the fix the server answered
-// every query with a TXT-typed question and no AA bit, so resolvers rejected the zone as lame.
+// TestDNSServerAuthoritativeBehavior drives the server transport the way a real recursive resolver does —
+// probing the zone with SOA/NS/A queries and minimizing intermediate names — and asserts the replies are
+// authoritative (AA set), echo the queried type, carry SOA/NS at the apex, and return an authoritative
+// NODATA everywhere else. Without AA and the echoed type, resolvers reject the zone as lame.
 func TestDNSServerAuthoritativeBehavior(t *testing.T) {
 	codec, err := NewCodec("t.example.com")
 	if err != nil {

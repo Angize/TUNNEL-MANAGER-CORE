@@ -96,22 +96,10 @@ func rcodeResolver(t *testing.T, rejecting *atomic.Bool, rc dnsmessage.RCode) st
 	return pc.LocalAddr().String()
 }
 
-// A resolver that REJECTS every query must be said out loud and must be counted.
-//
-// parseResponseTXT was given an RCode check exactly so a rejection stops looking like a healthy empty
-// answer — its comment says "Surfacing it lets the caller's empty/failure accounting see the real
-// cause" — and then its only production caller, recvLoop, threw the error away with a bare `continue`.
-// Two things broke:
-//
-//   - Nothing anywhere named the cause. The operator saw a tunnel that went quiet and, at worst, "dns
-//     session: handshake timed out", which reads as censorship when it is a rate limit or a zone the
-//     resolver refuses.
-//   - The `continue` skipped the empty/failure accounting the rejection USED to reach before the check
-//     existed. `active` stayed true, so fill() kept pipelineWindow (16) queries in flight against a
-//     resolver refusing all of them, instead of collapsing back to idleTarget.
-//
-// This drives a real dnsClient against a real (fake) resolver over loopback: healthy answers first, so
-// the window goes active through the production path, then rejections.
+// A resolver that REJECTS every query must be said out loud and must be counted. parseResponseTXT has an
+// RCode check so a rejection stops looking like a healthy empty answer, and its only caller threw that
+// error away: nothing named the cause, and the `continue` skipped the accounting, so `active` stayed true
+// and fill() kept a full window in flight against a resolver refusing everything.
 func TestRejectedAnswersAreLoggedAndCollapseTheWindow(t *testing.T) {
 	for _, rc := range []dnsmessage.RCode{dnsmessage.RCodeServerFailure, dnsmessage.RCodeRefused, dnsmessage.RCodeNameError} {
 		t.Run(rc.String(), func(t *testing.T) {

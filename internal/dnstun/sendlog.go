@@ -6,15 +6,10 @@ import (
 	"time"
 )
 
-// sendErrLog throttles a send-error line to at most one per interval, carrying the suppressed count.
-//
-// A resolver we cannot write to fails at query rate, so logging every occurrence would bury the journal;
-// logging none is what made the fault invisible — the operator saw only "dns session: handshake timed
-// out", which reads as censorship and sends diagnosis toward the network when the cause is local (an
-// unroutable resolver entry, an egress REJECT, a source address that disappeared).
-//
-// Deliberately duplicated from internal/packet's copy rather than shared: the two packages have no
-// dependency on each other today, and a shared logging package is not worth creating for ten lines.
+// sendErrLog throttles a send-error line to at most one per interval, carrying the suppressed count. A
+// resolver we cannot write to fails at query rate, so logging every occurrence buries the journal, and
+// logging none made the fault invisible — the operator saw only a handshake timeout, which reads as
+// censorship when the cause is local. Deliberately duplicated from internal/packet's copy, not shared.
 type sendErrLog struct {
 	last atomic.Int64 // unix nanos of the last line emitted
 	n    atomic.Int64 // occurrences accumulated since then

@@ -6,16 +6,10 @@ import (
 	"time"
 )
 
-// The drain lived in the SERVER's reply path, and no test ever built a server.
-//
-// bare_zone_test.go next door calls Codec.DecodeName and checks its error value. That is the
-// mechanism the fix used, not the thing the fix was about: what was stolen was a datagram off
-// `s.downstream`, and nothing in that file — or in codec_test.go, or in
-// TestDNSServerAuthoritativeBehavior — ever constructs a dnsServer, queues a downstream datagram, or
-// counts what is left in the queue afterwards. So the whole class stayed invisible: an apex query
-// could go back to popping the queue and every one of those tests would still pass.
-//
-// This drives the real server over a real UDP socket and MEASURES the queue.
+// The drain lived in the SERVER's reply path, and no test ever built a server. bare_zone_test.go checks
+// Codec.DecodeName's error value — the mechanism of the fix, not the thing it was about. What was stolen
+// was a datagram off `s.downstream`, and nothing else constructs a dnsServer, queues a downstream
+// datagram or counts the queue. This drives the real server over a real UDP socket and MEASURES it.
 func TestApexQueryDoesNotStealADownstreamDatagram(t *testing.T) {
 	const zone = "t.example.com"
 	codec, err := NewCodec(zone)

@@ -12,22 +12,9 @@ import (
 )
 
 // TestOneKeepalivePingDoesNotBlockTheAdoptInPlaceRecovery is TestServeSessionRecoversFromVanishedClient
-// with ONE difference, and that difference was enough to undo the whole recovery.
-//
-// v2.48.8 / #132 made the server adopt a new client IN PLACE when the live session's own client has
-// vanished before establishing KCP — about one round trip, instead of parking until a KCP dead-link
-// timeout. The gate is `liveProven`, documented as "the live session is established / establishing",
-// and tryStaged tears down rather than adopting only because "an established conv-0 KCP session can't
-// be retrofitted".
-//
-// `case kindPing` set that flag. A ping is a sealed keepalive one layer BELOW KCP and establishes
-// nothing, so any client that lived long enough to send a single keepalive left the server unable to
-// adopt anyone afterwards. The existing recovery test cannot see it: its client 1 arms the server and
-// goes silent immediately, so no ping is ever sent.
-//
-// The ping here is sent through sendKind — the same call the client's keepalive loop makes — rather
-// than by waiting on a timer, so the test is instant and deterministic. Everything on the SERVER side
-// is production code.
+// with ONE difference: the client sends a keepalive first. A ping is a sealed keepalive one layer BELOW
+// KCP and establishes nothing, so it must not set liveProven — otherwise any client that lived long
+// enough to ping leaves the server unable to adopt anyone afterwards. The ping goes through sendKind.
 func TestOneKeepalivePingDoesNotBlockTheAdoptInPlaceRecovery(t *testing.T) {
 	cliT, srvT := newPipePair(0)
 	cfg := SessionConfig{PSK: "a-ping-is-not-a-session", Cipher: "chacha20-poly1305"}
@@ -44,8 +31,8 @@ func TestOneKeepalivePingDoesNotBlockTheAdoptInPlaceRecovery(t *testing.T) {
 	}()
 
 	// Client 1 completes the crypto handshake — so the server's LIVE sealer is its — and then sends
-	// one keepalive ping. It never writes, so KCP is never established: exactly the state #132's
-	// adopt-in-place is for.
+	// one keepalive ping. It never writes, so KCP is never established: exactly the state
+	// adopt-in-place exists for.
 	cli1, err := DialSession(cliT, cfg)
 	if err != nil {
 		t.Fatalf("client 1 DialSession: %v", err)
@@ -96,12 +83,10 @@ func TestOneKeepalivePingDoesNotBlockTheAdoptInPlaceRecovery(t *testing.T) {
 	}
 }
 
-// TestDataStillProvesTheSessionIsEstablished is the other half, and it is what stops the fix above
-// from being "never tear down": a client that has really carried DATA has an established conv-0 KCP
-// session, which cannot be retrofitted, so a later client must NOT be adopted in place.
-//
-// Without this, deleting `liveProven = true` from the data case as well would leave both tests green
-// while quietly corrupting a live session.
+// TestDataStillProvesTheSessionIsEstablished is the other half, and it is what stops the fix above from
+// becoming "never tear down": a client that has really carried DATA has an established conv-0 KCP
+// session, which cannot be retrofitted, so a later client must NOT be adopted in place. Without it,
+// deleting liveProven from the data case too would leave both tests green over a corrupted session.
 func TestDataStillProvesTheSessionIsEstablished(t *testing.T) {
 	cliT, srvT := newPipePair(0)
 	cfg := SessionConfig{PSK: "data-does-prove-it", Cipher: "chacha20-poly1305"}
@@ -147,16 +132,10 @@ func TestDataStillProvesTheSessionIsEstablished(t *testing.T) {
 		go func() { _, _ = cli2.Write([]byte("from the second client")) }()
 	}
 
-	// The assertion must be that WE tore the conn down, not merely that a Read failed — and finding
-	// the right discriminator took measuring both variants rather than guessing at one:
-	//
-	//	tear-down (correct)      "use of closed network connection"  == net.ErrClosed
-	//	adopt-in-place (broken)  "io: read/write on closed pipe"     == io.ErrClosedPipe
-	//
-	// A first cut asserted only `err != nil`, and a second guessed at os.ErrDeadlineExceeded. BOTH
-	// passed on the broken code, because "no data arrived" has several spellings and neither of those
-	// was the one it produces. net.ErrClosed is the sentinel qpc.Close() raises, so it names the
-	// tear-down itself instead of one of its symptoms.
+	// The assertion must be that WE tore the conn down, not merely that a Read failed. `err != nil` and
+	// os.ErrDeadlineExceeded both pass on the broken code, because "no data arrived" has several spellings:
+	// adopt-in-place yields io.ErrClosedPipe, the tear-down yields net.ErrClosed. net.ErrClosed is the
+	// sentinel qpc.Close() raises, so it names the tear-down itself rather than one of its symptoms.
 	_ = srv.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 64)
 	_, err = srv.Read(buf)
