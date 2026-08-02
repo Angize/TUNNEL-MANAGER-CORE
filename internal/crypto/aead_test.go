@@ -119,8 +119,7 @@ func TestNoZeroNonceSignature(t *testing.T) {
 	}
 }
 
-// TestAADAuthenticated is the #11 fix: the frame header passed as aad is
-// authenticated, so flipping it makes Open fail.
+// TestAADAuthenticated: the frame header passed as aad is authenticated, so flipping it makes Open fail.
 func TestAADAuthenticated(t *testing.T) {
 	c, s := pair(t, "chacha20-poly1305", "aad-psk")
 	ct, _ := c.Seal([]byte("payload"), []byte{0x00}) // typeData

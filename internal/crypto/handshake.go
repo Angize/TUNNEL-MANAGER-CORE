@@ -1,43 +1,17 @@
-// Handshake: an ephemeral X25519 key agreement, authenticated by the PSK, that
-// establishes per-session AEAD keys with FORWARD SECRECY and FRESHNESS.
+// Handshake: an ephemeral X25519 key agreement, authenticated by the PSK, that establishes per-session
+// AEAD keys with FORWARD SECRECY and FRESHNESS. The static-PSK sealer derives the same keys every run,
+// so a captured frame still opens after a restart and one PSK disclosure decrypts all past traffic;
+// binding each session to a fresh ephemeral ECDH fixes both, and the responder's own ephemeral means a
+// replayed old-session frame can no longer rebind the peer or inject a packet.
 //
-// Why. The static-PSK sealer (NewSealer) derives the same keys every run, so a
-// frame captured from an earlier session still AEAD-opens after the peer
-// restarts — the root of the cross-session replay / peer-hijack finding — and a
-// one-time PSK disclosure decrypts all past traffic (no forward secrecy). Binding
-// each session to a fresh ephemeral ECDH fixes both:
-//
-//   - Forward secrecy: session keys come from ephemeral private keys that are
-//     discarded after the handshake; capturing the PSK later cannot reconstruct
-//     them. (#12)
-//   - Anti-replay / anti-rebind: the responder contributes a fresh ephemeral, so
-//     every session's keys differ. A replayed old-session data frame fails to
-//     open under the current keys and is dropped — it can no longer rebind the
-//     peer or inject a packet. (#1)
-//
-// Wire. Each message is a clear per-message random nonce, then the MASKED
-// (padLen || public value || MAC || pad), where pad is padLen bytes:
+// Wire. Each message is a clear per-message random nonce, then the MASKED body:
 //
 //	msg: nonce(12) || MASK( padLen(1) || e(32) || MAC(psk,tag||…) || pad(padLen) )
 //
-// MASK = ChaCha20(key=derived(psk), nonce) XOR the rest. Two anti-fingerprint
-// properties:
-//
-//   - Uniform bytes: a raw X25519 public value is a canonical curve point whose
-//     top wire bit is always 0, a bias a passive classifier could aggregate per-IP
-//     (the class of signal that has gotten Shadowsocks/obfs servers blocked).
-//     Masking under a per-message keystream makes the whole message uniformly
-//     random on the wire; the pad region is keystream over zeros, so it too looks
-//     random with no separate CSPRNG draw.
-//   - Variable size: padLen is uniform in [0,255], so the message length (and thus
-//     the opening byte-count sequence) is no longer a fixed 48→48 signature. A
-//     stream reader takes the fixed HandshakeCoreSize prefix, unmasks padLen and
-//     consumes the trailing pad (ReadHandshake); a datagram carries core||pad whole.
-//
-// The mask key is PSK-derived, so a prober without the PSK sees only noise and,
-// failing the MAC after unmasking, is answered with nothing. Session keys come from
-// HKDF(ikm = ECDH || psk, salt = e_i || e_r), so knowing the PSK alone is not
-// enough — an attacker also needs an ephemeral private key it never sees.
+// MASK = ChaCha20(key=derived(psk), nonce) XOR the rest, which buys two anti-fingerprint properties: a
+// raw X25519 public value is a canonical curve point whose top wire bit is always 0, a bias a passive
+// classifier can aggregate per-IP; and padLen is uniform in [0,255], so the message length is no longer
+// a fixed signature. Without the PSK a prober sees only noise and, failing the MAC, is answered nothing.
 package crypto
 
 import (
@@ -228,11 +202,10 @@ func ReadHandshake(r io.Reader, psk string) ([]byte, error) {
 	return core, nil
 }
 
-// SessionSealer derives the per-session Sealer from a completed handshake. ownPriv
-// is this side's ephemeral private key, peerPub the other side's public key, and
-// eInit/eResp the two public keys in fixed (initiator, responder) order so both
-// ends salt the KDF identically. isClient marks which end we are (the initiator
-// is always the client).
+// SessionSealer derives the per-session Sealer from a completed handshake: own is this side's ephemeral
+// key pair, peerPub the other side's public key, and eInit/eResp the two public keys in fixed
+// (initiator, responder) order so both ends salt the KDF identically. isClient marks which end we are —
+// the initiator is always the client.
 func SessionSealer(cipherName, psk string, own *Ephemeral, peerPub, eInit, eResp [32]byte, isClient bool) (*Sealer, error) {
 	name := ResolveCipher(cipherName)
 	_, keyLen, err := aeadFactory(name)

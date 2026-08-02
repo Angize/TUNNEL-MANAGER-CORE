@@ -12,11 +12,10 @@ import (
 	"testing"
 )
 
-// gsoPair returns a Device with the virtio-net header path ENABLED over a socketpair, plus the
-// peer fd standing in for the kernel side. This is the whole point of FromFileGSO: before it, the
-// GSO read path could not be reached from a test at all — Open needs /dev/net/tun and a kernel
-// with IFF_VNET_HDR, and FromFile hard-coded gso=false — so only the pure segment() helper was
-// ever covered and everything around it shipped untested.
+// gsoPair returns a Device with the virtio-net header path ENABLED over a socketpair, plus the peer fd
+// standing in for the kernel side. This is the whole point of FromFileGSO: without it the GSO read path
+// cannot be reached from a test at all — Open needs /dev/net/tun and a kernel with IFF_VNET_HDR, and
+// FromFile hard-codes gso=false — so only the pure segment() helper was ever covered.
 func gsoPair(t *testing.T) (*Device, *os.File) {
 	t.Helper()
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
@@ -64,14 +63,9 @@ func tcp4(payload int) []byte {
 func l4csum(pkt []byte) uint16 { return binary.BigEndian.Uint16(pkt[36:38]) }
 
 // TestGSOPassThroughFinalizesTheDeferredChecksum is the regression test for the GSO pass-through
-// corruption: readGSO only ran finalizeCsum on the plain-packet branch, so every super-packet
-// splitGSO handed back UNSEGMENTED went out still carrying the kernel's deferred virtio partial
-// checksum.
-//
-// In user terms: with the GSO knob on, a packet the splitter cannot parse is not dropped and not
-// repaired — it is sent to the far end with a checksum the far end's stack rejects. The operator
-// sees a silent hole in the stream with nothing logged at either end, on a knob the panel sells as
-// a pure speed-up.
+// corruption: readGSO ran finalizeCsum only on the plain-packet branch, so every super-packet splitGSO
+// handed back UNSEGMENTED went out still carrying the kernel's deferred virtio partial checksum — not
+// dropped, not repaired, just rejected by the far end's stack, with nothing logged at either end.
 func TestGSOPassThroughFinalizesTheDeferredChecksum(t *testing.T) {
 	dev, peer := gsoPair(t)
 
@@ -101,11 +95,10 @@ func TestGSOPassThroughFinalizesTheDeferredChecksum(t *testing.T) {
 	}
 }
 
-// TestGSOLegacyUFOIsNeverSegmented pins the decode table itself. VIRTIO_NET_HDR_GSO_UDP (3) is
-// legacy UFO — IP-fragmentation semantics — and was mapped to per-datagram UDP segmentation, while
-// the type that really means that, USO (5), had no case at all and fell through. Nothing requests
-// either today, so this is a dormant mine: it goes off for whoever adds TUN_F_USO4/USO6 to the
-// TUNSETOFFLOAD call expecting UDP upload to accelerate, and it corrupts every datagram.
+// TestGSOLegacyUFOIsNeverSegmented pins the decode table itself. VIRTIO_NET_HDR_GSO_UDP (3) is legacy
+// UFO — IP-fragmentation semantics — and was mapped to per-datagram UDP segmentation, while the type
+// that really means that, USO (5), had no case at all. Nothing requests either today, so this is a
+// dormant mine for whoever adds TUN_F_USO4/USO6 expecting UDP upload to accelerate.
 func TestGSOLegacyUFOIsNeverSegmented(t *testing.T) {
 	// A UDP super-packet big enough that a real segmentation would produce several pieces.
 	pkt := make([]byte, 20+8+3000)
@@ -157,14 +150,10 @@ func TestGSOReadDropsRatherThanTruncates(t *testing.T) {
 	}
 }
 
-// TestGSOReportsAtRuntimeNotOnlyAtShutdown pins the observability half: the counters are logged
-// WHILE the tunnel runs. Before, the only evidence GSO did anything at all was a single line
-// printed when the process closed, so an operator who turned the knob on could not tell "the kernel
-// is coalescing" from "the knob is inert" without stopping the tunnel.
-//
-// The first read must report immediately (a tunnel that starts coalescing says so at once), and a
-// second read that changes nothing must NOT report again — an idle tunnel has to stay silent or the
-// line becomes noise nobody reads.
+// TestGSOReportsAtRuntimeNotOnlyAtShutdown pins the observability half: the counters are logged WHILE
+// the tunnel runs, so an operator who turned the knob on can tell "the kernel is coalescing" from "the
+// knob is inert" without stopping the tunnel. The first read must report immediately, and a second read
+// that changes nothing must NOT report again — an idle tunnel has to stay silent or the line is noise.
 func TestGSOReportsAtRuntimeNotOnlyAtShutdown(t *testing.T) {
 	dev, peer := gsoPair(t)
 
@@ -233,13 +222,9 @@ func TestGSOSplitPathStillWorks(t *testing.T) {
 }
 
 // TestGSOFirstLineIsNotAllZeros is the regression test for the reporting rule reading backwards.
-//
-// reportGSO ran on the FIRST read, before the kernel could have coalesced anything, so the first line
-// an operator ever saw was `gso 0 super-packets -> 0 segments, 0 unsplit, 0 oversize dropped`. That
-// is precisely the reading that means "this knob is doing nothing" — and it also stamped the
-// reporting window, so a device that started coalescing one packet later stayed silent about it for
-// the next ten minutes. The operator turned the knob on, greped the journal, and was told it was
-// inert by a line that knew nothing yet.
+// Reporting on the FIRST read, before the kernel could coalesce anything, makes the first line an
+// operator ever sees "0 super-packets -> 0 segments" — exactly the reading that means the knob does
+// nothing — and it stamps the window too, so a device that starts coalescing stays silent for ten minutes.
 func TestGSOFirstLineIsNotAllZeros(t *testing.T) {
 	dev, peer := gsoPair(t)
 
