@@ -64,11 +64,10 @@ func TestUDPServerMultiIP(t *testing.T) {
 	}
 }
 
-// TestTCPServerMultiIP drives a full tunnel against a pooled TCP server bound on TWO loopback IPs at
-// the same port. The client dials the SECOND IP; the test asserts both listeners exist and that data
-// flows each way over the connection the client established to that IP. (TCP reply-source is inherently
-// correct — the accepted socket's local addr IS the dialed IP — so the multi-bind here is about the
-// server accepting ONLY on its selected pool IPs rather than every host IP.)
+// TestTCPServerMultiIP drives a full tunnel against a pooled TCP server bound on TWO loopback IPs at the
+// same port. The client dials the SECOND; the test asserts both listeners exist and that data flows each
+// way over it. TCP's reply source is inherently correct — the accepted socket's local addr IS the dialed
+// IP — so the multi-bind here is about accepting ONLY on the selected pool IPs.
 func TestTCPServerMultiIP(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"
@@ -116,9 +115,8 @@ func TestTCPServerMultiIP(t *testing.T) {
 
 // TestUDPServerReplyConnAuthGated is the regression guard for the reply-socket hijack: once a NAT'd
 // client is established on one pool IP, an UNAUTHENTICATED datagram to ANOTHER pool IP must NOT move the
-// server's reply socket (which would send downstream from an IP the client's NAT never saw, blackholing
-// it). It brings a tunnel up on 127.0.0.2, fires garbage at the 127.0.0.1 socket, and asserts the reply
-// socket stays on .2 AND downstream data still reaches the client.
+// server's reply socket, which would send downstream from an IP the client's NAT never saw. It brings a
+// tunnel up on 127.0.0.2, fires garbage at the .1 socket, and asserts both the socket and the data.
 func TestUDPServerReplyConnAuthGated(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"

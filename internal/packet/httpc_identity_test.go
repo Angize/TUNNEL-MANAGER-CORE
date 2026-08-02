@@ -7,16 +7,10 @@ import (
 	"testing"
 )
 
-// TestPostLadderSendsChromesAcceptEncoding is the regression test for the POST ladder contradicting
-// its own fingerprint.
-//
-// In user terms: the operator picks the http carrier shape because a CDN streams POSTs instead of
-// buffering them. The request that reaches the CDN claims to be Chrome 133 twice over — the
-// User-Agent and the uTLS JA3 — and then offered `Accept-Encoding: gzip`, which Go's transport adds
-// when the header is unset. No browser has sent gzip alone in a decade, and comparing the advertised
-// browser against the headers it sends is exactly what a CDN's bot management does. The ws shape
-// hand-builds Chrome's full block for this reason; the POST ladder sent four headers and no sec-*
-// header at all.
+// TestPostLadderSendsChromesAcceptEncoding is the regression test for the POST ladder contradicting its
+// own fingerprint. The request claims Chrome twice over — the User-Agent and the uTLS JA3 — and then
+// offered `Accept-Encoding: gzip`, which Go's transport adds when the header is unset. No browser has
+// sent gzip alone in a decade, and cross-checking the two is exactly what CDN bot management does.
 func TestPostLadderSendsChromesAcceptEncoding(t *testing.T) {
 	var got http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,15 +48,10 @@ func TestPostLadderSendsChromesAcceptEncoding(t *testing.T) {
 	}
 }
 
-// TestDownstreamGetSendsNoOrigin is the other half, and it is the one that was wrong.
-//
-// Chrome appends Origin for a CORS request and, otherwise, only for methods other than GET and HEAD.
-// So it sends Origin on the POST above and NEVER on a same-origin GET. Setting it on both put a
-// header combination on the wire that no Chrome produces — on the single most distinctive request
-// this carrier makes: one long-lived downstream GET per session, carrying it right beside the
-// Sec-Fetch-Site: same-origin that is supposed to make the request look ordinary. A CDN bot-
-// management rule that cross-checks Fetch Metadata against Origin sees the anomaly on exactly the
-// request the header block exists to protect.
+// TestDownstreamGetSendsNoOrigin is the other half. Chrome appends Origin for a CORS request and
+// otherwise only for methods other than GET and HEAD, so it sends it on the POST above and NEVER on a
+// same-origin GET. Setting it on both puts a combination no Chrome produces on the most distinctive
+// request this carrier makes — one long-lived GET per session, right beside Sec-Fetch-Site: same-origin.
 func TestDownstreamGetSendsNoOrigin(t *testing.T) {
 	var got http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +120,7 @@ func TestClientHintsMatchTheUA(t *testing.T) {
 
 // TestGrpcModeStillSendsNoBrowserHeaders pins that the block above did not leak into grpc mode. A
 // gRPC call is not something a browser can make, so Chrome client hints on an application/grpc
-// request would be the same lie told the other way round — the contradiction core #205 removed.
+// request would be the same lie told the other way round.
 func TestGrpcModeStillSendsNoBrowserHeaders(t *testing.T) {
 	req, err := http.NewRequest("POST", "https://edge.example/x", nil)
 	if err != nil {
@@ -152,13 +141,10 @@ func TestGrpcModeStillSendsNoBrowserHeaders(t *testing.T) {
 	}
 }
 
-// TestIdentityEncodingIsNotAFailure pins the downstream Content-Encoding guard from both sides.
-//
-// The guard is real and necessary: setting Accept-Encoding by hand turns off Go's transparent
-// decompression, and the downstream body IS the data plane, so a genuinely compressed response must
-// fail the dial rather than feed compressed bytes into the AEAD. But it first refused ANY non-empty
-// value, including "identity" — the spec's own name for "not encoded" — which turned a legal,
-// perfectly decodable response into a tunnel that would not come up.
+// TestIdentityEncodingIsNotAFailure pins the downstream Content-Encoding guard from both sides. The
+// guard is necessary — setting Accept-Encoding by hand turns off Go's transparent decompression, and the
+// downstream body IS the data plane — but "identity" is the spec's own name for "not encoded", so
+// refusing it turns a legal, perfectly decodable response into a tunnel that will not come up.
 func TestIdentityEncodingIsNotAFailure(t *testing.T) {
 	for _, ok := range []string{"", "identity", "IDENTITY", " identity ", "Identity"} {
 		if downstreamUnusable(ok) {

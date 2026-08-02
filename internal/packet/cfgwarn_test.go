@@ -37,18 +37,9 @@ func statusEvents(t *testing.T, path string) []coreEvent {
 }
 
 // TestAConfigWarningReachesTheStatusFile pins that a setting the host did not grant reaches the layer
-// the operator reads.
-//
-// The sock_buf clamp was reported with a log.Printf into the core unit's journal and nothing else. The
-// node reads that journal from exactly one place — _core_last_error — on the failure branch after a
-// build. A core that STARTED and merely had its buffers clamped takes no such branch, so the warning
-// reached nobody: the panel showed the setting green and the only way to find out was to ssh to the
-// node. The change that added the log line closed the core's half of the finding and left open the
-// half that was actually about the operator.
-//
-// The ORDER is the whole difficulty and is why this is tested rather than reasoned: sockets are sized
-// while the carrier is built, which is before main wires the status file, so a note raised first has
-// to survive until the sink exists. Both directions are driven here.
+// the operator reads. A journal line does not: the node reads the core's journal only on the failure
+// branch after a build, so a core that started with clamped buffers reports nothing. The ORDER is the
+// difficulty, and why this is tested — sockets are sized before main wires the sink, so a note must wait.
 func TestAConfigWarningReachesTheStatusFile(t *testing.T) {
 	t.Run("raised before the status file exists", func(t *testing.T) {
 		resetCfgWarns(t)

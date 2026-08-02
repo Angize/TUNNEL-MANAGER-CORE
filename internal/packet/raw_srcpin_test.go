@@ -7,13 +7,10 @@ import (
 	"testing"
 )
 
-// TestRawPinnedSrc covers which local address a raw send is pinned to.
-//
-// Regression guard for a feature that was inert: a raw CLIENT with a source pool rotated the pool,
-// logged "rotated source to X" and moved the pool's status file, while every packet still left from
-// the kernel-default address. The source only ever reached the wire through the IP_HDRINCL branch,
-// which exists solely when spoofing is configured — and rotateSourceRaw deliberately no-ops under
-// spoofSrc, so the two conditions were mutually exclusive and the pool could never take effect.
+// TestRawPinnedSrc covers which local address a raw send is pinned to. It guards a feature that was
+// inert: a raw CLIENT with a source pool rotated the pool, logged the move and updated its status file
+// while every packet still left from the kernel default — the source only reached the wire through the
+// IP_HDRINCL branch, which exists solely under spoofing, where rotateSourceRaw deliberately no-ops.
 func TestRawPinnedSrc(t *testing.T) {
 	ip := func(s string) net.IP { return net.ParseIP(s).To4() }
 

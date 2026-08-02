@@ -8,13 +8,8 @@ import (
 
 // TestRawChecksumBindsSourceMatchesTheEncapsulation derives the answer from rawEncap instead of
 // restating a list: for every profile it builds the same frame twice, changing ONLY the source, and
-// requires rawChecksumBindsSource to agree with whether the bytes actually differ.
-//
-// That is the property sendViaConn's fallback turns on. When the pinned source cannot be used, the
-// already-built bytes may only go out from a different source if they do not depend on it; for udp
-// and tcp they do (l4Checksum folds in the IPv4 pseudo-header), so sending them anyway puts a wrong
-// L4 checksum on the wire on every packet. Deriving it this way means a NEW profile whose header
-// binds the source — or an existing one that starts to — fails here rather than shipping silently.
+// requires rawChecksumBindsSource to agree with whether the bytes actually differ. That is the property
+// sendViaConn's fallback turns on, so a new profile whose header binds the source fails here.
 func TestRawChecksumBindsSourceMatchesTheEncapsulation(t *testing.T) {
 	body := []byte("a sealed core frame, long enough to checksum meaningfully 0123456789")
 	dst := net.IPv4(198, 51, 100, 20)
@@ -34,19 +29,10 @@ func TestRawChecksumBindsSourceMatchesTheEncapsulation(t *testing.T) {
 	}
 }
 
-// TestRawChecksumBindsSourceCoversEveryProfile: the switch keys off the protocol number, so a
-// profile name it does not know silently answers "independent" — the answer that lets a packet out.
-// Every name in the authoritative map must be a name it has an opinion about.
-//
-// It used to open with `for profile := range rawProfiles { if _, ok := rawProfiles[profile]; !ok {…} }`
-// — iterating a map's keys and then looking each key up in the same map. `ok` was true by
-// construction, so the Fatalf was unreachable for every possible state of the code, and the loop
-// called rawChecksumBindsSource zero times. The coverage the doc comment promises was not being
-// enforced here at all; only the sibling test above enforced anything.
-//
-// The two lists below carry that promise instead. Between them they must name EVERY key of
-// rawProfiles, so a newly registered profile fails this test until someone states which side it is
-// on — which is the whole point, because the silent default is the dangerous answer.
+// TestRawChecksumBindsSourceCoversEveryProfile: the switch keys off the protocol number, so a profile
+// name it does not know silently answers "independent" — the answer that lets a packet out. The two
+// lists below must between them name EVERY key of rawProfiles, so a newly registered profile fails this
+// test until someone states which side it is on. The silent default is the dangerous answer.
 func TestRawChecksumBindsSourceCoversEveryProfile(t *testing.T) {
 	bindsSource := []string{"udp", "tcp"}                        // L4 checksum folds in the IPv4 pseudo-header
 	independent := []string{"bip", "ipip", "gre", "icmp", "esp"} // bytes do not depend on the source

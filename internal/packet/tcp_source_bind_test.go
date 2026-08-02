@@ -38,18 +38,10 @@ func captureSrcLog(sink *srcLogSink) func() {
 	return func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) }
 }
 
-// TestDialerAcceptsSourceWithPort drives the REAL TCP.dialer — the function that decides what the
-// next connect() binds to — not a helper beside it.
-//
-// config.go's validatePoolEndpoint documents that it tolerates an accidental "ip:port" in a source
-// pool, and udp (rebindSourceTo) and raw/flux (hostOnly) all strip the port and carry on. tcp did
-// not: net.ParseIP("127.0.0.1:0") returns nil, and since the bind AND the warning both sat inside
-// `if ip != nil`, the entry was discarded with no LocalAddr, no burn and not one line of output —
-// the operator saw a configured source, the panel showed it, and the tunnel left from the kernel
-// default.
-//
-// 127.0.0.1 is used because canBindSource() has to find the address on this host for the bind to be
-// attempted at all; a routable literal would make the test assert the other branch.
+// TestDialerAcceptsSourceWithPort drives the REAL TCP.dialer — the function that decides what the next
+// connect() binds to — not a helper beside it. config.go promises an accidental "ip:port" in a source
+// pool is tolerated, and udp and raw/flux strip the port; tcp did not, and with the bind AND the warning
+// both inside `if ip != nil` the entry was discarded in silence. 127.0.0.1, so the bind is attempted.
 func TestDialerAcceptsSourceWithPort(t *testing.T) {
 	for _, src := range []string{"127.0.0.1", "127.0.0.1:0", "127.0.0.1:8080"} {
 		b := &TCP{isClient: true, bindIP: src}

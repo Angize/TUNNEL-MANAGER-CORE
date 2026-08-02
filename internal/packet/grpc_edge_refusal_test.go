@@ -9,24 +9,10 @@ import (
 	"time"
 )
 
-// TestGrpcEdgeRefusalNamesTheSwitchToFlip covers the one failure a grpc-carrier operator is most
-// likely to hit, and the one the bare status code told them nothing about.
-//
-// MEASURED against a live Cloudflare edge before this was written — four requests seconds apart, same
-// host, same method, same path, same Go TLS fingerprint, varying only the headers:
-//
-//	Content-Type: application/grpc      -> 403 Forbidden, cloudflare's own error page
-//	grpc-go User-Agent, ordinary type   -> 404 (reached the origin routing)
-//	TE: trailers, ordinary type         -> 404
-//	no grpc identity at all             -> 404
-//
-// So the refusal is the content type alone, which is what Cloudflare does until gRPC is enabled on
-// the zone (Network -> gRPC). The identical shape got a 200 from an ArvanCloud edge, so it is not
-// universal and the carrier is not at fault — the operator has a switch to flip, and
-// "http/grpc: got HTTP 403 (want 200)" never said which one.
-//
-// This is the check core #205 owed and never got: its identity work was verified in unit tests and
-// never once against a real CDN.
+// TestGrpcEdgeRefusalNamesTheSwitchToFlip covers the failure a grpc-carrier operator is most likely to
+// hit, and the one a bare status code says nothing about: at a Cloudflare edge the Content-Type:
+// application/grpc header ALONE draws a 403, until gRPC is enabled on the zone. Other edges answer the
+// same shape 200, so it is not universal and the carrier is not at fault — the operator has a switch.
 func TestGrpcEdgeRefusalNamesTheSwitchToFlip(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

@@ -8,17 +8,10 @@ import (
 	"time"
 )
 
-// The server's dead_after_secs must REACH the read deadline, not merely land in a field.
-//
-// TestServerHonoursDeadAfter next door sets srv.idle through SetDeadAfter and then reads srv.idle
-// back. That passes on the pre-fix tree, because SetDeadAfter was never what was gated — the role
-// gate was at the call site — and it says nothing about whether the number ever reaches a socket.
-// The window only matters if a silent peer is actually reaped on it: on tcp/ws that deadline IS the
-// dead-detection window, and while the server kept its ~60s default, half the tunnel self-healed at
-// the operator's speed and half did not.
-//
-// So this drives readLoop — the real loop, on a real TCP connection, against a peer that connects
-// and then says nothing — and measures when it gives up.
+// The server's dead_after_secs must REACH the read deadline, not merely land in a field. Reading the
+// field back passes on a tree where the value never touches a socket, and the window only matters if a
+// silent peer is actually reaped on it: on tcp/ws that deadline IS the dead-detection window. So this
+// drives readLoop, on a real TCP connection, against a peer that connects and then says nothing.
 func TestTheServersDeadWindowReallyReapsASilentPeer(t *testing.T) {
 	const keepalive = time.Second
 

@@ -64,12 +64,10 @@ func TestTLSToEdgeUsesChromeFingerprintALPNh1(t *testing.T) {
 	if !bytes.Contains(cc.hello, []byte("http/1.1")) {
 		t.Fatal("ClientHello must advertise http/1.1 in ALPN")
 	}
-	// ...and the ALPN list must NOT offer h2, else the edge could pick HTTP/2 and break our raw
-	// HTTP/1.1 WebSocket upgrade. In Chrome's ALPN the h2 vector is immediately followed by the
-	// http/1.1 vector ([0x02 h 2][0x08 h t t p / 1 . 1]); matching that combined run keys on the
-	// ALPN specifically and is not fooled by the ApplicationSettings (ALPS) extension, which
-	// legitimately still carries a bare "h2" ([0x02 h 2]) as part of the authentic Chrome
-	// fingerprint (ALPS does not drive protocol negotiation — only ALPN does).
+	// ...and the ALPN list must NOT offer h2, or the edge could pick HTTP/2 and break our raw HTTP/1.1
+	// WebSocket upgrade. In Chrome's ALPN the h2 vector is immediately followed by the http/1.1 vector, and
+	// matching that combined run keys on ALPN specifically — it is not fooled by ApplicationSettings, which
+	// legitimately still carries a bare "h2" and does not drive protocol negotiation.
 	alpnH2 := []byte{0x02, 'h', '2', 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1'}
 	if bytes.Contains(cc.hello, alpnH2) {
 		t.Fatal("ALPN must not offer h2 (would break the HTTP/1.1 WebSocket upgrade)")
@@ -138,15 +136,10 @@ func hasGREASE(suites []uint16) bool {
 	return false
 }
 
-// TestGrpcPathUsesTheGoFingerprint pins the TLS half of the grpc identity.
-//
-// A gRPC call is not something a browser can make: Content-Type: application/grpc and TE: trailers are
-// both forbidden to browser fetch/XHR. So a Chrome ClientHello in FRONT of one is not camouflage — it
-// advertises a browser making a call no browser can make, which is exactly the cross-check a
-// gRPC-aware WAF runs. Real gRPC traffic reaching a CDN comes from gRPC clients, and grpc-go rides
-// Go's crypto/tls, so grpc mode presents Go's own ClientHello and offers h2 alone, matching the
-// grpc-go User-Agent the request carries. Changing only one of the two layers relocates the mismatch
-// instead of removing it, which is why this test and TestGrpcRequestIsNotABrowser belong together.
+// TestGrpcPathUsesTheGoFingerprint pins the TLS half of the grpc identity. A gRPC call is not something a
+// browser can make, so a Chrome ClientHello in FRONT of one is not camouflage — it advertises a browser
+// making a call no browser can make. grpc-go rides Go's crypto/tls, so grpc mode presents Go's own hello
+// and offers h2 alone. Changing one layer relocates the mismatch, which is why this test has a twin.
 func TestGrpcPathUsesTheGoFingerprint(t *testing.T) {
 	grpc := helloSeenBy(t, []string{"h2"}, true)
 	if hasGREASE(grpc.CipherSuites) {

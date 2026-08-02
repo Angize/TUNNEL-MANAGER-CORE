@@ -12,19 +12,10 @@ import (
 	"time"
 )
 
-// TestUnbindableSourceRotationIsNotAnnounced closes the last corner of the announce-a-move-that-did-
-// not-happen class (#179/#189/#214): a timed rotation onto a source IP that is no longer on this host.
-//
-// dialer() only installs LocalAddr on the branch where the IP is really bindable; the other branch
-// takes dropUnusableSource, burns the entry and lets the socket leave from the KERNEL DEFAULT. The
-// connect and the handshake then succeed exactly as they would have, so the warm carrier IS adopted —
-// and the adoption site published `src-rotate` naming the IP the tunnel had just proven it cannot use.
-// The panel then showed the tunnel sourced from an address not one packet ever left from.
-//
-// It drives the real dialLoop end to end against a real server. The unbindable source is TEST-NET-3,
-// which is never a local address. The DESTINATION pool has two endpoints so the same beat also moves
-// it: the resulting `peer-rotate` is the positive control that proves the adoption site really ran on
-// this beat, so a green here cannot mean "nothing was ever adopted".
+// TestUnbindableSourceRotationIsNotAnnounced closes the last corner of the announce-a-move-that-did-not-
+// happen class: a timed rotation onto a source IP that is no longer on this host. dialer() installs
+// LocalAddr only where the IP is bindable, so the socket leaves from the KERNEL DEFAULT while the connect
+// and handshake succeed and the carrier IS adopted. The destination pool moves too, as a positive control.
 func TestUnbindableSourceRotationIsNotAnnounced(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"

@@ -12,19 +12,9 @@ import (
 )
 
 // TestBuildWarmFailurePublishesNoRotation pins the contract make-before-break rests on: a warm carrier
-// that will not come up must BURN its endpoint and ANNOUNCE NOTHING.
-//
-// The first version of the rotation timer moved the pool, wrote the pool status file and emitted
-// setActive + down("peer-rotate") BEFORE the replacement carrier existed. When the build then failed the
-// live connection stayed exactly where it was, so the panel showed an "active" endpoint the tunnel was
-// not on (indefinitely, if that endpoint kept failing), the system log carried a rotation that never
-// happened, and the down() armed a "reconnect" that the next genuine connect paired as a phantom
-// self-heal. Nothing in the suite caught it: no test arms a DIRECT tcp destination pool with a rotate
-// interval, so the whole buildWarm path was unexercised.
-//
-// The listener accepts and immediately closes, which is the interference shape this fleet actually meets
-// (the TCP connect completes, the core handshake dies), so buildWarm fails on the handshake rather than
-// on the dial — the dial branch is already covered by TestDialLoopBurnsOnHandshakeFailure.
+// that will not come up must BURN its endpoint and ANNOUNCE NOTHING. Announcing before the replacement
+// exists leaves the panel showing an endpoint the tunnel is not on and arms a down() the next connect
+// pairs as a phantom self-heal. The listener accepts and closes, so the HANDSHAKE fails, not the dial.
 func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -56,7 +46,7 @@ func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 	b.st = newCoreStatus(path, active)
 	b.warmNext = make(chan *warmDial, 1) // dialLoop's job; this test drives buildWarm directly
 	b.SetPeerPool(NewPeerPool([]string{addr, second}, true, 0, ""))
-	// Also wire a SOURCE pool and rotate it, reproducing #30: the proactive timer advances the source
+	// Also wire a SOURCE pool and rotate it, for the source half: the proactive timer advances the source
 	// (via rotateSourceTCP(true)) BEFORE buildWarm proves the move. The source-rotate event must NOT be
 	// published until the warm carrier goes live — so a build that then fails announces nothing at all.
 	// (The source IPs need not be local: dialer() skips an unbindable bind and dials from the default.)

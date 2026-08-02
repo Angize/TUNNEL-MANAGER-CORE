@@ -8,21 +8,9 @@ import (
 )
 
 // TestUnbindableSourceLeavesRotationEvenWithAutoBurnOff pins ONE rule across every carrier and every
-// shape of the same event: a source IP the kernel will not let this host send from is taken out of
-// rotation, whatever peer_auto_burn says.
-//
-// auto-burn is a policy about REMOTE reachability — "do not sideline a peer just because it timed
-// out" is a defensible thing for an operator to want. An address that is not on this box is not that
-// question: no policy makes it usable, and leaving it healthy means every rotation walks straight
-// back onto it, which is the #189/#214 defect. Since #215 that is a total SILENT blackout on the raw
-// udp/tcp profiles, because sendViaConn refuses the degraded send there.
-//
-// rejectCandidate (the rotation path) always burned unconditionally. The other four shapes — tcp's
-// dial, the raw/flux seed, and the udp/raw/flux operator jump — went through the auto-burn-gated
-// fail(), so the same physical fact produced opposite bookkeeping depending on which one saw it.
-//
-// Every case drives the real entry point, not the pool primitive. The check is behavioural: after
-// the path has seen the bad IP, a proactive rotate must NOT be able to land on it again.
+// shape of the same event: a source IP the kernel will not let this host send from leaves rotation,
+// whatever peer_auto_burn says. Auto-burn is a policy about REMOTE reachability; an address not on this
+// box is not that question. Behavioural check: after the path has seen it, a rotate must not land there.
 func TestUnbindableSourceLeavesRotationEvenWithAutoBurnOff(t *testing.T) {
 	const gone = "203.0.113.9" // TEST-NET-3: never a local address
 	const good = "127.0.0.1"

@@ -13,14 +13,10 @@ import (
 	"testing"
 )
 
-// A decoy that never reaches the wire must SAY so. Every transmit site used to discard its error
-// with `_ =`, so an L2 next hop that will not resolve — a cold neighbour, a route out of an
-// interface with no MAC, a container without the capability — produced zero decoys and zero log
-// lines, while startup had already printed "fake-desync on (N decoys, ttl=…, mode=…)". The panel
-// says the camouflage is on, the log says it is on, and the DPI is seeing nothing; when the tunnel
-// is then blocked there is no way to tell the camouflage never ran.
-//
-// Drives the REAL path (Raw.sendFakes) with a resolver that fails, not the reporter.
+// A decoy that never reaches the wire must SAY so. With every transmit error discarded, an L2 next hop
+// that will not resolve produced zero decoys and zero log lines, while startup had already printed that
+// the camouflage was on — so a blocked tunnel gave no way to tell it never ran. Drives the REAL path
+// (Raw.sendFakes) with a resolver that fails, not the reporter.
 func TestDecoyTransmitFailureIsReported(t *testing.T) {
 	f := &fakeResolver{err: errors.New("no next hop")}
 	r := &Raw{isClient: true, proto: protoBIP, profile: "bip", fakeFd: -1}
@@ -60,13 +56,10 @@ func TestDecoyTransmitFailureIsReported(t *testing.T) {
 	}
 }
 
-// The class guard. Fixing the six sites one by one does not stop the seventh from being written the
-// same way — a discarded send error is invisible in review precisely because `_ =` reads as
-// deliberate. Every decoy transmit in this package must hand its error to something: dsSend.note,
-// an `if err :=`, anything. Nothing may drop it on the floor.
-//
-// Bare-call statements count too: Go lets `syscall.Sendto(fd, …)` stand alone as a statement and
-// silently discard the error, with no `_ =` to notice.
+// The class guard. Fixing the sites one by one does not stop the next from being written the same way —
+// a discarded send error is invisible in review, because `_ =` reads as deliberate. Every decoy transmit
+// in this package must hand its error to something. Bare-call statements count too: Go lets
+// `syscall.Sendto(fd, …)` stand alone as a statement and silently drop the error, with no `_ =` to see.
 func TestNoSendErrorIsDiscarded(t *testing.T) {
 	ents, err := os.ReadDir(".")
 	if err != nil {

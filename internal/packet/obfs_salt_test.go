@@ -29,16 +29,10 @@ func (w *writeRecorder) snapshot() []int {
 	return append([]int(nil), w.sizes...)
 }
 
-// TestObfsSaltNeverGetsAWriteOfItsOwn pins that obfs mode emits no fixed-size record.
-//
-// The 24-byte per-connection salt used to get a conn.Write of its own. On tcp+cover that is one TLS
-// record and on ws one WebSocket frame — the same length on every connection, in BOTH directions,
-// immediately after the handshake. obfsSeal pads every real frame to a random size precisely so the
-// carrier has no constant size to count, and this one write walked straight past it.
-//
-// Both production paths are driven with a recording conn: handshakeAndPrime for the client and
-// handleServerConn for the server (the accept loop's own handler). The assertion is on the sizes the
-// carrier actually asked the socket to write.
+// TestObfsSaltNeverGetsAWriteOfItsOwn pins that obfs mode emits no fixed-size record. A write of its own
+// for the 24-byte per-connection salt is one TLS record on tcp+cover and one WebSocket frame on ws — the
+// same length on every connection, in BOTH directions, right after the handshake, walking straight past
+// the padding obfsSeal applies to every real frame. Both production paths use a recording conn.
 func TestObfsSaltNeverGetsAWriteOfItsOwn(t *testing.T) {
 	const psk = "obfs-salt-ride-pre-shared-key-123"
 	const cipher = "aes-256-gcm"

@@ -101,18 +101,10 @@ func assertDecoysFirst(t *testing.T, b *TCP, relay *countingRelay) {
 	}
 }
 
-// TestDesyncDecoysGoOutBeforeAnyOfOurBytes pins where fake_desync fires.
-//
-// The decoys were sent from handshakeAndPrime, whose comment claimed they went out "before our own
-// handshake bytes flow". That was true only for PLAIN tcp. On tcp+cover, dialCarrier had already
-// completed the whole tlscover.ClientConn handshake before returning; on ws it had completed the
-// (optional) TLS and the WebSocket upgrade. So on exactly the two carriers that are meant to look
-// like something else, every decoy arrived after the DPI had already seen the thing being hidden.
-//
-// The ordering is not visible in the byte stream — the decoys leave via AF_PACKET, not through the
-// conn — so the test observes the injection point itself (b.dsWatch) and asks how many of our bytes
-// were on the wire at that instant. Real injection stays off (dsOn is false): the suite runs as root
-// on the verification box and a test must not put forged packets on a real interface.
+// TestDesyncDecoysGoOutBeforeAnyOfOurBytes pins where fake_desync fires: on the bare 4-tuple, before the
+// cover handshake or the WebSocket upgrade the decoys are meant to hide. The ordering is not visible in
+// the byte stream — decoys leave via AF_PACKET, not through the conn — so the test observes the injection
+// point (b.dsWatch) and asks how many of our bytes were on the wire. Real injection stays off.
 func TestDesyncDecoysGoOutBeforeAnyOfOurBytes(t *testing.T) {
 	const psk = "desync-order-pre-shared-key-12345"
 	const cipher = "aes-256-gcm"

@@ -29,13 +29,10 @@ func (s *syncBuf) String() string {
 	return s.b.String()
 }
 
-// TestSetDesyncReportsTheCappedTTL drives the REAL TCP.SetDesync, not a helper.
-//
-// specsTCP clamps an inject decoy's TTL to injectMaxTTL because the decoy rides the real
-// connection's 4-tuple. That clamp is correct. What was wrong is that nothing said so: config.go
-// accepted fake_ttl up to 255, the node stored it, the panel echoed it back in the edit form, and
-// main logged "fake-desync on (… ttl=30 …)" — four layers reporting a hop budget the wire never
-// carried. This test locks in that the carrier which applies the cap is the one that announces it.
+// TestSetDesyncReportsTheCappedTTL drives the REAL TCP.SetDesync, not a helper. specsTCP clamps an inject
+// decoy's TTL to injectMaxTTL because the decoy rides the real connection's 4-tuple, and that clamp is
+// right — but config, node, panel and the startup log all echo the operator's number back, so the carrier
+// that applies the cap has to be the one that announces it.
 func TestSetDesyncReportsTheCappedTTL(t *testing.T) {
 	capture := func(ttl int) string {
 		var buf syncBuf

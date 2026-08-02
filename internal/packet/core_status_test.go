@@ -83,11 +83,9 @@ func TestCoreStatusEventPairing(t *testing.T) {
 }
 
 // TestHBPeriodTracksDeadWindow pins the rule that keeps a healthy tunnel out of the red: hb is a
-// TIMESTAMP, so the publish period must stay a fraction of the window the reader ages it against.
-//
-// The worst case is the tightest window the config allows — dead_after clamped to 2×keepalive — where a
-// perfectly healthy carrier's newest frame is already up to 1.3×keepalive old (the keepalive jitter
-// ceiling) when it is read. The old fixed 5s period added a whole 5s on top of that and crossed dw.
+// TIMESTAMP, so the publish period must stay a fraction of the window the reader ages it against. The
+// worst case is the tightest legal window (dead_after clamped to 2×keepalive), where a healthy carrier's
+// newest frame is already up to 1.3×keepalive old when it is read.
 func TestHBPeriodTracksDeadWindow(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -105,11 +103,10 @@ func TestHBPeriodTracksDeadWindow(t *testing.T) {
 		}
 	}
 
-	// The property the numbers exist for: publish lag + the oldest a healthy keepalive can be must stay
+	// The property the numbers exist for: publish lag plus the oldest a healthy keepalive can be must stay
 	// inside the window, for every window a carrier can resolve to. dw==2×keepalive is the tightest legal
-	// pairing (deadWindow clamps there). Below dw=3 the jitter ceiling alone (1.3×keepalive) all but fills
-	// the window, so the carrier self-heals on its own timing and no publisher can help; the smallest
-	// window the shipped knobs can even produce is far above that (dead_after starts at 10).
+	// pairing. Below dw=3 the jitter ceiling alone all but fills the window, and the smallest window the
+	// shipped knobs can produce is far above that.
 	for dw := int64(3); dw <= 600; dw++ {
 		keepalive := float64(dw) / 2
 		oldest := 1.3*keepalive + hbPeriod(dw).Seconds()

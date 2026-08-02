@@ -21,17 +21,9 @@ func captureLog(fn func()) string {
 }
 
 // TestFragDoesNotBlameECHItWasNeverToldAbout pins that the two fallback messages state the cause they
-// actually know, not the one that is usually true.
-//
-// Both fired on ANY failure of the hostname search and hard-asserted ECH — and noSplit went further,
-// concluding "nothing needs to be [fragmented]: there is no cleartext SNI left for a DPI to read".
-// That conclusion only holds if ECH really is on, and fragConn was never told. So the case that
-// matters most — the hostname genuinely not matching what the carrier dials with, ECH off, sni_split
-// silently doing nothing and the real SNI on the wire in cleartext — produced a log line telling the
-// operator they were protected.
-//
-// Two arms, because a message that is honest in one state and silent in the other proves nothing: with
-// ECH the reassuring text must survive, and without it the message must say the SNI is exposed.
+// actually know, not the one that is usually true. Both fired on ANY failure of the hostname search and
+// hard-asserted ECH, so the case that matters most — the hostname not matching, ECH off, the real SNI in
+// cleartext — told the operator they were protected. Two arms, since honesty in one state proves nothing.
 func TestFragDoesNotBlameECHItWasNeverToldAbout(t *testing.T) {
 	// A ClientHello-shaped buffer that does NOT contain the configured hostname, which is what both
 	// branches key on (splitAt returns -1, writeFake's bytes.Index returns -1).

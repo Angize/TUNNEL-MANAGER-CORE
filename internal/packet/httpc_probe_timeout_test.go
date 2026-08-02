@@ -7,16 +7,10 @@ import (
 	"time"
 )
 
-// TestHTTPCProbeHonoursProbeTimeout drives the REAL edge prober against a black-hole edge — one
-// that completes the TCP connect and then never says anything, which is exactly how a throttled
-// origin or a filtered CDN edge behaves — and requires it to give up inside the operator's
-// probe_timeout_secs budget.
-//
-// The httpc branch used to ignore that knob completely: a hardcoded 10s dial, an unbounded TLS
-// handshake (Transport.TLSHandshakeTimeout does not apply when the caller supplies DialTLSContext)
-// and a fixed 30s header wait. So a probe could run ~50s where the operator had asked for 5, and
-// since every retest and every differential-probe arm goes through here, the knob decided nothing
-// about how quickly a blocked http/grpc edge is judged. The ws branch has always honoured it.
+// TestHTTPCProbeHonoursProbeTimeout drives the REAL edge prober against a black-hole edge — one that
+// completes the TCP connect and then says nothing, which is how a throttled origin or a filtered edge
+// behaves — and requires it to give up inside the operator's probe_timeout_secs. Every retest and every
+// differential-probe arm goes through here, so the knob decides how fast a blocked edge is judged.
 func TestHTTPCProbeHonoursProbeTimeout(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -11,15 +11,10 @@ import (
 	"testing"
 )
 
-// TestSockBufReportsWhenItWasClamped is the regression test for sock_buf failing in silence.
-//
-// In user terms: the operator sets sock_buf to 16 MiB in Settings. The panel saves it green, the
-// node forwards it, the core accepts it — and if the process is short of CAP_NET_ADMIN (a container,
-// a hardened unit) the privileged setsockopt is refused and the plain one is capped by
-// net.core.{w,r}mem_max. Both errors were discarded, nothing was read back, and nothing was logged,
-// so the operator saw a setting that looked applied everywhere and bought no throughput anywhere.
-//
-// Driven on a real socket: ask for far more than any sysctl ceiling and require the line.
+// TestSockBufReportsWhenItWasClamped is the regression test for sock_buf failing in silence. The operator
+// sets 16 MiB, the panel saves it green, the node forwards it, the core accepts it — and short of
+// CAP_NET_ADMIN the privileged setsockopt is refused and the plain one is capped by the sysctl. Both
+// errors discarded and nothing read back meant a setting that looked applied and bought nothing.
 func TestSockBufReportsWhenItWasClamped(t *testing.T) {
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
 	if err != nil {
@@ -91,14 +86,10 @@ func TestSockBufIsSilentWhenItApplied(t *testing.T) {
 	}
 }
 
-// TestCoverProbeHintOnlyOnCover pins the clock-skew hint: a cover carrier whose core handshake
-// fails says WHY that can happen, exactly once, and a non-cover carrier says nothing.
-//
-// The symptom it explains has no other signal: tlscover's server answers a token it cannot open by
-// proxying to the real cover site — the same answer it gives a censor's probe, which is what makes
-// the carrier probe-resistant — so a clock more than AuthWindowSecs out of step produces a TLS
-// session that succeeds against a site which never heard of the core protocol. Nothing can be sent
-// back to distinguish it, because anything our client could read, a probe could read too.
+// TestCoverProbeHintOnlyOnCover pins the clock-skew hint: a cover carrier whose core handshake fails says
+// WHY that can happen, exactly once, and a non-cover carrier says nothing. The symptom has no other
+// signal — tlscover answers a token it cannot open by proxying to the real site, the same answer it gives
+// a probe — and nothing can be sent back to distinguish it, since a probe could read that too.
 func TestCoverProbeHintOnlyOnCover(t *testing.T) {
 	var buf bytes.Buffer
 	prev := log.Writer()

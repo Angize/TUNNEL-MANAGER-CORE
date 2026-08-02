@@ -8,19 +8,9 @@ import (
 )
 
 // TestHandshakeAndPrimeFailsWhenThePrimeWriteFails pins that the client handshake path still has a
-// CHECKED write on it.
-//
-// Before the obfs salt started riding the next frame, sendSalt() did the write itself and returned
-// its error, and the client's `if err := cf.sendSalt(); err != nil` covered real I/O. sendSalt now
-// only fills saltPend and can fail on RNG/cipher errors alone, so the only I/O left on this path is
-// the prime ping — whose error was discarded. handshakeAndPrime then returned (cf, nil), i.e.
-// SUCCESS, for a connection whose first byte never left: dialLoop adopts it and logs a connect, and
-// buildWarm PARKS it as the warm standby, so a carrier that was dead when it was built waits to
-// replace a healthy one.
-//
-// crypto and obfs are off so the prime ping is the ONLY thing this function does — the test cannot
-// accidentally pass on some other guard. Both arms are needed: the failure arm alone would also pass
-// if handshakeAndPrime rejected everything.
+// CHECKED write on it. sendSalt only fills saltPend now, so the prime ping is the only I/O left — and a
+// discarded error would return SUCCESS for a connection whose first byte never left, which buildWarm then
+// PARKS as the warm standby. crypto and obfs are off, so the ping is the only thing this function does.
 func TestHandshakeAndPrimeFailsWhenThePrimeWriteFails(t *testing.T) {
 	b := &TCP{isClient: true, cryptoOn: false, obfs: false}
 

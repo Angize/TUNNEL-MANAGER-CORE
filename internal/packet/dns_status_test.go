@@ -8,11 +8,10 @@ import (
 	"time"
 )
 
-// dns was the ONE client carrier that wrote no status file, and the panel decides its dot from that
-// file. With no `dw` published, instant-red is gated off — a genuinely dead dns tunnel never turns
-// red. With no `hb`, there is nothing but traffic flow to judge by — so a HEALTHY tunnel carrying no
-// user traffic ages into yellow. Both halves are visible only end to end, so this runs a real client
-// against a real authoritative server over loopback and reads the file the node reads.
+// dns is the one client carrier whose status file the panel needs for both halves of its dot: with no
+// `dw` published, instant-red is gated off and a dead tunnel never turns red; with no `hb` there is
+// nothing but traffic flow to judge by, so a HEALTHY idle tunnel ages into yellow. Both are visible only
+// end to end, so this runs a real client against a real authoritative server and reads the node's file.
 func TestDNSClientPublishesStatusAndHeartbeat(t *testing.T) {
 	const (
 		psk  = "e2e-shared-pre-shared-key-1234567890"

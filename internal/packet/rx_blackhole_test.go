@@ -10,11 +10,10 @@ import (
 	"time"
 )
 
-// rxBlackhole is a transparent TCP relay that can silently stop delivering the SERVER->CLIENT
-// direction while leaving both sockets open and the CLIENT->SERVER direction untouched. That is
-// exactly what a receive-direction blackhole looks like from the client: no FIN, no RST, nothing the
-// kernel can report — the carrier stays writable forever, and only the ABSENCE of answers can reveal
-// it. Closing a socket instead would test a completely different (and already-handled) failure.
+// rxBlackhole is a transparent TCP relay that can silently stop delivering the SERVER->CLIENT direction
+// while leaving both sockets open and the other direction untouched. That is what a receive-direction
+// blackhole looks like from the client: no FIN, no RST, nothing the kernel can report — only the ABSENCE
+// of answers reveals it. Closing a socket would test a different, already-handled failure.
 type rxBlackhole struct {
 	ln   net.Listener
 	down atomic.Bool // true = drop everything coming back from the server
@@ -69,21 +68,10 @@ func (bh *rxBlackhole) pipe(cli net.Conn, target string) {
 	}
 }
 
-// TestReceiveBlackholeIsDetectedWhileOutboundDataFlows guards the worst kind of stuck tunnel: the
-// RECEIVE direction dies, the panel dot goes red, and the core does nothing about it — no reconnect,
-// no failover, not one log line, forever.
-//
-// A TCP-family carrier has exactly TWO dead-detection paths, and a successful outbound write used to
-// hold BOTH of them open: tunLoop stamped the (then direction-agnostic) data timestamp that
-// b.lastRxData replaced on every write, which made recentData() true and
-// suppressed the keepalive ping (so no ping could go unanswered), and it pushed the read deadline
-// forward (so the idle reaper could not fire either). "Outbound data keeps flowing" is not a contrived
-// state — the inner TCP retransmits into a blackhole, so it is the NORMAL consequence of the failure.
-//
-// The test therefore keeps writing into the client's TUN for the whole window and asserts the client
-// drops the carrier anyway. b.idle is 60s here (idleMinSecs floors it well above 4×keepalive), so the
-// idle reaper cannot be what rescues this inside the assert window: ping-loss is the only mechanism
-// that can make it pass, which is exactly the mechanism outbound data used to disable.
+// TestReceiveBlackholeIsDetectedWhileOutboundDataFlows guards the worst kind of stuck tunnel: the RECEIVE
+// direction dies and the core does nothing — no reconnect, no failover, not one log line. A successful
+// outbound write must not hold both dead-detection paths open, and outbound data DOES keep flowing,
+// because the inner TCP retransmits into the blackhole. b.idle is 60s, so only ping-loss can pass this.
 func TestReceiveBlackholeIsDetectedWhileOutboundDataFlows(t *testing.T) {
 	const psk = "rx-blackhole-pre-shared-key-123456"
 	const cipher = "aes-256-gcm"

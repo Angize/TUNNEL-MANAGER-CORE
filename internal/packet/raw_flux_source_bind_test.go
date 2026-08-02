@@ -17,19 +17,10 @@ const unusableIP = "192.0.2.77"
 // bindable even where InterfaceAddrs() reports only 127.0.0.1/8 (that is why it asks).
 const usableLoopbackIP = "127.0.0.1"
 
-// raw and flux STAMP the source IP — into a crafted IP header, or into an IP_PKTINFO control message
-// — instead of binding a socket to it, so an IP that is not on this host failed silently: they stored
-// it, logged "rotated source to X" and published a src-rotate event naming an address the tunnel
-// cannot use. udp has had rebindSourceTo + rejectCandidate since #189, tcp got canBindSource +
-// dropUnusableSource in #214; these two got neither.
-//
-// Since #215 that is a TOTAL BLACKOUT on the udp and tcp raw profiles rather than a cosmetic problem:
-// sendViaConn refuses to fall back to the kernel source there (the carrier header's L4 checksum was
-// computed over the pinned one), so every packet is dropped for as long as the source is wrong. #209
-// widened the reach to effectively every client raw/flux tunnel by turning bind_ip into a one-entry
-// source pool.
-//
-// Each case below drives the REAL method the rotation timer / pin poller calls.
+// raw and flux STAMP the source IP — into a crafted IP header, or an IP_PKTINFO control message —
+// instead of binding a socket to it, so an IP that is not on this host fails silently: stored, logged as
+// a rotation, published as an active source the tunnel cannot use. On the udp and tcp raw profiles that
+// is a TOTAL BLACKOUT. Each case below drives the REAL method the rotation timer or pin poller calls.
 func TestRawAndFluxRefuseASourceThisHostCannotSendFrom(t *testing.T) {
 	// A rotation that lands on an unusable source must not move the tunnel onto it, must not publish
 	// the move, and must leave the working source healthy and current.

@@ -11,11 +11,10 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
 
-// tunPairFD is tunPair with the DEVICE end's raw fd exposed, so a test can make the carrier's blocked
-// TUN read fail. Nothing else can, measured on the box rather than assumed: syscall.Socketpair hands
-// back BLOCKING fds, so os.NewFile cannot make them pollable and closing the Device does not interrupt
-// a read already parked in the kernel; and on an AF_UNIX SOCK_DGRAM pair closing the PEER does not wake
-// the reader either. shutdown(SHUT_RD) does — it returns EOF immediately.
+// tunPairFD is tunPair with the DEVICE end's raw fd exposed, so a test can make the carrier's blocked TUN
+// read fail. Nothing else can: Socketpair hands back BLOCKING fds, so os.NewFile cannot make them
+// pollable and closing the Device does not interrupt a read already parked in the kernel, and on an
+// AF_UNIX SOCK_DGRAM pair closing the PEER does not wake the reader either. shutdown(SHUT_RD) does.
 func tunPairFD(t *testing.T, name string) (*tun.Device, *os.File, int) {
 	t.Helper()
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
@@ -28,18 +27,10 @@ func tunPairFD(t *testing.T, name string) (*tun.Device, *os.File, int) {
 	return dev, ctrl, fds[0]
 }
 
-// TestTunReaderDeathStopsTheCarrier guards against the worst failure this carrier has: a green dot on
-// a tunnel that cannot move a single byte.
-//
-// tunLoop is the ONLY reader of the TUN device. It used to be started as a fire-and-forget
-// `go b.tunLoop()`, so when the device died the reader returned and nothing noticed: on the client the
-// keepalive loop kept pinging, the pongs kept stamping b.lastRx, and the heartbeat the panel reads
-// stayed fresh — a tunnel reported healthy with 100% of the traffic on the floor, and no event, no
-// reconnect and no restart to break out of it. udp/raw/flux hand this error back from Run; main logs
-// it and the process exits, and systemd restarts onto a fresh device.
-//
-// The assertion is exactly that: Run RETURNS, with an error. That is what turns a permanently dead
-// tunnel into a restart. Both roles run tunLoop, so both are covered.
+// TestTunReaderDeathStopsTheCarrier guards against the worst failure this carrier has: a green dot on a
+// tunnel that cannot move a single byte. tunLoop is the ONLY reader of the TUN device, so a
+// fire-and-forget reader that dies leaves the keepalive loop pinging and the heartbeat the panel reads
+// fresh. The assertion is that Run RETURNS, with an error — what turns a dead tunnel into a restart.
 func TestTunReaderDeathStopsTheCarrier(t *testing.T) {
 	const psk = "tun-reader-death-psk-abcdefghijkl"
 	const cipher = "aes-256-gcm"

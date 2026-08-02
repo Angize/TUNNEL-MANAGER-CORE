@@ -14,15 +14,10 @@ import (
 	"time"
 )
 
-// The httpc carrier had a write deadline that was recorded and never enforced: connFramer arms
-// now+writeTimeout immediately before every framed write, and the only check was a comparison at the
-// TOP of Write — so it always passed, and the write underneath then parked with no bound at all.
-// These tests drive each of the four writers that can park, and assert the write RETURNS.
-//
-// Why it matters, in order of damage: on the client the POST ladder parks under cf.mu, which is the
-// same lock writeFrame holds, so the TUN reader and the keepalive loop park with it — and while
-// anything is still arriving downstream, lastRx keeps the panel dot green over a tunnel whose
-// upstream is completely dead. On the server the parked write holds the goroutine that drains the TUN.
+// The httpc carrier's write deadline must be ENFORCED, not merely recorded: connFramer arms
+// now+writeTimeout immediately before every framed write, so a check at the TOP of Write always passes
+// and the write underneath parks unbounded. These tests drive each of the four writers that can park and
+// assert the write RETURNS. On the client the ladder parks under cf.mu, taking the TUN reader with it.
 
 // tarpitServer answers nothing: it drains the request body and then holds the handler, which is what a
 // CDN edge under load does to an origin. Returns the server and the func that releases it.
@@ -44,10 +39,9 @@ func tarpitServer(t *testing.T) (*httptest.Server, func()) {
 }
 
 // A jammed POST ladder must fail the write, not swallow it. Every queue in front of the workers is
-// finite (upWorkers in flight, upWorkCap batches waiting, upChanCap chunks queued), so once a
-// tarpitting edge holds every worker the enqueue blocks — and it is reached from writeFrame under
-// cf.mu, so it takes tunLoop and the keepalive loop down with it. Nothing recovers that until the
-// read side happens to time out, which a tunnel that is still receiving never does.
+// finite, so once a tarpitting edge holds every worker the enqueue blocks — and it is reached from
+// writeFrame under cf.mu, so it takes tunLoop and the keepalive loop down with it. Nothing recovers that
+// until the read side happens to time out, which a tunnel that is still receiving never does.
 func TestHTTPCUpstreamEnqueueHonoursTheWriteDeadline(t *testing.T) {
 	w0, b0, c0, i0, g0 := upWorkers, maxUpBatch, upChanCap, upIdleConns, upMinGap
 	defer func() { upWorkers, maxUpBatch, upChanCap, upIdleConns, upMinGap = w0, b0, c0, i0, g0 }()
@@ -108,11 +102,10 @@ func TestHTTPCUpstreamPostCannotHoldAWorkerForever(t *testing.T) {
 	}
 }
 
-// SERVER, both shapes. c.w is the ResponseWriter of a long-lived response; when the peer stops
-// reading, the socket (HTTP/1) or the stream window (h2) fills and the write parks forever, holding
-// the goroutine that drains the TUN. Driven through newHTTPCServerConn — the one constructor both
-// real handlers use — against a real ResponseWriter and a real client that reads the headers and then
-// never reads the body.
+// SERVER, both shapes. c.w is the ResponseWriter of a long-lived response; when the peer stops reading,
+// the socket (HTTP/1) or the stream window (h2) fills and the write parks forever, holding the goroutine
+// that drains the TUN. Driven through newHTTPCServerConn — the one constructor both real handlers use —
+// against a real ResponseWriter and a client that reads the headers and then never reads the body.
 func TestHTTPCServerWriteFailsInsteadOfParkingWhenThePeerStopsReading(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -168,16 +161,10 @@ func TestHTTPCServerWriteFailsInsteadOfParkingWhenThePeerStopsReading(t *testing
 	}
 }
 
-// ...and the same claim at the size the tunnel really writes, which is the size that was never covered.
-//
-// The test above writes 64 KiB, larger than either server writer's buffer, so bufio forwards it straight
-// to the socket inside c.w.Write and the armed deadline does bite. A framed tunnel packet is 2+sealed
-// bytes — about one TUN MTU — and that is SMALLER than both buffers (net/http's 2048-byte
-// bufferBeforeChunkingSize, x/net/http2's 4 KiB handlerChunkWriteSize). Both handlers flush after every
-// frame, so every write starts against an empty buffer, c.w.Write never touches the socket, and 100% of
-// the blocking is in c.flush() — which the deadline was disarmed before. On the real frame size the
-// server write was therefore still completely unbounded, and a tarpitting peer parks the goroutine that
-// drains the TUN forever.
+// ...and the same claim at the size the tunnel really writes, which is what was never covered. The test
+// above writes more than either server writer's buffer, so bufio forwards it straight to the socket
+// inside c.w.Write. A framed tunnel packet is SMALLER than both buffers and both handlers flush after
+// every frame, so c.w.Write never touches the socket and all of the blocking happens in c.flush().
 func TestHTTPCServerWriteDeadlineCoversTheFlushAtFrameSize(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -233,11 +220,10 @@ func TestHTTPCServerWriteDeadlineCoversTheFlushAtFrameSize(t *testing.T) {
 	}
 }
 
-// CLIENT, grpc shape. Here the writer is an io.Pipe feeding the request body, and the pipe's reader is
+// CLIENT, grpc shape. Here the writer is an io.Pipe feeding the request body and the pipe's reader is
 // Go's h2 transport: once the server stops reading, the stream window fills, the transport stops
-// draining the pipe, and Write parks. A pipe offers no deadline handle, so the deadline has to close
-// the conn — which is what a write error causes here anyway. The whole client path is real
-// (establishHTTPC -> dialHTTPCGrpc); only the far end is a stub that never reads the body.
+// draining, and Write parks. A pipe offers no deadline handle, so the deadline closes the conn — which
+// is what a write error causes here anyway. The whole client path is real; only the far end is a stub.
 func TestHTTPCClientGrpcWriteFailsInsteadOfParkingOnAStalledPeer(t *testing.T) {
 	stall := make(chan struct{})
 	defer close(stall)

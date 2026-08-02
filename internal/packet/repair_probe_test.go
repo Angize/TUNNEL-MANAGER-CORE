@@ -49,19 +49,10 @@ func tcpWinProbes(t *testing.T) int {
 	return 0
 }
 
-// Leaving TCP_REPAIR mode must not put a segment on the wire.
-//
-// The kernel distinguishes the two "off" values: 0 (TCP_REPAIR_OFF) ALSO calls
-// tcp_send_window_probe(), which on an ESTABLISHED socket transmits a bare ACK at once; -1
-// (TCP_REPAIR_OFF_NO_WP) does not. readSeqs runs on an idle, just-connected socket right at the
-// ClientHello point, so with 0 that ACK — and the peer's answer to it — landed between the TCP
-// handshake and the ClientHello on EVERY sni_mode=fake connection: an exchange that appears on exactly
-// the connections that are trying not to stand out.
-//
-// Measured on DE with tcpdump before this was written (the audit finding was reasoned from the kernel
-// source and explicitly flagged as unmeasured): with 0 the capture carries an extra `Flags [.], ack 1`
-// from us plus the peer's answering ACK; with -1 neither appears. This test watches the kernel counter
-// that fires on the same code path, which is the part a Go test can see.
+// Leaving TCP_REPAIR mode must not put a segment on the wire. The kernel distinguishes the two "off"
+// values: 0 ALSO calls tcp_send_window_probe(), which on an ESTABLISHED socket transmits a bare ACK at
+// once; -1 does not. readSeqs runs on an idle, just-connected socket right at the ClientHello point, so
+// with 0 that ACK lands between the handshake and the ClientHello on EVERY sni_mode=fake connection.
 func TestLeavingRepairModeSendsNothing(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

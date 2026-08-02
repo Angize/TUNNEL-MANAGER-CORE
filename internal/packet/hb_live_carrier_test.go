@@ -6,14 +6,10 @@ import (
 	"time"
 )
 
-// TestOnlyTheLiveCarrierStampsHeartbeat pins who is allowed to move the tunnel's heartbeat.
-//
-// Under warm standby every carrier runs its own readLoop and keepaliveLoop pings the STANDBY as well as
-// the active, so an unguarded stamp let the standby's pongs keep hb fresh with an empty active slot —
-// exactly the state an operator pin onto an edge that will not come up produces. The panel then read the
-// tunnel green for the whole pin_ttl while every packet was being dropped.
-//
-// Driven at the readLoop level over net.Pipe: no TUN, no listener, no timing assumptions beyond a poll.
+// TestOnlyTheLiveCarrierStampsHeartbeat pins who may move the tunnel's heartbeat. Under warm standby
+// every carrier runs its own readLoop and keepaliveLoop pings the STANDBY too, so an unguarded stamp lets
+// the standby's pongs keep hb fresh with an empty active slot — the state an operator pin onto an edge
+// that will not come up produces. Driven at the readLoop level over net.Pipe.
 func TestOnlyTheLiveCarrierStampsHeartbeat(t *testing.T) {
 	b := &TCP{isClient: true, warmStandby: true, keepalive: time.Second, idle: 5 * time.Second,
 		closeCh: make(chan struct{})}
@@ -74,14 +70,10 @@ func TestOnlyTheLiveCarrierStampsHeartbeat(t *testing.T) {
 	})
 }
 
-// TestGoingLiveAdoptsTheCarriersOwnHeartbeat covers the other half of the same rule: a carrier that is
-// not the tunnel's records its liveness on ITSELF (cf.rxAt) — the crypto handshake and every pong it
-// answers as a standby — and the tunnel adopts that only when the carrier actually goes live.
-//
-// Without the split, building such a carrier stamped the tunnel: every warm-standby rebuild and every
-// parked rotation carrier reset the tunnel's age to zero and bought a dead tunnel another dead-window of
-// green. With it, hb still jumps the instant the carrier is promoted — from the proof it already had, not
-// from a fabricated "now" — so nothing waits for the next keepalive to go green.
+// TestGoingLiveAdoptsTheCarriersOwnHeartbeat covers the other half of the rule: a carrier that is not the
+// tunnel's records liveness on ITSELF (cf.rxAt) — its handshake and every pong it answers as a standby —
+// and the tunnel adopts that only when the carrier actually goes live. Without the split, every standby
+// rebuild reset the tunnel's age and bought a dead tunnel another dead-window of green.
 func TestGoingLiveAdoptsTheCarriersOwnHeartbeat(t *testing.T) {
 	b := &TCP{isClient: true, warmStandby: true, keepalive: time.Second, idle: 5 * time.Second,
 		closeCh: make(chan struct{})}

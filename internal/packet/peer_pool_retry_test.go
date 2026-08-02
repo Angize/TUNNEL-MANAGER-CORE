@@ -19,18 +19,10 @@ func burnUntilDue(t *testing.T, p *PeerPool, at int, clk *int64) {
 	*clk = r.nextRetest
 }
 
-// TestTCPDialsTheEndpointTheRotationChose drives the REAL tcp accessors — dialTarget() is what the
-// dial uses and sourceIP() is what the socket binds to — across a proactive rotation onto a burned
-// endpoint whose retest is due.
-//
-// Before the fix these two disagreed with the rotation. advanceEligibleLocked accepts a DUE burned
-// endpoint (that re-admission is the retest), but current()'s first pass refuses a burned endpoint
-// while any healthy one exists and silently reset cur, so dialTarget() handed back the endpoint the
-// tunnel was already on. The rotation timer therefore tore down a healthy connection and rebuilt it
-// to the SAME address every interval, forever; the peer-rotate event and the status file both named
-// an endpoint the tunnel was not on; and the due endpoint was never dialled, so it never healed and
-// "probe now" (which only pulls the backoff forward) had nothing to trigger. udp/raw/flux consume the
-// address nextEndpoint returns and were never affected.
+// TestTCPDialsTheEndpointTheRotationChose drives the REAL tcp accessors — dialTarget() is what the dial
+// uses, sourceIP() what the socket binds to — across a proactive rotation onto a burned endpoint whose
+// retest is due. The rotation accepts a DUE burned endpoint (re-admission IS the retest) while
+// current()'s first pass refuses one while anything healthy exists, so the two must not disagree.
 func TestTCPDialsTheEndpointTheRotationChose(t *testing.T) {
 	clk := int64(1000)
 	dst := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, true, 0, "")

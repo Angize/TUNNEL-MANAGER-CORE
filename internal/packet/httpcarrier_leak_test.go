@@ -26,19 +26,10 @@ func settleGoroutines() int {
 	return prev
 }
 
-// TestHTTPCGrpcNoConnLeakOnRotation guards the grpc teardown path: establishing and retiring many
-// grpc sessions (the proactive-rotation churn) must not grow the process goroutine count. It backs
-// the force-close-on-teardown fix in dialHTTPCOnce, where a retired session's underlying h2 conn was
-// closed only via CloseIdleConnections — which, on a fresh-per-session transport with no
-// IdleConnTimeout, can race the async stream teardown and, if the far side holds the TCP conn open
-// (a CDN edge does), never actually close it, leaking the conn's reader/writer goroutines and fd
-// until a new standby dial can no longer be made and rotation silently stalls.
-//
-// NOTE ON TEETH: a loopback httptest h2 server tears the conn down promptly on stream-cancel, so this
-// in-process test does NOT reproduce the CDN-latency-dependent leak — it passes with and without the
-// fix. It is a no-regression guard (the teardown path reaps its own goroutines) and executable
-// documentation of the concern, NOT proof the production stall is resolved. Production confirmation
-// comes from the goroutine-count heartbeat (diagLoop) and the rotation-skip logs added alongside.
+// TestHTTPCGrpcNoConnLeakOnRotation guards the grpc teardown path: retiring many sessions must not grow
+// the goroutine count, since a retired session's h2 conn was closed only via CloseIdleConnections, which
+// can race the async stream teardown. ⚠ NO TEETH: a loopback h2 server tears down promptly, so this does
+// NOT reproduce the CDN-latency-dependent leak — it is a no-regression guard, not proof of the fix.
 func TestHTTPCGrpcNoConnLeakOnRotation(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	srvDev, _ := tunPair(t, "xhgleak")

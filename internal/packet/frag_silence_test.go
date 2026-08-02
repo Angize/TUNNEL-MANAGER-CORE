@@ -44,13 +44,10 @@ func hello(host string) []byte {
 	return b.Bytes()
 }
 
-// TestFakeModeSaysWhenItCouldNotRun is the regression test for sni_mode=fake degrading in silence.
-//
-// In user terms: the operator picks «fake», the mode that is the ONLY one which beats a DPI
-// reassembling the TCP stream, and the panel keeps showing it. Every one of writeFake's six
-// bail-outs handed off to disorder without a word — so a container missing CAP_NET_ADMIN, an IPv6
-// edge, or a TLS conn with no raw fd left the tunnel running a materially weaker defence while every
-// dashboard said otherwise.
+// TestFakeModeSaysWhenItCouldNotRun is the regression test for sni_mode=fake degrading in silence. The
+// operator picks «fake», the only mode that beats a DPI reassembling the TCP stream, and the panel keeps
+// showing it — so a container missing CAP_NET_ADMIN, an IPv6 edge or a conn with no raw fd must not leave
+// the tunnel on a materially weaker defence without a word.
 func TestFakeModeSaysWhenItCouldNotRun(t *testing.T) {
 	buf := fragLog(t)
 	// A conn whose addresses are not TCP: writeFake's very first bail-out.
@@ -75,12 +72,10 @@ func TestFakeModeSaysWhenItCouldNotRun(t *testing.T) {
 	}
 }
 
-// TestFakeModeRefusesAByteIdenticalDecoy pins the ECH case. With the hostname encrypted there is
-// nothing in the ClientHello to overwrite, so the "decoy" is a byte-for-byte copy of the real one.
-// Injecting that at the same sequence with a corrupt checksum gives a reassembling DPI exactly the
-// SNI it would have seen anyway — zero benefit — while a duplicate segment carrying a bad checksum
-// is itself a signature. It is reachable whenever ECH is on AND split_pos is set, because splitAt
-// returns f.pos before it ever looks for the hostname.
+// TestFakeModeRefusesAByteIdenticalDecoy pins the ECH case. With the hostname encrypted there is nothing
+// in the ClientHello to overwrite, so the "decoy" is a byte-for-byte copy: injecting it at the same
+// sequence with a corrupt checksum gives a reassembling DPI the SNI it would have seen anyway, while a
+// duplicate bad-checksum segment is itself a signature. Reachable whenever ECH is on and split_pos is set.
 func TestFakeModeRefusesAByteIdenticalDecoy(t *testing.T) {
 	buf := fragLog(t)
 	// Real TCP addresses, so the earlier bail-outs are passed and the decoy branch is the one reached.
@@ -109,11 +104,10 @@ func TestFakeModeRefusesAByteIdenticalDecoy(t *testing.T) {
 	}
 }
 
-// TestSNISplitSaysWhenNothingIsSplit is the regression test for E12: under ECH the cleartext search
-// finds nothing, splitAt returns 0, the ClientHello goes out whole — and the config, the panel and
-// the startup log all still say sni_split is on. Correct behaviour (there is no cleartext SNI left
-// to straddle a boundary), but it was completely silent, so an operator running ECH plus sni_split
-// believed both were active when only one was.
+// TestSNISplitSaysWhenNothingIsSplit: under ECH the cleartext search finds nothing, splitAt returns 0 and
+// the ClientHello goes out whole, while the config, the panel and the startup log all still say sni_split
+// is on. The behaviour is correct — there is no cleartext SNI left to straddle a boundary — but silence
+// let an operator running ECH plus sni_split believe both were active when only one was.
 func TestSNISplitSaysWhenNothingIsSplit(t *testing.T) {
 	for _, tc := range []struct {
 		name, host, want string

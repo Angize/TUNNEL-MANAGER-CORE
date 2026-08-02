@@ -77,19 +77,9 @@ func echServerConfig(pub []byte, publicName string) []byte {
 }
 
 // Every TCP connection the ws carrier dials must get exactly one pass of desync decoys, on the bare
-// 4-tuple, before any of our own bytes flow.
-//
-// establishWS injects on the conn IT dialled. tlsToEdge then closes that conn on an ECH rejection and
-// dials a BRAND NEW one to retry with the fresh RetryConfigList — and nothing injected on it, so the
-// connection that actually carried the tunnel had no decoys at all while
-// handshakeAndPrime's comment claimed "each connection is still covered exactly once". Cloudflare
-// rotates its ECH key on a schedule, so this is not a corner: it is what every client does the first
-// time it dials after a rotation.
-//
-// The whole path is real — establishWS -> tlsToEdge -> uEdgeHandshake against a crypto/tls server
-// holding real ECH keys that do NOT match the client's (which IS a stale key), answering with
-// SendAsRetry so the rejection carries retry configs. Decoys are observed through dsWatch, the seam
-// #220 added, which is called before the dsOn gate on purpose.
+// 4-tuple, before any of our own bytes flow. establishWS injects on the conn IT dialled, and tlsToEdge
+// then closes that one on an ECH rejection and dials a BRAND NEW one — the connection that actually
+// carries the tunnel. The whole path here is real, and the decoys are observed through the dsWatch seam.
 func TestEveryDialledConnectionGetsDecoysAcrossTheECHRedial(t *testing.T) {
 	leaf, caPool := caSignedTLSCert(t, "public.example")
 

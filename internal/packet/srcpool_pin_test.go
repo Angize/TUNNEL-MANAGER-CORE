@@ -10,8 +10,7 @@ import (
 // The carrier half of the bind_ip chain (main.pinSource is the other): a ONE-ENTRY source pool must
 // actually pin the source, on every carrier that has no separate bind. This is what lets bind_ip be
 // honoured on udp/raw/flux at all — the pool's gate is len>=1 precisely so a lone entry is a fixed
-// source. If any of these stopped seeding from the pool, bind_ip would go back to being a silent
-// no-op there and the kernel would pick the route's default source again.
+// source. If any of these stopped seeding from the pool, bind_ip would be a silent no-op there again.
 func TestOneEntrySourcePoolPinsTheSource(t *testing.T) {
 	// A loopback address, so udp's real bind can succeed on any host.
 	const pin = "127.0.0.1"

@@ -34,13 +34,10 @@ func pendBytes(s *httpcSession) (held int, entries int) {
 	return held, len(s.pend)
 }
 
-// TestHTTPCPostNeverCreatesSession locks in the rule that the upstream POST path may not ALLOCATE.
-// A session is created by the downstream GET and only by it: a real client opens the GET first and
-// builds its upstream sender only once that GET's response head has arrived (dialHTTPCPost), so a
-// POST for an id the server has never served is always either a scanner or a stale straggler.
-// Before the fix any POST carrying a 32-hex `s=` created a session — a pipe, a watchdog timer and a
-// whole out-of-order buffer — with no handshake and no cap on how many, so anyone who could reach
-// the origin (directly or through the CDN) could OOM the node and drop every tunnel on it.
+// TestHTTPCPostNeverCreatesSession locks in the rule that the upstream POST path may not ALLOCATE. A
+// session is created by the downstream GET and only by it, so a POST for an id the server never served
+// is always a scanner or a stale straggler. Letting it create one — a pipe, a timer and a whole
+// out-of-order buffer, with no handshake and no cap — lets anyone reaching the origin OOM the node.
 func TestHTTPCPostNeverCreatesSession(t *testing.T) {
 	b := &TCP{httpcSessions: map[string]*httpcSession{}}
 	ts := httptest.NewServer(http.HandlerFunc(b.httpcHandler))

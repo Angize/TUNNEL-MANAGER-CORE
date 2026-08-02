@@ -5,15 +5,10 @@ import (
 	"testing"
 )
 
-// TestWarmStandbyBuildSkipsAttribution is the regression test for the rotation freeze proven by the
-// production goroutine dump: on a failed establish the warm-standby build goroutine ran the full
-// differential-probe attribution (attributeFailure -> differentialProbe -> several probeEdgeFull
-// establishes, each bounded by httpcEstablishTimeout). That blocked the single standby-build
-// goroutine for minutes with standbyBuilding still set, so requestStandby() no-op'd, the standby
-// never became ready, and proactive rotation silently stopped while the open active kept the tunnel
-// up. The fix suppresses attribution on the warm-standby path (establishHTTPC(false)); the primary
-// dial (establishHTTPC(true)) still attributes. probeFn stands in for the real network probe so we
-// can count whether the differential probe ran at all.
+// TestWarmStandbyBuildSkipsAttribution guards against a rotation freeze: on a failed establish the
+// warm-standby build goroutine must NOT run the full differential-probe attribution, which fires several
+// establishes and blocks that single goroutine with standbyBuilding still set — so requestStandby()
+// no-ops, no standby ever becomes ready, and rotation stops while the open active keeps the tunnel up.
 func TestWarmStandbyBuildSkipsAttribution(t *testing.T) {
 	// Two dead edges (refused) + one SNI, autoBurn on so attributeFailure is not short-circuited.
 	pool := newWSPool([]string{"127.0.0.1:9", "127.0.0.1:10"},

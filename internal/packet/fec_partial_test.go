@@ -66,13 +66,10 @@ func flushBlock(t *testing.T, e *fecEncoder, sink *fecCapture, count int) (data,
 	return sink.take()
 }
 
-// TestPartialFecBlockScalesParity: a partial block must scale its parity count with the data
-// shards it really carries, not emit the full k.
-//
-// The test pins the property, not the formula: for every geometry and every block occupancy the
-// parity actually emitted must (a) still hold the configured erasure ratio and (b) be the
-// smallest count that does — one fewer must break (a). Together those fix the value uniquely,
-// so neither a regression back to k nor an over-eager cut to zero can pass.
+// TestPartialFecBlockScalesParity: a partial block must scale its parity count with the data shards it
+// really carries, not emit the full k. The test pins the property, not the formula — the parity emitted
+// must still hold the configured erasure ratio and be the smallest count that does, and one fewer must
+// break it. Together those fix the value uniquely, so neither a regression to k nor a cut to zero passes.
 func TestPartialFecBlockScalesParity(t *testing.T) {
 	for _, geo := range []struct{ n, k int }{{10, 3}, {10, 2}, {8, 4}, {4, 1}} {
 		sink := &fecCapture{}
@@ -107,11 +104,10 @@ func TestPartialFecBlockScalesParity(t *testing.T) {
 	}
 }
 
-// TestPartialFecBlockStillRecoversLoss proves the scaled parity is real protection and not just
-// cheaper: a 4-frame flush of a 10+3 tunnel goes out as 4 data + 2 parity, and losing TWO of the
-// four data shards must still deliver all four frames. It also pins that this is not a wire
-// change — the shards are fed to an UNMODIFIED decoder, which copes because the header still
-// declares the configured k and the parity we did not send is just another erasure.
+// TestPartialFecBlockStillRecoversLoss proves the scaled parity is real protection and not just cheaper:
+// a 4-frame flush of a 10+3 tunnel goes out as 4 data + 2 parity, and losing TWO of the four data shards
+// must still deliver all four frames. It also pins that this is not a wire change — the shards go to an
+// UNMODIFIED decoder, which copes because the header still declares k and the missing parity is an erasure.
 func TestPartialFecBlockStillRecoversLoss(t *testing.T) {
 	sink := &fecCapture{}
 	e, err := newFecEncoder(10, 3, sink.emit)

@@ -2,11 +2,10 @@ package packet
 
 import "testing"
 
-// TestActiveEdgeNotCorruptedByStandbyDial locks in the warm-standby bug fix: the status file's
-// "active edge" must reflect the carrier ACTUALLY carrying data, never the edge a background
-// standby dial happened to pick. current() picks an edge but must NOT publish it; only setActive
-// (real active / promotion) does. Before the fix, current() set p.active, so building a standby
-// clobbered the live active and the panel's auto-switch log went wrong / silent.
+// TestActiveEdgeNotCorruptedByStandbyDial locks in the rule that the status file's "active edge" must
+// reflect the carrier ACTUALLY carrying data, never the edge a background standby dial happened to pick.
+// current() picks an edge but must NOT publish it; only setActive does. Otherwise building a standby
+// clobbers the live active and the panel's auto-switch log goes wrong or silent.
 func TestActiveEdgeNotCorruptedByStandbyDial(t *testing.T) {
 	snis := []wsSNIEntry{{host: "a.example"}, {host: "b.example"}}
 	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, snis, true, "")

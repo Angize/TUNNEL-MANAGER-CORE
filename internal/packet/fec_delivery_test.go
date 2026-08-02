@@ -74,14 +74,10 @@ func fecCollect(pkts [][]byte) map[string]int {
 	return seen
 }
 
-// TestFecDeliversTheShardsThatArrived is the regression test for backlog D3: a block that could
-// not be reconstructed threw away the intact data shards that DID arrive.
-//
-// In user terms: with FEC on, tunToNet never writes a frame itself — every packet goes through
-// the encoder — so the decoder is the ONLY path those frames have. Losing one shard past the
-// geometry's repair budget did not cost one packet, it cost the WHOLE block: at 10+3, 13 packets
-// on the wire and 10 real packets gone. Above ~17% loss that made turning FEC on strictly worse
-// than leaving it off, which is the exact opposite of what the panel offers it for.
+// TestFecDeliversTheShardsThatArrived: a block that cannot be reconstructed must not throw away the
+// intact data shards that DID arrive. With FEC on the decoder is the ONLY path those frames have, so
+// losing one shard past the repair budget cost the WHOLE block — at 10+3, ten real packets gone for
+// thirteen on the wire, which above ~17% loss makes FEC strictly worse than leaving it off.
 func TestFecDeliversTheShardsThatArrived(t *testing.T) {
 	wire, payloads := fecEncodeBlock(t, 10, 3, 10)
 	data, parity := fecSplit(wire)
@@ -134,17 +130,10 @@ func TestFecDeliversWithoutWaitingForTheBlock(t *testing.T) {
 	}
 }
 
-// TestFecEveryErasurePatternDeliversWhatArrived closes the CLASS rather than the one line: for a
-// full 10+3 block it walks ALL 2^13 possible erasure patterns, and for a partial block every
-// pattern over whatever the encoder actually put on the wire. For each one the decoder must
-// deliver exactly:
-//
-//   - every frame whose own data shard arrived (nothing physically received is ever discarded), and
-//   - every frame of the block when enough shards arrived to reconstruct (n of n+k, counting the
-//     pad shards a partial block synthesizes),
-//
-// each exactly once — so a recovered shard can never be delivered on top of the arrived one.
-// No pattern may deliver a frame the receiver had no way to know.
+// TestFecEveryErasurePatternDeliversWhatArrived closes the CLASS rather than one line: for a full 10+3
+// block it walks all 2^13 erasure patterns, and for a partial block every pattern over what the encoder
+// really emitted. Each must deliver every frame whose own data shard arrived, plus every frame of the
+// block once enough shards arrived to reconstruct — each exactly once, and never one it could not know.
 func TestFecEveryErasurePatternDeliversWhatArrived(t *testing.T) {
 	for _, tc := range []struct{ n, k, count int }{{10, 3, 10}, {10, 3, 4}} {
 		wire, payloads := fecEncodeBlock(t, tc.n, tc.k, tc.count)
