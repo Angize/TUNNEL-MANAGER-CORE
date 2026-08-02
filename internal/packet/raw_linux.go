@@ -897,6 +897,7 @@ func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr) {
 	for _, st := range r.staged {
 		if typ, session, seq, payload, oerr := r.openWith(st.box.s, body); oerr == nil && st.rp.ok(session, seq) {
 			r.session.Store(st.box)
+			r.fecDec.reset() // a fresh session: the peer may have restarted its block numbering
 			r.rp = st.rp
 			r.staged = nil
 			r.markRx() // a pending session promoted -> genuine inbound
@@ -955,6 +956,7 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr) {
 		}
 		r.rp = replayGuard{}
 		r.session.Store(&sealerBox{s: s})
+		r.fecDec.reset() // a fresh session: the peer may have restarted its block numbering
 		// Clear the ephemeral so a replayed resp captured on-path hits the ci==nil guard above
 		// instead of re-parsing and wiping the fresh anti-replay window. A legitimate
 		// re-handshake regenerates a fresh ci in sendInit (ci==nil path).

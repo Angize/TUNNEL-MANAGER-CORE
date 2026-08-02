@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -209,11 +210,34 @@ type fecDecoder struct {
 	codecs    map[int]*fecCodecEntry // keyed by n<<8|k, bounded by fecMaxCodecs, LRU-evicted
 	codecTick uint64                 // monotonic use counter stamped on each codec hand-out (the LRU key)
 	deliver   func([]byte)           // called with each sealed frame, exactly once, in arrival order
+
+	// resetPending is set by reset() and consumed by the next input(): the carriers call reset() from
+	// deliver(), which input() may already be running under d.mu, so the clear cannot be taken there.
+	resetPending atomic.Bool
 }
 
 func newFecDecoder(deliver func([]byte)) *fecDecoder {
 	return &fecDecoder{blocks: map[uint32]*fecBlock{}, codecs: map[int]*fecCodecEntry{},
 		maxBytes: fecMaxBytes, deliver: deliver}
+}
+
+// reset voids the reassembly state because a NEW session is being installed. A peer that restarted numbers
+// its blocks from zero again, so a fresh block lands on one the decoder still holds for the dead session:
+// the done/geometry guards then swallow its shards, and a same-geometry hit merges old-session ciphertext
+// into the new block so the reconstruct fails AEAD. Codecs survive — they cache geometry, not session
+// state. Nil-safe: the carriers call it unconditionally and fecDec is nil when FEC is off.
+func (d *fecDecoder) reset() {
+	if d == nil {
+		return
+	}
+	d.resetPending.Store(true)
+}
+
+// dropBlocksLocked applies a pending reset: every live block goes, and the byte budget with it.
+// Caller holds d.mu.
+func (d *fecDecoder) dropBlocksLocked() {
+	d.blocks = map[uint32]*fecBlock{}
+	d.bytes = 0
 }
 
 // codec returns the Reed-Solomon codec for one block geometry, building and caching it on first use.
@@ -294,6 +318,9 @@ func (d *fecDecoder) input(pkt []byte) {
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.resetPending.Swap(false) {
+		d.dropBlocksLocked()
+	}
 	b := d.blocks[blk]
 	if b == nil {
 		// Reserve this block's pad shards (plus the incoming shard) up front and refuse
