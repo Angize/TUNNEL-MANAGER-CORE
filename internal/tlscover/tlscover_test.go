@@ -142,13 +142,10 @@ func TestCoverProbeSeesRealSite(t *testing.T) {
 	}
 }
 
-// TestCoverProbeIsNeverDroppedWhenTheRelayPoolIsFull is the whole class: no probe
-// may ever be closed on the spot because earlier probes hold the relay slots.
-//
-// ⚠ This test shrinks ONLY sv.relay and leaves sv.queue at its full size, so it
-// passes with or without a working queue — see the sibling below, which is the one
-// that actually exercises it. What this covers is the idle bound: dest never closes
-// here, so nothing but the idle timer can hand a slot back.
+// TestCoverProbeIsNeverDroppedWhenTheRelayPoolIsFull is the whole class: no probe may be closed on the
+// spot because earlier probes hold the relay slots. ⚠ It shrinks ONLY sv.relay and leaves sv.queue at
+// full size, so it passes with or without a working queue — the sibling below is the one that exercises
+// that. What this covers is the idle bound: dest never closes here, so only the idle timer frees a slot.
 func TestCoverProbeIsNeverDroppedWhenTheRelayPoolIsFull(t *testing.T) {
 	const psk = "reality-psk-abcdefghij"
 	dest := holdingDest(t, "real.example")
@@ -204,17 +201,10 @@ func TestCoverRelayBoundIsIdleNotLifetime(t *testing.T) {
 	}
 }
 
-// TestCoverQueueIsNotJustTheRelayPoolAgain is the test the sibling above only looked
-// like. In production maxWaiting == maxRelays, and the queue token used to be held for
-// the goroutine's WHOLE life — relay included — so a goroutine in service still
-// occupied a waiting-room slot. The queue was therefore full exactly when the relay
-// pool was, every new probe hit the `default` arm, and it was CLOSED ON THE SPOT: the
-// instant FIN straight after the ClientHello that this carrier exists to never emit,
-// at exactly the concurrency it emitted it at before the queue was added.
-//
-// Shrinking BOTH semaphores to the same small number is what reproduces the production
-// relationship. The third probe must wait for a slot and then reach the real dest, not
-// get a connection reset.
+// TestCoverQueueIsNotJustTheRelayPoolAgain is the test the sibling above only looked like. In production
+// maxWaiting == maxRelays, so a queue token held for the goroutine's WHOLE life makes the queue full
+// exactly when the relay pool is, and every new probe is closed on the spot. Shrinking BOTH semaphores
+// to the same small number reproduces that relationship: the third probe must wait, then reach dest.
 func TestCoverQueueIsNotJustTheRelayPoolAgain(t *testing.T) {
 	const psk = "reality-psk-abcdefghij"
 	dest := holdingDest(t, "real.example")

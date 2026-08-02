@@ -1,23 +1,16 @@
-// Package tlscover gives a core TCP connection a REALITY-style TLS cover so it not
-// only looks like HTTPS to passive DPI but also survives ACTIVE probing (the
-// censor connecting to the server itself and comparing) — the technique Iran's
-// filtering uses.
+// Package tlscover gives a core TCP connection a REALITY-style TLS cover, so it not only looks like
+// HTTPS to passive DPI but survives ACTIVE probing — the censor connecting to the server itself and
+// comparing. The client speaks a Chrome-fingerprinted ClientHello (uTLS) with a PSK-authenticated token
+// hidden in the 32-byte legacy session id, which is normally random and therefore invisible:
 //
-// How. The client speaks a Chrome-fingerprinted ClientHello (uTLS) and hides a
-// PSK-authenticated token inside the 32-byte legacy session id (normally random,
-// so invisible). The server reads the ClientHello before answering:
+//	token valid (our client)   the server terminates TLS itself and the core/PSK handshake runs inside
+//	token absent or invalid    the server transparently PROXIES the whole connection to the REAL
+//	                           dest:443 and relays bytes, so the prober gets that site's genuine
+//	                           certificate and real response
 //
-//   - token valid (our client)  -> the server terminates TLS itself (a throwaway
-//     cert the client does not verify) and the core/PSK handshake runs inside.
-//   - token absent/invalid (a probe, a real browser, the censor) -> the server
-//     transparently PROXIES the whole connection to the REAL destination site
-//     (dest:443) and relays bytes. The prober gets that site's genuine
-//     certificate and real response, indistinguishable from visiting it.
-//
-// So dest MUST be a real, reachable, unblocked HTTPS site — it is the cover the
-// server borrows. Replays are neutralised by a timestamp window plus a seen-
-// ClientHello cache (a replayed hello is treated as a probe → proxied), and a
-// replayer cannot complete the inner PSK handshake anyway.
+// So dest MUST be a real, reachable, unblocked HTTPS site — it is the cover the server borrows. Replays
+// are neutralised by a timestamp window plus a seen-ClientHello cache, and cannot complete the inner
+// PSK handshake anyway.
 package tlscover
 
 import (
@@ -191,11 +184,10 @@ func (sv *Server) Handle(raw net.Conn, deadline time.Time) (net.Conn, error) {
 		_ = s.SetDeadline(time.Time{})
 		return s, nil
 	}
-	// Everything that is not a successfully-authenticated token — an unreadable
-	// hello (fragmented, multi-record, oversized, or non-TLS), an absent/invalid
-	// token, or a replay — MUST be proxied to dest, replaying whatever bytes we
-	// consumed. Dropping the connection here would give a censor a distinguisher;
-	// a probe/real browser has to see the genuine dest site instead.
+	// Everything that is not a successfully-authenticated token — an unreadable hello (fragmented,
+	// multi-record, oversized, or non-TLS), an absent or invalid token, or a replay — MUST be proxied to
+	// dest, replaying whatever bytes we consumed. Dropping the connection here would hand a censor a
+	// distinguisher; a probe or a real browser has to see the genuine dest site instead.
 	sv.proxyToDest(raw, hello)
 	return nil, ErrProbe
 }
@@ -222,16 +214,10 @@ func (sv *Server) firstSight(token []byte) bool {
 	return true
 }
 
-// proxyToDest relays raw<->dest (prepending the buffered ClientHello) in a
-// detached goroutine, bounded by the relay cap.
-//
-// A full relay pool must not close the connection on the spot: an instant FIN
-// straight after the ClientHello is exactly the distinguisher Handle refuses to
-// hand a censor. So a probe QUEUES for a slot instead — queueing costs only the
-// conn we have already accepted — and the relays themselves are bounded by an
-// IDLE timeout, so slots recycle instead of being pinned by connections nobody
-// speaks on. Only a flood deeper than maxWaiting is still dropped outright;
-// there is no bounded-memory answer to that one.
+// proxyToDest relays raw<->dest (prepending the buffered ClientHello) in a detached goroutine, bounded
+// by the relay cap. A full relay pool must NOT close the connection on the spot: an instant FIN straight
+// after the ClientHello is exactly the distinguisher Handle refuses to hand a censor. So a probe QUEUES
+// for a slot, and the relays are bounded by an IDLE timeout so slots recycle instead of being pinned.
 func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 	select {
 	case sv.queue <- struct{}{}:
@@ -240,13 +226,10 @@ func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 		return
 	}
 	go func() {
-		// LEAVE THE WAITING ROOM ON ENTERING SERVICE. Holding the queue token for the goroutine's whole
-		// life made the queue inert: every relaying goroutine also held a queue token, so with both caps
-		// at maxRelays the queue was full exactly when the relay pool was, and a new probe hit the
-		// `default` above and was CLOSED ON THE SPOT — the instant FIN this whole change exists to
-		// remove, at precisely the concurrency it removed it at before. The two semaphores only bound
-		// different things if a connection holds one at a time: maxWaiting queued PLUS maxRelays in
-		// service.
+		// LEAVE THE WAITING ROOM ON ENTERING SERVICE. Holding the queue token for the goroutine's whole life
+		// makes the queue inert: every relaying goroutine also holds one, so with both caps equal the queue is
+		// full exactly when the relay pool is, and a new probe is CLOSED ON THE SPOT — the instant FIN this
+		// exists to remove. The two semaphores only bound different things if a conn holds one at a time.
 		queued := true
 		leaveQueue := func() {
 			if queued {
@@ -270,11 +253,10 @@ func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 			raw.Close()
 			return
 		}
-		// Both legs re-arm their deadline before every single read and write, so
-		// this is an IDLE bound and never a lifetime cap — a slow real download
-		// through the cover is untouched, while a silent connection releases its
-		// slot instead of waiting on dest's keepalive to decide for us. It also
-		// supersedes the handshake deadline Handle left on raw.
+		// Both legs re-arm their deadline before every read and write, so this is an IDLE bound and never a
+		// lifetime cap — a slow real download through the cover is untouched, while a silent connection
+		// releases its slot instead of waiting on dest's keepalive to decide for us. It also supersedes the
+		// handshake deadline Handle left on raw.
 		ri, di := &idleConn{Conn: raw, idle: sv.idle}, &idleConn{Conn: dst, idle: sv.idle}
 		if _, err := di.Write(hello); err != nil {
 			dst.Close()

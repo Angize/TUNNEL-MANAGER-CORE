@@ -1,26 +1,7 @@
-// Package crypto provides the AEAD sealing used by the core carrier.
-//
-// Four AEADs are supported and selected by name: AES-256-GCM and AES-128-GCM
-// (stdlib, fastest on AES-NI hosts) and ChaCha20-Poly1305 / XChaCha20-Poly1305
-// (constant-time in software, faster on hosts without AES acceleration such as
-// many ARM boards). Both ends of a tunnel
-// MUST use the same cipher and PSK.
-//
-// Directional keys (v2). The AEAD key is derived PER DIRECTION — the client→server
-// key differs from server→client — so each sealing key is used by exactly ONE
-// sealer in a tunnel. That removes the (key, nonce) reuse risk that a single
-// bidirectional key had (two independent sealers could pick the same random nonce
-// prefix), and means a frame captured in one direction is not a valid frame in the
-// other. A node's Sealer is built with isClient so it seals with its send-direction
-// key and opens with the peer's.
-//
-// Wire masking (v2). The AEAD nonce would otherwise ride on the wire in the clear
-// with its high counter bytes fixed at zero — a stateless DPI signature that a
-// censor can match on even through the obfs layer. To kill it, every sealed frame
-// is XOR-masked with a per-direction ChaCha20 keystream seeded by a fresh random
-// per-frame salt; the salt is prepended. The result is uniformly random on the
-// wire: no fixed offset, no zero bytes. The mask is obfuscation only — the AEAD
-// tag under it still provides all authentication.
+// Package crypto provides the AEAD sealing used by the core carrier: AES-256/128-GCM and
+// ChaCha20/XChaCha20-Poly1305, selected by name, with both ends of a tunnel on the same cipher and PSK.
+// Keys are derived PER DIRECTION, so each sealing key belongs to exactly one sealer and a frame captured
+// one way is not valid the other. Every frame is XOR-masked (see Sealer) so no fixed bytes ride the wire.
 package crypto
 
 import (
@@ -53,18 +34,10 @@ const (
 // Supported is the ordered list of concrete cipher names the core accepts.
 var Supported = []string{CipherAES256, CipherAES128, CipherChaCha, CipherXChaCha}
 
-// Sealer seals and opens packet payloads with the configured AEAD, using
-// direction-separated keys and a wire mask (see the package comment).
-//
-// Nonces are NOT random per message. A random nonce would, by the birthday
-// bound, collide after ~2^32 messages on a busy tunnel — catastrophic for GCM.
-// Instead each Sealer picks a random per-process "session" prefix once at
-// construction and appends a strictly-increasing 64-bit counter: the pair
-// (prefix, counter) is unique for the life of the process, and a fresh random
-// prefix on every restart avoids reuse across restarts. Because the send key is
-// used by only ONE sealer, that pair is never shared with another sealer either.
-// The counter doubles as the anti-replay sequence number and the prefix
-// identifies the sender's boot session; Open returns both.
+// Sealer seals and opens packet payloads with the configured AEAD, using direction-separated keys and a
+// wire mask. Nonces are NOT random per message — a random nonce would collide after ~2^32 messages by
+// the birthday bound, catastrophic for GCM. Each Sealer picks a random per-process prefix once and
+// appends a strictly-increasing 64-bit counter, which doubles as the anti-replay sequence number.
 type Sealer struct {
 	sendAEAD cipher.AEAD
 	recvAEAD cipher.AEAD
@@ -132,19 +105,10 @@ func aeadFactory(name string) (mk func(key []byte) (cipher.AEAD, error), keyLen 
 	}
 }
 
-// NewSealer builds a Sealer for the named cipher keyed statically from psk.
-// isClient selects which direction key it seals with (client seals c→s, opens
-// s→c; server the reverse), so the two ends of a tunnel interoperate. This is the
-// pre-handshake / no-forward-secrecy path; sealerFromKeys is used once an
-// ephemeral session is negotiated (see handshake.go).
-//
-// VALIDATION/BOOTSTRAP ONLY — do NOT seal live traffic with this. The keys are a
-// pure function of the PSK, so the send counter restarts from 0 every run: two
-// processes (or one after a restart) would reuse (key, nonce) pairs and void the
-// AEAD's confidentiality/integrity. It exists solely to fail fast on a bad
-// cipher/PSK at startup (main.go keeps only s.Name and drops the sealer). All real
-// frames go through SessionSealer, whose keys are salted by a fresh per-session
-// ephemeral so no two sessions — and no restart — ever share a keystream.
+// NewSealer builds a Sealer for the named cipher keyed statically from psk; isClient selects which
+// direction key it seals with. VALIDATION/BOOTSTRAP ONLY — do NOT seal live traffic with it: the keys
+// are a pure function of the PSK, so the send counter restarts from 0 every run and two processes would
+// reuse (key, nonce) pairs. Real frames go through SessionSealer, salted by a fresh per-session ephemeral.
 func NewSealer(cipherName, psk string, isClient bool) (*Sealer, error) {
 	name := ResolveCipher(cipherName)
 	_, keyLen, err := aeadFactory(name)

@@ -19,22 +19,16 @@ import (
 	"unsafe"
 )
 
-// ErrGSOUnsupported wraps a failure of one of the two ioctls Open runs ONLY when gso
-// was asked for: TUNSETIFF with IFF_VNET_HDR, and TUNSETOFFLOAD. It means "the
-// gso-specific part of the open failed" — NOT "this kernel lacks gso". A missing
-// CAP_NET_ADMIN fails the very same ioctl, and nothing in the errno tells the two
-// apart. So a caller must not report "gso unavailable" on the strength of this error
-// alone; it has to prove it by opening again WITHOUT gso and seeing that succeed.
-// Nothing after these two ioctls is wrapped, so a busy interface name or a failing
-// `ip` command still propagates as the hard error it is.
+// ErrGSOUnsupported wraps a failure of one of the two ioctls Open runs ONLY when gso was asked for:
+// TUNSETIFF with IFF_VNET_HDR, and TUNSETOFFLOAD. It means "the gso-specific part of the open failed",
+// NOT "this kernel lacks gso" — a missing CAP_NET_ADMIN fails the same ioctl and the errno does not
+// distinguish them, so a caller must prove it by opening again WITHOUT gso and seeing that succeed.
 var ErrGSOUnsupported = errors.New("the gso-specific part of the tun open failed")
 
-// setIff and setOffload are seams. Production runs the ioctl; the gso-classification
-// test replaces them to fail a chosen one, which is the only way to reach the
-// ErrGSOUnsupported branches on a kernel that supports gso perfectly well.
-// They take ifr as a POINTER rather than a uintptr on purpose: the
-// unsafe.Pointer→uintptr conversion has to happen inside syscall.Syscall's own
-// argument list for the compiler's pointer-liveness rule to apply.
+// setIff and setOffload are seams. Production runs the ioctl; the gso-classification test replaces them
+// to fail a chosen one, which is the only way to reach the ErrGSOUnsupported branches on a kernel that
+// supports gso perfectly well. They take ifr as a POINTER, not a uintptr, because the
+// unsafe.Pointer→uintptr conversion must happen inside syscall.Syscall's own argument list.
 var setIff = func(f *os.File, ifr *[ifReqSize]byte) syscall.Errno {
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), tunSetIff, uintptr(unsafe.Pointer(ifr)))
 	return errno
@@ -67,13 +61,10 @@ type Device struct {
 
 	nSuper, nSeg atomic.Uint64 // GSO diagnostic: super-packets split and segments produced
 	nUnsplit     atomic.Uint64 // GSO super-packets handed back unsegmented (unknown/legacy gso_type, or a header segment() would not parse)
-	// nOversize counts packets Read DROPPED because they did not fit the caller's buffer. It is a
-	// guard on an exported API, not a diagnostic: no caller in this binary can trip it, because rbuf
-	// is vnetHdrLen+65535 so a segment is at most 65535 bytes, and every caller passes exactly
-	// maxDatagram = 65535. It is therefore reported only when it is NON-ZERO — a permanent
-	// "0 oversize dropped" on the operator's GSO line is noise in a line whose whole job is to answer
-	// "is this knob doing anything?", and it also read as evidence that something was being checked
-	// when nothing could ever be counted.
+	// nOversize counts packets Read DROPPED because they did not fit the caller's buffer. It is a guard on
+	// an exported API, not a diagnostic: no caller in this binary can trip it, since rbuf is
+	// vnetHdrLen+65535 and every caller passes exactly maxDatagram. It is therefore reported only when
+	// NON-ZERO — a permanent "0 oversize dropped" is noise in a line whose job is "is this knob working?".
 	nOversize atomic.Uint64
 
 	// Reporting state, touched ONLY by the single reader goroutine (readGSO), so no lock.
@@ -82,24 +73,16 @@ type Device struct {
 	repSaid bool      // a line has been written at least once
 }
 
-// gsoReportEvery bounds how often a running device logs its GSO counters. Before this the ONLY
-// evidence the knob did anything was one line printed at SHUTDOWN, so an operator who turned GSO on
-// had no way to tell "the kernel is coalescing" from "the knob is inert" without stopping the
-// tunnel. Ten minutes is quiet enough to live in the journal forever and often enough to answer the
-// question, and a report is skipped entirely when nothing moved — an idle tunnel stays silent.
+// gsoReportEvery bounds how often a running device logs its GSO counters. With the only evidence printed
+// at SHUTDOWN, an operator who turned GSO on had no way to tell "the kernel is coalescing" from "the
+// knob is inert" without stopping the tunnel. Ten minutes is quiet enough to live in the journal forever
+// and often enough to answer the question; a report is skipped entirely when nothing moved.
 const gsoReportEvery = 10 * time.Minute
 
-// reportGSO logs the counters at most once per gsoReportEvery, and only when something changed.
-//
-// The rule is written around one failure: the FIRST call used to report unconditionally, which meant
-// the first line an operator ever saw was "gso 0 super-packets -> 0 segments" — printed milliseconds
-// after startup, before the kernel could coalesce anything, and reading exactly like the answer
-// "this knob is doing nothing". It also stamped the window, so the truth was then ten minutes away.
-//
-// So: silence on the first read, an IMMEDIATE line the first time a counter moves (the answer the
-// operator wants), at most one line per window after that, and exactly one "still nothing" line once
-// a full window has passed with no movement — because an inert knob deserves to be visible too, just
-// not before it is known. Called from readGSO only (single goroutine), so the state needs no lock.
+// reportGSO logs the counters at most once per gsoReportEvery, and only when something changed: silence
+// on the first read, an IMMEDIATE line the first time a counter moves, at most one per window after
+// that, and one "still nothing" line once a full window passes with no movement. Reporting on the first
+// read would say "0 -> 0" before the kernel could coalesce anything. readGSO only, so no lock.
 func (d *Device) reportGSO() {
 	now := time.Now()
 	cur := [4]uint64{d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), d.nOversize.Load()}
@@ -188,13 +171,10 @@ func Open(name string, mtu int, addr string, gso bool) (*Device, error) {
 	return d, nil
 }
 
-// rawRead/rawWrite do blocking TUN I/O with a plain syscall, DELIBERATELY bypassing os.File and
-// Go's netpoller. A dependency's package-init can bring the netpoller up before main() opens the
-// TUN (kcp-go's SystemTimedSched starts goroutines at init); the TUN fd can then inherit a poisoned
-// pollDesc from a transient regular-file fd that failed EPOLL_CTL_ADD (EPERM), and os.File.Read
-// returns "not pollable", killing the data plane on EVERY transport. The TUN is opened blocking
-// (no O_NONBLOCK; f.Fd() keeps it blocking), so a raw syscall.Read/Write always works regardless of
-// init ordering. Same approach as wireguard-go. EINTR is retried; the fd lifetime is tied to d.f.
+// rawRead/rawWrite do blocking TUN I/O with a plain syscall, DELIBERATELY bypassing os.File and Go's
+// netpoller. A dependency's package-init can bring the netpoller up before main() opens the TUN, and the
+// TUN fd can then inherit a poisoned pollDesc from a transient fd that failed EPOLL_CTL_ADD — os.File
+// then returns "not pollable" and kills the data plane on EVERY transport. Same approach as wireguard-go.
 func rawRead(fd int, p []byte) (int, error) {
 	for {
 		n, err := syscall.Read(fd, p)
@@ -248,15 +228,10 @@ func (d *Device) Read(buf []byte) (int, error) {
 		}
 		seg := d.q[0]
 		d.q = d.q[1:]
-		// A packet that does not fit is DROPPED, not truncated. copy() silently shortens, and the
-		// carrier would then have shipped a header claiming a length the body no longer has — a
-		// corrupt packet the far end cannot even diagnose.
-		//
-		// No caller in THIS binary can reach it, and the commit that added it claimed otherwise: rbuf
-		// is vnetHdrLen+65535, so a segment is at most 65535 bytes, and every production caller passes
-		// exactly maxDatagram = 65535 — the comparison is 65535 > 65535 on every possible input. Read
-		// is an exported method though, so this stays as the boundary guard it is; what changed is that
-		// its counter is no longer printed when it is zero, which was always.
+		// A packet that does not fit is DROPPED, not truncated. copy() silently shortens, and the carrier
+		// would then ship a header claiming a length the body no longer has — a corrupt packet the far end
+		// cannot even diagnose. No caller in THIS binary can reach it (rbuf is vnetHdrLen+65535 and every
+		// caller passes maxDatagram), but Read is exported, so this stays as the boundary guard it is.
 		if len(seg) > len(buf) {
 			d.nOversize.Add(1)
 			continue
@@ -284,11 +259,10 @@ func (d *Device) readGSO() ([][]byte, error) {
 		segs, split = splitGSO(pkt, gsoSize, gsoType)
 	}
 	if !split {
-		// Either a plain packet or a super-packet splitGSO handed back untouched. BOTH still
-		// carry the kernel's DEFERRED (virtio partial) checksum when NEEDS_CSUM is set, so both
-		// have to be finalized — the old code only did it on the plain-packet branch, and every
-		// pass-through therefore left the partial sum sitting in the checksum field. The far end
-		// drops those on arrival: a silent hole in the stream, with nothing logged at either end.
+		// Either a plain packet or a super-packet splitGSO handed back untouched. BOTH still carry the
+		// kernel's DEFERRED (virtio partial) checksum when NEEDS_CSUM is set, so both have to be finalized —
+		// finalizing only the plain-packet branch leaves every pass-through with the partial sum in the
+		// checksum field, which the far end drops: a silent hole in the stream, with nothing logged.
 		if flags&vnetNeedsCsum != 0 {
 			finalizeCsum(pkt)
 		}
@@ -304,11 +278,10 @@ func (d *Device) readGSO() ([][]byte, error) {
 	return segs, nil
 }
 
-// Write injects one L3 packet. With GSO the kernel expects a virtio-net header
-// prefix; a zero header means "one complete packet, checksums done".
-// Write hands one L3 packet to the kernel. There is no GRO here — the write side never coalesces — so
-// with GSO on this pays one allocation and one copy per packet just to prepend the virtio header. That
-// is the cost side of the knob, and it is why the offload is a read-side win, not a symmetric one.
+// Write hands one L3 packet to the kernel. With GSO the kernel expects a virtio-net header prefix, and a
+// zero header means "one complete packet, checksums done". There is no GRO here — the write side never
+// coalesces — so with GSO on this pays one allocation and one copy per packet just to prepend that
+// header. That is the cost side of the knob, and why the offload is a read-side win, not a symmetric one.
 func (d *Device) Write(pkt []byte) (int, error) {
 	if !d.gso {
 		return d.wr(pkt)

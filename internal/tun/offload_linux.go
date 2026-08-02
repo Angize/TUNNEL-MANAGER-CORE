@@ -1,19 +1,9 @@
 //go:build linux
 
-// GSO offload for the TUN device — GSO ONLY. Despite how the knob has been labelled, there is no GRO
-// anywhere in this core: the net→tun direction never coalesces packets, it writes them one at a time
-// (Device.Write), and with the knob on it pays an extra allocation and copy per packet to prepend the
-// virtio header. So the knob buys read-side syscalls and costs a little on the write side; naming it
-// "GSO/GRO" promised a second half that does not exist.
-//
-// When enabled, the interface is opened with
-// a virtio-net header and TCP/UDP segmentation offload, so the kernel hands the
-// core ONE large "super-packet" (up to 64 KiB) instead of dozens of MTU-sized
-// packets on bulk transfers. readGSO splits that super-packet back into ordinary
-// L3 packets in userspace (recomputing every IP/TCP/UDP checksum from scratch,
-// which sidesteps the virtio partial-checksum convention entirely), so the rest
-// of the core — and the wire format between the two ends — is unchanged. The
-// win is purely fewer TUN read syscalls and copies per byte moved.
+// GSO offload for the TUN device — GSO ONLY. There is no GRO anywhere in this core: the net→tun
+// direction never coalesces, and with the knob on it pays an extra allocation and copy per packet to
+// prepend the virtio header. On the read side the kernel hands the core ONE large super-packet instead
+// of dozens of MTU-sized ones, and readGSO splits it back in userspace, so the wire format is unchanged.
 package tun
 
 import "encoding/binary"
@@ -29,14 +19,10 @@ const (
 
 	vnetHdrLen = 10 // sizeof(struct virtio_net_hdr)
 
-	// virtio_net_hdr.gso_type. VIRTIO_NET_HDR_GSO_UDP (3) is LEGACY UFO — IP-fragmentation
-	// semantics, where the segments are IP fragments of one datagram, NOT one datagram each.
-	// Splitting it with segment() would build a stream of independent UDP datagrams that each
-	// claim the whole payload's header: silent corruption. The type that DOES mean "one UDP
-	// datagram per segment" is VIRTIO_NET_HDR_GSO_UDP_L4 (5), USO, added in Linux 6.2.
-	// Neither is requested today (see the TUNSETOFFLOAD flags above), so neither arrives — but
-	// naming 3 "UDP" and segmenting it left a mine for whoever adds TUN_F_USO4/USO6 to that
-	// ioctl expecting UDP upload to accelerate.
+	// virtio_net_hdr.gso_type. VIRTIO_NET_HDR_GSO_UDP (3) is LEGACY UFO — IP-fragmentation semantics,
+	// where the segments are IP fragments of ONE datagram, not one datagram each — so splitting it with
+	// segment() would build independent datagrams that each claim the whole payload's header. The type
+	// that does mean one datagram per segment is USO (5). Neither is requested today.
 	gsoNone  = 0
 	gsoTCPv4 = 1
 	gsoUFO   = 3 // legacy UFO: IP fragments, NOT per-datagram — never segment this
@@ -48,12 +34,10 @@ const (
 	vnetNeedsCsum = 0x01
 )
 
-// splitGSO turns one virtio super-packet into ordinary L3 packets. gsoSize is the segment payload
-// size (MSS). split reports whether the packet was really segmented: when it is false the caller
-// gets the super-packet back UNCHANGED and must treat it exactly like a non-GSO read — in
-// particular it still carries the virtio partial checksum when VIRTIO_NET_HDR_F_NEEDS_CSUM is set,
-// and it is still up to 64 KiB. Every "give it back as-is" path in here reports false, including
-// segment()'s own bail-outs, so no caller can mistake a pass-through for a finished segment.
+// splitGSO turns one virtio super-packet into ordinary L3 packets. gsoSize is the segment payload size.
+// split reports whether the packet was really segmented: when false the caller gets the super-packet
+// back UNCHANGED and must treat it exactly like a non-GSO read — it still carries the virtio partial
+// checksum when NEEDS_CSUM is set, and is still up to 64 KiB. Every give-it-back path reports false.
 func splitGSO(pkt []byte, gsoSize, gsoType int) (segs [][]byte, split bool) {
 	switch gsoType &^ gsoECN {
 	case gsoTCPv4, gsoTCPv6:
@@ -205,14 +189,10 @@ func finalizeCsum(pkt []byte) {
 	}
 }
 
-// ipv6L4Offset walks the IPv6 extension-header chain, starting from the fixed
-// header's Next Header field (byte 6), to locate the true L4 header. It returns
-// the byte offset of the L4 header and the final protocol number. ok is false
-// when the packet is truncated or the chain contains an unrecognized extension
-// header; the caller must then leave the packet unmodified rather than write an
-// L4 checksum at a guessed offset. Only the standard extension headers are
-// recognized: hop-by-hop (0), routing (43), fragment (44, fixed 8 bytes) and
-// destination-options (60); anything else is treated as the upper-layer proto.
+// ipv6L4Offset walks the IPv6 extension-header chain from the fixed header's Next Header field to locate
+// the true L4 header, returning its byte offset and the final protocol number. ok is false when the
+// packet is truncated or the chain holds an unrecognized extension header, in which case the caller must
+// leave the packet unmodified rather than write a checksum at a guessed offset. Standard headers only.
 func ipv6L4Offset(pkt []byte) (l4Off int, proto byte, ok bool) {
 	if len(pkt) < 40 {
 		return 0, 0, false
