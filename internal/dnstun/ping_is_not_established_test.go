@@ -79,7 +79,8 @@ func TestOneKeepalivePingDoesNotBlockTheAdoptInPlaceRecovery(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("ServeSession stayed parked after a new client fully dialed. One keepalive ping from " +
 			"the PREVIOUS client marked the session established, so the new one was torn down instead " +
-			"of adopted — the #132 recovery, defeated by a packet that carries no data at all.")
+			"of adopted, so the recovery a restarted peer depends on is defeated by a packet that " +
+			"carries no data at all.")
 	}
 }
 

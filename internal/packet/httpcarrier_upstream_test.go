@@ -21,7 +21,7 @@ func TestUpstreamSizingInvariants(t *testing.T) {
 	inFlight := upWorkers * maxUpBatch
 	waiting := upChanCap*1400 + upWorkCap*maxUpBatch
 
-	// Capacity: at a CDN-ish 150 ms round-trip the window has to be worth tens of Mbit, or the
+	// Capacity: at a CDN-ish round-trip the in-flight window has to be worth tens of Mbit, or the
 	// carrier itself becomes the bottleneck and the inner TCP never gets to see the real path.
 	if got := float64(inFlight) * 8 / 0.150 / 1e6; got < 40 {
 		t.Errorf("in-flight window %d B ⇒ only %.1f Mbit at a 150ms RTT; want >= 40", inFlight, got)
@@ -33,8 +33,7 @@ func TestUpstreamSizingInvariants(t *testing.T) {
 			waiting, 3*maxUpBatch)
 	}
 	// The write channel must be able to hold one whole batch: the batcher only coalesces what is
-	// ALREADY queued, so a channel smaller than a batch silently caps the batch size — measured 6.3
-	// Mbit instead of 29.7 when this was set to 16.
+	// ALREADY queued, so a channel smaller than a batch silently caps the batch size.
 	if upChanCap*1400 < maxUpBatch {
 		t.Errorf("upChanCap %d chunks (%d B) cannot hold one %d B batch, so batches stay small",
 			upChanCap, upChanCap*1400, maxUpBatch)
@@ -70,7 +69,7 @@ func TestSetHTTPCUpstream(t *testing.T) {
 		t.Fatalf("all-zero must leave the defaults alone, got %d/%d/%v", upWorkers, maxUpBatch, upMinGap)
 	}
 
-	SetHTTPUpstream(4, 512, 30) // the measured ArvanCloud profile
+	SetHTTPUpstream(4, 512, 30) // the ArvanCloud profile
 	if upWorkers != 4 || maxUpBatch != 512<<10 {
 		t.Errorf("workers/batch not applied: %d/%d", upWorkers, maxUpBatch)
 	}
@@ -307,8 +306,8 @@ func TestXhUpCoalescesAndReassemblesOutOfOrder(t *testing.T) {
 	if len(seqs) >= chunks {
 		t.Fatalf("%d POSTs for %d chunks — nothing coalesced", len(seqs), chunks)
 	}
-	// The point of the window: batches must be able to exceed the old 32 KiB cap, which is what made
-	// the upstream a 4.4 Mbit bottleneck.
+	// The point of the window: a batch must be able to exceed 32 KiB, or a slow edge holds the
+	// upstream down no matter how much is queued behind it.
 	if maxBody <= 32<<10 {
 		t.Errorf("largest batch was %d B; with a slow edge and %d queued chunks it should exceed 32 KiB",
 			maxBody, chunks)

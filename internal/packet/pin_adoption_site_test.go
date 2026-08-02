@@ -74,7 +74,7 @@ func TestActiveAdoptionStillConsultsThePin(t *testing.T) {
 			"resolved its edge BEFORE an operator pin can then be adopted as the live carrier: the " +
 			"operator lands on an edge they did not pick, and because that edge does not match, " +
 			"pinApplied never clears the pin — so proactive rotation stays frozen for the rest of " +
-			"pinTTL. That is the report core #204 was written for.")
+			"pinTTL.")
 	}
 	if !refuses {
 		t.Fatal("the activeReady arm still calls pool.pinMatches, but no `if` that tests it leaves the " +

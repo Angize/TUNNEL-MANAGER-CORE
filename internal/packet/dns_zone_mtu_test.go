@@ -27,7 +27,7 @@ func TestDNSRefusesAZoneThatLeavesAnUnusableMTU(t *testing.T) {
 	}
 
 	shortOK := false
-	for _, n := range []int{10, 20, 40, 75, 87} { // measured: these leave 87, 81, 69, 47 and 40 bytes
+	for _, n := range []int{10, 20, 40, 75, 87} { // zone lengths whose budget straddles the floor
 		if _, err := newDNS(nil, true, "", nil, zoneOf(n), "psk", "chacha20-poly1305", 0); err == nil {
 			shortOK = true
 			break
@@ -66,8 +66,8 @@ func TestDNSMTUFloorClearsKCPsOwnHeader(t *testing.T) {
 		t.Fatalf("the MTU floor %d is at or below KCP's own %d-byte header — SetMtu refuses it outright, "+
 			"KCP silently keeps its 1400-byte default, and nothing reports it", dnsMinMTU, dnstun.KCPOverhead)
 	}
-	// The ceiling. A DNS query name is 255 bytes and base32 costs 8 characters per 5, so even a
-	// ten-character zone leaves only ~87 (measured). A floor near that refuses zones that work.
+	// The ceiling. A DNS query name is 255 bytes and base32 costs 8 characters per 5, so even a short
+	// zone leaves little room, and a floor near what a zone can actually leave refuses zones that work.
 	if dnsMinMTU > 80 {
 		t.Fatalf("the MTU floor %d is close to what any zone can leave (~87 for a ten-character zone) — "+
 			"almost no dns tunnel could start", dnsMinMTU)
