@@ -650,6 +650,7 @@ func (f *Flux) handleCrypto(body []byte, addr *net.IPAddr) {
 	for _, st := range f.staged {
 		if typ, session, seq, payload, oerr := f.openWith(st.box.s, body); oerr == nil && st.rp.ok(session, seq) {
 			f.session.Store(st.box)
+			f.fecDec.reset() // a fresh session: the peer may have restarted its block numbering
 			f.rp = st.rp
 			f.staged = nil
 			f.markRx() // a pending session promoted -> genuine inbound
@@ -719,6 +720,7 @@ func (f *Flux) tryHandshake(body []byte, addr *net.IPAddr) {
 		}
 		f.rp = replayGuard{}
 		f.session.Store(&sealerBox{s: s})
+		f.fecDec.reset() // a fresh session: the peer may have restarted its block numbering
 		// Clear the ephemeral so a replayed resp captured on-path hits the ci==nil guard above
 		// instead of re-parsing and wiping the fresh anti-replay window. A legitimate
 		// re-handshake regenerates a fresh ci in sendInit (ci==nil path).

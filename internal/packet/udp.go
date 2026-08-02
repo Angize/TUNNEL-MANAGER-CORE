@@ -860,6 +860,7 @@ func (b *UDP) handleCrypto(pkt []byte, addr *net.UDPAddr) {
 	for _, st := range b.staged {
 		if typ, session, seq, payload, oerr := b.openWith(st.box.s, pkt); oerr == nil && st.rp.ok(session, seq) {
 			b.session.Store(st.box)
+			b.fecDec.reset() // a fresh session: the peer may have restarted its block numbering
 			b.rp = st.rp
 			b.staged = nil
 			b.markRx() // a pending session promoted -> genuine inbound
@@ -889,6 +890,7 @@ func (b *UDP) tryHandshake(pkt []byte, addr *net.UDPAddr) {
 		}
 		b.rp = replayGuard{}
 		b.session.Store(&sealerBox{s: s})
+		b.fecDec.reset() // a fresh session: the peer may have restarted its block numbering
 		// Clear the ephemeral so a replayed resp captured on-path hits the ci==nil guard above
 		// instead of re-parsing and wiping the fresh anti-replay window. A legitimate
 		// re-handshake regenerates a fresh ci in sendInit (ci==nil path).
