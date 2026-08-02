@@ -80,7 +80,7 @@ func TestUnbindableSourceLeavesRotationEvenWithAutoBurnOff(t *testing.T) {
 			if a, moved := sp.rotateOnce(); moved {
 				t.Fatalf("the next rotation went straight back to %q. An IP the kernel refuses is a local "+
 					"impossibility, not the remote-reachability question peer_auto_burn is a policy for — "+
-					"leaving it in rotation is the #189/#214 defect, and on the raw udp/tcp profiles it is "+
+					"leaving it in rotation is the defect, and on the raw udp/tcp profiles it is "+
 					"a silent blackout", a)
 			}
 		})

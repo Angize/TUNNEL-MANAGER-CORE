@@ -58,7 +58,7 @@ func TestAntiLeakScopeIsNotDraggedBackByAStragglerFrame(t *testing.T) {
 		r.leak.apply() // scopeAsync hands off to a goroutine; run the same work synchronously
 
 		if got := rec.last(); got != live {
-			t.Errorf("a straggler from %s dragged the anti-leak rules onto it; they are now OFF %s, which is the endpoint carrying the tunnel — the #211 kernel-answer leak, re-opened on every rotation", old, live)
+			t.Errorf("a straggler from %s dragged the anti-leak rules onto it; they are now OFF %s, which is the endpoint carrying the tunnel — the kernel-answer leak, re-opened on every rotation", old, live)
 		}
 	})
 

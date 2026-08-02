@@ -80,9 +80,8 @@ func TestUDPRotationKeepsStreamFlowing(t *testing.T) {
 	}
 	_ = srvCtrl.SetReadDeadline(time.Time{})
 
-	// With the fix the re-handshake starts immediately, so the worst gap is ~1 RTT (loopback: a few ms).
-	// Pre-fix it was ~1s (sleep the retransmit interval before the first init). 500ms cleanly separates
-	// the two with generous CI headroom.
+	// The re-handshake has to start immediately, so the worst gap is about one RTT. The bound below sits
+	// far above that and far below a rotation that waits out a retransmit interval before its first init.
 	if maxGap > 500*time.Millisecond {
 		t.Fatalf("largest stream gap across a rotation = %v, want < 500ms (rotation must not stall the stream)", maxGap)
 	}
