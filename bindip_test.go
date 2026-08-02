@@ -19,11 +19,10 @@ func (p *pinsByPool) SetSourcePool(sp *packet.PeerPool) { p.got = sp }
 // pinsNothing is a dns-shaped carrier: it can pin no source at all.
 type pinsNothing struct{}
 
-// bind_ip must reach EVERY carrier that can honour it. It was implemented only for the TCP family:
-// the type assertion had no else and the "binding outbound source IP" log line lived inside its
-// successful branch, so on udp/raw/flux the knob was a silent no-op — the kernel picked the route's
-// default source while the panel showed the node's registered address. The node stamps bind_ip from
-// local_ip on every client core tunnel, so this was every udp/raw/flux tunnel on a multi-IP host.
+// bind_ip must reach EVERY carrier that can honour it. It was implemented only for the TCP family: the
+// type assertion had no else and the "binding outbound source IP" log line lived inside its successful
+// branch, so on udp/raw/flux the knob was a silent no-op while the panel showed the node's registered
+// address. The node stamps bind_ip from local_ip on every client core tunnel.
 func TestBindIPReachesEveryCarrierThatCanHonourIt(t *testing.T) {
 	const ip = "203.0.113.9"
 

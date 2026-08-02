@@ -1,12 +1,10 @@
-// Command tnl-core is the custom data-plane core for the tunnel fleet
-// manager. It carries raw L3 packets over a TUN device across a selectable
-// transport (udp/tcp/raw/flux/ws/http) with optional configurable crypto.
+// Command tnl-core is the custom data-plane core for the tunnel fleet manager. It carries raw L3
+// packets over a TUN device across a selectable transport (udp/tcp/raw/flux/ws/http) with optional
+// configurable crypto. The node agent owns the config file; the core just runs what it is told.
 //
 // Usage:
 //
 //	tnl-core --config /run/tnl/core-<id>.json
-//
-// The node agent owns the config file; the core just runs what it is told.
 package main
 
 import (
@@ -34,16 +32,10 @@ const version = "0.1.0-core"
 // TUN device, a kernel that lacks IFF_VNET_HDR, or root.
 type tunOpener func(name string, mtu int, addr string, gso bool) (*tun.Device, error)
 
-// openTUN opens the TUN and returns the gso setting the device ACTUALLY got.
-//
-// A failed gso ioctl falls back to a plain device: gso is a throughput knob, not a
-// requirement, so it must never keep the tunnel from coming up.
-//
-// A gso-specific failure is now retried ONCE without gso. The retry is also what
-// makes the log honest: ErrGSOUnsupported cannot tell "no vnet-hdr here" from "no
-// CAP_NET_ADMIN" (same ioctl, and the errno does not distinguish them), so the
-// message is only written when the plain open actually succeeded. If it fails too,
-// gso was never the problem and the error reported is the SECOND one — the real cause.
+// openTUN opens the TUN and returns the gso setting the device ACTUALLY got. A failed gso ioctl falls
+// back to a plain device — gso is a throughput knob, not a requirement. The retry is also what makes
+// the log honest: ErrGSOUnsupported cannot tell "no vnet-hdr here" from "no CAP_NET_ADMIN", so the
+// message is written only when the plain open succeeded; if that fails too, the SECOND error is real.
 func openTUN(open tunOpener, name string, mtu int, addr string, gso bool) (*tun.Device, bool, error) {
 	dev, err := open(name, mtu, addr, gso)
 	if err == nil {
@@ -100,11 +92,10 @@ func main() {
 	// resolved by applyDefaults (4 MiB default; negative = leave the kernel default).
 	packet.SetSockBuf(cfg.SockBuf)
 
-	// Open the TUN device BEFORE building the sealer. The sealer's constructor may
-	// draw from crypto/rand; on hosts without getrandom(2) that opens /dev/urandom
-	// and registers it with the runtime netpoller, which can leave a subsequently
-	// opened TUN fd in a half-pollable state (reads fail with "not pollable" and
-	// the reader loop dies). Setting up the TUN first avoids that ordering hazard.
+	// Open the TUN device BEFORE building the sealer. The sealer's constructor may draw from crypto/rand;
+	// on hosts without getrandom(2) that opens /dev/urandom and registers it with the runtime netpoller,
+	// which can leave a subsequently opened TUN fd in a half-pollable state — reads fail with "not
+	// pollable" and the reader loop dies.
 	dev, gsoOn, err := openTUN(tun.Open, cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO)
 	if err != nil {
 		log.Fatalf("tnl-core: tun: %v", err)
@@ -319,17 +310,10 @@ func main() {
 	case pinUnsupported:
 		log.Printf("core: WARNING carrier %s ignores bind_ip — it can pin neither a source IP nor a source pool, so this tunnel egresses from whatever source the kernel routes it out of", cfg.Transport)
 	}
-	// Per-tunnel self-heal deadline: when set, tighten the carrier's dead-detection window so this
-	// tunnel re-establishes/fails over faster than the default (~3×keepalive / 60s idle backstop).
-	// Every carrier implements it; a 0 value leaves the default formula in place.
-	//
-	// Applied on BOTH roles, not just the client. The panel writes dead_after_secs onto both ends of a
-	// tunnel and config.go validates it on both, but this was gated on "client" — so on tcp/ws, where
-	// the window IS the connection's read deadline and the server has one of its own, the server kept
-	// its default (~60s) while the client honoured the operator's 20s. Half the tunnel self-healed at
-	// the configured speed and the other half did not. On the connectionless carriers (udp/raw/flux)
-	// the server holds no such window at all — there is no connection to reap — so this is inert
-	// there by shape, not by oversight.
+	// Per-tunnel self-heal deadline: when set, tighten the carrier's dead-detection window so this tunnel
+	// re-establishes or fails over faster than the default. Applied on BOTH roles, because on tcp/ws the
+	// window IS the connection's read deadline and the server has one of its own. On the connectionless
+	// carriers the server holds no such window at all, so it is inert there by shape, not by oversight.
 	applyDeadAfter(b, cfg.Transport, cfg.Keepalive, cfg.DeadAfterSecs)
 	// Wire the status file: a liveness heartbeat (hb) plus this carrier's resolved dead window (dw),
 	// and an event ring carrying the client's precise self-heal reasons into the node/panel system
@@ -363,11 +347,10 @@ func main() {
 	if cfg.Role == "client" && cfg.SNISplit {
 		applySNISplit(b, cfg.Transport, cfg.SNIMode, cfg.SplitPos, cfg.SplitTTL)
 	}
-	// Destination rotation pool (client, direct transports udp/tcp/raw/flux): cycle the peer IPs and
-	// burn a blocked one so a single filtered server IP doesn't kill the tunnel — the direct-transport
-	// analogue of the ws edge pool. Only the direct carriers implement SetPeerPool; ws (its own edge
-	// pool) and the server ignore it. Needs >=2 endpoints to actually rotate (config allows fewer only
-	// as the degenerate single-peer case, which never moves).
+	// Destination rotation pool (client, direct transports udp/tcp/raw/flux): cycle the peer IPs and burn
+	// a blocked one, so a single filtered server IP does not kill the tunnel. Only the direct carriers
+	// implement SetPeerPool; ws has its own edge pool and the server ignores it. Needs >=2 endpoints to
+	// actually rotate.
 	if cfg.Role == "client" && len(cfg.PeerIPs) >= 2 {
 		if s, ok := b.(interface{ SetPeerPool(*packet.PeerPool) }); ok {
 			pp := packet.NewPeerPool(cfg.PeerIPs, cfg.PeerAutoBurn, time.Duration(cfg.PeerRotateSecs)*time.Second, cfg.PeerStatusPath)
@@ -376,12 +359,9 @@ func main() {
 		}
 	}
 	// Source rotation pool (client, direct transports): cycle the client's OWN source IPs alongside the
-	// destination pool (same rotate/auto-burn settings). raw/flux swap the crafted-header source, udp
-	// rebinds its socket, tcp re-dials with a new LocalAddr. Only the direct carriers implement it. The
-	// source pool doesn't own a status file (the destination pool writes the panel-facing status).
-	// >=1 (not >=2): a LONE src_ip is a fixed source that supersedes bind_ip (per the field doc) — it
-	// wires a 1-entry pool that seeds the source and never rotates. Without this a single src_ip was
-	// silently ignored and the kernel picked the default egress IP. A >=2 pool rotates as before.
+	// destination pool. raw/flux swap the crafted-header source, udp rebinds its socket, tcp re-dials with
+	// a new LocalAddr. The gate is >=1, not >=2: a LONE src_ip is a fixed source that supersedes bind_ip,
+	// wired as a one-entry pool that seeds the source and never rotates.
 	if cfg.Role == "client" && len(cfg.SrcIPs) >= 1 {
 		if s, ok := b.(interface{ SetSourcePool(*packet.PeerPool) }); ok {
 			sp := packet.NewPeerPool(cfg.SrcIPs, cfg.PeerAutoBurn, time.Duration(cfg.PeerRotateSecs)*time.Second, cfg.SrcStatusPath)
@@ -390,10 +370,9 @@ func main() {
 		}
 	}
 	// Pooled server (raw/flux): the client rotates its SOURCE IP, but these carriers see every host on the
-	// wire and pre-filter incoming frames by the learned peer source. Give the server the client's known
-	// source pool so a rotated source still reaches crypto (which authenticates it) and learnPeer re-binds
-	// — otherwise a source rotation strands the server on the stale source until a rebuild. udp/tcp bind a
-	// socket per source and re-learn naturally, so they don't implement this.
+	// wire and pre-filter incoming frames by the learned peer source. Giving the server the client's known
+	// source pool lets a rotated source reach crypto, which authenticates it, and learnPeer re-bind.
+	// udp/tcp bind a socket per source and re-learn on their own.
 	if cfg.Role == "server" && len(cfg.PeerSrcIPs) > 0 {
 		if s, ok := b.(interface{ SetPeerSources([]string) }); ok {
 			s.SetPeerSources(cfg.PeerSrcIPs)
@@ -439,20 +418,10 @@ const (
 	pinUnsupported = "unsupported" // the carrier can pin neither, so the kernel chooses
 )
 
-// pinSource pins the client's outbound source IP to this node's own registered IP when bind_ip is
-// set, so on a multi-IP host the peer/CDN sees THAT address instead of whatever the route's default
-// source happens to be. The node stamps bind_ip from local_ip on every client core tunnel, so this
-// runs on effectively all of them.
-//
-// SetSourceIP is a TCP-family method (tcp/ws/http re-dial with a LocalAddr). udp/raw/flux have no
-// such method — they pin a source through the source POOL, whose gate is deliberately len>=1 so a
-// LONE entry is a fixed source that never rotates. bind_ip therefore becomes a one-entry pool there
-// rather than nothing: the same request, expressed the way those carriers already implement it.
-//
-// Doing nothing was the bug, and it was silent in both directions: the type assertion had no else,
-// and the "binding outbound source IP" line lived inside its successful branch. So on udp/raw/flux
-// the kernel picked the route's default source and NOTHING said the operator's chosen node address
-// was unused — on a host whose other addresses are burned, that is the entire point of the knob.
+// pinSource pins the client's outbound source IP to this node's own registered IP when bind_ip is set,
+// so on a multi-IP host the peer or CDN sees THAT address instead of the route's default source. The
+// node stamps bind_ip from local_ip on every client core tunnel. SetSourceIP is a TCP-family method;
+// udp/raw/flux pin a source through the source POOL, so bind_ip becomes a one-entry pool there.
 func pinSource(b any, cfg *Config) string {
 	if cfg.Role != "client" || cfg.BindIP == "" {
 		return pinNone
@@ -481,14 +450,8 @@ func pinSource(b any, cfg *Config) string {
 
 // effectiveDeadAfter resolves the dead window a carrier will REALLY enforce for the operator's
 // dead_after_secs, plus a short note naming the floor that applied — so the startup log cannot promise
-// a number the carrier then overrides.
-//
-// Every carrier floors the override, but not by the same rule: udp/tcp/raw/flux clamp up to 2×keepalive,
-// while dns applies its own ABSOLUTE floor (dnstun's dead floor) because that carrier is high-loss and
-// its window must survive several dropped pings. Logging 2×keepalive for dns was wrong in BOTH
-// directions — with keepalive=15/dead_after=10 it printed 30s against a real 20s, and with
-// keepalive=5/dead_after=10 it printed 10s against the same real 20s. An operator asking why a dns
-// tunnel self-heals when it does was reading a number nothing enforced.
+// a number the carrier then overrides. Every carrier floors it, but not by the same rule: udp/tcp/raw/
+// flux clamp up to 2×keepalive, while dns applies its own ABSOLUTE floor, being a high-loss carrier.
 func effectiveDeadAfter(transport string, keepaliveSecs, deadAfterSecs int) (int, string) {
 	floor, note := 2*keepaliveSecs, "≥2×keepalive"
 	if transport == "dns" {
@@ -501,16 +464,10 @@ func effectiveDeadAfter(transport string, keepaliveSecs, deadAfterSecs int) (int
 	return deadAfterSecs, note
 }
 
-// applyDeadAfter wires the per-tunnel self-heal deadline into the carrier and logs the EFFECTIVE
-// value. It deliberately takes NO role: dead_after_secs is written onto both ends of a tunnel by the
-// panel and validated on both by config.go, and on tcp/ws the window IS the connection's read
-// deadline, which the server has one of too. Gating this on role=="client" left the server reaping a
-// dead connection on its own ~60s default while the client honoured the operator's 20s — half the
-// tunnel self-healing at the configured speed and half not. On the connectionless carriers the
-// server holds no such window at all (there is no connection to reap), so this is inert there by the
-// shape of the carrier rather than by a gate.
-//
-// Split out of main so the decision is reachable from a test without opening a TUN.
+// applyDeadAfter wires the per-tunnel self-heal deadline into the carrier and logs the EFFECTIVE value.
+// It deliberately takes NO role: dead_after_secs is written onto both ends by the panel and validated
+// on both, and on tcp/ws the window IS the connection's read deadline, which the server has too. Split
+// out of main so the decision is reachable from a test without opening a TUN.
 func applyDeadAfter(b any, transport string, keepaliveSecs, deadAfterSecs int) bool {
 	if deadAfterSecs <= 0 {
 		return false // leave each carrier's default formula in place
@@ -524,12 +481,10 @@ func applyDeadAfter(b any, transport string, keepaliveSecs, deadAfterSecs int) b
 		return false
 	}
 	if !s.SetDeadAfter(deadAfterSecs) {
-		// The carrier took the value and will never read it. That happens on the SERVER of a
-		// connectionless carrier (udp/raw/flux/dns): there is no connection to reap, and the loop that
-		// consults the window only runs on a client. Removing the role gate here was right — tcp/ws
-		// servers DO enforce it — but it also meant this function printed "self-heal deadline set to
-		// Ns" on the carriers where nothing enforces anything, which is the same lie about a knob it
-		// was written to stop telling.
+		// The carrier took the value and will never read it. That happens on the SERVER of a connectionless
+		// carrier (udp/raw/flux/dns): there is no connection to reap, and the loop that consults the window
+		// only runs on a client. Printing "self-heal deadline set to Ns" there would be the same lie about a
+		// knob this function exists to stop telling.
 		log.Printf("core: dead_after_secs is stored but not enforced on this end (%s server): a "+
 			"connectionless server holds no dead window — the CLIENT end reaps the session", transport)
 		return false
@@ -539,14 +494,10 @@ func applyDeadAfter(b any, transport string, keepaliveSecs, deadAfterSecs int) b
 	return true
 }
 
-// applySNISplit wires SNI fragmentation into the carrier and logs what really happened.
-//
-// The old code printed "SNI fragmentation on" for any carrier that merely HAD the method. *TCP has
-// it for transport=tcp as well as ws, and on tcp it discards the setting — no ClientHello of ours
-// goes to an edge there — so a tcp tunnel logged positive confirmation of a defence that was not
-// running. Report what the carrier actually accepted instead.
-//
-// Split out of main so the decision is reachable from a test without opening a TUN.
+// applySNISplit wires SNI fragmentation into the carrier and logs what really happened. *TCP has the
+// method for transport=tcp as well as ws, and on tcp it discards the setting — no ClientHello of ours
+// goes to an edge there — so reporting on the method's presence gives a tcp tunnel positive
+// confirmation of a defence that is not running. Split out of main so a test can reach the decision.
 func applySNISplit(b any, transport, mode string, pos, ttl int) bool {
 	if mode == "" {
 		mode = "split"

@@ -6,10 +6,9 @@ import (
 )
 
 // TestHTTPUpBatchMessageMatchesTheCheck guards that the rejection text names the range the predicate
-// actually enforces. The check accepts 0..512 and SetHTTPUpstream then raises anything below 8 to 8
-// (tclamp) — a safe direction, so the clamp stays. What could not stay is a message naming 8 as the
-// floor: an operator who set 4 got NO error, ran on 8, and if they later typo'd the value the error
-// they finally saw described a range the code does not enforce.
+// actually enforces. The check accepts 0..512 and SetHTTPUpstream then raises anything below 8 to 8, a
+// safe direction, so the clamp stays. What cannot stay is a message naming 8 as the floor: an operator
+// who set 4 got NO error, ran on 8, and on a later typo saw an error naming a range nothing enforces.
 func TestHTTPUpBatchMessageMatchesTheCheck(t *testing.T) {
 	base := func() *Config {
 		return &Config{
@@ -309,14 +308,9 @@ func TestListenIPsValidated(t *testing.T) {
 }
 
 // TestListenIPsRejectedWhereItIsIgnored closes the class, not one line: listen_ips is validated in the
-// shared `case "server"` arm, but main.go hands it ONLY to the tcp and udp listeners. On every other
-// carrier the pool was checked, stored and advertised while the server bound cfg.Listen alone — and a
-// pooled RAW server is worse than cosmetic, since a bound AF_INET raw socket is demuxed by destination
-// and goes deaf to every pool IP but one.
-//
-// Each transport is asserted VALID without listen_ips first, so a base that is malformed for some other
-// reason fails loudly here instead of making the rejection below pass for the wrong reason; and the
-// error text must name listen_ips, so an unrelated rejection cannot be mistaken for this one.
+// shared `case "server"` arm, but main.go hands it ONLY to the tcp and udp listeners. Elsewhere the
+// pool was checked, stored and advertised while the server bound cfg.Listen alone — and a pooled RAW
+// server is worse than cosmetic, since a bound AF_INET raw socket is demuxed by destination.
 func TestListenIPsRejectedWhereItIsIgnored(t *testing.T) {
 	psk := CryptoCfg{Enabled: true, PSK: "a-sufficiently-long-preshared-key"}
 	srv := func(tr string) *Config {

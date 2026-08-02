@@ -2,16 +2,10 @@ package main
 
 import "testing"
 
-// fec_data has an upper bound the sum rule (fec_data+fec_parity<=255) says nothing about: the
-// RECEIVER has to be able to repair the block.
-//
-// The decoder delivers intact data shards on arrival and parity-recovered ones last, so a repaired
-// frame reaches the AEAD up to blocksize-1 sequence numbers behind the newest one already delivered
-// — and the replay guard refuses anything a full window behind as too old to prove it is not a
-// replay. Past that size the parity is computed, transmitted, reconstructed and then discarded:
-// FEC costs its full bandwidth and repairs nothing, in silence, for the life of the tunnel.
-//
-// Measured on the guard itself before this bound was written: 63 and 64 recover, 65 and above do not.
+// fec_data has an upper bound the sum rule (fec_data+fec_parity<=255) says nothing about: the RECEIVER
+// has to be able to repair the block. The decoder delivers intact shards on arrival and recovered ones
+// last, so a repaired frame reaches the AEAD up to blocksize-1 sequences behind the newest, and the
+// replay guard refuses anything a full window behind — full bandwidth, no repair, in silence.
 func TestFecDataBoundedByTheReplayWindow(t *testing.T) {
 	base := func(fd, fp int) *Config {
 		return &Config{
