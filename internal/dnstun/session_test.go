@@ -171,11 +171,10 @@ func TestSessionWrongPSKFails(t *testing.T) {
 	}
 }
 
-// TestServeSessionRecoversFromVanishedClient proves the server's single session slot recovers
-// PROMPTLY from a client that arms it (a valid init) then vanishes before completing the KCP
-// handshake (crash, or its own resp was lost so it timed out). A NEW client that fully dials and
-// writes must be ADOPTED IN PLACE and served — the server reads its data — with no reconnect and no
-// re-init, in about one round trip rather than a KCP dead-link timeout.
+// TestServeSessionRecoversFromVanishedClient proves the server's single session slot recovers PROMPTLY
+// from a client that arms it with a valid init and then vanishes before completing the KCP handshake. A
+// NEW client that fully dials and writes must be ADOPTED IN PLACE and served — the server reads its data
+// — with no reconnect and no re-init, in about one round trip rather than a KCP dead-link timeout.
 func TestServeSessionRecoversFromVanishedClient(t *testing.T) {
 	cliT, srvT := newPipePair(0)
 	cfg := SessionConfig{PSK: "recover-me", Cipher: "chacha20-poly1305"}
@@ -236,10 +235,9 @@ func TestServeSessionRecoversFromVanishedClient(t *testing.T) {
 }
 
 // TestServeSessionIgnoresReplayedInit locks in the replayed-init DoS protection: once a client has
-// ESTABLISHED and data is flowing, a bare different-ephemeral init with NO follow-up data — exactly
-// what an on-path attacker replaying a captured init can produce — must NOT tear the live session
-// down. Only a data frame that actually opens under the staged keys (which a replay cannot forge)
-// may promote.
+// ESTABLISHED and data is flowing, a bare different-ephemeral init with NO follow-up data — exactly what
+// an on-path attacker replaying a captured init can produce — must NOT tear the live session down. Only
+// a data frame that actually opens under the staged keys may promote.
 func TestServeSessionIgnoresReplayedInit(t *testing.T) {
 	cliT, srvT := newPipePair(0)
 	cfg := SessionConfig{PSK: "no-teardown", Cipher: "chacha20-poly1305"}

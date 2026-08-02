@@ -103,12 +103,10 @@ func pump(src, dst *QueuePacketConn, via, as net.Addr, lossPct int, rng *mrand.R
 	}
 }
 
-// TestKCPOverQueueReliableWithLoss is the core Phase-A proof: a real kcp-go session over
-// two cross-wired QueuePacketConns delivers a large payload intact IN BOTH DIRECTIONS even
-// when a fifth of datagrams are dropped — i.e. the reliability layer the DNS carrier rides
-// on actually works over a lossy, socket-less transport. It drives the session FULL-DUPLEX
-// (separate read and write goroutines each side), exactly as the real carrier does — never
-// io.Copy on a single session, which would read-then-write in one goroutine and self-stall.
+// TestKCPOverQueueReliableWithLoss is the core proof: a real kcp-go session over two cross-wired
+// QueuePacketConns delivers a large payload intact IN BOTH DIRECTIONS even when a fifth of datagrams are
+// dropped — the reliability layer the DNS carrier rides on works over a lossy, socket-less transport. It
+// drives the session FULL-DUPLEX, as the real carrier does; io.Copy on one session would self-stall.
 func TestKCPOverQueueReliableWithLoss(t *testing.T) {
 	const lossPct = 20
 	const payloadSize = 32 * 1024 // many datagrams, exercises retransmit/reorder

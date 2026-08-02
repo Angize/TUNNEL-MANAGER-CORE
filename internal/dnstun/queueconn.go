@@ -18,18 +18,10 @@ type taggedPacket struct {
 	addr net.Addr
 }
 
-// QueuePacketConn is a net.PacketConn whose reads/writes are backed by in-memory
-// channels instead of a socket, so kcp-go (which speaks net.PacketConn) can run over
-// a transport that is not a socket — here, DNS request/response.
-//
-//   - kcp-go SENDS via WriteTo(p, addr): the datagram is queued; the DNS transport drains
-//     it with OutgoingQueue(addr) and ships it inside a DNS message.
-//   - the DNS transport RECEIVES a datagram and calls QueueIncoming(p, addr); kcp-go then
-//     reads it via ReadFrom.
-//
-// addr is a logical peer identity (a ClientID on the server, the fixed server addr on the
-// client), NOT a UDP address — so a session survives the resolver's source address changing.
-// Modeled on the turbo-tunnel pattern (Fifield).
+// QueuePacketConn is a net.PacketConn backed by in-memory channels instead of a socket, so kcp-go can run
+// over a transport that is not one — here, DNS request/response. kcp-go WriteTo()s a datagram the DNS
+// transport drains with OutgoingQueue; inbound it calls QueueIncoming and kcp-go ReadFrom()s it. addr is
+// a logical peer identity, NOT a UDP address, so a session survives the resolver's source changing.
 type QueuePacketConn struct {
 	local     net.Addr
 	recvQueue chan taggedPacket

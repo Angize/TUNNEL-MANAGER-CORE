@@ -8,20 +8,10 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// TestApexAnswersLookLikeAnOrdinaryNODATA pins the SHAPE of the answer, which the drain fix never
-// looked at.
-//
-// That fix reasoned only about not being SILENT — "a resolver that gets nothing marks the zone lame"
-// — and reached for write(), which always attaches txtResource(EncodeTXT(down)); EncodeTXT(nil) is
-// []string{""}. So `dig TXT <zone>` came back with an actual TXT RR carrying a zero-length string at
-// TTL 0. Essentially no real zone answers that: a zone with no apex TXT returns NOERROR with an EMPTY
-// answer section and its SOA in AUTHORITY. The one probe the branch was added to handle was therefore
-// the probe that most clearly marked the zone as something other than an ordinary authoritative
-// server — which for an anti-censorship carrier is the opposite of what the branch was for.
-//
-// It drives the REAL server over a real socket and reads the packed message, because the defect is
-// invisible to parseResponseTXT (both shapes yield zero payload bytes) and that is exactly why the
-// existing apex tests could not see it.
+// TestApexAnswersLookLikeAnOrdinaryNODATA pins the SHAPE of the apex answer, which the drain fix never
+// looked at: it reasoned only about not being SILENT and reached for write(), which always attaches a TXT
+// record — so `dig TXT <zone>` came back with a zero-length string at TTL 0, which essentially no real
+// zone does. It drives the REAL server and reads the packed message, since both shapes parse as empty.
 func TestApexAnswersLookLikeAnOrdinaryNODATA(t *testing.T) {
 	const zone = "t.example.com"
 	codec, err := NewCodec(zone)

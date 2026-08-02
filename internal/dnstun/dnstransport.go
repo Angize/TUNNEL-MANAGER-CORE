@@ -19,12 +19,10 @@ import (
 var (
 	pollInterval = 40 * time.Millisecond // idle downstream-poll cadence (var so tests can lower it)
 	queryTimeout = 3 * time.Second       // per-query wait for the resolver's answer
-	// serverHold is how long the server briefly withholds a response, waiting for a downstream datagram
-	// to attach to THIS reply (a long-poll). It lets the handshake response ride the very query that
-	// carried the init — and every KCP ack ride the query that prompted it — instead of a later poll,
-	// so a session converges in far fewer round-trips. That is decisive on a lossy or answer-mangling
-	// resolver where each extra round-trip is another chance to fail. Kept well under queryTimeout and a
-	// recursive resolver's own upstream timeout. A var so tests can lower it.
+	// serverHold is how long the server briefly withholds a response, waiting for a downstream datagram to
+	// attach to THIS reply (a long-poll). It lets the handshake response ride the very query that carried
+	// the init, and every KCP ack ride the query that prompted it, so a session converges in far fewer
+	// round-trips. Kept well under queryTimeout. A var so tests can lower it.
 	serverHold = 150 * time.Millisecond
 )
 
@@ -44,11 +42,10 @@ const serverWorkers = 24
 
 const dnsReadBuf = 1500
 
-// newNonce returns a fresh nonceLen-char lowercase-base32 label for one query. It is the leftmost
-// label of every query name, making each name unique so a recursive resolver never serves a query
-// from cache or coalesces two — every poll and every retransmit reaches our authoritative server.
-// crypto/rand is overkill for cache-busting but the volume is ~one label per round-trip, so cost is
-// irrelevant; on the vanishingly rare read error the zero-value bytes still yield a valid label.
+// newNonce returns a fresh nonceLen-char lowercase-base32 label for one query. It is the leftmost label
+// of every query name, making each name unique so a recursive resolver never serves one from cache or
+// coalesces two. crypto/rand is overkill for cache-busting but costs nothing at one label per
+// round-trip; on the rare read error the zero-value bytes still yield a valid label.
 func newNonce() string {
 	var b [(nonceLen*5 + 7) / 8]byte // enough entropy bytes to base32 to >= nonceLen chars
 	_, _ = rand.Read(b[:])
@@ -79,11 +76,10 @@ func parseResponseTXT(buf []byte, wantID uint16) ([]byte, error) {
 	if h.ID != wantID || !h.Response {
 		return nil, errors.New("dns: response id/flag mismatch")
 	}
-	// A rejection is NOT an empty answer. SERVFAIL / REFUSED / NXDOMAIN all arrive with Response set and
-	// a matching ID and no TXT records, so without this check they were indistinguishable from a healthy
-	// response that simply had nothing queued — and the tunnel went quiet with no error at all while the
-	// resolver was refusing every query (rate limit, a blocked zone, a resolver that stopped recursing).
-	// Surfacing it lets the caller's empty/failure accounting see the real cause.
+	// A rejection is NOT an empty answer. SERVFAIL / REFUSED / NXDOMAIN all arrive with Response set, a
+	// matching ID and no TXT records, so without this check they are indistinguishable from a healthy
+	// response that simply had nothing queued — and the tunnel goes quiet with no error at all while the
+	// resolver refuses every query. Surfacing it lets the caller's empty/failure accounting see the cause.
 	if h.RCode != dnsmessage.RCodeSuccess {
 		return nil, fmt.Errorf("dns: resolver returned %v", h.RCode)
 	}
@@ -135,10 +131,9 @@ func parseQuery(buf []byte) (id uint16, name string, qtype dnsmessage.Type, ok b
 }
 
 // buildResponse assembles an authoritative reply: the AA bit is set, RA is cleared, the question is
-// echoed with the type actually queried, and the given answer records are attached. A recursive
-// resolver querying a zone's own nameserver iteratively (RD=0) requires AA on the answer — without
-// it the delegation looks lame and the lookup SERVFAILs, so this bit is what makes the carrier work
-// through real resolvers rather than only a direct-to-server dig.
+// echoed with the type actually queried, and the given answer records are attached. A recursive resolver
+// querying a zone's own nameserver iteratively (RD=0) requires AA — without it the delegation looks lame
+// and the lookup SERVFAILs, so this bit is what makes the carrier work through real resolvers.
 func buildResponse(id uint16, qname dnsmessage.Name, qtype dnsmessage.Type, answers, authority []dnsmessage.Resource) ([]byte, error) {
 	msg := dnsmessage.Message{
 		Header:      dnsmessage.Header{ID: id, Response: true, Authoritative: true},
@@ -161,15 +156,9 @@ func txtResource(name dnsmessage.Name, txt []string) dnsmessage.Resource {
 // ---- client transport (WireTransport) ----
 
 // dnsClient is the client-side WireTransport: it ships each outgoing datagram as a DNS query to a
-// recursive resolver and returns downstream datagrams carried back in the responses. It polls even
-// when idle so the server can push downstream data (a poll is a nonce-only query with no payload).
-//
-// The socket is UNCONNECTED (net.ListenUDP, not DialUDP): a query goes to a resolver picked
-// round-robin from resolvers, and a reply is accepted from ANY source address. Both matter on the
-// lossy, hostile paths this carrier runs on — round-robin spreads each query across every configured
-// resolver so heavy loss on one is covered by the others, and accepting replies from any source keeps
-// working with anycast / smart-DNS resolvers whose answer arrives from a different backend IP than the
-// one queried (a connected socket would drop those). Answers are matched by DNS id, not source.
+// recursive resolver and returns downstream datagrams carried back in the responses. It polls even when
+// idle so the server can push. The socket is UNCONNECTED — queries go round-robin across the resolvers
+// and a reply is accepted from ANY source, since anycast resolvers answer from another backend IP.
 type dnsClient struct {
 	conn      *net.UDPConn
 	resolvers []*net.UDPAddr
@@ -183,12 +172,10 @@ type dnsClient struct {
 	sendErr   sendErrLog    // throttled write-failure logging (see sendlog.go)
 	answerErr sendErrLog    // throttled REJECTED-answer logging (SERVFAIL/REFUSED/NXDOMAIN), same throttle
 
-	// Pipelining state. inflight maps a live query's DNS id to its deadline + the nonce label the
-	// reply must echo (matching by id AND nonce keeps the off-path anti-spoof strength of the old
-	// one-id-at-a-time loop). slots is a counting semaphore of spare in-flight capacity (starts full);
-	// the invariant |inflight| + len(slots) == pipelineWindow holds because a slot is acquired before
-	// the map insert and released after the delete. active flips the send target between idleTarget
-	// and pipelineWindow. wake nudges the sender to refill a just-freed slot. wg joins the 3 loops.
+	// Pipelining state. inflight maps a live query's DNS id to its deadline plus the nonce the reply must
+	// echo (matching on both keeps the off-path anti-spoof strength of the old one-at-a-time loop). slots
+	// is a counting semaphore of spare capacity, so |inflight| + len(slots) == pipelineWindow always holds.
+	// active flips the send target between idleTarget and pipelineWindow.
 	mu       sync.Mutex
 	inflight map[uint16]inflightQuery
 	slots    chan struct{}
@@ -337,14 +324,10 @@ func (c *dnsClient) fill() bool {
 		if !c.sendOne(nil) {
 			return false
 		}
-		// sendOne rolls its slot back and still returns true on ANY pre-send failure — an unroutable
-		// resolver (ENETUNREACH from an IPv6 entry on a v4-only node), an egress REJECT (EPERM), an
-		// encode error. The in-flight count then never reaches target and this became a tight, sleepless
-		// loop that pegged a core for the life of the transport, allocating a fresh nonce and DNS id
-		// every iteration, while nothing was logged: the operator saw only "handshake timed out", which
-		// reads as censorship and sends diagnosis in the wrong direction.
-		// Stop filling this round instead. The ticker retries, the transport stays alive, and the
-		// failure surfaces through sendOne's own log.
+		// sendOne rolls its slot back and still returns true on ANY pre-send failure — an unroutable resolver,
+		// an egress REJECT, an encode error — so the in-flight count never reaches target and this becomes a
+		// tight, sleepless loop that pegs a core for the life of the transport. Stop filling this round
+		// instead: the ticker retries, and the failure surfaces through sendOne's own log.
 		if c.inflightLen() <= before {
 			break
 		}
@@ -354,11 +337,8 @@ func (c *dnsClient) fill() bool {
 
 // sendOne acquires an in-flight slot, encodes one query (up==nil is a downstream-only poll), records it
 // under a UNIQUE DNS id plus its nonce, and writes it to a round-robin resolver. On any pre-send failure
-// it rolls the slot back so a transient error never leaks capacity. Returns false only when the transport
-// closed while waiting for a slot.
-//
-// The 16-bit id is drawn from crypto/rand (predictable ids would let an off-path attacker spoof a matching
-// answer); with several queries outstanding it is also redrawn on collision so it stays a unique map key.
+// it rolls the slot back, so a transient error never leaks capacity. The 16-bit id comes from crypto/rand
+// — a predictable id would let an off-path attacker spoof an answer — and is redrawn on collision.
 func (c *dnsClient) sendOne(up []byte) bool {
 	if !c.acquire() {
 		return false
@@ -423,19 +403,15 @@ func (c *dnsClient) recvLoop() {
 		}
 		down, derr := parseResponseTXT(buf[:n], id)
 		if derr != nil {
-			// SAY it. parseResponseTXT was given the RCode check precisely so a rejection stops looking
-			// like a healthy empty answer — "Surfacing it lets the caller's empty/failure accounting see
-			// the real cause" — and then the only caller threw the error away with a bare continue. A
-			// resolver that refuses every query (rate limit, a blocked zone, one that stopped recursing)
-			// left the operator with a tunnel that goes quiet and nothing anywhere naming the cause, which
-			// reads as censorship. Throttled and named by SOURCE, because with several resolvers in
-			// rotation "which one" is the whole question, and this recurs at query rate.
+			// SAY it. parseResponseTXT has the RCode check precisely so a rejection stops looking like a healthy
+			// empty answer, and throwing that error away leaves a tunnel that goes quiet with nothing naming the
+			// cause — which reads as censorship when it is a rate limit or a refused zone. Throttled and named by
+			// SOURCE, because with several resolvers in rotation "which one" is the whole question.
 			c.answerErr.noteAs("dns/"+from.String(), "answer rejected", derr)
-			// ...and COUNT it, which is the half that changed behaviour. Before the RCode check a
-			// SERVFAIL parsed as a zero-length answer and fell into the accounting below; after it, the
-			// continue skipped that, so `active` stayed true and fill() kept pipelineWindow (16) queries
-			// in flight against a resolver refusing all of them. A rejection is not a delivery: let it
-			// age the window down to idleTarget exactly as an empty reply does.
+			// ...and COUNT it, which is the half that changes behaviour. A `continue` here skips the empty/failure
+			// accounting, so `active` stays true and fill() keeps pipelineWindow queries in flight against a
+			// resolver refusing all of them. A rejection is not a delivery: let it age the window down to
+			// idleTarget exactly as an empty reply does.
 			down = nil
 		}
 		if len(down) > 0 {
@@ -607,11 +583,10 @@ func NewDNSServerTransport(listenAddr string, codec *Codec) (WireTransport, net.
 	return s, conn.LocalAddr(), nil
 }
 
-// apexRecords precomputes the zone-apex name plus its SOA and NS answer records. They point the
-// zone at itself (MNAME/NS = apex): the parent delegation already carries the glue that routes
-// resolvers here, so these only need to answer the apex probes (SOA/NS) that resolvers make while
-// validating the zone — self-reference keeps them well-formed without a second hostname to publish.
-// Serial is fixed and MinTTL is 0 (no zone transfers, no negative caching for this carrier).
+// apexRecords precomputes the zone-apex name plus its SOA and NS answer records. They point the zone at
+// itself: the parent delegation already carries the glue that routes resolvers here, so these only have
+// to answer the apex probes resolvers make while validating the zone, and self-reference keeps them
+// well-formed without a second hostname to publish. Serial is fixed and MinTTL is 0.
 func apexRecords(zone string) (dnsmessage.Name, dnsmessage.Resource, dnsmessage.Resource, error) {
 	zn, err := dnsmessage.NewName(zone)
 	if err != nil {
@@ -648,11 +623,10 @@ func (s *dnsServer) Close() error {
 	return nil
 }
 
-// serveLoop reads each query and delivers its upstream datagram immediately, then dispatches the reply
-// (which may long-poll up to serverHold for a downstream datagram) to a bounded worker pool. Reading is
-// thus never blocked by another query's hold, so a client that pipelines many queries at once is answered
-// concurrently instead of one-serverHold-at-a-time. Replies go to the query's UDP source — the resolver —
-// so a changing resolver address never breaks the session (the identity is the tunnel).
+// serveLoop reads each query and delivers its upstream datagram immediately, then dispatches the reply —
+// which may long-poll up to serverHold for a downstream datagram — to a bounded worker pool. Reading is
+// never blocked by another query's hold, so a client that pipelines is answered concurrently. Replies go
+// to the query's UDP source, so a changing resolver address never breaks the session.
 func (s *dnsServer) serveLoop() {
 	defer close(s.serveDone)
 	sem := make(chan struct{}, serverWorkers)
@@ -692,26 +666,10 @@ func (s *dnsServer) serveLoop() {
 
 		data, derr := s.codec.DecodeName(qname)
 		if errors.Is(derr, ErrBareZone) {
-			// A TXT query on the zone apex itself. Our client never sends one (EncodeName always
-			// prepends a nonce label, even for a payload-free poll), so this is a resolver checking
-			// the delegation, a scanner, or someone draining us. Answer it — staying silent on our own
-			// zone is its own signal, and a resolver that gets nothing marks the zone lame — but answer
-			// it EMPTY, without going near the downstream queue.
-			//
-			// This was a real theft-of-service: `dig TXT <zone>` in a loop popped one server->client
-			// datagram per query, so a stranger who read the zone off the public delegation could
-			// starve the tunnel. The payload is AEAD-sealed, so nothing was disclosed; what was stolen
-			// was the stream itself.
-			//
-			// "Empty" has to mean NODATA — NOERROR with an empty ANSWER section and the SOA in
-			// AUTHORITY — and not an empty TXT RECORD, which is what it used to send: write() always
-			// attaches txtResource(EncodeTXT(down)) and EncodeTXT(nil) is []string{""}, so `dig TXT
-			// <zone>` came back with `<zone>. 0 IN TXT ""`. Essentially no real zone answers that, so
-			// the one probe this branch exists for was the one that most clearly marked the zone as
-			// not an ordinary authoritative server. The branch reasoned only about not being SILENT
-			// and never asked what its non-silent answer looked like. NODATA is also the TRUTH here:
-			// this zone has no apex TXT — every tunnel record lives under "<nonce>.<zone>" — and it is
-			// the shape the non-TXT path above already chose for exactly the same reason.
+			// A TXT query on the zone apex. Our client never sends one (EncodeName always prepends a nonce
+			// label), so this is a resolver checking the delegation, a scanner, or someone draining us — one
+			// `dig TXT <zone>` used to pop a server->client datagram. Answer it, since silence on our own zone
+			// marks it lame, but as NODATA: empty ANSWER, the SOA in AUTHORITY, and nothing taken off the queue.
 			resp, berr := buildResponse(id, qn, dnsmessage.TypeTXT, nil, s.negativeAuthority(nil))
 			if berr == nil {
 				if _, err := s.conn.WriteToUDP(resp, addr); err != nil {
@@ -788,7 +746,7 @@ func (s *dnsServer) write(id uint16, qn dnsmessage.Name, down []byte, addr *net.
 	if berr != nil {
 		return
 	}
-	// The server half was left out when #157 gave the client throttled logging. A server that cannot
+	// The server needs the same throttled logging the client has. A server that cannot
 	// answer (ENOBUFS, EPERM from an OUTPUT rule, a route flap) goes completely dark, and the CLIENT
 	// then reports "the resolver stopped answering" — pointing the operator at the wrong machine.
 	if _, err := s.conn.WriteToUDP(resp, addr); err != nil {
@@ -813,11 +771,10 @@ func (s *dnsServer) apexAnswers(qname string, qtype dnsmessage.Type) []dnsmessag
 	return nil
 }
 
-// negativeAuthority returns the AUTHORITY section for an answer that carries no records: the zone's
-// SOA, which is what a real authoritative server sends with a NODATA so a resolver can negatively
-// cache it. Without it the reply is a NODATA that no resolver can remember and that no ordinary zone
-// produces — two tells for the price of one. Returns nil when there ARE answers, where an authority
-// section would be noise.
+// negativeAuthority returns the AUTHORITY section for an answer that carries no records: the zone's SOA,
+// which is what a real authoritative server sends with a NODATA so a resolver can negatively cache it.
+// Without it the reply is a NODATA no resolver can remember and no ordinary zone produces — two tells
+// for the price of one. Returns nil when there ARE answers, where an authority section would be noise.
 func (s *dnsServer) negativeAuthority(answers []dnsmessage.Resource) []dnsmessage.Resource {
 	if len(answers) > 0 {
 		return nil

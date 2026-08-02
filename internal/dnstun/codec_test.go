@@ -141,11 +141,10 @@ func TestDecodeNameRejectsSharedSuffixLabel(t *testing.T) {
 }
 
 func TestDecodeBareZoneIsRejected(t *testing.T) {
-	// This test used to assert the opposite — that a bare-zone query is "a poll carrying zero
-	// upstream bytes" — and that assumption was the bug: the server answered it by taking a datagram
-	// off the server->client queue, so anyone who read the PUBLIC zone off the delegation could drain
-	// the tunnel with `dig TXT <zone>` in a loop. Our client never sends a bare zone (EncodeName
-	// always prepends a nonce label), so it is not a poll and must not be treated as one.
+	// A bare-zone query is NOT "a poll carrying zero upstream bytes": the server answered it by taking a
+	// datagram off the server->client queue, so anyone who read the PUBLIC zone off the delegation could
+	// drain the tunnel with `dig TXT <zone>` in a loop. Our client never sends a bare zone, because
+	// EncodeName always prepends a nonce label.
 	c, _ := NewCodec("t.example.com")
 	got, err := c.DecodeName("t.example.com.")
 	if !errors.Is(err, ErrBareZone) {

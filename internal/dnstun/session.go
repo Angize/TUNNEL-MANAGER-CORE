@@ -11,11 +11,10 @@ import (
 	kcp "github.com/xtaci/kcp-go/v5"
 )
 
-// WireTransport ships opaque, unreliable datagrams to and from the ONE peer. The DNS carrier
-// implements it over DNS queries/responses (client) or an authoritative responder (server);
-// tests drive it with an in-memory lossy pipe. Send is best-effort — a datagram may be lost or
-// reordered. Recv blocks for the next inbound datagram and returns an error once the transport
-// is closed. The reliability and ordering the tunnel needs are supplied ABOVE this by kcp-go.
+// WireTransport ships opaque, unreliable datagrams to and from the ONE peer. The DNS carrier implements
+// it over DNS queries and responses; tests drive it with an in-memory lossy pipe. Send is best-effort —
+// a datagram may be lost or reordered — and Recv blocks for the next inbound one, erroring once the
+// transport closes. The reliability and ordering the tunnel needs are supplied ABOVE this by kcp-go.
 type WireTransport interface {
 	Send(datagram []byte) error
 	Recv() ([]byte, error)
@@ -32,11 +31,10 @@ const (
 	kindPong      = 0x03 // server -> client sealed keepalive reply
 )
 
-// Client keepalive. The client sends a sealed ping every keepalive and re-dials (with a fresh init) if
-// it hears nothing authentic for deadWindow — the ONLY way it detects a server that restarted or a
-// session the server tore down (KCP's own dead-link never fires on a silent link, and the server keeps
-// answering DNS queries even for a mismatched session). Floored generously: this carrier is high-loss,
-// so the window must survive several dropped pings without reaping a healthy tunnel.
+// Client keepalive. The client sends a sealed ping every keepalive and re-dials, with a fresh init, if it
+// hears nothing authentic for deadWindow — the ONLY way it detects a server that restarted or a session
+// the server tore down, since KCP's own dead-link never fires on a silent link. Floored generously: this
+// carrier is high-loss, so the window must survive several dropped pings.
 const keepaliveDeadMult = 3
 
 // Vars (not consts) so a test can shorten them; production keeps these.
@@ -46,10 +44,9 @@ var (
 )
 
 // DeadFloor reports the ABSOLUTE floor this carrier applies to its dead window, including to an
-// operator's dead_after_secs override (resolveKeepalive below). Exported so the startup log can report
-// the deadline the carrier will really use: every other carrier floors at 2×keepalive, and reporting
-// that number for dns misstated it in BOTH directions (keepalive=15/dead=10 logged 30s against a real
-// 20s; keepalive=5/dead=10 logged 10s against the same real 20s).
+// operator's dead_after_secs override. Exported so the startup log can report the deadline the carrier
+// will really use: every other carrier floors at 2×keepalive, and reporting that number for dns
+// misstated it in both directions.
 func DeadFloor() time.Duration { return keepaliveDeadFloor }
 
 // SessionConfig carries the crypto parameters both ends share (from the tunnel config), the KCP MTU the
@@ -86,26 +83,10 @@ const SessionOverhead = 1 + 12 + 24 + 16 + 3
 // so the caller can floor its MTU against the real number instead of a copy that can drift.
 const KCPOverhead = 24
 
-// MinUsefulMTU is the smallest KCP MTU the DNS carrier will accept: the point where a segment's
-// payload is at least as large as the header it rides behind.
-//
-// The number has to be read against the CEILING, which is low. A DNS query name is 255 bytes, base32
-// costs 8 characters per 5 bytes, and the zone and nonce labels come out of the same budget — so even
-// a ten-character zone leaves only ~87 bytes of MTU (measured on the box, not estimated), and it
-// falls from there: 40 characters leave 69, 74 leave 48, 87 leave 40, 88 leave 39.
-//
-// ⚠ THE FLOOR WENT UP TO 48 AND CAME STRAIGHT BACK DOWN. The justification for raising it was that a
-// very long zone drove the MTU under KCPOverhead, where kcp-go's SetMtu fails and KCP silently keeps
-// its own 1400-byte default. That scenario was NEVER REACHABLE: an MTU under 24 needs a zone of ~116
-// characters, and this very check already refused everything from 88 up at the old floor of 40. So
-// raising it bought nothing against the failure it named, and banned the 75..87 character band —
-// which does start, does hand SetMtu a value it accepts, and does carry traffic, slowly. A zone that
-// long is a plausible four-level corporate delegation, and the panel accepts up to 253 characters.
-//
-// So the floor is the ceiling KCP itself enforces plus a margin, not a throughput opinion: below
-// KCPOverhead SetMtu refuses outright and the carrier is dead in a way nothing reports. Above it the
-// tunnel is slow, which is the operator's call to make and not this constant's. Anything that reads
-// like "more than half the query is header" is an argument for a WARNING, not a refusal.
+// MinUsefulMTU is the smallest KCP MTU the DNS carrier will accept. The ceiling is low to begin with — a
+// query name is 255 bytes, base32 costs 8 characters per 5, and the zone and nonce labels share that
+// budget. The floor is what KCP itself enforces plus a margin, not a throughput opinion: below
+// KCPOverhead SetMtu refuses outright and the carrier dies silently, above it the tunnel is merely slow.
 const MinUsefulMTU = KCPOverhead + 16
 
 const handshakeRetxInterval = 500 * time.Millisecond
@@ -121,20 +102,15 @@ type sessionConn struct {
 	*kcp.UDPSession
 	qpc *QueuePacketConn
 	t   WireTransport
-	// sealer authenticates the byte stream. It is an atomic.Pointer because the server can SWAP it:
-	// when the armed client vanishes before completing KCP and a new client proves itself (a data
-	// datagram opens under the staged session), recvPump ADOPTS that session in place so the same
-	// AcceptKCP returns the new client — no teardown, no reconnect. sendPump only Loads it. It is
-	// Stored once at construction (before the pumps start) and swapped only by recvPump.
+	// sealer authenticates the byte stream. It is an atomic.Pointer because the server can SWAP it: when
+	// the armed client vanishes before completing KCP and a new one proves itself, recvPump ADOPTS that
+	// session in place so the same AcceptKCP returns the new client — no teardown, no reconnect. Stored
+	// once at construction and swapped only by recvPump; sendPump only Loads it.
 	sealer atomic.Pointer[crypto.Sealer]
-	// staged is a BOUNDED set of sessions staged by recent different-ephemeral inits (server only).
-	// A data datagram that actually OPENS under a candidate proves a real, live new client — a
-	// replayed init an attacker captured on-path never can — which then either ADOPTS it in place
-	// (while the armed session has never carried data, i.e. its client vanished) or, once the live
-	// session is established, TEARS DOWN so the carrier reconnects. A SET (not one slot) so a replayed
-	// init can't evict a legit client's staged session by overwriting it; an attacker needs maxStaged
-	// DISTINCT captured inits to push it out (was one). Written by onHandshake and read by recvPump,
-	// both on the single recvPump goroutine, so it needs no lock.
+	// staged is a BOUNDED set of sessions staged by recent different-ephemeral inits (server only). A data
+	// datagram that actually OPENS under a candidate proves a real, live new client — a replayed init
+	// never can — and then either adopts it in place or tears down. A SET, not one slot, so a replay
+	// cannot evict a legit candidate. Written and read on the single recvPump goroutine, so no lock.
 	staged []stagedSession
 	// lastRx is the unix-nano of the last authentic inbound frame (data, ping, or pong). The client's
 	// keepalive goroutine ages it against deadWindow to detect a dead/mismatched session and re-dial.
@@ -147,21 +123,16 @@ type sessionConn struct {
 	closeOnce  sync.Once
 }
 
-// LastRx exposes that stamp (unix-nano, 0 until the peer first answers) so the carrier can publish
-// the SAME liveness number this session self-heals on. It has to come from here rather than from the
-// packets the carrier reads: an idle dns tunnel carries no data at all, and its proof of life is the
-// keepalive pong — which is consumed in here and never surfaces as a packet. A carrier that stamped
-// only what it read would freeze the heartbeat on a perfectly healthy tunnel.
-//
-// Discovered through this interface (not the concrete type) by the packet carrier, since DialSession
-// and ServeSession both return a plain net.Conn.
+// LastRx exposes the last-authenticated stamp (unix-nano, 0 until the peer first answers) so the carrier
+// can publish the SAME liveness number this session self-heals on. It has to come from here: an idle dns
+// tunnel carries no data at all and its proof of life is the keepalive pong, which is consumed in here
+// and never surfaces as a packet. Discovered through this interface, since both entry points return net.Conn.
 func (sc *sessionConn) LastRx() int64 { return sc.lastRx.Load() }
 
-// DeadWindow exposes the window this session self-heals on, so the carrier publishes the number that
-// is really enforced instead of deriving a second one. Zero on the server, which holds no window at
-// all (there is no connection to reap; the client end reaps the session).
-//
-// Discovered through an interface by the packet carrier, like LastRx: DialSession returns a net.Conn.
+// DeadWindow exposes the window this session self-heals on, so the carrier publishes the number that is
+// really enforced instead of deriving a second one. Zero on the server, which holds no window at all —
+// there is no connection to reap, and the client end reaps the session. Discovered through an interface
+// by the packet carrier, like LastRx.
 func (sc *sessionConn) DeadWindow() time.Duration { return sc.deadWindow }
 
 // stagedSession is one server-side staged candidate: the client's init ephemeral (so a retransmit of
@@ -261,17 +232,10 @@ func (sc *sessionConn) recvPump(inCh <-chan []byte, onHandshake func([]byte)) {
 				sc.tryStaged(d[1:], true, &liveProven) // a data frame's KCP SYN adopts a proven new client
 			case kindPing:
 				if _, _, _, err := sc.sealer.Load().Open(d[1:], nil); err == nil {
-					// NOT liveProven. A ping proves the peer is ALIVE; liveProven means the KCP session
-					// is ESTABLISHED, and those are different facts. tryStaged tears down instead of
-					// adopting only because "an established conv-0 KCP session can't be retrofitted" —
-					// and a ping establishes no KCP: it is a sealed keepalive one layer below it.
-					//
-					// Setting it here undid the v2.48.8 / #132 adopt-in-place recovery for any client
-					// that lived long enough to send ONE keepalive. That client then vanishes (a crash,
-					// a changed address), a new one dials, and the server tears the session down and
-					// makes the carrier reconnect instead of serving the new client in place — which is
-					// the exact case #132 exists to make fast. lastRx and the pong are untouched: those
-					// ARE about liveness, which is what a ping really carries.
+					// NOT liveProven. A ping proves the peer is ALIVE; liveProven means the KCP session is ESTABLISHED,
+					// and those are different facts — tryStaged tears down rather than adopting only because an
+					// established conv-0 KCP session cannot be retrofitted, and a ping establishes no KCP. lastRx and
+					// the pong are untouched: those ARE about liveness, which is what a ping really carries.
 					sc.lastRx.Store(time.Now().UnixNano())
 					sc.sendKind(kindPong) // server: echo so the client's keepalive sees a live session
 					continue
@@ -293,13 +257,10 @@ func (sc *sessionConn) recvPump(inCh <-chan []byte, onHandshake func([]byte)) {
 	}
 }
 
-// tryStaged handles a frame the live session couldn't open by trying each staged candidate (server
-// only; the set is empty on the client). The first candidate that opens proves a real, live new client
-// — a replayed init an attacker captured can never produce such a frame. If the live session has never
-// carried data (its client vanished) AND this is a data frame, adopt the new client IN PLACE and feed
-// its KCP SYN so the SAME AcceptKCP returns it; once the live session is established, tear down instead
-// so the carrier reconnects (an established conv-0 KCP session can't be retrofitted). A proving PING
-// pre-establishment has no KCP frame to feed, so it just waits for the client's first data frame.
+// tryStaged handles a frame the live session could not open by trying each staged candidate (server
+// only). The first that opens proves a real, live new client, which a replayed init can never produce.
+// If the live session has never carried data and this is a data frame, adopt the new client IN PLACE and
+// feed its KCP SYN; once the live session is established, tear down so the carrier reconnects instead.
 func (sc *sessionConn) tryStaged(payload []byte, isData bool, liveProven *bool) {
 	for i := range sc.staged {
 		_, _, pt, perr := sc.staged[i].sealer.Open(payload, nil)
@@ -333,11 +294,10 @@ func (sc *sessionConn) sendKind(kind byte) {
 	_ = sc.t.Send(append([]byte{kind}, sealed...))
 }
 
-// keepalive (client only) sends a sealed ping every interval and re-dials — by Closing the session so
-// the carrier's Read errors — if nothing authentic has arrived for deadWindow. This is what detects a
-// server that restarted or a session the server tore down: the mismatched server can't produce a valid
-// pong, so lastRx ages out and the client reconnects with a fresh init. interval/deadWindow are
-// resolved by the caller so this goroutine never reads the package tunables (keeps it data-race free).
+// keepalive (client only) sends a sealed ping every interval and re-dials — by Closing the session so the
+// carrier's Read errors — if nothing authentic has arrived for deadWindow. This is what detects a server
+// that restarted or a session it tore down: the mismatched server cannot produce a valid pong, so lastRx
+// ages out. interval and deadWindow are resolved by the caller, so this goroutine reads no tunables.
 func (sc *sessionConn) keepalive(interval, deadWindow time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -366,20 +326,9 @@ func resolveKeepalive(interval, deadAfter time.Duration) (time.Duration, time.Du
 }
 
 // ResolveDeadWindow is the window the client's keepalive goroutine really enforces before it reaps a
-// silent session: keepaliveDeadMult×keepalive, floored, or the operator's dead_after_secs (floored too).
-//
-// Exported because the CARRIER has to publish this exact number. dw in the status file is what the node
-// and the panel age hb against, so a reader deciding the dot and the session deciding when to re-dial
-// must be answering with the same formula — and the carrier had re-derived its own, keeping the floor
-// and dropping the multiplier entirely. At the shipped defaults (keepalive=15s, dead_after_secs unset)
-// it published 20s against a real 45s: the tunnel is called dead 25 seconds before it heals, so ONE
-// dropped ping on a carrier whose whole justification is surviving several of them turns the dot red
-// while traffic is flowing. Even with zero loss it flickers — pongs land every 15s and the file is
-// rewritten every dw/4, so the published age reaches 20s = dw on a tunnel that never lost a frame.
-//
-// One function, asked by both sides, is the only shape that cannot drift. This is the same rule
-// core_status.go's sessionStaleWindow already states for the udp/raw/flux carriers; dns was the one
-// carrier outside it.
+// silent session: keepaliveDeadMult×keepalive, floored, or the operator's dead_after_secs, floored too.
+// Exported because the CARRIER publishes this exact number as dw, which the node and the panel age hb
+// against — one function, asked by both sides, is the only shape that cannot drift.
 func ResolveDeadWindow(keepalive, deadAfter time.Duration) time.Duration {
 	if keepalive <= 0 {
 		keepalive = defaultKeepalive
@@ -473,12 +422,10 @@ handshake:
 	return sc, nil
 }
 
-// ServeSession (server) waits for a valid init on t, derives the session and answers, then
-// returns the reliable stream once the client's kcp-go session establishes. It re-answers a
-// retransmitted init (same ephemeral) so a lost response self-heals. Single-session: a NEW,
-// PSK-authenticated init (client restart) is STAGED and answered but does not replace the live
-// session until a datagram actually opens under it — so a replayed old init cannot tear the
-// session down (remote DoS). Promotion tears this session down; the carrier owns re-accept.
+// ServeSession (server) waits for a valid init on t, derives the session and answers, then returns the
+// reliable stream once the client's kcp-go session establishes. It re-answers a retransmitted init (same
+// ephemeral) so a lost response self-heals. Single-session: a NEW, PSK-authenticated init is STAGED and
+// answered but does not replace the live session until a datagram actually opens under it.
 func ServeSession(t WireTransport, cfg SessionConfig) (net.Conn, error) {
 	done := make(chan struct{})
 	inCh := make(chan []byte, 256)
@@ -518,17 +465,10 @@ func ServeSession(t WireTransport, cfg SessionConfig) (net.Conn, error) {
 	sc := &sessionConn{qpc: qpc, t: t, done: done}
 	sc.sealer.Store(sealer) // before the pumps start (below): sendPump's first Seal must not Load nil
 	sc.lastRx.Store(time.Now().UnixNano())
-	// Re-answer a retransmit of the SAME init (a lost response self-heals). A DIFFERENT ephemeral
-	// might mean the previous client is gone and a new one is dialing (restart) — but it might also
-	// be a REPLAYED old init an attacker captured on-path (it still verifies the PSK MAC), so tearing
-	// the live session down on sight is a remote DoS. Instead, mirror the datagram carriers'
-	// promote-on-open discipline as the single-session design allows: STAGE the new init as a pending
-	// session and answer it, but keep the live session running. Only a data datagram that actually
-	// opens under a staged candidate (see recvPump) — which a replay can never produce — promotes it
-	// and tears the old session down so the carrier reconnects to the new client. Candidates live in a
-	// BOUNDED SET (not one slot), so a replayed init can't evict a legit client's staged session by
-	// overwriting it. A staged init that re-arrives is re-answered from its cached response without
-	// recomputing the (ECDH+KDF) crypto.
+	// Re-answer a retransmit of the SAME init, so a lost response self-heals. A DIFFERENT ephemeral might
+	// be a new client dialing after a restart — or a REPLAYED old init an attacker captured, which still
+	// verifies the PSK MAC — so tearing the live session down on sight is a remote DoS. STAGE it and answer
+	// it instead; only a data datagram that actually opens under a candidate promotes it.
 	onHS := func(hs []byte) {
 		e, err := crypto.ParseInit(cfg.PSK, hs)
 		if err != nil {
@@ -579,14 +519,10 @@ func ServeSession(t WireTransport, cfg SessionConfig) (net.Conn, error) {
 	return sc, nil
 }
 
-// tuneSession applies the DNS-appropriate KCP settings. The carrier is HIGH-LATENCY (hundreds of ms
-// per round-trip) and strictly paced at ~one datagram per round-trip by the client's poll loop, so
-// the old LAN turbo profile (30ms min-RTO + fast-resend) just fired ~10+ spurious retransmits per
-// segment before an ACK could return and never converged. Instead: stream mode (the carrier frames
-// its own packets); nodelay OFF so the min-RTO sits at ~100ms and adapts UP to the measured RTT;
-// resend=0 to DISABLE fast-retransmit (there are never dup-acks with one datagram in flight); a
-// 100ms flush interval matched to the pace; a small window bounding in-flight data to about the
-// carrier's bandwidth-delay product; and the MTU the transport carries in one query (<=0 -> default).
+// tuneSession applies the DNS-appropriate KCP settings. The carrier is HIGH-LATENCY and strictly paced at
+// about one datagram per round-trip by the client's poll loop, so a LAN turbo profile fires spurious
+// retransmits before an ACK can return and never converges. Instead: stream mode, nodelay OFF so the
+// min-RTO adapts up to the measured RTT, fast-retransmit disabled, and a flush interval matched to the pace.
 func tuneSession(s *kcp.UDPSession, mtu int) {
 	if mtu <= 0 {
 		mtu = kcpMTUDefault
