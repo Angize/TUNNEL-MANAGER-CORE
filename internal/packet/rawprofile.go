@@ -146,8 +146,10 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		// advances by payload bytes like a real stream; ack is a non-zero peer ISN, not the
 		// tell-tale 0). Identical byte layout to the desync injector, so both share buildTCPSeg
 		// (tcpseg.go).
+		// No options: these are the carrier's OWN frames, with no kernel TCP beside them to be
+		// told apart from, and adding any would change the wire format.
 		sp, dp := rawPorts(isClient)
-		return buildTCPSeg(src, dst, sp, dp, seq, ack, tcpPshAck, rawTCPWindow, payload)
+		return buildTCPSeg(src, dst, sp, dp, seq, ack, tcpPshAck, rawTCPWindow, nil, payload)
 
 	case protoESP:
 		// IPsec ESP (RFC 4303): [SPI 4B][seq 4B] then the sealed frame as the "encrypted
