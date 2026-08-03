@@ -588,7 +588,7 @@ func (b *TCP) fragWrap(conn net.Conn, host string, ech []byte) net.Conn {
 // events reach the node/panel system log, in the same file shape the datagram carriers write. Skipped
 // when a pool is configured (it writes its own richer status file) and on the server. Call before Run().
 func (b *TCP) SetStatusPath(path string) {
-	if !b.isClient || path == "" || b.pool != nil {
+	if path == "" || b.pool != nil {
 		return
 	}
 	// Label the status file by the ACTUAL transport, not a hardcoded "ws": a direct tcp or a
@@ -603,7 +603,7 @@ func (b *TCP) SetStatusPath(path string) {
 	case b.cover:
 		carrier = "cover"
 	}
-	b.st = newCoreStatus(path, carrier+" · "+b.addr)
+	b.st = newCoreStatus(path, carrier+" · "+b.addr, roleOf(b.isClient))
 	b.stTag = carrier // reused by setActive when a direct dest pool rotates the active endpoint
 }
 
@@ -825,17 +825,20 @@ func (b *TCP) Run() error {
 	// tunnel. Buffered so neither sender can block once the other has won.
 	errc := make(chan error, 2)
 	go func() { errc <- b.tunLoop() }()
+	// BOTH ends publish. The server's own lastRx proves the CLIENT->SERVER direction — a fact only that
+	// end can see — and without it a server had no liveness signal at all and fell back to probing.
+	// Do NOT seed the heartbeat: lastRx stays 0 until a GENUINE inbound frame arrives, so the node can
+	// tell "connecting" (hb still 0) from "connected" (hb advancing), and a carrier that never comes up
+	// ages to red instead of looking alive from a startup seed.
+	if dw := int64(b.idle.Seconds()); b.st != nil { // b.idle IS the resolved stream dead-window
+		b.st.setDW(dw)
+		go heartbeat(b.st, &b.lastRx, b.closeCh, dw)
+	}
 	if b.isClient {
 		go b.keepaliveLoop()
 		go b.diagLoop() // low-rate goroutine-count heartbeat so a slow session leak is visible in the log
-		// Do NOT seed the heartbeat: lastRx stays 0 until a GENUINE inbound frame arrives, so the node can
-		// tell "connecting" (hb still 0) from "connected" (hb advancing), and a carrier that never comes up
-		// ages to red instead of looking alive from a startup seed.
-		dw := int64(b.idle.Seconds()) // b.idle IS the resolved stream dead-window (idle backstop / dead_after)
-		if b.st != nil {
-			b.st.setDW(dw)                               // publish it so the reader ages hb against it...
-			go heartbeat(b.st, &b.lastRx, b.closeCh, dw) // ...and pace the republish off it: single-edge / direct-tcp
-		} else if b.pool != nil {
+		dw := int64(b.idle.Seconds())
+		if b.pool != nil {
 			b.pool.setDW(dw)
 			go heartbeatPool(b.pool, &b.lastRx, b.closeCh, dw) // ws/http edge pool uses its own status writer
 		}

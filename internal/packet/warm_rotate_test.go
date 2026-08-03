@@ -43,7 +43,7 @@ func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 	b := &TCP{cryptoOn: true, cipher: "aes-256-gcm", psk: "warm-rotate-psk-abcdefghijklmno",
 		keepalive: time.Second, idle: idleFor(time.Second), isClient: true, addr: addr,
 		stTag: "tcp", closeCh: make(chan struct{})}
-	b.st = newCoreStatus(path, active)
+	b.st = newCoreStatus(path, active, "client")
 	b.warmNext = make(chan *warmDial, 1) // dialLoop's job; this test drives buildWarm directly
 	b.SetPeerPool(NewPeerPool([]string{addr, second}, true, 0, ""))
 	// Also wire a SOURCE pool and rotate it, for the source half: the proactive timer advances the source

@@ -50,7 +50,7 @@ func TestWSPoolReadECHCmd(t *testing.T) {
 func TestReadECHCmdSingle(t *testing.T) {
 	dir := t.TempDir()
 	status := filepath.Join(dir, "core-x.status")
-	b := &TCP{ws: true, wsHost: "a.example", wsECH: []byte("OLD"), st: newCoreStatus(status, "ws · edge:443")}
+	b := &TCP{ws: true, wsHost: "a.example", wsECH: []byte("OLD"), st: newCoreStatus(status, "ws · edge:443", "client")}
 
 	newECH := []byte("FRESH-single-edge-ech")
 	cmd := map[string]map[string]string{"snis": {"a.example": base64.StdEncoding.EncodeToString(newECH)}}

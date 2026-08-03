@@ -68,7 +68,7 @@ func TestOperatorPinIsSilentOnEveryCarrier(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "core.status")
-			st := newCoreStatus(path, "before")
+			st := newCoreStatus(path, "before", "client")
 			c.pin(st)
 
 			d := read(t, path)

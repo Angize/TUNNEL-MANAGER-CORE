@@ -127,14 +127,14 @@ func (r *Raw) SetDeadAfter(secs int) bool {
 // SetStatusPath (client, optional) wires a status-file event ring so self-heal re-handshakes and
 // recoveries surface in the panel's system log. Call before Run(). No-op path leaves it off.
 func (r *Raw) SetStatusPath(path string) {
-	if path == "" || !r.isClient {
+	if path == "" {
 		return
 	}
 	peer := ""
 	if p := r.peer.Load(); p != nil {
 		peer = p.String()
 	}
-	r.st = newCoreStatus(path, "raw:"+r.profile+" · "+peer)
+	r.st = newCoreStatus(path, "raw:"+r.profile+" · "+peer, roleOf(r.isClient))
 }
 
 // SetDesync (client, optional) turns on fake-packet desync: `count` decoy packets go out just before
@@ -377,11 +377,13 @@ func (r *Raw) Run() error {
 	errc := make(chan error, 2)
 	go func() { errc <- r.tunToNet() }()
 	go func() { errc <- r.link.recvLoop() }() // conn (netToTun) or, for a decoy server, AF_PACKET
+	// BOTH ends publish. The server's own lastRx proves the CLIENT->SERVER direction — a fact only that
+	// end can see — and without it a server had no liveness signal at all and fell back to probing.
+	dw := int64(r.deadWin().Seconds())
+	r.st.setDW(dw)                             // publish it so the reader ages hb against it...
+	go heartbeat(r.st, &r.hbRx, r.closeCh, dw) // ...and pace the republish off it, so an idle tunnel reads live, not half-open
 	if r.isClient {
 		go r.clientLoop()
-		dw := int64(r.deadWin().Seconds())         // the resolved dead-window, in seconds
-		r.st.setDW(dw)                             // publish it so the reader ages hb against it...
-		go heartbeat(r.st, &r.hbRx, r.closeCh, dw) // ...and pace the republish off it, so an idle tunnel reads live, not half-open
 	}
 	return <-errc
 }

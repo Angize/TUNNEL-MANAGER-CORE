@@ -112,10 +112,10 @@ func (d *DNS) SetDeadAfter(secs int) bool {
 // and dw (the dead window this carrier really enforces). Without them the panel has only traffic flow to
 // go on, so a healthy but IDLE dns tunnel ages to yellow and a dead one never goes red. Call before Run().
 func (d *DNS) SetStatusPath(path string) {
-	if path == "" || !d.isClient {
+	if path == "" {
 		return
 	}
-	d.st = newCoreStatus(path, "dns · "+d.zone)
+	d.st = newCoreStatus(path, "dns · "+d.zone, roleOf(d.isClient))
 }
 
 // heartbeat republishes the live session's liveness into the status file, paced off dw exactly as the
