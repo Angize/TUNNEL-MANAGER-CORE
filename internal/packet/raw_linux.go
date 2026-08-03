@@ -1326,6 +1326,7 @@ func (r *Raw) clientLoop() {
 			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the
 			// NEW destination sees, and it is what makes the server stamp its replies from that IP.
 			r.pc.mark()
+			r.st.keepaliveSent()
 			r.send(typePing, nil, r.peer.Load())
 			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session survives,
 			// no handshake failure will ever say so. Count unanswered ticks here — AFTER the jump, so the very

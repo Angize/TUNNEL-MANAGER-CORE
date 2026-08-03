@@ -316,10 +316,10 @@ func main() {
 	// carriers the server holds no such window at all, so it is inert there by shape, not by oversight.
 	applyDeadAfter(b, cfg.Transport, cfg.Keepalive, cfg.DeadAfterSecs)
 	// Wire the status file: a liveness heartbeat (hb) plus this carrier's resolved dead window (dw),
-	// and an event ring carrying the client's precise self-heal reasons into the node/panel system
-	// log. EVERY client carrier implements it now — dns was the last one that did not, which left the
-	// panel deciding its dot from traffic flow alone. Only the client writes it.
-	if cfg.Role == "client" && cfg.StatusPath != "" {
+	// and an event ring carrying the client's precise self-heal reasons into the node/panel system log.
+	// BOTH roles write it. The server's own lastRx is the only local proof that the CLIENT->SERVER
+	// direction carries, and withholding it left that end with no liveness signal at all.
+	if cfg.StatusPath != "" {
 		if s, ok := b.(interface{ SetStatusPath(string) }); ok {
 			s.SetStatusPath(cfg.StatusPath)
 			log.Printf("tnl-core: writing status/events to %s", cfg.StatusPath)

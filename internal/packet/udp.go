@@ -1038,6 +1038,7 @@ func (b *UDP) clientLoop() {
 			// source. Sending it first meant the ping went to the endpoint we were leaving and the
 			// server did not follow until the next data frame.
 			b.pc.mark()
+			b.st.keepaliveSent()
 			b.send(typePing, nil, b.peer.Load())
 			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session survives,
 			// no handshake failure will ever say so. Count unanswered ticks here — AFTER the jump, so the very
