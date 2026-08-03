@@ -118,14 +118,14 @@ func (f *Flux) SetDeadAfter(secs int) bool {
 // SetStatusPath (client, optional) wires a status-file event ring so self-heal re-handshakes and
 // recoveries surface in the panel's system log. Call before Run(). No-op path leaves it off.
 func (f *Flux) SetStatusPath(path string) {
-	if path == "" || !f.isClient {
+	if path == "" {
 		return
 	}
 	peer := ""
 	if p := f.peer.Load(); p != nil {
 		peer = p.String()
 	}
-	f.st = newCoreStatus(path, "flux:"+f.carrier+" · "+peer)
+	f.st = newCoreStatus(path, "flux:"+f.carrier+" · "+peer, roleOf(f.isClient))
 }
 
 // SetDesync (client, optional) turns on fake-packet desync: `count` decoy packets go out
@@ -293,11 +293,13 @@ func (f *Flux) Run() error {
 	go func() { errc <- f.tunToNet() }()
 	go func() { errc <- f.netToTun() }()
 	go f.rotateWatcher()
+	// BOTH ends publish. The server's own lastRx proves the CLIENT->SERVER direction — a fact only that
+	// end can see — and without it a server had no liveness signal at all and fell back to probing.
+	dw := int64(f.deadWin().Seconds())
+	f.st.setDW(dw)                             // publish it so the reader ages hb against it...
+	go heartbeat(f.st, &f.hbRx, f.closeCh, dw) // ...and pace the republish off it, so an idle tunnel reads live, not half-open
 	if f.isClient {
 		go f.clientLoop()
-		dw := int64(f.deadWin().Seconds())         // the resolved dead-window, in seconds
-		f.st.setDW(dw)                             // publish it so the reader ages hb against it...
-		go heartbeat(f.st, &f.hbRx, f.closeCh, dw) // ...and pace the republish off it, so an idle tunnel reads live, not half-open
 	}
 	return <-errc
 }

@@ -414,14 +414,14 @@ func (b *UDP) SetDeadAfter(secs int) bool {
 // SetStatusPath (client, optional) wires a status-file event ring so self-heal re-handshakes and
 // recoveries surface in the panel's system log. Call before Run(). No-op path leaves it off.
 func (b *UDP) SetStatusPath(path string) {
-	if path == "" || !b.isClient {
+	if path == "" {
 		return
 	}
 	peer := ""
 	if p := b.peer.Load(); p != nil {
 		peer = p.String()
 	}
-	b.st = newCoreStatus(path, "udp · "+peer)
+	b.st = newCoreStatus(path, "udp · "+peer, roleOf(b.isClient))
 }
 
 // deadWin is the session-stale window this carrier enforces: sessionStaleWindow over the
@@ -653,12 +653,14 @@ func (b *UDP) initFec(fec bool, fecData, fecParity int) {
 func (b *UDP) Run() error {
 	errc := make(chan error, 2+len(b.srvConns))
 	go func() { errc <- b.tunToNet() }()
+	// BOTH ends publish. The server's own lastRx proves the CLIENT->SERVER direction — a fact only that
+	// end can see — and without it a server had no liveness signal at all and fell back to probing.
+	dw := int64(b.deadWin().Seconds())
+	b.st.setDW(dw)                             // publish it so the reader ages hb against it...
+	go heartbeat(b.st, &b.hbRx, b.closeCh, dw) // ...and pace the republish off it, so an idle tunnel reads live, not half-open
 	if b.isClient {
 		go func() { errc <- b.netToTun() }()
 		go b.clientLoop()
-		dw := int64(b.deadWin().Seconds())         // the resolved dead-window, in seconds
-		b.st.setDW(dw)                             // publish it so the reader ages hb against it...
-		go heartbeat(b.st, &b.hbRx, b.closeCh, dw) // ...and pace the republish off it, so an idle tunnel reads live, not half-open
 	} else {
 		for _, c := range b.srvConns {
 			c := c

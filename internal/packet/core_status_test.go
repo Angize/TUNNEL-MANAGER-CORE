@@ -14,7 +14,7 @@ import (
 // so a single-edge in-band self-heal reaches the panel without spamming on every reconnect.
 func TestTCPSingleEdgeECHSelfHeal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "core-x.status")
-	b := &TCP{st: newCoreStatus(path, "ws · edge:443"), wsECH: []byte{0x01}}
+	b := &TCP{st: newCoreStatus(path, "ws · edge:443", "client"), wsECH: []byte{0x01}}
 
 	b.noteECHSelfHeal("h.example", []byte{0x02, 0x03}) // first heal: key differs -> persist + emit
 	if !bytes.Equal(b.wsECH, []byte{0x02, 0x03}) {
@@ -44,7 +44,7 @@ func TestTCPSingleEdgeECHSelfHeal(t *testing.T) {
 // emit a "reconnect" — and the status file is written with a monotonic seq the panel consumes once.
 func TestCoreStatusEventPairing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "core-x.status")
-	s := newCoreStatus(path, "udp · 1.2.3.4:443")
+	s := newCoreStatus(path, "udp · 1.2.3.4:443", "client")
 
 	// First connect at startup must NOT be logged as a self-heal.
 	s.reconnected("udp")

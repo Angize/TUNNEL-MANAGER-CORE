@@ -27,6 +27,9 @@ type coreStatus struct {
 	// second half, so a tunnel blackholed upstream keeps hb fresh while rt freezes.
 	rt  int64 // unix-seconds of the last answered keepalive
 	rtt int64 // milliseconds that round trip took, measured on the carrier itself
+	// role tells a reader which end wrote this. A SERVER legitimately sits with hb==0 until a client
+	// first reaches it — that is "waiting", not "died" — and only the writer knows which it is.
+	role string
 }
 
 // pingClock times a keepalive round trip. mark() stamps the send; rtt() reports how long ago that was,
@@ -149,10 +152,19 @@ func (s *coreStatus) setDW(secs int64) {
 	s.write()
 }
 
+// roleOf names the end that writes a status file, so a reader can tell a server WAITING for its first
+// client (hb still 0, perfectly normal) from a client that was answered and then went quiet.
+func roleOf(isClient bool) string {
+	if isClient {
+		return "client"
+	}
+	return "server"
+}
+
 // newCoreStatus creates the writer and flushes an initial (empty-ring) file so a reader sees a live
 // tunnel immediately rather than a missing file.
-func newCoreStatus(path, active string) *coreStatus {
-	s := &coreStatus{path: path, active: active}
+func newCoreStatus(path, active, role string) *coreStatus {
+	s := &coreStatus{path: path, active: active, role: role}
 	s.write()
 	adoptCfgWarnSink(func(code, detail string) { s.event("cfg", code, detail) })
 	return s
@@ -264,6 +276,7 @@ func (s *coreStatus) write() {
 	dw := s.dw
 	rt := s.rt
 	rtt := s.rtt
+	role := s.role
 	s.mu.Unlock()
 	payload := struct {
 		Active string      `json:"active"`
@@ -272,8 +285,9 @@ func (s *coreStatus) write() {
 		DW     int64       `json:"dw"`
 		RT     int64       `json:"rt"`
 		RTT    int64       `json:"rtt_ms"`
+		Role   string      `json:"role"`
 		TS     int64       `json:"ts"`
-	}{Active: active, Events: evs, HB: hb, DW: dw, RT: rt, RTT: rtt, TS: time.Now().Unix()}
+	}{Active: active, Events: evs, HB: hb, DW: dw, RT: rt, RTT: rtt, Role: role, TS: time.Now().Unix()}
 	buf, err := json.Marshal(payload)
 	if err != nil {
 		return
