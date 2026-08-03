@@ -27,6 +27,10 @@ type coreStatus struct {
 	// second half, so a tunnel blackholed upstream keeps hb fresh while rt freezes.
 	rt  int64 // unix-seconds of the last answered keepalive
 	rtt int64 // milliseconds that round trip took, measured on the carrier itself
+	// unans is keepalives SENT since the last answer. `rt` alone is ambiguous — an old timestamp means
+	// either "nobody answered" or "I never asked" — and only the sender can tell those apart. This can:
+	// it moves ONLY when a ping really goes out, so a non-zero count is unanswered, full stop.
+	unans int64
 	// role tells a reader which end wrote this. A SERVER legitimately sits with hb==0 until a client
 	// first reaches it — that is "waiting", not "died" — and only the writer knows which it is.
 	role string
@@ -134,9 +138,20 @@ func (s *coreStatus) roundTrip(d time.Duration) {
 	}
 	s.mu.Lock()
 	s.rt = time.Now().Unix()
+	s.unans = 0
 	if d > 0 {
 		s.rtt = d.Milliseconds()
 	}
+	s.mu.Unlock()
+}
+
+// keepaliveSent counts one keepalive onto the unanswered tally. Paired with roundTrip, which clears it.
+func (s *coreStatus) keepaliveSent() {
+	if s == nil || s.path == "" {
+		return
+	}
+	s.mu.Lock()
+	s.unans++
 	s.mu.Unlock()
 }
 
@@ -277,6 +292,7 @@ func (s *coreStatus) write() {
 	rt := s.rt
 	rtt := s.rtt
 	role := s.role
+	unans := s.unans
 	s.mu.Unlock()
 	payload := struct {
 		Active string      `json:"active"`
@@ -286,8 +302,10 @@ func (s *coreStatus) write() {
 		RT     int64       `json:"rt"`
 		RTT    int64       `json:"rtt_ms"`
 		Role   string      `json:"role"`
+		Unans  int64       `json:"unanswered"`
 		TS     int64       `json:"ts"`
-	}{Active: active, Events: evs, HB: hb, DW: dw, RT: rt, RTT: rtt, Role: role, TS: time.Now().Unix()}
+	}{Active: active, Events: evs, HB: hb, DW: dw, RT: rt, RTT: rtt, Role: role, Unans: unans,
+		TS: time.Now().Unix()}
 	buf, err := json.Marshal(payload)
 	if err != nil {
 		return

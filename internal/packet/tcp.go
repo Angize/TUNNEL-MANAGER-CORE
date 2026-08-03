@@ -2850,6 +2850,7 @@ func (b *TCP) keepaliveLoop() {
 // deadline. readLoop resets the counter on any inbound frame.
 func (b *TCP) pingOne(cf *connFramer) (ok bool, err error) {
 	b.pc.mark()
+	b.st.keepaliveSent()
 	if err := cf.writeFrame(typePing, nil); err != nil {
 		return false, err
 	}
