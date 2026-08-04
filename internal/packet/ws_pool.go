@@ -67,10 +67,6 @@ type healthRec struct {
 	state      string
 	fails      int
 	nextRetest int64
-	// nodeBurn (direct pool only) marks a burn the NODE's tun probe decided — the one measurement that
-	// watches what actually CROSSES the tunnel. Nothing weaker takes it back; see PeerPool.condemned.
-	// The ws pool never sets it: its own prober tests the same thing its burns are about.
-	nodeBurn bool
 }
 
 // wsPool holds the clean IP/SNI lists, the per-entry health FSM, and the active index.

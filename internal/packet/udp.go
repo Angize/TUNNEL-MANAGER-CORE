@@ -125,7 +125,6 @@ type UDP struct {
 	pp      *PeerPool           // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
 	poolIPs map[string]struct{} // client-only: the destination pool's IPs (4-byte keys), so a frame from the endpoint we just left is not mistaken for proof that the new one is alive; set once before Run
 	sp      *PeerPool           // client-only: source-IP rotation pool (nil = fixed source; rebinds the socket on rotate)
-	dp      destProbe           // client-only: the in-flight out-of-band destination probe (see peer_probe.go)
 }
 
 // SetPeerPool (client, direct transports) wires a destination-IP rotation pool: when the current
@@ -394,24 +393,6 @@ func runPinPoll(rc *rotationController, closeCh <-chan struct{}, adoptPeer, adop
 // delivered as SIGHUP). No-op unless pooled.
 func (b *UDP) ProbeAllNow() {
 	probeAllPools(b.pp, b.sp)
-}
-
-// probeDest tests one burned DESTINATION out of band: a real handshake init addressed at that endpoint
-// alone. It goes out the LIVE socket on purpose — a udp server identifies its client by (source ip,
-// source port), so an init from a fresh socket would look like a second client. Nothing of the live
-// carrier is touched: the server stages a session for an init and learns nothing from it until a frame
-// opens under those keys, which this probe never sends, so not even its reply socket moves.
-//
-// Crypto only, and the crypto-off pool has no prober at all (see clientLoop). The only probe a
-// crypto-off carrier could send is a ping — and a crypto-off server DOES re-point its reply socket at
-// whichever of its IPs a frame last arrived on, so that ping would steer the downstream onto the
-// endpoint under test, which is the burned one. There is no ordering that reliably puts it back.
-func (b *UDP) probeDest(addr string) bool {
-	ua, err := net.ResolveUDPAddr("udp", addr)
-	if err != nil || ua == nil || ua.IP == nil {
-		return false
-	}
-	return probeDestHandshake(&b.dp, b.psk, ua.IP, func(init []byte) { b.writeCtrl(init, ua) })
 }
 
 // pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin. Runs until Close.
@@ -900,9 +881,6 @@ func (b *UDP) handleCrypto(pkt []byte, addr *net.UDPAddr) {
 // init starts a fresh session; on the client a resp completes ours.
 func (b *UDP) tryHandshake(pkt []byte, addr *net.UDPAddr) {
 	if b.isClient {
-		if b.dp.answered(addr.IP, pkt) {
-			return // the RESP our out-of-band probe asked another endpoint for; it installs no session
-		}
 		ci := b.ci.Load()
 		if ci == nil {
 			return
@@ -1006,11 +984,6 @@ func (b *UDP) clientLoop() {
 	if rc.active() {
 		go b.pinPollLoop(rc)
 	}
-	if b.cryptoOn { // no PSK handshake to probe with otherwise — see probeDest
-		// Its own goroutine, not the pin poller's: a probe batch takes seconds, and an operator's jump
-		// must never wait behind it.
-		go runDestRetests(b.pp, b.closeCh, b.probeDest, b.st.event)
-	}
 	// Seed the staleness baseline NOW (clear mode). Without a baseline, sessionStale() returns false
 	// while lastRx==0, so a clear-mode failover-only pool whose FIRST endpoint is dead from the start
 	// never fires — it never receives a reply, so lastRx stays 0 and the tunnel strands on the blackhole.
@@ -1045,21 +1018,18 @@ func (b *UDP) clientLoop() {
 		} else {
 			// A manual jump LANDS the moment the endpoint it aimed at answers, and a landed pin has to
 			// release AT ONCE: while it is live, both failover and the timed rotation are frozen behind
-			// it. Deliberately not folded into healEvents below — that gate needs a prior failure to
-			// have been counted, which a jump that simply worked never produces, so a landed pin used to
-			// sit out the whole pinTTL. Keyed on the address the carrier is REALLY on, like the tcp twin,
-			// so a pin aimed somewhere else is never reported as landed.
+			// it. Keyed on the address the carrier is REALLY on, like the tcp twin, so a pin aimed
+			// somewhere else is never reported as landed.
 			if b.pp != nil && b.peerAnswered.Load() {
 				if pa := b.peer.Load(); pa != nil {
 					b.pp.pinLandedOn(pa.String())
 				}
 			}
-			// Clear any transient burn on an endpoint that is proving itself. Heal only what the CURRENT endpoint
-			// has EARNED: failN alone is not proof, because a timed rotation keeps the session and failN then also
-			// counts unanswered probes on an endpoint we have merely jumped to — which would un-burn a blocked IP
-			// on every visit. peerAnswered is the proof, in both modes.
-			if b.peerAnswered.Load() && (failN > 0 || (!b.cryptoOn && rc.active())) {
-				healEvents(b.st, rc) // this endpoint is answering — clear transient burns and emit any heal
+			// No heal here. A frame coming back proves an endpoint answered US, never that the tunnel
+			// CARRIES — the node's tun probe owns that verdict and delivers it as cmdOK. All that is
+			// left is bookkeeping a live carrier invalidates.
+			if b.peerAnswered.Load() {
+				rc.success() // live carrier: reset the attribution count and the pin-release count
 			}
 			// Clear mode has no handshake to fire st.reconnected(), so a self-heal down() would arm wasDown with
 			// no matching "up". Pair it on the data-plane recovery instead: reconnected() is a no-op unless a down

@@ -100,7 +100,6 @@ type Flux struct {
 	pp      *PeerPool           // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
 	poolIPs map[string]struct{} // client-only: the destination pool's IPs (4-byte keys) — see provenFrom
 	sp      *PeerPool           // client-only: source-IP rotation pool (nil = single fixed source; swaps the crafted header src)
-	dp      destProbe           // client-only: the in-flight out-of-band destination probe (see peer_probe.go)
 }
 
 // SetDeadAfter (client) tightens the session-stale deadline to the per-tunnel dead_after_secs so the
@@ -710,9 +709,6 @@ func (f *Flux) openWith(s Sealer, body []byte) (typ byte, session, seq uint64, p
 
 func (f *Flux) tryHandshake(body []byte, addr *net.IPAddr) {
 	if f.isClient {
-		if f.dp.answered(addr.IP, body) {
-			return // the RESP our out-of-band probe asked another endpoint for; it installs no session
-		}
 		ci := f.ci.Load()
 		if ci == nil {
 			return
@@ -1022,19 +1018,6 @@ func (f *Flux) adoptSourceFlux() {
 	// session survives — nothing to reconnect, nothing to log. The source pool's status file shows it.
 }
 
-// probeDest tests one burned DESTINATION out of band: a real handshake init built in THIS epoch's
-// carrier shape and addressed at that endpoint alone, answered only by a peer holding the PSK. flux
-// addresses by IP, so the server's view of who we are does not move; nothing of the live carrier is
-// touched either — not the session, not the peer, not the staleness clock.
-func (f *Flux) probeDest(addr string) bool {
-	ip := parseIP4(hostOnly(addr))
-	if ip == nil {
-		return false
-	}
-	to := &net.IPAddr{IP: ip}
-	return probeDestHandshake(&f.dp, f.psk, ip, func(init []byte) { f.sendCtrl(init, to) })
-}
-
 // ProbeAllNow retests every suspect/dead endpoint on both pools at once (the panel "probe now" control,
 // delivered as SIGHUP). No-op unless pooled.
 func (f *Flux) ProbeAllNow() {
@@ -1054,9 +1037,6 @@ func (f *Flux) clientLoop() {
 	if rc.active() {
 		go f.pinPollLoop(rc)
 	}
-	// Its own goroutine, not the pin poller's: a probe batch takes seconds, and an operator's jump must
-	// never wait behind it.
-	go runDestRetests(f.pp, f.closeCh, f.probeDest, f.st.event)
 	// Seed the staleness baseline NOW (clear mode). Without it, sessionStale() returns false while
 	// lastRx==0, so a clear-mode failover-only pool whose first endpoint is dead never fires. Mirrors UDP.
 	f.lastRx.Store(time.Now().UnixNano())
@@ -1080,25 +1060,18 @@ func (f *Flux) clientLoop() {
 		} else {
 			// A manual jump LANDS the moment the endpoint it aimed at answers, and a landed pin has to
 			// release AT ONCE: while it is live, both failover and the timed rotation are frozen behind
-			// it. Deliberately not folded into healEvents below — that gate needs a prior failure to
-			// have been counted, which a jump that simply worked never produces, so a landed pin used to
-			// sit out the whole pinTTL. Keyed on the address the carrier is REALLY on, like the tcp twin,
-			// so a pin aimed somewhere else is never reported as landed.
+			// it. Keyed on the address the carrier is REALLY on, like the tcp twin, so a pin aimed
+			// somewhere else is never reported as landed.
 			if f.pp != nil && f.peerAnswered.Load() {
 				if pa := f.peer.Load(); pa != nil {
 					f.pp.pinLandedOn(pa.IP.String())
 				}
 			}
-			// Heal transient burns on endpoints proving themselves. Clear mode has no handshake, so use
-			// the data plane (peerAnswered), so a just-jumped-to endpoint's burn is never falsely cleared.
-			// Heal only what the CURRENT endpoint has EARNED. "failN > 0" alone used to be proof: it could
-			// only be non-zero in crypto mode after handshake retransmits, and reaching this branch at all
-			// meant the handshake had just succeeded. Now that a timed rotation keeps the session, failN
-			// also counts unanswered probes on an endpoint we have merely jumped to — so the old signal
-			// cleared the burn of an endpoint that had proven nothing, and a blocked IP was un-burned on
-			// every visit and never dropped out of rotation. peerAnswered is the proof, in both modes.
-			if f.peerAnswered.Load() && (failN > 0 || (!f.cryptoOn && rc.active())) {
-				healEvents(f.st, rc) // this endpoint is answering — clear transient burns and emit any heal
+			// No heal here. A frame coming back proves an endpoint answered US, never that the tunnel
+			// CARRIES — the node's tun probe owns that verdict and delivers it as cmdOK. All that is
+			// left is bookkeeping a live carrier invalidates.
+			if f.peerAnswered.Load() {
+				rc.success() // live carrier: reset the attribution count and the pin-release count
 			}
 			rc.proactive(f.rotatePeerFlux, f.rotateSourceFlux, time.Now())
 			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the

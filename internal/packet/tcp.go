@@ -1764,33 +1764,10 @@ func (b *TCP) dialLoop() {
 			w.conn.Close() // built just as Close fired — do not leak the fd
 		}
 	}()
-	// burnDest burns+advances the destination and refreshes the active label: the carrier is gone, so the
-	// endpoint the pool advanced onto IS where the tunnel is heading. announce=true also writes a
-	// "peer-rotate" down, for the dial/handshake-failure paths where this is the drop's only event;
-	// announce=false burns silently, because the post-serve path emits its own classified down().
-	burnDest := func(announce bool) {
-		if addr, burned := b.burnAdvance(true); burned { // the carrier is gone: this IS a failover
-			b.st.setActive(b.stTag + " · " + addr)
-			if announce {
-				b.st.down("peer-rotate", "ip:"+addr)
-			}
-		}
-	}
 	succeedBoth := func() {
+		// No heal here either — a connection that came up proves the endpoint accepted US. cmdOK is
+		// where a heal comes from now. All that is left is the attribution counter.
 		b.destRot.Store(0)
-		// succeeded() returns the recovered address only on a real heal transition (it cleared a
-		// burn/suspect), else "" — so emit a discrete heal event exactly once per recovery, matching the
-		// datagram carriers' event("heal","peer-retest")/("src-retest"). nil-safe (ws-pool/server).
-		if b.pp != nil {
-			if a := b.pp.succeeded(); a != "" {
-				b.st.event("heal", "peer-retest", "ip:"+a)
-			}
-		}
-		if b.sp != nil {
-			if a := b.sp.succeeded(); a != "" {
-				b.st.event("heal", "src-retest", "ip:"+a)
-			}
-		}
 	}
 	// reconnect backoff: grows on each failed dial/handshake, resets on a successful connect, so a
 	// dead/blocked destination is re-probed with an exponential backoff instead of a fixed-1s beacon.
@@ -1840,9 +1817,10 @@ func (b *TCP) dialLoop() {
 			if err != nil {
 				if b.pool != nil {
 					b.pool.advance() // rotate to the next combo for the retry
-				} else {
-					burnDest(true) // direct-tcp: this endpoint won't connect -> burn + advance (dest, then source)
 				}
+				// A DIRECT pool is left alone: only the node's tun probe may condemn one of its
+				// endpoints, and a dial that failed says the carrier could not come up, not which IP
+				// is to blame. Re-dial on the backoff; the probe judges within a couple of sweeps.
 				backoff = nextReconnectDelay(backoff)
 				if b.sleep(backoff) {
 					return
@@ -1852,14 +1830,11 @@ func (b *TCP) dialLoop() {
 			cf, err = b.handshakeAndPrime(conn)
 			if err != nil {
 				conn.Close()
-				// Attribute this exactly like a failed dial. A TCP connect that COMPLETES and then fails the core
-				// handshake is the signature of a DPI that lets the SYN through and kills the payload, so the
-				// endpoint is as unusable as one that never answered — without the burn the client re-dials the
-				// same blocked endpoint forever and rotation is inert for the failure mode it exists to escape.
+				// The ws EDGE pool attributes this itself — a TCP connect that completes and then fails the
+				// core handshake is the signature of a DPI that lets the SYN through and kills the payload.
+				// A DIRECT pool does not: the tun probe is its only judge, and it sees the same silence.
 				if b.pool != nil {
 					b.pool.advance() // rotate to the next combo; edge health stays for attributeFailure/dataFailure
-				} else {
-					burnDest(true) // direct-tcp: this endpoint answers TCP but won't carry the tunnel -> burn + advance
 				}
 				backoff = nextReconnectDelay(backoff)
 				if b.sleep(backoff) {
@@ -1984,11 +1959,11 @@ func (b *TCP) dialLoop() {
 				// MAKE BEFORE BREAK. A connection-oriented carrier cannot carry its session across a destination
 				// change the way the datagram carriers do, so build the NEXT one first and only then drop this one:
 				// dialLoop adopts the parked carrier without dialing, so the changeover costs no connect.
-				if !b.buildWarm(func() { b.burnAdvance(false) }, srcMovedTo, dstMoved, dstPrev) { // live carrier stays: silent, its source is not burned, its endpoint is still Active
+				if !b.buildWarm(func() {}, srcMovedTo, dstMoved, dstPrev) { // live carrier stays: silent, its endpoint is still Active
 					// The endpoint we advanced onto will not come up. KEEP the healthy connection —
 					// trading it for a dead one is exactly what make-before-break exists to prevent —
-					// and re-arm; burnAdvance already burned it, so the next beat picks a different one.
-					// buildWarm has already put the cursor back on dstPrev.
+					// and re-arm. Nothing is burned: a warm build that failed is not the tun probe
+					// speaking. buildWarm has already put the cursor back on dstPrev.
 					rot.Reset(iv)
 					return
 				}
@@ -2044,7 +2019,7 @@ func (b *TCP) dialLoop() {
 				deliberate = true
 				succeedBoth()
 			} else if time.Since(connectedAt) < minLiveness {
-				burnDest(false) // burn+advance SILENTLY: the classified down() below is the drop's single event
+				// a short-lived carrier is not a verdict on this endpoint; the tun probe decides
 			} else {
 				succeedBoth()
 			}
@@ -2595,8 +2570,6 @@ func (b *TCP) ProbeAllNow() {
 // (dialTarget()/sourceIP() read the pinned endpoint via the pool's current()). No rebuild — the TUN
 // stays up. Runs until Close. The ws edge pool uses retestLoop for the same job on its own axes.
 func (b *TCP) peerPinPollLoop() {
-	// Its own goroutine: a probe batch takes seconds, and an operator's jump must never wait behind it.
-	go runDestRetests(b.pp, b.closeCh, b.probeDest, b.st.event)
 	drop := func() {
 		b.manualSwitch.Store(true) // operator-initiated: skip fault accounting on the induced drop
 		if c := b.curConn.Load(); c != nil {
@@ -2613,6 +2586,15 @@ func (b *TCP) peerPinPollLoop() {
 			if b.pp != nil {
 				if cmd, ok := b.pp.readCmd(); ok {
 					switch {
+					case cmd.Cmd == cmdOK:
+						// Both ends of the pair the probe measured are proven; keyed, so a verdict that
+						// crossed with a re-dial cannot clear an endpoint the tunnel has already left.
+						if cmd.Key != "" && b.pp.clearBurn(cmd.Key) {
+							b.st.event("heal", "peer-retest", "ip:"+cmd.Key)
+						}
+						if b.sp != nil && cmd.Src != "" && b.sp.clearBurn(cmd.Src) {
+							b.st.event("heal", "src-retest", "ip:"+cmd.Src)
+						}
 					case cmd.Cmd == cmdFail:
 						// Same burn the carrier does on a dead peer; burnAdvance leaves the event to its
 						// caller, so publish here and drop so dialLoop re-dials on the new destination.
@@ -2623,7 +2605,6 @@ func (b *TCP) peerPinPollLoop() {
 						if addr, moved := b.burnAdvance(true); moved {
 							log.Printf("core/tcp: destination %s failed by the node's tun probe — burning and advancing to %s", gone, addr)
 							b.st.event("burn", "tun-probe", "ip:"+gone)
-							b.pp.markNodeBurn(gone) // the tun probe condemned it; only the tun probe takes it back
 							drop()
 						}
 					case cmd.Key != "" && b.pp.selectEntry(cmd.Key):
@@ -2644,57 +2625,6 @@ func (b *TCP) peerPinPollLoop() {
 			}
 		}
 	}
-}
-
-// probeDest tests one burned DESTINATION of the DIRECT pool out of band: a fresh connection carrying
-// the real client handshake, torn down at once. Nothing on the live carrier moves. With crypto on the
-// server answers only a PSK-authenticated init and publishes nothing until a frame authenticates too,
-// so the probe never reaches its connection set; with crypto off there is no such step and the dial
-// itself is the whole answer.
-func (b *TCP) probeDest(addr string) bool {
-	d := &net.Dialer{Timeout: probeTimeout}
-	if ip := b.probeSourceIP(); ip != nil {
-		d.LocalAddr = &net.TCPAddr{IP: ip}
-	}
-	conn, err := d.Dial("tcp", addr)
-	if err != nil {
-		return false
-	}
-	defer conn.Close()
-	deadline := time.Now().Add(probeTimeout)
-	c := conn
-	if b.cover { // the cover handshake is part of the path being tested — a bare TCP accept is not it
-		tc, cerr := tlscover.ClientConn(c, b.coverSNI, b.psk, deadline)
-		if cerr != nil {
-			return false
-		}
-		c = tc
-	}
-	if !b.cryptoOn {
-		return true
-	}
-	conn.SetDeadline(deadline)
-	return b.clientHandshake(b.newFramer(c)) == nil
-}
-
-// probeSourceIP is the local IP a PROBE dial binds to — the source pool's current entry, or the fixed
-// bindIP — resolved without dialer()'s side effects: that one records lastSrc (which the source-pin
-// landing check reads) and burns an unbindable source, and a probe may do neither. nil = let the
-// kernel choose, exactly as the live dial does when the configured source will not bind.
-func (b *TCP) probeSourceIP() net.IP {
-	src := b.sourceIP()
-	if src == "" {
-		return nil
-	}
-	host := src
-	if h, _, e := net.SplitHostPort(src); e == nil {
-		host = h
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !canBindSource(ip) {
-		return nil
-	}
-	return ip
 }
 
 // SelectEdge pins a specific pool edge (kind "ip"|"sni", key its value) as the active one and
