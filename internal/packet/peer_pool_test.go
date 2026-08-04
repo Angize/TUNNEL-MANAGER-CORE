@@ -74,28 +74,6 @@ func TestPeerPoolAutoBurnOffJustRotates(t *testing.T) {
 	}
 }
 
-func TestPeerPoolSucceededClearsBurn(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b", "c"}, true, 0, "")
-	p.fail() // burn a, now on b
-	// pretend we later rotate back onto a and it works
-	p.mu.Lock()
-	p.cur = 0 // force active = a (still burned)
-	p.mu.Unlock()
-	if healed := p.succeeded(); healed != "a" {
-		t.Fatalf("succeeded() must return the recovered addr %q, got %q", "a", healed)
-	}
-	p.mu.Lock()
-	burnedA := p.health["a"] != nil
-	p.mu.Unlock()
-	if burnedA {
-		t.Fatal("succeeded() must clear the active endpoint's burn")
-	}
-	// A second success on the now-healthy endpoint is a no-op — returns "" so no duplicate heal event.
-	if healed := p.succeeded(); healed != "" {
-		t.Fatalf("succeeded() on a healthy endpoint must return \"\", got %q", healed)
-	}
-}
-
 // TestPeerPoolSuspectToDeadBackoff walks a single endpoint through the whole health FSM: a fresh failure
 // makes it suspect (+30s), each failed live retest steps the backoff, and running off the end drops it to
 // dead on the slow interval — exactly the ws edge pool's schedule.
@@ -148,13 +126,12 @@ func TestPeerPoolDueEndpointReadmitted(t *testing.T) {
 	if got != "a" && got != "b" {
 		t.Fatalf("a due endpoint should be re-admitted, got %q", got)
 	}
-	// A success on the re-admitted endpoint heals it.
-	p.succeeded()
+	// Only the node's verdict clears it — see TestNothingButTheNodeClearsABurn.
 	p.mu.Lock()
-	healed := p.health[p.addrs[p.cur]] == nil
+	active := p.addrs[p.cur]
 	p.mu.Unlock()
-	if !healed {
-		t.Fatal("succeeded() on a re-admitted endpoint should heal it back to healthy")
+	if !p.clearBurn(active) {
+		t.Fatal("the node's OK should clear the re-admitted endpoint's burn")
 	}
 }
 

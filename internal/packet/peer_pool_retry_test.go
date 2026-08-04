@@ -20,12 +20,12 @@ func burnUntilDue(t *testing.T, p *PeerPool, at int, clk *int64) {
 	*clk = r.nextRetest
 }
 
-// TestProactiveRotationPassesOverADueBurnedEndpoint drives the REAL tcp accessors — dialTarget() is what
-// the dial uses, sourceIP() what the socket binds to — across a proactive rotation while one endpoint is
-// burned with its retest already due. The timed rotation must walk PAST it to a healthy one: a due
-// endpoint has answered nothing, and jumping the live tunnel onto it to find out is what the prober
-// replaced. Every reader must then agree with what the rotation announced.
-func TestProactiveRotationPassesOverADueBurnedEndpoint(t *testing.T) {
+// TestProactiveRotationRetriesADueBurnButNotAPendingOne drives the REAL tcp accessors — dialTarget()
+// is what the dial uses, sourceIP() what the socket binds to — across the two shapes a burned endpoint
+// can have. A burn whose backoff has ELAPSED is eligible again on purpose: there is no out-of-band
+// prober, so selecting it IS the test and the node's tun probe judges what happens next. A burn still
+// inside its backoff is passed over. Every reader must agree with what the rotation announced.
+func TestProactiveRotationRetriesADueBurnButNotAPendingOne(t *testing.T) {
 	clk := int64(1000)
 	dst := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, true, 0, "")
 	dst.now = func() int64 { return clk }
@@ -33,11 +33,11 @@ func TestProactiveRotationPassesOverADueBurnedEndpoint(t *testing.T) {
 	src.now = func() int64 { return clk }
 	b := &TCP{pp: dst, sp: src}
 
-	burnUntilDue(t, dst, 1, &clk) // 10.0.0.2 is burned but DUE; 10.0.0.1 and .3 are healthy
+	burnUntilDue(t, dst, 1, &clk) // 10.0.0.2 burned, backoff elapsed
 
 	rotated, moved := dst.nextEndpoint(true)
-	if !moved || rotated != "10.0.0.3" {
-		t.Fatalf("the timed rotation must skip the due-but-burned 10.0.0.2 and take the healthy .3, got (%q,%v)", rotated, moved)
+	if !moved || rotated != "10.0.0.2" {
+		t.Fatalf("a due burn is the next thing to retry, got (%q,%v)", rotated, moved)
 	}
 	if got := b.dialTarget(); got != rotated {
 		t.Fatalf("the dial went to %s while the rotation announced %s", got, rotated)
@@ -51,23 +51,22 @@ func TestProactiveRotationPassesOverADueBurnedEndpoint(t *testing.T) {
 		t.Fatalf("the status writer would publish %s while the tunnel dials %s", got, rotated)
 	}
 
-	// With every alternative burned the proactive timer must not move AT ALL — tearing a working
-	// connection down to land on an endpoint that has proven nothing is strictly worse than staying.
-	burnUntilDue(t, dst, 0, &clk)
-	dst.mu.Lock()
-	dst.cur, dst.chosen = 2, ""
-	dst.mu.Unlock()
-	if addr, m := dst.nextEndpoint(true); m {
-		t.Fatalf("nothing is healthy — the timed rotation must stay put, it moved to %q", addr)
+	// A burn still inside its backoff is passed over for a healthy endpoint.
+	p2 := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, true, 0, "")
+	p2.now = func() int64 { return clk }
+	p2.mu.Lock()
+	p2.health["10.0.0.2"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600}
+	p2.cur, p2.chosen = 0, ""
+	p2.mu.Unlock()
+	if a, m := p2.nextEndpoint(true); !m || a != "10.0.0.3" {
+		t.Fatalf("a pending burn must be passed over for the healthy .3, got (%q,%v)", a, m)
 	}
-	if got := b.dialTarget(); got != "10.0.0.3" {
-		t.Fatalf("after a rotation that did not move, the dial target is %s, want 10.0.0.3", got)
-	}
-
-	// The source pool follows the same rule: its only alternative is burned, so nothing moves.
-	burnUntilDue(t, src, 1, &clk)
-	if addr, m := src.nextEndpoint(true); m {
-		t.Fatalf("the source rotation must stay put with no healthy alternative, it moved to %q", addr)
+	// ...and with every alternative pending, the timer must not move at all.
+	p2.mu.Lock()
+	p2.health["10.0.0.1"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600}
+	p2.mu.Unlock()
+	if a, m := p2.nextEndpoint(true); m {
+		t.Fatalf("nothing is eligible — the timer must stay put, it moved to %q", a)
 	}
 	if got := b.sourceIP(); got != "192.0.2.1" {
 		t.Fatalf("the socket would bind %s, want the unmoved 192.0.2.1", got)
@@ -86,7 +85,7 @@ func TestFailoverLandsOnADueEndpointAndIsNotSticky(t *testing.T) {
 		// Burning .2 leaves nothing healthy and nothing due, so the least-bad OTHER endpoint wins: .1,
 		// whose retest is nearer than the cold .3's.
 		{"the retry failed", func(p *PeerPool) { p.fail() }, "10.0.0.1"},
-		{"the prober re-admitted it", func(p *PeerPool) { p.retestResult("10.0.0.2", true) }, "10.0.0.2"},
+		{"the node reported it carrying", func(p *PeerPool) { p.clearBurn("10.0.0.2") }, "10.0.0.2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clk := int64(1000)

@@ -109,7 +109,6 @@ type Raw struct {
 	pp      *PeerPool           // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
 	poolIPs map[string]struct{} // client-only: the destination pool's IPs (4-byte keys) — see provenFrom
 	sp      *PeerPool           // client-only: source-IP rotation pool (nil = fixed source; ignored under spoofSrc)
-	dp      destProbe           // client-only: the in-flight out-of-band destination probe (see peer_probe.go)
 }
 
 // SetDeadAfter (client) tightens the session-stale deadline to the per-tunnel dead_after_secs so the
@@ -946,9 +945,6 @@ func (r *Raw) learnLocalIP(peer net.IP) {
 
 func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr) {
 	if r.isClient {
-		if r.dp.answered(addr.IP, body) {
-			return // the RESP our out-of-band probe asked another endpoint for; it installs no session
-		}
 		ci := r.ci.Load()
 		if ci == nil {
 			return
@@ -1274,19 +1270,6 @@ func (r *Raw) adoptSourceRaw() {
 	// nothing to reconnect and nothing to log — the source pool's own status file reflects the change.
 }
 
-// probeDest tests one burned DESTINATION out of band: a real handshake init wrapped in this profile's
-// carrier header and addressed at that endpoint alone, answered only by a peer holding the PSK. raw
-// addresses by IP with no port, so the server's view of WHO we are does not move; nothing of the live
-// carrier is touched either — not the session, not the peer, not the staleness clock.
-func (r *Raw) probeDest(addr string) bool {
-	ip := parseIP4(hostOnly(addr))
-	if ip == nil {
-		return false
-	}
-	to := &net.IPAddr{IP: ip}
-	return probeDestHandshake(&r.dp, r.psk, ip, func(init []byte) { r.writeCtrl(init, to) })
-}
-
 // ProbeAllNow retests every suspect/dead endpoint on both pools at once (the panel "probe now" control,
 // delivered as SIGHUP). No-op unless pooled.
 func (r *Raw) ProbeAllNow() {
@@ -1305,9 +1288,6 @@ func (r *Raw) clientLoop() {
 	if rc.active() {
 		go r.pinPollLoop(rc)
 	}
-	// Its own goroutine, not the pin poller's: a probe batch takes seconds, and an operator's jump must
-	// never wait behind it.
-	go runDestRetests(r.pp, r.closeCh, r.probeDest, r.st.event)
 	// Seed the staleness baseline NOW (clear mode). Without it, sessionStale() returns false while
 	// lastRx==0, so a clear-mode failover-only pool whose first endpoint is dead never fires. Mirrors UDP.
 	r.lastRx.Store(time.Now().UnixNano())
@@ -1332,21 +1312,18 @@ func (r *Raw) clientLoop() {
 		} else {
 			// A manual jump LANDS the moment the endpoint it aimed at answers, and a landed pin has to
 			// release AT ONCE: while it is live, both failover and the timed rotation are frozen behind
-			// it. Deliberately not folded into healEvents below — that gate needs a prior failure to
-			// have been counted, which a jump that simply worked never produces, so a landed pin used to
-			// sit out the whole pinTTL. Keyed on the address the carrier is REALLY on, like the tcp twin,
-			// so a pin aimed somewhere else is never reported as landed.
+			// it. Keyed on the address the carrier is REALLY on, like the tcp twin, so a pin aimed
+			// somewhere else is never reported as landed.
 			if r.pp != nil && r.peerAnswered.Load() {
 				if pa := r.peer.Load(); pa != nil {
 					r.pp.pinLandedOn(pa.IP.String())
 				}
 			}
-			// Heal transient burns on an endpoint proving itself. Crypto signals that via a completed handshake;
-			// clear mode has none, so it uses the data plane (peerAnswered, set when the CURRENT endpoint replies
-			// and cleared on rotation). Heal only what that endpoint has EARNED: failN alone is not proof, because
-			// a timed rotation keeps the session and failN then also counts probes we merely jumped into.
-			if r.peerAnswered.Load() && (failN > 0 || (!r.cryptoOn && rc.active())) {
-				healEvents(r.st, rc) // this endpoint is answering — clear transient burns and emit any heal
+			// No heal here. A frame coming back proves an endpoint answered US, never that the tunnel
+			// CARRIES — the node's tun probe owns that verdict and delivers it as cmdOK. All that is
+			// left is bookkeeping a live carrier invalidates.
+			if r.peerAnswered.Load() {
+				rc.success() // live carrier: reset the attribution count and the pin-release count
 			}
 			rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
 			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the
