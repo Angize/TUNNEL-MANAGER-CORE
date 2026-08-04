@@ -374,7 +374,8 @@ func probeAllPools(pp, sp *PeerPool) {
 
 // runPinPoll is the 1s ticker that applies operator pins for a datagram carrier: identical across
 // udp/raw/flux, which inject their own close channel and adopt-peer/adopt-source callbacks.
-func runPinPoll(rc *rotationController, closeCh <-chan struct{}, adoptPeer, adoptSource func()) {
+func runPinPoll(rc *rotationController, closeCh <-chan struct{}, adoptPeer, adoptSource func(),
+	rotDst, rotSrc func(proactive bool)) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
@@ -382,7 +383,7 @@ func runPinPoll(rc *rotationController, closeCh <-chan struct{}, adoptPeer, adop
 		case <-closeCh:
 			return
 		case <-t.C:
-			rc.pollPins(adoptPeer, adoptSource)
+			rc.pollPins(adoptPeer, adoptSource, rotDst, rotSrc)
 		}
 	}
 }
@@ -395,7 +396,7 @@ func (b *UDP) ProbeAllNow() {
 
 // pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin. Runs until Close.
 func (b *UDP) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, b.closeCh, b.adoptPeerUDP, b.adoptSourceUDP)
+	runPinPoll(rc, b.closeCh, b.adoptPeerUDP, b.adoptSourceUDP, b.rotatePeerUDP, b.rotateSourceUDP)
 }
 
 // SetDeadAfter (client) tightens the session-stale deadline to the per-tunnel dead_after_secs so the

@@ -1027,7 +1027,7 @@ func (f *Flux) ProbeAllNow() {
 // pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin (re-pointing the
 // live dataplane at the pinned endpoint via pollPins). Runs until Close.
 func (f *Flux) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, f.closeCh, f.adoptPeerFlux, f.adoptSourceFlux)
+	runPinPoll(rc, f.closeCh, f.adoptPeerFlux, f.adoptSourceFlux, f.rotatePeerFlux, f.rotateSourceFlux)
 }
 
 func (f *Flux) clientLoop() {

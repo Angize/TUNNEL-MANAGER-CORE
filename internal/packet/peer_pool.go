@@ -2,6 +2,7 @@ package packet
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"sync"
 	"time"
@@ -510,26 +511,36 @@ func (p *PeerPool) cmdPath() string {
 	return p.statusPath + ".cmd"
 }
 
-// readSelectCmd consumes a pending select-endpoint command (written by the node for the panel's per-IP
-// pin button) and returns the requested key. ok=false when none is pending or it is malformed. The file
-// is removed once read so a command fires exactly once.
-func (p *PeerPool) readSelectCmd() (key string, ok bool) {
+// poolCmd is one request from the node, read out of the sidecar file. Exactly one field is meaningful
+// per command: Key pins that endpoint (the panel's per-IP button), Cmd names an action.
+type poolCmd struct {
+	Key string `json:"key"`
+	Cmd string `json:"cmd"`
+}
+
+// cmdFail is the node asking us to treat the current endpoint as dead: burn it and advance, the same
+// move a peer that stopped answering triggers here. The node sends it when its own probe finds nothing
+// crossing the TUN, which is a signal this side cannot see — our carrier only knows whether frames it
+// can authenticate arrive, and on a crypto tunnel that takes the stale window plus a full run of failed
+// handshakes to conclude. The FSM stays owned here: the node asks, this file decides what it means.
+const cmdFail = "fail"
+
+// readCmd consumes a pending command (written by the node) and returns it. ok=false when none is
+// pending or it carries neither field. The file is removed once read, so a command fires exactly once.
+func (p *PeerPool) readCmd() (c poolCmd, ok bool) {
 	cp := p.cmdPath()
 	if cp == "" {
-		return "", false
+		return c, false
 	}
 	data, err := os.ReadFile(cp)
 	if err != nil {
-		return "", false
+		return c, false
 	}
 	os.Remove(cp)
-	var c struct {
-		Key string `json:"key"`
+	if json.Unmarshal(data, &c) != nil || (c.Key == "" && c.Cmd == "") {
+		return poolCmd{}, false
 	}
-	if json.Unmarshal(data, &c) != nil || c.Key == "" {
-		return "", false
-	}
-	return c.Key, true
+	return c, true
 }
 
 // rotationController couples a client carrier's DESTINATION pool with an optional SOURCE pool and
@@ -644,15 +655,25 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 // pollPins reads a pending pin command for each pool and, when one is present, pins the requested
 // endpoint and calls the carrier's apply func (which re-points the live dataplane at the newly-pinned
 // endpoint via the pool's current()). Carriers run this on a ~1s ticker so a manual switch is prompt.
-func (c *rotationController) pollPins(applyDst, applySrc func()) {
+func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc func(proactive bool)) {
 	if c.dst != nil {
-		if key, ok := c.dst.readSelectCmd(); ok && c.dst.selectEntry(key) {
-			applyDst()
+		if cmd, ok := c.dst.readCmd(); ok {
+			switch {
+			case cmd.Cmd == cmdFail:
+				// Straight into the dead-peer path, so a node-driven failover and a carrier-driven one
+				// are the same move: same burn, same advance, same pin handling. Only the trigger differs.
+				log.Print("core: destination failed by the node's tun probe — burning and advancing")
+				c.fail(rotDst, rotSrc)
+			case cmd.Key != "" && c.dst.selectEntry(cmd.Key):
+				applyDst()
+			}
 		}
 		c.dst.expirePinIfLapsed() // flush the status file the moment a lapsed pin stops being honoured
 	}
 	if c.src != nil {
-		if key, ok := c.src.readSelectCmd(); ok && c.src.selectEntry(key) {
+		// The source pool takes pins only. A tun probe cannot tell a bad SOURCE from a bad DESTINATION,
+		// and the controller already walks the source once every destination has been tried against it.
+		if cmd, ok := c.src.readCmd(); ok && cmd.Key != "" && c.src.selectEntry(cmd.Key) {
 			applySrc()
 		}
 		c.src.expirePinIfLapsed()

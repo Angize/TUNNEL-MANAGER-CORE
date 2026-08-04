@@ -1278,7 +1278,7 @@ func (r *Raw) ProbeAllNow() {
 
 // pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin. Runs until Close.
 func (r *Raw) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, r.closeCh, r.adoptPeerRaw, r.adoptSourceRaw)
+	runPinPoll(rc, r.closeCh, r.adoptPeerRaw, r.adoptSourceRaw, r.rotatePeerRaw, r.rotateSourceRaw)
 }
 
 func (r *Raw) clientLoop() {
