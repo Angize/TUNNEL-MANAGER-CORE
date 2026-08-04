@@ -401,8 +401,9 @@ type TCP struct {
 	// once the destination pool has cycled through every endpoint against it. Written by the dial loop and
 	// by the rotation timer (which reaches burnAdvance through buildWarm), hence atomic.
 	destRot   atomic.Int64
-	srcWarned sync.Map    // sources already reported as unbindable (one log line per source)
-	probing   atomic.Bool // a retest batch is in flight; keeps the retest tick free for the operator pin
+	destTick  atomic.Int32 // timed-rotation beats since the source last moved (the odometer's low digit)
+	srcWarned sync.Map     // sources already reported as unbindable (one log line per source)
+	probing   atomic.Bool  // a retest batch is in flight; keeps the retest tick free for the operator pin
 	// lastSrc is the source the dialer really BOUND to — empty when no bind was applied (none
 	// configured, or the IP is not on this host). Releasing a source pin is conditioned on it, so a
 	// pin is never consumed by a connection that leaves from somewhere else. Written in dialer(),
@@ -516,8 +517,15 @@ func (b *TCP) burnAdvance(carrierGone bool) (string, bool) {
 		}
 		return "", false
 	}
+	// ELIGIBLE, not size, and read BEFORE the burn — see rotationController.fail: a condemned
+	// destination cannot be tried, so counting the raw list blames the source for a lap that never
+	// happened. Floored at one: with nothing eligible, the endpoint we are on IS the experiment.
+	want := b.pp.eligibleCount()
+	if want < 1 {
+		want = 1
+	}
 	addr, _ := b.pp.fail()
-	if n := b.destRot.Add(1); b.sp != nil && b.pp.size() > 0 && int(n) >= b.pp.size() {
+	if n := b.destRot.Add(1); b.sp != nil && int(n) >= want {
 		walkSource()
 		b.destRot.Store(0)
 	}
@@ -1939,18 +1947,29 @@ func (b *TCP) dialLoop() {
 				// described a destination move on a source-only beat.
 				dstMoved := false
 				dstPrev := "" // where the LIVE connection is; restored below if the warm build fails
+				// The two pools are an ODOMETER: each beat advances the destination, and the source
+				// moves only once the destination has been all the way round — or cannot move at all.
+				// See rotationController.proactive; tcp runs its own timer but the walk is the same.
+				lap := true
 				if b.pp != nil {
 					dstPrev = b.pp.current()
 					if _, m := b.pp.rotateOnce(); m {
 						dstMoved = true // the endpoint itself is read back at the adoption site, once it is real
 					}
+					n := int32(b.pp.eligibleCount())
+					lap = !dstMoved || (n > 0 && b.destTick.Add(1) >= n)
+					if lap {
+						b.destTick.Store(0)
+					}
 				}
 				moved := dstMoved
 				// srcMovedTo is announced at the adoption site, not here — see rotateSourceTCP.
 				srcMovedTo := ""
-				if a, m := b.rotateSourceTCP(true); m { // advances the source pool; re-dial applies the new LocalAddr
-					moved = true
-					srcMovedTo = a
+				if lap {
+					if a, m := b.rotateSourceTCP(true); m { // the odometer's high digit
+						moved = true
+						srcMovedTo = a
+					}
 				}
 				if !moved {
 					rot.Reset(iv) // every other endpoint burned this beat — re-arm so rotation resumes once one heals

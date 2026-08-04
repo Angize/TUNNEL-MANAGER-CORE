@@ -1,6 +1,9 @@
 package packet
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // burnUntilDue burns addr once and moves the clock to its retest time, leaving it DUE — the state a
 // PROACTIVE rotation must now walk past (re-admission belongs to whatever burned it), and that only a
@@ -152,5 +155,90 @@ func TestEveryAdvanceAgreesWithCurrent(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestTheRotationWalksEveryCombination is the odometer. With two destinations and two sources the timed
+// rotation must visit all four pairs in order, not two of them: moving BOTH axes on every beat keeps
+// them in lockstep, so (src1,dst2) and (src2,dst1) were never seen at all. The destination is the low
+// digit; the source moves only when the destination has been all the way round, or cannot move at all.
+func TestTheRotationWalksEveryCombination(t *testing.T) {
+	dst := NewPeerPool([]string{"d1", "d2"}, true, time.Minute, "")
+	src := NewPeerPool([]string{"s1", "s2"}, true, time.Minute, "")
+	rc := newRotationController(dst, src)
+	rotDst := func(bool) { dst.nextEndpoint(true) }
+	rotSrc := func(bool) { src.nextEndpoint(true) }
+
+	at := time.Now()
+	var got []string
+	for i := 0; i < 4; i++ {
+		at = at.Add(2 * time.Minute)
+		rc.proactive(rotDst, rotSrc, at)
+		got = append(got, src.current()+" -> "+dst.current())
+	}
+	want := []string{"s1 -> d1", "s2 -> d2", "s2 -> d1", "s1 -> d2"}
+	// The pair the walk STARTS on is (s1,d2) after the first beat; what matters is that all four
+	// combinations appear across a full cycle, each exactly once.
+	seen := map[string]int{}
+	for _, g := range got {
+		seen[g]++
+	}
+	if len(seen) != 4 {
+		t.Fatalf("a 2x2 pool must produce four distinct combinations in four beats, got %v (want the set of %v)", got, want)
+	}
+	for g, n := range seen {
+		if n != 1 {
+			t.Fatalf("%s came up %d times in one cycle: %v", g, n, got)
+		}
+	}
+	// With only one destination eligible the source must move on EVERY beat, or the pool stops rotating.
+	dst.mu.Lock()
+	dst.health["d2"] = &healthRec{state: stateSuspect, nextRetest: dst.now() + 3600}
+	dst.mu.Unlock()
+	before := src.current()
+	at = at.Add(2 * time.Minute)
+	rc.proactive(rotDst, rotSrc, at)
+	if src.current() == before {
+		t.Fatalf("the destination cannot move, so the source must — it stayed on %s", before)
+	}
+}
+
+// TestASourceIsOnlyBlamedAfterARealLap guards the attribution. A source is the constant in the
+// experiment, so it may only be burned once every destination that COULD be tried against it has been.
+// Counting the raw list instead read two asks that both landed on the one surviving endpoint as a full
+// lap, and burned an innocent source — measured on core42, where 94.183.210.130 went for it.
+func TestASourceIsOnlyBlamedAfterARealLap(t *testing.T) {
+	clk := int64(1000)
+	dst := NewPeerPool([]string{"d1", "d2"}, true, 0, "")
+	dst.now = func() int64 { return clk }
+	src := NewPeerPool([]string{"s1", "s2"}, true, 0, "")
+	src.now = func() int64 { return clk }
+	dst.mu.Lock()
+	dst.health["d2"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600} // condemned, cannot be tried
+	dst.mu.Unlock()
+
+	rc := newRotationController(dst, src)
+	srcMoves := 0
+	rotDst := func(bool) { dst.fail() }
+	rotSrc := func(bool) { srcMoves++ }
+	for i := 0; i < 3; i++ {
+		rc.fail(rotDst, rotSrc)
+	}
+	if srcMoves != 3 {
+		t.Fatalf("with ONE eligible destination every ask is a full lap, so the source moves each time; got %d", srcMoves)
+	}
+
+	// And with both eligible it takes two asks per source move — the real lap.
+	dst2 := NewPeerPool([]string{"d1", "d2"}, false, 0, "") // auto-burn off: nothing leaves the eligible set
+	src2 := NewPeerPool([]string{"s1", "s2"}, false, 0, "")
+	rc2 := newRotationController(dst2, src2)
+	srcMoves = 0
+	rc2.fail(func(bool) {}, rotSrc)
+	if srcMoves != 0 {
+		t.Fatalf("one ask of two eligible destinations is not a lap, got %d source moves", srcMoves)
+	}
+	rc2.fail(func(bool) {}, rotSrc)
+	if srcMoves != 1 {
+		t.Fatalf("the second ask completes the lap, got %d source moves", srcMoves)
 	}
 }

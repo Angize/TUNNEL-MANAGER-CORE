@@ -10,8 +10,7 @@ import (
 
 // PeerPool rotates a client's DESTINATION endpoint (or, as a second instance, its SOURCE IP) across a
 // list of candidates, so one blocked IP does not kill the tunnel. It shares the ws edge pool's health
-// primitives (ws_pool.go) — the same healthy → suspect → dead FSM — and, for a destination pool, the
-// but has NO prober of its own, and takes no health opinion of its own either. On the direct carriers
+// primitives (ws_pool.go) — the same healthy → suspect → dead FSM — but has NO prober of its own, and takes no health opinion of its own either. On the direct carriers
 // the node's tun probe is the SOLE judge: it burns an endpoint (cmdFail) and it clears one (cmdOK),
 // and nothing else in this file may. A handshake an endpoint answers, or a frame that comes back from
 // it, says nothing about whether the tunnel CARRIES — which is the only question worth asking, and the
@@ -114,6 +113,30 @@ func (p *PeerPool) currentLocked() string {
 	}
 	// Pass 3: nothing healthy or due — the least-bad endpoint (never dead-end).
 	return p.pickLocked(p.bestIdxLocked(-1))
+}
+
+// eligibleCount is how many endpoints the rotation could actually pick right now: the healthy ones
+// plus the burned ones whose backoff has elapsed. It is what "a full lap" and "every destination has
+// been tried" both have to mean — the raw list length counts endpoints the rotation cannot reach, so
+// with one destination condemned it declares a lap after two asks that both landed on the same one.
+func (p *PeerPool) eligibleCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now, n := p.now(), 0
+	for _, a := range p.addrs {
+		if r := p.health[a]; r == nil || r.nextRetest <= now {
+			n++
+		}
+	}
+	return n
+}
+
+// activeIdx is the cursor's current index — read before and after a rotate to tell whether the pool
+// actually advanced, without every carrier's swap func having to report it.
+func (p *PeerPool) activeIdx() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cur
 }
 
 // size is the number of endpoints in the pool. It is fixed at construction, so no lock is needed.
@@ -535,6 +558,8 @@ func (p *PeerPool) readCmd() (c poolCmd, ok bool) {
 type rotationController struct {
 	dst, src *PeerPool
 	destRot  int
+	destTick int // beats since the source last moved — the odometer's low digit (see proactive)
+	destWant int // destinations this failover round can actually try (see fail)
 	pinFails int // consecutive proven-dead rounds while a pin is in force -> auto-release at pinFailRelease
 	rotate   time.Duration
 	rotateAt time.Time
@@ -585,10 +610,20 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 		c.pinFails = 0 // not pinned -> reset so a later pin starts its release count fresh
 	}
 	if c.dst != nil {
+		// How many destinations this round can actually try, snapshotted BEFORE the burn and at the
+		// START of the round: ELIGIBLE, not the raw list. A condemned destination cannot be tried, so
+		// counting the list read two asks that both landed on the one survivor as a full lap and burned
+		// an innocent source for a destination that never varied — measured on core42. Floored at one:
+		// with nothing eligible, the endpoint we are sitting on IS the whole experiment.
+		if c.destRot == 0 {
+			if c.destWant = c.dst.eligibleCount(); c.destWant < 1 {
+				c.destWant = 1
+			}
+		}
 		rotDst(false)
 		c.destRot++
-		if c.src != nil && c.dst.size() > 0 && c.destRot >= c.dst.size() {
-			rotSrc(false) // every destination tried against this source — move the source
+		if c.src != nil && c.destRot >= c.destWant {
+			rotSrc(false) // every destination that could be tried has been — move the source
 			c.destRot = 0
 		}
 		return
@@ -607,8 +642,12 @@ func (c *rotationController) success() {
 	c.pinFails = 0
 }
 
-// proactive fires the timed rotation of BOTH pools when due (a signal-free moving target on each side).
-// Held off while a pin is in force so the manual switch is not overridden.
+// proactive fires the timed rotation when due. The two pools are an ODOMETER, not two clocks: each
+// beat advances the DESTINATION, and the SOURCE moves only when the destination has been all the way
+// round — or cannot move at all, which is the same thing with one destination left. Moving both on
+// every beat is what the old code did, and with two of each it only ever produced two of the four
+// combinations: (src1,dst1) and (src2,dst2), the other pair never seen. Held off under a pin so the
+// manual switch is not overridden.
 func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now time.Time) {
 	if c.rotate <= 0 || c.rotateAt.IsZero() || !now.After(c.rotateAt) {
 		return
@@ -617,14 +656,22 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 		c.rotateAt = now.Add(c.rotate) // keep the schedule ticking; just skip this beat
 		return
 	}
-	if c.dst != nil {
-		rotDst(true)
-	}
-	if c.src != nil {
-		rotSrc(true)
-	}
-	c.destRot = 0 // a timed source move restarts the dest cycle (the "all dests tried" count is per-source)
 	c.rotateAt = now.Add(c.rotate)
+	if c.dst == nil { // source-only pool: every beat is its beat
+		if c.src != nil {
+			rotSrc(true)
+		}
+		return
+	}
+	before := c.dst.activeIdx()
+	rotDst(true)
+	c.destTick++
+	lap := c.dst.activeIdx() == before || c.destTick >= c.dst.eligibleCount()
+	if c.src != nil && lap {
+		rotSrc(true)
+		c.destTick = 0
+		c.destRot = 0 // a source move restarts the "every destination tried" count, which is per-source
+	}
 }
 
 // pollPins reads a pending pin command for each pool and, when one is present, pins the requested
