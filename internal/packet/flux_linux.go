@@ -100,6 +100,7 @@ type Flux struct {
 	pp      *PeerPool           // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
 	poolIPs map[string]struct{} // client-only: the destination pool's IPs (4-byte keys) — see provenFrom
 	sp      *PeerPool           // client-only: source-IP rotation pool (nil = single fixed source; swaps the crafted header src)
+	dp      destProbe           // client-only: the in-flight out-of-band destination probe (see peer_probe.go)
 }
 
 // SetDeadAfter (client) tightens the session-stale deadline to the per-tunnel dead_after_secs so the
@@ -709,6 +710,9 @@ func (f *Flux) openWith(s Sealer, body []byte) (typ byte, session, seq uint64, p
 
 func (f *Flux) tryHandshake(body []byte, addr *net.IPAddr) {
 	if f.isClient {
+		if f.dp.answered(addr.IP, body) {
+			return // the RESP our out-of-band probe asked another endpoint for; it installs no session
+		}
 		ci := f.ci.Load()
 		if ci == nil {
 			return
@@ -1018,6 +1022,19 @@ func (f *Flux) adoptSourceFlux() {
 	// session survives — nothing to reconnect, nothing to log. The source pool's status file shows it.
 }
 
+// probeDest tests one burned DESTINATION out of band: a real handshake init built in THIS epoch's
+// carrier shape and addressed at that endpoint alone, answered only by a peer holding the PSK. flux
+// addresses by IP, so the server's view of who we are does not move; nothing of the live carrier is
+// touched either — not the session, not the peer, not the staleness clock.
+func (f *Flux) probeDest(addr string) bool {
+	ip := parseIP4(hostOnly(addr))
+	if ip == nil {
+		return false
+	}
+	to := &net.IPAddr{IP: ip}
+	return probeDestHandshake(&f.dp, f.psk, ip, func(init []byte) { f.sendCtrl(init, to) })
+}
+
 // ProbeAllNow retests every suspect/dead endpoint on both pools at once (the panel "probe now" control,
 // delivered as SIGHUP). No-op unless pooled.
 func (f *Flux) ProbeAllNow() {
@@ -1037,6 +1054,9 @@ func (f *Flux) clientLoop() {
 	if rc.active() {
 		go f.pinPollLoop(rc)
 	}
+	// Its own goroutine, not the pin poller's: a probe batch takes seconds, and an operator's jump must
+	// never wait behind it.
+	go runDestRetests(f.pp, f.closeCh, f.probeDest, f.st.event)
 	// Seed the staleness baseline NOW (clear mode). Without it, sessionStale() returns false while
 	// lastRx==0, so a clear-mode failover-only pool whose first endpoint is dead never fires. Mirrors UDP.
 	f.lastRx.Store(time.Now().UnixNano())

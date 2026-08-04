@@ -10,8 +10,9 @@ import (
 
 // PeerPool rotates a client's DESTINATION endpoint (or, as a second instance, its SOURCE IP) across a
 // list of candidates, so one blocked IP does not kill the tunnel. It shares the ws edge pool's health
-// primitives (ws_pool.go) — the same healthy → suspect → dead FSM — but has no out-of-band prober, so a
-// "retest" here is RE-ADMISSION: a due endpoint is retried by the live data plane, which IS the probe.
+// primitives (ws_pool.go) — the same healthy → suspect → dead FSM — and, for a destination pool, the
+// same out-of-band retest: dueRetests hands a burned endpoint to the carrier's prober (peer_probe.go)
+// and retestResult walks the FSM on the answer. A source pool has no prober; see succeeded.
 type PeerPool struct {
 	mu         sync.Mutex
 	writeMu    sync.Mutex            // serializes the status file write+rename so concurrent writers don't race the shared .tmp
@@ -373,9 +374,49 @@ func (p *PeerPool) succeeded() string {
 	return ""
 }
 
-// probeAllNow pulls EVERY suspect/dead endpoint's retest forward to now, so the next rotation (or the
-// operator's manual switch) re-admits it immediately instead of waiting out the backoff — a lifted block
-// heals at once. Backs the panel's "probe now" control (delivered as a signal that carries no key).
+// dueRetests returns the burned endpoints whose backoff has elapsed — the ones the carrier's
+// out-of-band prober should test now. The ACTIVE endpoint is left out: it is the one the live carrier
+// is on, whose verdict belongs to the node's tun probe, and an answer coming back from it cannot be
+// told apart from the traffic already crossing it.
+func (p *PeerPool) dueRetests() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	var out []string
+	for i, a := range p.addrs {
+		if i == p.cur {
+			continue
+		}
+		if r := p.health[a]; r != nil && r.nextRetest <= now {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// retestResult feeds one out-of-band probe verdict into the endpoint's FSM: a peer that answered a real
+// handshake is re-admitted to rotation, one that did not walks the backoff a step further toward dead.
+// Returns true only on the heal transition, so the carrier emits exactly one event per recovery.
+func (p *PeerPool) retestResult(addr string, alive bool) bool {
+	p.mu.Lock()
+	r := p.health[addr]
+	if r == nil { // cleared from under us (an operator pin / "probe now") — nothing to record
+		p.mu.Unlock()
+		return false
+	}
+	if alive {
+		delete(p.health, addr)
+	} else {
+		p.failRetestLocked(r)
+	}
+	p.mu.Unlock()
+	p.writeStatus()
+	return alive
+}
+
+// probeAllNow pulls EVERY suspect/dead endpoint's retest forward to now, so the prober tests them all
+// on its next tick instead of waiting out the backoff — a lifted block heals at once. Backs the panel's
+// "probe now" control (delivered as a signal that carries no key).
 func (p *PeerPool) probeAllNow() {
 	p.mu.Lock()
 	now := p.now()
