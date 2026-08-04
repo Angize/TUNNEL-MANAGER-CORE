@@ -2614,17 +2614,24 @@ func (b *TCP) peerPinPollLoop() {
 						if b.sp != nil && cmd.Src != "" && b.sp.clearBurn(cmd.Src) {
 							b.st.event("heal", "src-retest", "ip:"+cmd.Src)
 						}
-					case cmd.Cmd == cmdFail:
+					case cmd.Cmd == cmdFail && cmd.Key == b.pp.current():
 						// Same burn the carrier does on a dead peer; burnAdvance leaves the event to its
 						// caller, so publish here and drop so dialLoop re-dials on the new destination.
-						// Read the endpoint about to GO first: burnAdvance returns where the pool moved
-						// TO, and the burn event has to name the one the node's probe condemned — the
-						// datagram twin in pollPins takes current() before the burn for the same reason.
-						gone := b.pp.current()
+						// The event names the KEY, never burnAdvance's return: that is where the pool
+						// moved TO, and blaming the replacement is the mis-target one step later.
+						gone := cmd.Key
 						if addr, moved := b.burnAdvance(true); moved {
 							log.Printf("core/tcp: destination %s failed by the node's tun probe — burning and advancing to %s", gone, addr)
 							b.st.event("burn", "tun-probe", "ip:"+gone)
 							drop()
+						}
+					case cmd.Cmd == cmdFail:
+						// The rotation moved between the measurement and this read (this ticker is 1s and
+						// the probe ahead of it takes most of a second). Burn what was MEASURED and leave
+						// the connection alone — it is already somewhere no verdict covers.
+						if b.pp.burnNamed(cmd.Key) {
+							log.Printf("core/tcp: destination %s failed by the node's tun probe, but the rotation has since moved to %s — burning what was measured, staying put", cmd.Key, b.pp.current())
+							b.st.event("burn", "tun-probe", "ip:"+cmd.Key)
 						}
 					case cmd.Key != "" && b.pp.selectEntry(cmd.Key):
 						log.Printf("core/tcp: pin destination %s (panel select)", cmd.Key)

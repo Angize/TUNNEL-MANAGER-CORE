@@ -10,8 +10,9 @@ import (
 
 // PeerPool rotates a client's DESTINATION endpoint (or, as a second instance, its SOURCE IP) across a
 // list of candidates, so one blocked IP does not kill the tunnel. It shares the ws edge pool's health
-// primitives (ws_pool.go) — the same healthy → suspect → dead FSM — but has NO prober of its own, and takes no health opinion of its own either. On the direct carriers
-// the node's tun probe is the SOLE judge: it burns an endpoint (cmdFail) and it clears one (cmdOK),
+// primitives (ws_pool.go) — the same healthy → suspect → dead FSM — but has NO prober of its own, and
+// takes no health opinion of its own either. On the direct carriers the node's tun probe is the SOLE
+// judge: it burns the endpoint it names (cmdFail) and it clears the one it names (cmdOK),
 // and nothing else in this file may. A handshake an endpoint answers, or a frame that comes back from
 // it, says nothing about whether the tunnel CARRIES — which is the only question worth asking, and the
 // one the tun probe is the only thing positioned to answer. A burned endpoint is retried the only way
@@ -388,6 +389,32 @@ func (p *PeerPool) clearBurn(addr string) bool {
 	return cleared
 }
 
+// burnNamed walks the named endpoint one step down the health FSM WITHOUT moving the cursor, and
+// reports whether it did. It is the other keyed half of clearBurn: what a fail verdict does once the
+// pool's own rotation has moved out from under it, so the endpoint the probe MEASURED is the one that
+// answers for it. An address the pool does not hold, and auto-burn off, are both no-ops — the same
+// policy fail() applies.
+func (p *PeerPool) burnNamed(addr string) bool {
+	p.mu.Lock()
+	known := false
+	if p.autoBurn {
+		for _, a := range p.addrs {
+			if a == addr {
+				known = true
+				break
+			}
+		}
+	}
+	if known {
+		p.burnLocked(addr)
+	}
+	p.mu.Unlock()
+	if known {
+		p.writeStatus()
+	}
+	return known
+}
+
 // probeAllNow pulls EVERY suspect/dead endpoint's retest forward to now, so the rotation may select
 // them again at once instead of waiting out the backoff — and the tun probe then judges them. The
 // node fires it itself after walking the whole destination x source matrix with the tunnel STILL dead;
@@ -511,19 +538,22 @@ func (p *PeerPool) cmdPath() string {
 	return p.statusPath + ".cmd"
 }
 
-// poolCmd is one request from the node, read out of the sidecar file. Exactly one field is meaningful
-// per command: Key pins that endpoint (the panel's per-IP button), Cmd names an action.
+// poolCmd is one request from the node, read out of the sidecar file. Cmd names an action and the rest
+// says which endpoints it is about; with no Cmd it is the panel's per-IP pin button, and Key alone is
+// the endpoint to pin.
 type poolCmd struct {
-	Key string `json:"key"`
+	Key string `json:"key"` // a pin's endpoint; on cmdFail/cmdOK, the DESTINATION the verdict was measured on
 	Src string `json:"src"` // cmdOK only: the SOURCE the verdict was measured on
 	Cmd string `json:"cmd"`
 }
 
-// cmdFail is the node asking us to treat the current endpoint as dead: burn it and advance, the same
+// cmdFail is the node asking us to treat the endpoint it names as dead: burn it and advance, the same
 // move a peer that stopped answering triggers here. The node sends it when its own probe finds nothing
 // crossing the TUN, which is a signal this side cannot see — our carrier only knows whether frames it
 // can authenticate arrive, and on a crypto tunnel that takes the stale window plus a full run of failed
-// handshakes to conclude. The FSM stays owned here: the node asks, this file decides what it means.
+// handshakes to conclude. Keyed like cmdOK, and for the mirror reason: a verdict that crossed with a
+// rotation must not condemn an endpoint the tunnel had already left.
+// The FSM stays owned here: the node asks, this file decides what it means.
 const cmdFail = "fail"
 
 // cmdOK is the other half of the same verdict: the node's tun probe reports that traffic is CROSSING,
@@ -692,16 +722,30 @@ func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc 
 					ev("heal", "src-retest", cmd.Src)
 				}
 			case cmd.Cmd == cmdFail:
-				// Straight into the dead-peer path, so a node-driven failover and a carrier-driven one
-				// are the same move: same burn, same advance, same pin handling. Only the trigger differs.
-				// The carrier's own rotate publishes "peer-rotate" either way, which cannot say WHO decided
-				// -- so mark it here, before the burn, while we still know which endpoint is about to go.
-				addr := c.dst.current()
-				log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", addr)
-				if ev != nil {
-					ev("burn", "tun-probe", "ip:"+addr)
+				// The verdict names the endpoint it was MEASURED on, and that name is the whole guard.
+				// This poll is a one-second ticker and the probe ahead of it takes most of a second, so
+				// the proactive timer can move the pool in between; current() would then condemn an
+				// endpoint the probe never tested AND drop the tunnel back onto the one it did.
+				// Both arms live in THIS case, never as sibling cases: a fail that burns nothing must not
+				// fall through to the pin arm below and select the very endpoint it condemns.
+				if addr := c.dst.current(); cmd.Key == addr {
+					// Still where it was measured: burn and advance, so a node-driven failover and a
+					// carrier-driven one are the same move. Marked before the burn, while we still know
+					// which endpoint goes — the carrier's "peer-rotate" cannot say WHO decided.
+					log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", addr)
+					if ev != nil {
+						ev("burn", "tun-probe", "ip:"+addr)
+					}
+					c.fail(rotDst, rotSrc)
+				} else if c.dst.burnNamed(cmd.Key) {
+					// It moved under the verdict. Burn what was measured and stay put: the rotation has
+					// already advanced, and nothing has measured where it went.
+					log.Printf("core: destination %s failed by the node's tun probe, but the rotation has "+
+						"since moved to %s — burning what was measured, staying put", cmd.Key, addr)
+					if ev != nil {
+						ev("burn", "tun-probe", "ip:"+cmd.Key)
+					}
 				}
-				c.fail(rotDst, rotSrc)
 			case cmd.Key != "" && c.dst.selectEntry(cmd.Key):
 				applyDst()
 			}
