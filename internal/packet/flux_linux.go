@@ -1027,7 +1027,7 @@ func (f *Flux) ProbeAllNow() {
 // pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin (re-pointing the
 // live dataplane at the pinned endpoint via pollPins). Runs until Close.
 func (f *Flux) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, f.closeCh, f.adoptPeerFlux, f.adoptSourceFlux)
+	runPinPoll(rc, f.closeCh, f.adoptPeerFlux, f.adoptSourceFlux, f.rotatePeerFlux, f.rotateSourceFlux, f.st.event)
 }
 
 func (f *Flux) clientLoop() {
@@ -1049,19 +1049,14 @@ func (f *Flux) clientLoop() {
 		}
 		// Clear mode has no handshake whose failure would drive failover, so a dead pool endpoint would
 		// otherwise strand the tunnel forever. Use receive-staleness (the peer pongs our pings). Mirrors UDP.
-		if !f.cryptoOn && rc.active() && f.sessionStale() {
-			rc.fail(f.rotatePeerFlux, f.rotateSourceFlux)
+		if !f.cryptoOn && f.sessionStale() {
 			f.lastRx.Store(time.Now().UnixNano()) // fresh window even if the pool couldn't move (single endpoint / source-only)
 			f.peerAnswered.Store(false)           // stale -> the current endpoint is no longer proven answering
 			f.st.down("stale", "flux")
 		}
 		if f.cryptoOn && f.sealer() == nil {
-			unproven = false // the handshake path already ticks at 1s and drives its own failover
+			unproven = false // keep re-initing this endpoint; moving off it is the node's call, not ours
 			f.sendInit()
-			if failN++; rc.active() && failN >= peerFailThreshold {
-				rc.fail(f.rotatePeerFlux, f.rotateSourceFlux) // burn+advance dest; walk source once dests cycle
-				failN = 0
-			}
 		} else {
 			// Heal transient burns on endpoints proving themselves. Clear mode has no handshake, so use
 			// the data plane (peerAnswered), so a just-jumped-to endpoint's burn is never falsely cleared.
@@ -1087,10 +1082,9 @@ func (f *Flux) clientLoop() {
 			// sessionStale (a whole dead window) win the race and turned a blocked IP into a ~30s hole.
 			if unproven = f.cryptoOn && rc.active() && !f.peerAnswered.Load(); unproven {
 				if failN++; failN >= peerFailThreshold {
-					f.session.Store(nil) // not answering: drop back to the handshake path, which burns and advances
+					f.session.Store(nil) // not answering: drop back to the handshake path and re-init there
 					f.ci.Store(nil)
 					f.st.down("peer-dead", "flux")
-					rc.fail(f.rotatePeerFlux, f.rotateSourceFlux)
 					failN = 0
 				}
 			} else {

@@ -2609,16 +2609,28 @@ func (b *TCP) peerPinPollLoop() {
 			return
 		case <-t.C:
 			if b.pp != nil {
-				if key, ok := b.pp.readSelectCmd(); ok && b.pp.selectEntry(key) {
-					log.Printf("core/tcp: pin destination %s (panel select)", key)
-					b.st.setActive(b.stTag + " · " + key) // reflect the pinned destination in "active" — silently; drop() below is deliberate (no event)
-					drop()
+				if cmd, ok := b.pp.readCmd(); ok {
+					switch {
+					case cmd.Cmd == cmdFail:
+						// Same burn the carrier does on a dead peer; burnAdvance leaves the event to its
+						// caller, so publish here and drop so dialLoop re-dials on the new destination.
+						if addr, moved := b.burnAdvance(true); moved {
+							log.Printf("core/tcp: destination %s failed by the node's tun probe — burning and advancing", addr)
+							b.st.event("burn", "tun-probe", "ip:"+addr)
+							drop()
+						}
+					case cmd.Key != "" && b.pp.selectEntry(cmd.Key):
+						log.Printf("core/tcp: pin destination %s (panel select)", cmd.Key)
+						b.st.setActive(b.stTag + " · " + cmd.Key) // reflect the pinned destination in "active" — silently; drop() below is deliberate (no event)
+						drop()
+					}
 				}
 				b.pp.expirePinIfLapsed() // flush the status file the moment a lapsed pin stops being honoured (current() drops it under the hot lock but can't write)
 			}
 			if b.sp != nil {
-				if key, ok := b.sp.readSelectCmd(); ok && b.sp.selectEntry(key) {
-					log.Printf("core/tcp: pin source %s (panel select)", key)
+				// pins only: a tun probe cannot tell a bad SOURCE from a bad DESTINATION
+				if cmd, ok := b.sp.readCmd(); ok && cmd.Key != "" && b.sp.selectEntry(cmd.Key) {
+					log.Printf("core/tcp: pin source %s (panel select)", cmd.Key)
 					drop()
 				}
 				b.sp.expirePinIfLapsed()

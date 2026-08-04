@@ -1278,7 +1278,7 @@ func (r *Raw) ProbeAllNow() {
 
 // pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin. Runs until Close.
 func (r *Raw) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, r.closeCh, r.adoptPeerRaw, r.adoptSourceRaw)
+	runPinPoll(rc, r.closeCh, r.adoptPeerRaw, r.adoptSourceRaw, r.rotatePeerRaw, r.rotateSourceRaw, r.st.event)
 }
 
 func (r *Raw) clientLoop() {
@@ -1301,19 +1301,14 @@ func (r *Raw) clientLoop() {
 		// Clear mode has no handshake whose failure would drive failover, so a dead pool endpoint would
 		// otherwise strand the tunnel forever. Use receive-staleness: the peer pongs our pings, so once it
 		// stops answering (lastRx ages past the dead window) burn and advance the pool. Mirrors UDP.
-		if !r.cryptoOn && rc.active() && r.sessionStale() {
-			rc.fail(r.rotatePeerRaw, r.rotateSourceRaw)
+		if !r.cryptoOn && r.sessionStale() {
 			r.lastRx.Store(time.Now().UnixNano()) // fresh window even if the pool couldn't move (single endpoint / source-only)
 			r.peerAnswered.Store(false)           // stale -> the current endpoint is no longer proven answering
 			r.st.down("stale", "raw")
 		}
 		if r.cryptoOn && r.sealer() == nil {
-			unproven = false // the handshake path already ticks at 1s and drives its own failover
+			unproven = false // keep re-initing this endpoint; moving off it is the node's call, not ours
 			r.sendInit()
-			if failN++; rc.active() && failN >= peerFailThreshold {
-				rc.fail(r.rotatePeerRaw, r.rotateSourceRaw)
-				failN = 0
-			}
 		} else {
 			// Heal transient burns on an endpoint proving itself. Crypto signals that via a completed handshake;
 			// clear mode has none, so it uses the data plane (peerAnswered, set when the CURRENT endpoint replies
@@ -1333,10 +1328,9 @@ func (r *Raw) clientLoop() {
 			// next wait is already the 1s probe interval — on the same threshold the handshake path uses.
 			if unproven = r.cryptoOn && rc.active() && !r.peerAnswered.Load(); unproven {
 				if failN++; failN >= peerFailThreshold {
-					r.session.Store(nil) // not answering: drop back to the handshake path, which burns and advances
+					r.session.Store(nil) // not answering: drop back to the handshake path and re-init there
 					r.ci.Store(nil)
 					r.st.down("peer-dead", "raw")
-					rc.fail(r.rotatePeerRaw, r.rotateSourceRaw)
 					failN = 0
 				}
 			} else {
