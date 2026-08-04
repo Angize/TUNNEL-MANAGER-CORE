@@ -375,7 +375,7 @@ func probeAllPools(pp, sp *PeerPool) {
 // runPinPoll is the 1s ticker that applies operator pins for a datagram carrier: identical across
 // udp/raw/flux, which inject their own close channel and adopt-peer/adopt-source callbacks.
 func runPinPoll(rc *rotationController, closeCh <-chan struct{}, adoptPeer, adoptSource func(),
-	rotDst, rotSrc func(proactive bool)) {
+	rotDst, rotSrc func(proactive bool), ev func(kind, code, detail string)) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
@@ -383,7 +383,7 @@ func runPinPoll(rc *rotationController, closeCh <-chan struct{}, adoptPeer, adop
 		case <-closeCh:
 			return
 		case <-t.C:
-			rc.pollPins(adoptPeer, adoptSource, rotDst, rotSrc)
+			rc.pollPins(adoptPeer, adoptSource, rotDst, rotSrc, ev)
 		}
 	}
 }
@@ -396,7 +396,7 @@ func (b *UDP) ProbeAllNow() {
 
 // pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin. Runs until Close.
 func (b *UDP) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, b.closeCh, b.adoptPeerUDP, b.adoptSourceUDP, b.rotatePeerUDP, b.rotateSourceUDP)
+	runPinPoll(rc, b.closeCh, b.adoptPeerUDP, b.adoptSourceUDP, b.rotatePeerUDP, b.rotateSourceUDP, b.st.event)
 }
 
 // SetDeadAfter (client) tightens the session-stale deadline to the per-tunnel dead_after_secs so the
@@ -1000,10 +1000,10 @@ func (b *UDP) clientLoop() {
 		// pool. The baseline is seeded at connect and reset on every rotation, so a fresh tunnel or a
 		// just-jumped-to endpoint gets a full window before it can false-fail.
 		if !b.cryptoOn && b.sessionStale() {
-			if rc.active() {
-				rc.fail(b.rotatePeerUDP, b.rotateSourceUDP)
-			}
-			b.lastRx.Store(time.Now().UnixNano()) // fresh window even if the pool couldn't move (single endpoint / source-only rotate)
+			// Staleness no longer moves the pool. The node's tun probe owns that decision now, for every
+			// carrier alike, and it measures where the payload actually travels instead of inferring from
+			// what our own keepalives got back. All that is left here is re-baselining and the event.
+			b.lastRx.Store(time.Now().UnixNano()) // fresh window so the next stale is measured from now
 			b.peerAnswered.Store(false)           // stale -> the current endpoint is no longer proven answering
 			// The event is NOT conditional on a pool. Every other down/up site here is gated on crypto or on a
 			// pool, so clear mode with no rotation pool could write no event at all — while the panel classifies
@@ -1012,12 +1012,8 @@ func (b *UDP) clientLoop() {
 			b.st.down("stale", "udp")
 		}
 		if b.sealer() == nil && b.cryptoOn {
-			unproven = false // the handshake path already ticks at 1s and drives its own failover
+			unproven = false // keep re-initing this endpoint; moving off it is the node's call, not ours
 			b.sendInit()
-			if failN++; rc.active() && failN >= peerFailThreshold {
-				rc.fail(b.rotatePeerUDP, b.rotateSourceUDP) // burn+advance dest; walk source once dests cycle
-				failN = 0
-			}
 		} else {
 			// Clear any transient burn on an endpoint that is proving itself. Heal only what the CURRENT endpoint
 			// has EARNED: failN alone is not proof, because a timed rotation keeps the session and failN then also
@@ -1046,10 +1042,9 @@ func (b *UDP) clientLoop() {
 			// next wait is already the 1s probe interval — on the same threshold the handshake path uses.
 			if unproven = b.cryptoOn && rc.active() && !b.peerAnswered.Load(); unproven {
 				if failN++; failN >= peerFailThreshold {
-					b.session.Store(nil) // not answering: drop back to the handshake path, which burns and advances
+					b.session.Store(nil) // not answering: drop back to the handshake path and re-init there
 					b.ci.Store(nil)
 					b.st.down("peer-dead", "udp")
-					rc.fail(b.rotatePeerUDP, b.rotateSourceUDP)
 					failN = 0
 				}
 			} else {

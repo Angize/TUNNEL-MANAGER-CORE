@@ -655,14 +655,21 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 // pollPins reads a pending pin command for each pool and, when one is present, pins the requested
 // endpoint and calls the carrier's apply func (which re-points the live dataplane at the newly-pinned
 // endpoint via the pool's current()). Carriers run this on a ~1s ticker so a manual switch is prompt.
-func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc func(proactive bool)) {
+func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc func(proactive bool),
+	ev func(kind, code, detail string)) {
 	if c.dst != nil {
 		if cmd, ok := c.dst.readCmd(); ok {
 			switch {
 			case cmd.Cmd == cmdFail:
 				// Straight into the dead-peer path, so a node-driven failover and a carrier-driven one
 				// are the same move: same burn, same advance, same pin handling. Only the trigger differs.
-				log.Print("core: destination failed by the node's tun probe — burning and advancing")
+				// The carrier's own rotate publishes "peer-rotate" either way, which cannot say WHO decided
+				// -- so mark it here, before the burn, while we still know which endpoint is about to go.
+				addr := c.dst.current()
+				log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", addr)
+				if ev != nil {
+					ev("burn", "tun-probe", "ip:"+addr)
+				}
 				c.fail(rotDst, rotSrc)
 			case cmd.Key != "" && c.dst.selectEntry(cmd.Key):
 				applyDst()
