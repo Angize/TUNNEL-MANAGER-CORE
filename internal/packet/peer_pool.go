@@ -12,7 +12,8 @@ import (
 // list of candidates, so one blocked IP does not kill the tunnel. It shares the ws edge pool's health
 // primitives (ws_pool.go) — the same healthy → suspect → dead FSM — and, for a destination pool, the
 // same out-of-band retest: dueRetests hands a burned endpoint to the carrier's prober (peer_probe.go)
-// and retestResult walks the FSM on the answer. A source pool has no prober; see succeeded.
+// and retestResult walks the FSM on the answer — EXCEPT for an endpoint the node's tun probe condemned,
+// which only the node takes back. See condemned. A source pool has no prober at all; see succeeded.
 type PeerPool struct {
 	mu         sync.Mutex
 	writeMu    sync.Mutex            // serializes the status file write+rename so concurrent writers don't race the shared .tmp
@@ -88,9 +89,9 @@ func (p *PeerPool) currentLocked() string {
 	n := len(p.addrs)
 	now := p.now()
 	// Pass 0: the endpoint an advance deliberately chose. The passes below re-select under DIFFERENT rules,
-	// so without this a reader walks straight back off the rotation's choice — an advance re-admits a DUE
-	// burned endpoint that pass 1 refuses while anything healthy exists, and a failover steps OFF what it
-	// just burned where pass 3 does not. udp/raw/flux use nextEndpoint's address; tcp re-asks current().
+	// so without this a reader walks straight back off the rotation's choice — a failover lands on a DUE
+	// burned endpoint that pass 1 refuses while anything healthy exists, and steps OFF what it just burned
+	// where pass 3 does not. udp/raw/flux use nextEndpoint's address; tcp re-asks current().
 	if p.chosen != "" && p.addrs[p.cur] == p.chosen {
 		return p.chosen
 	}
@@ -217,25 +218,49 @@ func (p *PeerPool) advanceFailLocked() {
 	p.commitLocked(p.bestIdxLocked(p.cur)) // else least-bad among the others
 }
 
-// advanceEligibleLocked moves cur to another ELIGIBLE endpoint (healthy or due) for a proactive rotate,
-// returning whether it moved. It never rotates onto a not-yet-due burned endpoint and stays put when no
-// other endpoint is eligible (so the proactive timer doesn't tear a healthy connection down for nothing
-// when every alternative is blocked). Caller holds the lock; addrs has >=2 entries.
+// advanceEligibleLocked moves cur to another HEALTHY endpoint for a proactive rotate, returning whether
+// it moved. A burned endpoint is not eligible, not even one whose retest is due: re-admission belongs to
+// whatever burned it, and jumping the live tunnel onto an endpoint that has proven nothing, to find out,
+// is the very thing this replaced. With nothing healthy elsewhere it stays put, so the proactive timer
+// never tears a working connection down for nothing. Caller holds the lock; addrs has >=2 entries.
 func (p *PeerPool) advanceEligibleLocked() bool {
 	n := len(p.addrs)
-	now := p.now()
 	for k := 1; k <= n; k++ {
 		idx := (p.cur + k) % n
 		if idx == p.cur {
 			break
 		}
-		if r := p.health[p.addrs[idx]]; r == nil || r.nextRetest <= now {
+		if p.health[p.addrs[idx]] == nil {
 			p.commitLocked(idx)
 			return true
 		}
 	}
 	return false
 }
+
+// markNodeBurn records that the burn now on addr was decided by the NODE's tun probe — the one
+// measurement that watches what actually CROSSES the tunnel. Called right after the burn, with the same
+// address the burn event named, so the mark and the log can never disagree. A no-op when auto-burn left
+// no record to mark.
+func (p *PeerPool) markNodeBurn(addr string) {
+	p.mu.Lock()
+	if r := p.health[addr]; r != nil {
+		r.nodeBurn = true
+	}
+	p.mu.Unlock()
+}
+
+// condemned reports that the node's tun probe burned this endpoint and has not taken it back. Such an
+// endpoint is not probed, not healed by a live success, and not eligible for rotation. It returns ONLY
+// through probeAllNow — which the node fires itself once it has walked the whole pool and the tunnel is
+// STILL dead, and which the panel offers as "probe now" — or through an operator pin.
+//
+// The rule is "whatever condemned it is what forgives it", and it is measured, not theoretical: an
+// endpoint can answer a real PSK handshake while carrying nothing. On the fleet, 5.75.197.201 answered
+// within a second of every rotation onto it and the node's probe then found 20 of 20 packets lost,
+// twice. Letting the handshake re-admit it put the tunnel back on a dead IP every three minutes, for
+// good. Caller holds the lock.
+func condemned(r *healthRec) bool { return r != nil && r.nodeBurn }
 
 // fail reports that the active endpoint looks dead. With auto-burn it is walked down the health FSM
 // (healthy→suspect→…→dead); either way the pool advances to the next endpoint to try and returns it
@@ -361,11 +386,21 @@ func healEvents(st *coreStatus, rc *rotationController) {
 // succeeded clears any health record on the CURRENT endpoint — a live success proves it healthy right
 // now, so a transient block heals. Returns the recovered address when it actually cleared a burn (a heal
 // transition), else "", so the carrier can emit a discrete heal event. Writes the status file only then.
+//
+// It will NOT touch a burn the node's tun probe decided. A frame coming back says an endpoint answered
+// US; the node measured what CROSSES and found nothing, twice — and one reply a second after a rotation
+// used to wipe exactly that. See condemned. What is left here is every OTHER burn: the SOURCE pool's,
+// where a returning frame really is the whole answer (it proves this host can send from the address its
+// socket is bound to, and nothing else can probe a source), and a tcp carrier's own dial-failure burn,
+// which a connection that came up on the same endpoint answers like for like.
 func (p *PeerPool) succeeded() string {
 	p.mu.Lock()
 	a := p.addrs[p.cur]
-	changed := p.health[a] != nil
-	delete(p.health, a)
+	r := p.health[a]
+	changed := r != nil && !condemned(r)
+	if changed {
+		delete(p.health, a)
+	}
 	p.mu.Unlock()
 	if changed {
 		p.writeStatus()
@@ -375,9 +410,11 @@ func (p *PeerPool) succeeded() string {
 }
 
 // dueRetests returns the burned endpoints whose backoff has elapsed — the ones the carrier's
-// out-of-band prober should test now. The ACTIVE endpoint is left out: it is the one the live carrier
-// is on, whose verdict belongs to the node's tun probe, and an answer coming back from it cannot be
-// told apart from the traffic already crossing it.
+// out-of-band prober should test now. Two kinds are left out. The ACTIVE endpoint, because it is the one
+// the live carrier is on, its verdict belongs to the node's tun probe, and an answer from it cannot be
+// told apart from the traffic already crossing it. And any endpoint the node CONDEMNED, because a
+// handshake it answers is not the measurement that condemned it — see condemned. Leaving those alone
+// also stops us poking an IP a censor is already watching.
 func (p *PeerPool) dueRetests() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -387,7 +424,7 @@ func (p *PeerPool) dueRetests() []string {
 		if i == p.cur {
 			continue
 		}
-		if r := p.health[a]; r != nil && r.nextRetest <= now {
+		if r := p.health[a]; r != nil && r.nextRetest <= now && !condemned(r) {
 			out = append(out, a)
 		}
 	}
@@ -414,14 +451,18 @@ func (p *PeerPool) retestResult(addr string, alive bool) bool {
 	return alive
 }
 
-// probeAllNow pulls EVERY suspect/dead endpoint's retest forward to now, so the prober tests them all
-// on its next tick instead of waiting out the backoff — a lifted block heals at once. Backs the panel's
-// "probe now" control (delivered as a signal that carries no key).
+// probeAllNow pulls EVERY suspect/dead endpoint's retest forward to now AND takes back the node's
+// condemnations, so the prober tests them all on its next tick instead of waiting out the backoff — a
+// lifted block heals at once. This is the ONLY way a node-burned endpoint comes back, and it is the
+// right one: whoever reaches for this control is saying the problem was never these IPs. The node fires
+// it itself once it has walked the whole destination x source matrix and the tunnel is STILL dead; the
+// panel offers it as "probe now" (delivered as a signal, which carries no key — hence all of them).
 func (p *PeerPool) probeAllNow() {
 	p.mu.Lock()
 	now := p.now()
 	for _, r := range p.health {
 		r.nextRetest = now
+		r.nodeBurn = false
 	}
 	p.mu.Unlock()
 	p.writeStatus()
@@ -438,8 +479,8 @@ func (p *PeerPool) selectEntry(key string) bool {
 		if a == key {
 			p.pinKey = key
 			p.pinUntil = p.now() + pinTTL
-			delete(p.health, key)
-			p.pickLocked(idx) // the pin key governs while it is live; normal selection resumes once it lapses
+			delete(p.health, key) // the operator picked this one deliberately: burn and condemnation both
+			p.pickLocked(idx)     // the pin key governs while it is live; normal selection resumes once it lapses
 			ok = true
 			break
 		}
@@ -712,6 +753,7 @@ func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc 
 					ev("burn", "tun-probe", "ip:"+addr)
 				}
 				c.fail(rotDst, rotSrc)
+				c.dst.markNodeBurn(addr) // the tun probe condemned it; only the tun probe takes it back
 			case cmd.Key != "" && c.dst.selectEntry(cmd.Key):
 				applyDst()
 			}

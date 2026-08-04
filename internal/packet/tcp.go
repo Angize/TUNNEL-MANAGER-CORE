@@ -2623,6 +2623,7 @@ func (b *TCP) peerPinPollLoop() {
 						if addr, moved := b.burnAdvance(true); moved {
 							log.Printf("core/tcp: destination %s failed by the node's tun probe — burning and advancing to %s", gone, addr)
 							b.st.event("burn", "tun-probe", "ip:"+gone)
+							b.pp.markNodeBurn(gone) // the tun probe condemned it; only the tun probe takes it back
 							drop()
 						}
 					case cmd.Key != "" && b.pp.selectEntry(cmd.Key):

@@ -130,8 +130,8 @@ func TestPeerPoolSuspectToDeadBackoff(t *testing.T) {
 	}
 }
 
-// TestPeerPoolDueEndpointReadmitted checks the "data plane is the probe" recovery: a burned endpoint is
-// skipped by current() while its backoff is pending, then re-admitted for a live retry once it is due.
+// TestPeerPoolDueEndpointReadmitted checks the never-dead-end fallback: a burned endpoint is
+// skipped by current() while anything healthy exists, and once NOTHING is healthy the pool still hands
 func TestPeerPoolDueEndpointReadmitted(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
