@@ -2616,9 +2616,13 @@ func (b *TCP) peerPinPollLoop() {
 					case cmd.Cmd == cmdFail:
 						// Same burn the carrier does on a dead peer; burnAdvance leaves the event to its
 						// caller, so publish here and drop so dialLoop re-dials on the new destination.
+						// Read the endpoint about to GO first: burnAdvance returns where the pool moved
+						// TO, and the burn event has to name the one the node's probe condemned — the
+						// datagram twin in pollPins takes current() before the burn for the same reason.
+						gone := b.pp.current()
 						if addr, moved := b.burnAdvance(true); moved {
-							log.Printf("core/tcp: destination %s failed by the node's tun probe — burning and advancing", addr)
-							b.st.event("burn", "tun-probe", "ip:"+addr)
+							log.Printf("core/tcp: destination %s failed by the node's tun probe — burning and advancing to %s", gone, addr)
+							b.st.event("burn", "tun-probe", "ip:"+gone)
 							drop()
 						}
 					case cmd.Key != "" && b.pp.selectEntry(cmd.Key):
