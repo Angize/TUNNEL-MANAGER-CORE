@@ -190,7 +190,7 @@ func TestPeerPoolSelectPin(t *testing.T) {
 	if a, moved := p.rotateOnce(); a != "c" || moved {
 		t.Fatalf("rotateOnce() while pinned must stay on c: got %q moved=%v, want c false", a, moved)
 	}
-	p.pinLanded() // the carrier landed on c -> pin releases
+	p.pinLandedOn("c") // the carrier landed on c -> pin releases
 	if p.isPinned() {
 		t.Fatal("pinLanded on the pinned endpoint must release the pin")
 	}
@@ -467,11 +467,13 @@ func TestRotationControllerPinAutoReleasesOnProvenBlock(t *testing.T) {
 			t.Fatalf("no failover while the pin is held, got moves=%d", moves)
 		}
 	}
-	// A live success resets the counter AND lands (clears) the pin. Re-pin and confirm the release count
-	// restarts from zero — accumulated rounds from a prior pin must never leak into a fresh one.
+	// A live success resets the counter; the LANDING is what clears the pin, and the carriers do that
+	// themselves on the endpoint they are proven up on (see the clientLoops). Re-pin and confirm the
+	// release count restarts from zero — rounds from a prior pin must never leak into a fresh one.
 	rc.success()
+	dst.pinLandedOn("d1") // the carrier came up on the pinned endpoint
 	if dst.isPinned() {
-		t.Fatal("success() lands the pin, so it must clear it")
+		t.Fatal("a landing on the pinned endpoint must clear it")
 	}
 	if !dst.selectEntry("d1") {
 		t.Fatal("re-pin d1 failed")

@@ -1043,12 +1043,23 @@ func (b *UDP) clientLoop() {
 			unproven = false // keep re-initing this endpoint; moving off it is the node's call, not ours
 			b.sendInit()
 		} else {
+			// A manual jump LANDS the moment the endpoint it aimed at answers, and a landed pin has to
+			// release AT ONCE: while it is live, both failover and the timed rotation are frozen behind
+			// it. Deliberately not folded into healEvents below — that gate needs a prior failure to
+			// have been counted, which a jump that simply worked never produces, so a landed pin used to
+			// sit out the whole pinTTL. Keyed on the address the carrier is REALLY on, like the tcp twin,
+			// so a pin aimed somewhere else is never reported as landed.
+			if b.pp != nil && b.peerAnswered.Load() {
+				if pa := b.peer.Load(); pa != nil {
+					b.pp.pinLandedOn(pa.String())
+				}
+			}
 			// Clear any transient burn on an endpoint that is proving itself. Heal only what the CURRENT endpoint
 			// has EARNED: failN alone is not proof, because a timed rotation keeps the session and failN then also
 			// counts unanswered probes on an endpoint we have merely jumped to — which would un-burn a blocked IP
 			// on every visit. peerAnswered is the proof, in both modes.
 			if b.peerAnswered.Load() && (failN > 0 || (!b.cryptoOn && rc.active())) {
-				healEvents(b.st, rc) // this endpoint is answering — clear transient burns, release a landed pin, emit any heal
+				healEvents(b.st, rc) // this endpoint is answering — clear transient burns and emit any heal
 			}
 			// Clear mode has no handshake to fire st.reconnected(), so a self-heal down() would arm wasDown with
 			// no matching "up". Pair it on the data-plane recovery instead: reconnected() is a no-op unless a down

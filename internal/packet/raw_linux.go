@@ -1330,12 +1330,23 @@ func (r *Raw) clientLoop() {
 			unproven = false // keep re-initing this endpoint; moving off it is the node's call, not ours
 			r.sendInit()
 		} else {
+			// A manual jump LANDS the moment the endpoint it aimed at answers, and a landed pin has to
+			// release AT ONCE: while it is live, both failover and the timed rotation are frozen behind
+			// it. Deliberately not folded into healEvents below — that gate needs a prior failure to
+			// have been counted, which a jump that simply worked never produces, so a landed pin used to
+			// sit out the whole pinTTL. Keyed on the address the carrier is REALLY on, like the tcp twin,
+			// so a pin aimed somewhere else is never reported as landed.
+			if r.pp != nil && r.peerAnswered.Load() {
+				if pa := r.peer.Load(); pa != nil {
+					r.pp.pinLandedOn(pa.IP.String())
+				}
+			}
 			// Heal transient burns on an endpoint proving itself. Crypto signals that via a completed handshake;
 			// clear mode has none, so it uses the data plane (peerAnswered, set when the CURRENT endpoint replies
 			// and cleared on rotation). Heal only what that endpoint has EARNED: failN alone is not proof, because
 			// a timed rotation keeps the session and failN then also counts probes we merely jumped into.
 			if r.peerAnswered.Load() && (failN > 0 || (!r.cryptoOn && rc.active())) {
-				healEvents(r.st, rc) // this endpoint is answering — clear transient burns, release a landed pin, emit any heal
+				healEvents(r.st, rc) // this endpoint is answering — clear transient burns and emit any heal
 			}
 			rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
 			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the

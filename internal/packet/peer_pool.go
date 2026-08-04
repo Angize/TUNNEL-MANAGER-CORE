@@ -492,22 +492,6 @@ func (p *PeerPool) selectEntry(key string) bool {
 	return ok
 }
 
-// pinLanded releases a live manual pin because the carrier just handshook successfully — a pin is "jump
-// here and keep trying until connected", so a success IS the landing. Single-locked, so it cannot race
-// the pin's own TTL expiry, and it needs no current() call: while pinned, current() forces the pinned
-// one. DESTINATION pools of udp/raw/flux only: tcp uses pinLandedOn, and a source swap has no handshake.
-func (p *PeerPool) pinLanded() {
-	p.mu.Lock()
-	changed := p.pinnedLocked()
-	if changed {
-		p.pinKey, p.pinUntil = "", 0
-	}
-	p.mu.Unlock()
-	if changed {
-		p.writeStatus()
-	}
-}
-
 // pinLandedOn releases a live manual pin ONLY when the carrier really came up on the pinned endpoint.
 // tcp needs the comparison because dialLoop can adopt a carrier the rotation timer PRE-BUILT, whose
 // endpoint was resolved before the pin existed — releasing then reports the operator's jump as complete
@@ -695,15 +679,17 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 	}
 }
 
-// success marks both pools good after the carrier handshakes, resets the dest-cycle counter, releases a
-// destination pin that has now landed, and returns the dst/src addresses that RECOVERED from a burn this
-// call (empty when nothing healed) so the carrier can surface a discrete heal event.
+// success marks both pools good after the carrier handshakes, resets the dest-cycle counter, and returns
+// the dst/src addresses that RECOVERED from a burn this call (empty when nothing healed) so the carrier
+// can surface a discrete heal event.
 func (c *rotationController) success() (dstHealed, srcHealed string) {
 	c.destRot = 0
 	c.pinFails = 0 // a live success (the pin landed, or the endpoint healed) resets the release count
 	if c.dst != nil {
 		dstHealed = c.dst.succeeded()
-		c.dst.pinLanded() // atomically release a pin that has now landed (no-op when unpinned)
+		// No pinLanded() here either. This runs behind a gate that needs a prior failure, which a jump
+		// that simply worked never produces — so a landed pin sat out its whole TTL. The carriers
+		// release it themselves, on the endpoint they are PROVEN up on; see the clientLoops.
 	}
 	if c.src != nil {
 		srcHealed = c.src.succeeded()
