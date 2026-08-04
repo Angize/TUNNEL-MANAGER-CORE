@@ -1780,7 +1780,9 @@ func (b *TCP) dialLoop() {
 		b.destRot.Store(0)
 		// succeeded() returns the recovered address only on a real heal transition (it cleared a
 		// burn/suspect), else "" — so emit a discrete heal event exactly once per recovery, matching the
-		// datagram carriers' event("heal","peer-retest")/("src-retest"). nil-safe (ws-pool/server).
+		// datagram carriers' event("heal","peer-retest")/("src-retest"). nil-safe (ws-pool/server). The
+		// destination half is now always "" here, because runDestRetests owns that pool's re-admission:
+		// a connection that came up says this endpoint accepted US, never that the tunnel carries.
 		if b.pp != nil {
 			if a := b.pp.succeeded(); a != "" {
 				b.st.event("heal", "peer-retest", "ip:"+a)

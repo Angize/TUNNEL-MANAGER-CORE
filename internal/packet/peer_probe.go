@@ -98,6 +98,9 @@ func runDestRetests(pp *PeerPool, closeCh <-chan struct{}, probe func(addr strin
 	if pp == nil {
 		return
 	}
+	// From here on re-admission is ours, and a returning frame stops clearing burns (PeerPool.succeeded).
+	// Set HERE, not at the call sites, so the flag and the existence of a prober are one decision.
+	pp.proberOwned()
 	var busy atomic.Bool
 	t := time.NewTicker(time.Second)
 	defer t.Stop()

@@ -74,6 +74,9 @@ func TestPeerPoolAutoBurnOffJustRotates(t *testing.T) {
 	}
 }
 
+// TestPeerPoolSucceededClearsBurn covers succeeded(), which is the SOURCE pool's heal: a frame that came
+// back proves this host can send from the address it is bound to. A DESTINATION burn is not cleared this
+// way any more — see TestHealEventsLeavesTheDestinationBurned.
 func TestPeerPoolSucceededClearsBurn(t *testing.T) {
 	p := NewPeerPool([]string{"a", "b", "c"}, true, 0, "")
 	p.fail() // burn a, now on b
@@ -130,8 +133,9 @@ func TestPeerPoolSuspectToDeadBackoff(t *testing.T) {
 	}
 }
 
-// TestPeerPoolDueEndpointReadmitted checks the "data plane is the probe" recovery: a burned endpoint is
-// skipped by current() while its backoff is pending, then re-admitted for a live retry once it is due.
+// TestPeerPoolDueEndpointReadmitted checks the never-dead-end fallback: a burned endpoint is skipped by
+// current() while anything healthy exists, and once NOTHING is healthy the pool still hands one back
+// rather than leaving the carrier with no address at all.
 func TestPeerPoolDueEndpointReadmitted(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
