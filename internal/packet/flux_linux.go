@@ -1078,6 +1078,17 @@ func (f *Flux) clientLoop() {
 			unproven = false // keep re-initing this endpoint; moving off it is the node's call, not ours
 			f.sendInit()
 		} else {
+			// A manual jump LANDS the moment the endpoint it aimed at answers, and a landed pin has to
+			// release AT ONCE: while it is live, both failover and the timed rotation are frozen behind
+			// it. Deliberately not folded into healEvents below — that gate needs a prior failure to
+			// have been counted, which a jump that simply worked never produces, so a landed pin used to
+			// sit out the whole pinTTL. Keyed on the address the carrier is REALLY on, like the tcp twin,
+			// so a pin aimed somewhere else is never reported as landed.
+			if f.pp != nil && f.peerAnswered.Load() {
+				if pa := f.peer.Load(); pa != nil {
+					f.pp.pinLandedOn(pa.IP.String())
+				}
+			}
 			// Heal transient burns on endpoints proving themselves. Clear mode has no handshake, so use
 			// the data plane (peerAnswered), so a just-jumped-to endpoint's burn is never falsely cleared.
 			// Heal only what the CURRENT endpoint has EARNED. "failN > 0" alone used to be proof: it could
@@ -1087,7 +1098,7 @@ func (f *Flux) clientLoop() {
 			// cleared the burn of an endpoint that had proven nothing, and a blocked IP was un-burned on
 			// every visit and never dropped out of rotation. peerAnswered is the proof, in both modes.
 			if f.peerAnswered.Load() && (failN > 0 || (!f.cryptoOn && rc.active())) {
-				healEvents(f.st, rc) // this endpoint is answering — clear transient burns, release a landed pin, emit any heal
+				healEvents(f.st, rc) // this endpoint is answering — clear transient burns and emit any heal
 			}
 			rc.proactive(f.rotatePeerFlux, f.rotateSourceFlux, time.Now())
 			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the
