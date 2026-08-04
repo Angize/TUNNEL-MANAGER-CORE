@@ -2595,6 +2595,8 @@ func (b *TCP) ProbeAllNow() {
 // (dialTarget()/sourceIP() read the pinned endpoint via the pool's current()). No rebuild — the TUN
 // stays up. Runs until Close. The ws edge pool uses retestLoop for the same job on its own axes.
 func (b *TCP) peerPinPollLoop() {
+	// Its own goroutine: a probe batch takes seconds, and an operator's jump must never wait behind it.
+	go runDestRetests(b.pp, b.closeCh, b.probeDest, b.st.event)
 	drop := func() {
 		b.manualSwitch.Store(true) // operator-initiated: skip fault accounting on the induced drop
 		if c := b.curConn.Load(); c != nil {
@@ -2637,6 +2639,57 @@ func (b *TCP) peerPinPollLoop() {
 			}
 		}
 	}
+}
+
+// probeDest tests one burned DESTINATION of the DIRECT pool out of band: a fresh connection carrying
+// the real client handshake, torn down at once. Nothing on the live carrier moves. With crypto on the
+// server answers only a PSK-authenticated init and publishes nothing until a frame authenticates too,
+// so the probe never reaches its connection set; with crypto off there is no such step and the dial
+// itself is the whole answer.
+func (b *TCP) probeDest(addr string) bool {
+	d := &net.Dialer{Timeout: probeTimeout}
+	if ip := b.probeSourceIP(); ip != nil {
+		d.LocalAddr = &net.TCPAddr{IP: ip}
+	}
+	conn, err := d.Dial("tcp", addr)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(probeTimeout)
+	c := conn
+	if b.cover { // the cover handshake is part of the path being tested — a bare TCP accept is not it
+		tc, cerr := tlscover.ClientConn(c, b.coverSNI, b.psk, deadline)
+		if cerr != nil {
+			return false
+		}
+		c = tc
+	}
+	if !b.cryptoOn {
+		return true
+	}
+	conn.SetDeadline(deadline)
+	return b.clientHandshake(b.newFramer(c)) == nil
+}
+
+// probeSourceIP is the local IP a PROBE dial binds to — the source pool's current entry, or the fixed
+// bindIP — resolved without dialer()'s side effects: that one records lastSrc (which the source-pin
+// landing check reads) and burns an unbindable source, and a probe may do neither. nil = let the
+// kernel choose, exactly as the live dial does when the configured source will not bind.
+func (b *TCP) probeSourceIP() net.IP {
+	src := b.sourceIP()
+	if src == "" {
+		return nil
+	}
+	host := src
+	if h, _, e := net.SplitHostPort(src); e == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !canBindSource(ip) {
+		return nil
+	}
+	return ip
 }
 
 // SelectEdge pins a specific pool edge (kind "ip"|"sni", key its value) as the active one and

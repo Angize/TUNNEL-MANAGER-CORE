@@ -125,6 +125,7 @@ type UDP struct {
 	pp      *PeerPool           // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
 	poolIPs map[string]struct{} // client-only: the destination pool's IPs (4-byte keys), so a frame from the endpoint we just left is not mistaken for proof that the new one is alive; set once before Run
 	sp      *PeerPool           // client-only: source-IP rotation pool (nil = fixed source; rebinds the socket on rotate)
+	dp      destProbe           // client-only: the in-flight out-of-band destination probe (see peer_probe.go)
 }
 
 // SetPeerPool (client, direct transports) wires a destination-IP rotation pool: when the current
@@ -393,6 +394,24 @@ func runPinPoll(rc *rotationController, closeCh <-chan struct{}, adoptPeer, adop
 // delivered as SIGHUP). No-op unless pooled.
 func (b *UDP) ProbeAllNow() {
 	probeAllPools(b.pp, b.sp)
+}
+
+// probeDest tests one burned DESTINATION out of band: a real handshake init addressed at that endpoint
+// alone. It goes out the LIVE socket on purpose — a udp server identifies its client by (source ip,
+// source port), so an init from a fresh socket would look like a second client. Nothing of the live
+// carrier is touched: the server stages a session for an init and learns nothing from it until a frame
+// opens under those keys, which this probe never sends, so not even its reply socket moves.
+//
+// Crypto only, and the crypto-off pool has no prober at all (see clientLoop). The only probe a
+// crypto-off carrier could send is a ping — and a crypto-off server DOES re-point its reply socket at
+// whichever of its IPs a frame last arrived on, so that ping would steer the downstream onto the
+// endpoint under test, which is the burned one. There is no ordering that reliably puts it back.
+func (b *UDP) probeDest(addr string) bool {
+	ua, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil || ua == nil || ua.IP == nil {
+		return false
+	}
+	return probeDestHandshake(&b.dp, b.psk, ua.IP, func(init []byte) { b.writeCtrl(init, ua) })
 }
 
 // pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin. Runs until Close.
@@ -881,6 +900,9 @@ func (b *UDP) handleCrypto(pkt []byte, addr *net.UDPAddr) {
 // init starts a fresh session; on the client a resp completes ours.
 func (b *UDP) tryHandshake(pkt []byte, addr *net.UDPAddr) {
 	if b.isClient {
+		if b.dp.answered(addr.IP, pkt) {
+			return // the RESP our out-of-band probe asked another endpoint for; it installs no session
+		}
 		ci := b.ci.Load()
 		if ci == nil {
 			return
@@ -983,6 +1005,11 @@ func (b *UDP) clientLoop() {
 	rc := newRotationController(b.pp, b.sp)
 	if rc.active() {
 		go b.pinPollLoop(rc)
+	}
+	if b.cryptoOn { // no PSK handshake to probe with otherwise — see probeDest
+		// Its own goroutine, not the pin poller's: a probe batch takes seconds, and an operator's jump
+		// must never wait behind it.
+		go runDestRetests(b.pp, b.closeCh, b.probeDest, b.st.event)
 	}
 	// Seed the staleness baseline NOW (clear mode). Without a baseline, sessionStale() returns false
 	// while lastRx==0, so a clear-mode failover-only pool whose FIRST endpoint is dead from the start
