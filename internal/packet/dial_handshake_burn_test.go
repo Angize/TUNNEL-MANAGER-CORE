@@ -64,7 +64,7 @@ func TestDialFailureLeavesTheDirectPoolAlone(t *testing.T) {
 	}
 
 	// The node's verdict, through the file the core really polls, DOES move it.
-	if werr := os.WriteFile(pp.cmdPath(), []byte(`{"cmd":"fail"}`), 0o644); werr != nil {
+	if werr := os.WriteFile(pp.cmdPath(), []byte(`{"cmd":"fail","key":"`+addr+`"}`), 0o644); werr != nil {
 		t.Fatalf("write cmd: %v", werr)
 	}
 	deadline = time.Now().Add(10 * time.Second)

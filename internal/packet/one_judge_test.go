@@ -144,7 +144,7 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 	cli, _, a1, _, _, _ := probePair(t, time.Second, "onej")
 	p := cli.pp
 
-	writeFileAtomic(p.cmdPath(), []byte(`{"cmd":"fail"}`), 0o644)
+	writeFileAtomic(p.cmdPath(), []byte(`{"cmd":"fail","key":"`+a1+`"}`), 0o644)
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		p.mu.Lock()
