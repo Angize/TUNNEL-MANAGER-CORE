@@ -141,8 +141,9 @@ func (b *UDP) SetPeerPool(pp *PeerPool) {
 }
 
 // peerFailThreshold is how many ~1s handshake retransmits with no session go by before the client
-// concludes the current peer is dead and rotates to the next pool endpoint (crypto on). Long enough
-// to ride out a slow handshake / brief loss, short enough to fail over from a blocked IP quickly.
+// gives up on the session it is holding and drops back to a fresh handshake (crypto on). It no longer
+// rotates: which endpoint to be on is the node probe's call, and this is only about how long to keep
+// re-initing before starting over. Long enough to ride out a slow handshake or brief loss.
 const peerFailThreshold = 12
 
 // handshakeRetransmit is the base gap between handshake inits, and between probes of an endpoint a
@@ -155,10 +156,10 @@ const handshakeRetransmit = time.Second
 // when a filtered path is most worth fingerprinting.
 func handshakeRetransmitWait() time.Duration { return jitterFrac(handshakeRetransmit) }
 
-// pinFailRelease is how many proven-dead rounds (each already peerFailThreshold retransmits, or a full
-// clear-mode staleness window, with no session) a manual pin absorbs before it auto-releases, so the
-// tunnel recovers instead of freezing on a blocked endpoint for the rest of pinTTL. Two rounds keeps a
-// real transient — which heals before even one round — from ever releasing a good pin.
+// pinFailRelease is how many proven-dead rounds a manual pin absorbs before it auto-releases, so the
+// tunnel recovers instead of freezing on a blocked endpoint for the rest of pinTTL. A round is now one
+// node-driven failover ask — the node has already confirmed the silence over two sweeps before it asks,
+// so two of them is a deliberate second opinion, not a retry count.
 const pinFailRelease = 2
 
 // rotatePeerUDP points the client at the next pool endpoint: burn+advance (proactive=false) or a timed
