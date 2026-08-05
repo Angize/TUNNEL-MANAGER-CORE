@@ -1,9 +1,9 @@
 // Raw-IP encapsulation profiles for the "raw" transport. Each profile wraps a sealed core frame in a
 // different IP-layer carrier so the tunnel mimics ordinary IPIP / GRE / ICMP / TCP / UDP traffic — or
-// "bip", our native minimal framing. Only the carrier header, and so the IP protocol number on the wire,
+// "bare", our native minimal framing. Only the carrier header, and so the IP protocol number on the wire,
 // changes between them; the sealed frame is the innermost payload either way:
 //
-//	bip      proto 253   no L4 header             [IPv4][sealed]
+//	bare      proto 253   no L4 header             [IPv4][sealed]
 //	ipip     proto 4     no L4 header             [IPv4][sealed]
 //	etherip  proto 97    2-byte EtherIP header    [IPv4][EtherIP][sealed]     (version 3)
 //	ipcomp   proto 108   4-byte IPComp header     [IPv4][IPComp][sealed]      (next=IPIP, CPI=DEFLATE)
@@ -37,13 +37,13 @@ const (
 	protoEtherIP = 97
 	protoIPComp  = 108
 	protoL2TPv3  = 115
-	protoBIP     = 253 // private/experimental range: our native no-L4-header profile
+	protoBare    = 253 // private/experimental range: our native no-L4-header profile
 )
 
 // rawProfiles maps a profile name to its IP protocol number. It is also the
 // authoritative set of valid profile names.
 var rawProfiles = map[string]int{
-	"bip":     protoBIP,
+	"bare":    protoBare,
 	"ipip":    protoIPIP,
 	"gre":     protoGRE,
 	"icmp":    protoICMP,
@@ -60,7 +60,7 @@ var rawProfiles = map[string]int{
 // buffer from it, rawDecap skips by it, and the node's MTU arithmetic is checked against it across
 // repositories. A profile missing here would silently encapsulate with no header at all.
 var rawHeaderLens = map[string]int{
-	"bip":     0,
+	"bare":    0,
 	"ipip":    0,
 	"etherip": 2,
 	"ipcomp":  4,
@@ -74,7 +74,7 @@ var rawHeaderLens = map[string]int{
 }
 
 // rawHeaderLen is the carrier header size for a profile, 0 for an unknown one (which encapsulates bare,
-// the same as bip).
+// the same as bare).
 func rawHeaderLen(profile string) int { return rawHeaderLens[profile] }
 
 // Default ports for the tcp/udp profiles: the client's 51820 (inside Linux's 32768-60999 ephemeral
@@ -110,7 +110,7 @@ func rawPorts(isClient bool, srv uint16) (sport, dport uint16) {
 
 // RawProfileHasPorts reports whether a profile forges an L4 header with PORTS in it, and so has a
 // server port raw_port can override. Exported for config validation: a raw_port on any other profile
-// would validate, persist and read as set while the wire ignored it. "" is bip, which forges nothing.
+// would validate, persist and read as set while the wire ignored it. "" is bare, which forges nothing.
 func RawProfileHasPorts(profile string) bool {
 	switch rawProfiles[profile] {
 	case protoUDP, protoTCP:
@@ -136,8 +136,8 @@ func RawProfileValid(name string) bool {
 	return ok
 }
 
-// RawProfileOwning returns the profile that owns an IP protocol number, if any. It is what stops bip's
-// raw_proto from borrowing a number whose header a middlebox will try to parse: bip sends no L4 header,
+// RawProfileOwning returns the profile that owns an IP protocol number, if any. It is what stops bare's
+// raw_proto from borrowing a number whose header a middlebox will try to parse: bare sends no L4 header,
 // so an outer "protocol 6" with ciphertext where the TCP header belongs reads as a malformed segment on
 // every stateful box in the path — random ports, no SYN it ever saw, a checksum that cannot verify.
 func RawProfileOwning(proto int) (string, bool) {
@@ -151,7 +151,7 @@ func RawProfileOwning(proto int) (string, bool) {
 
 // rawChecksumBindsSource reports whether this profile's carrier header carries a checksum computed over
 // the OUTER SOURCE address, so rawEncap's bytes are only valid if the packet really leaves from that
-// source. udp and tcp do (the IPv4 pseudo-header is part of l4Checksum); icmp, bip, ipip, gre and esp do
+// source. udp and tcp do (the IPv4 pseudo-header is part of l4Checksum); icmp, bare, ipip, gre and esp do
 // not. It exists for one decision — sendViaConn's fallback when the pinned source cannot be used.
 func rawChecksumBindsSource(profile string) bool {
 	switch rawProfiles[profile] {
@@ -167,7 +167,7 @@ func rawProtoFor(profile string) (int, bool) {
 	return p, ok
 }
 
-// rawEffProto returns the EFFECTIVE outer IP protocol number for a carrier. The bare "bip" profile may
+// rawEffProto returns the EFFECTIVE outer IP protocol number for a carrier. The bare "bare" profile may
 // override its native 253 with any 1..255 (raw_proto) to slip past a protocol-whitelist filter. Every
 // other profile keeps its fixed number, since that number is tied to its forged L4 header.
 func rawEffProto(profile string, rawProto int) (int, bool) {
@@ -175,7 +175,7 @@ func rawEffProto(profile string, rawProto int) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	if profile == "bip" && rawProto >= 1 && rawProto <= 255 {
+	if profile == "bare" && rawProto >= 1 && rawProto <= 255 {
 		return rawProto, true
 	}
 	return base, true
@@ -188,7 +188,7 @@ func rawEffProto(profile string, rawProto int) (int, bool) {
 // tcp/udp server port (0 = the default 443).
 func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port uint16, seq, ack, spi uint32) []byte {
 	switch rawProfiles[profile] {
-	case protoBIP, protoIPIP:
+	case protoBare, protoIPIP:
 		return payload // native / IP-in-IP: the sealed frame is the whole payload
 
 	case protoGRE:
@@ -325,7 +325,7 @@ func rawDecap(profile string, proto int, pkt []byte) ([]byte, bool) {
 		}
 	}
 	switch framing {
-	case protoBIP, protoIPIP:
+	case protoBare, protoIPIP:
 		return pkt, true
 	case protoTCP:
 		// The only VARIABLE header: read its own data offset rather than the table, so a peer that

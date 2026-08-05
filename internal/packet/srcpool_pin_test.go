@@ -16,7 +16,7 @@ func TestOneEntrySourcePoolPinsTheSource(t *testing.T) {
 	const pin = "127.0.0.1"
 
 	t.Run("raw stamps the crafted header from it", func(t *testing.T) {
-		r := &Raw{isClient: true, proto: protoBIP, profile: "bip", fakeFd: -1}
+		r := &Raw{isClient: true, proto: protoBare, profile: "bare", fakeFd: -1}
 		r.link = &directLink{r: r}
 		r.SetSourcePool(NewPeerPool([]string{pin}, false, 0, ""))
 		if got := r.srcIP(); got == nil || got.String() != pin {

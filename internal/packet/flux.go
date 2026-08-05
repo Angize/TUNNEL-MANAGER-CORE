@@ -2,7 +2,7 @@
 // unit-testable) apart from the socket work in flux_linux.go.
 //
 // flux is a polymorphic, moving-target carrier. Unlike the fixed raw profiles
-// (bip/ipip/gre/... each pinned to one IP protocol number), flux derives its
+// (bare/ipip/gre/... each pinned to one IP protocol number), flux derives its
 // carrier *shape* from the pre-shared key and a time-based epoch, and both ends
 // recompute it independently from the wall clock — so the shape rotates in
 // lock-step with NO negotiation packet on the wire to fingerprint or to signal a
@@ -40,9 +40,9 @@ import (
 // (same-segment / L2-adjacent / a cooperative datacenter). Across the open
 // internet most transit drops anything that is not TCP/UDP/ICMP, so the "udp"
 // carrier below is the internet-safe default.
-// Note: 253 (protoBIP) is deliberately EXCLUDED — flux's raw carrier installs a per-peer PREROUTING
-// DROP for every pool proto, which would silently black-hole a co-located raw/"bip" tunnel to the
-// same peer (bip rides proto 253). 246 takes its slot; both ends derive from this list so they stay
+// Note: 253 (protoBare) is deliberately EXCLUDED — flux's raw carrier installs a per-peer PREROUTING
+// DROP for every pool proto, which would silently black-hole a co-located raw/"bare" tunnel to the
+// same peer (bare rides proto 253). 246 takes its slot; both ends derive from this list so they stay
 // in sync (a breaking change is fine — no on-wire backward-compat is kept).
 var fluxProtoPool = []int{254, 252, 251, 250, 249, 248, 247, 246}
 

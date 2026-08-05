@@ -31,7 +31,7 @@ func TestSetDesyncKeepsTheModesThatNeedNoHdrincl(t *testing.T) {
 			// neighbour is also what this really looks like in production.
 			f := &fakeResolver{err: errors.New("l2: neighbour not resolved")}
 			tried := false
-			r := &Raw{isClient: true, proto: protoBIP, profile: "bip", fakeFd: -1}
+			r := &Raw{isClient: true, proto: protoBare, profile: "bare", fakeFd: -1}
 			r.link = &directLink{r: r}
 			r.localIP.Store(&net.IPAddr{IP: net.IPv4(192, 0, 2, 1)})
 			r.openFakeFd = func(int) (int, error) { tried = true; return -1, boom }

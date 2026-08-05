@@ -238,11 +238,11 @@ func newFlux(dev *tun.Device, ka, rotate time.Duration, obfs, cryptoOn bool, psk
 func (f *Flux) epochNow() int64 { return fluxEpochAt(f.rotate, time.Now()) + f.epochOffset }
 
 // openFluxSockets opens the shared IP_HDRINCL sender and AF_PACKET receiver. The
-// sender is created for bip's protocol number, but IP_HDRINCL means the protocol
+// sender is created for bare's protocol number, but IP_HDRINCL means the protocol
 // we stamp in each packet's header is what actually goes on the wire, so one
 // socket serves every epoch's protocol.
 func openFluxSockets() (send, pkt int, err error) {
-	send, err = openHdrincl(protoBIP)
+	send, err = openHdrincl(protoBare)
 	if err != nil {
 		return -1, -1, err
 	}
@@ -511,7 +511,7 @@ func fluxDropMatches(peer net.IP, carrier string) [][]string {
 
 // addFluxDrop installs best-effort raw-PREROUTING DROP rules for exactly this
 // carrier's traffic from peer, so the kernel never ICMP-rejects our frames while a
-// co-located tunnel (e.g. raw/bip on proto 253) to the same peer keeps working.
+// co-located tunnel (e.g. raw/bare on proto 253) to the same peer keeps working.
 // AF_PACKET taps before this chain, so flux's receive is unaffected. Returns a
 // cleanup func that removes every rule it managed to install (nil if none).
 func addFluxDrop(peer net.IP, carrier string) func() {

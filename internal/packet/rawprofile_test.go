@@ -61,7 +61,7 @@ func TestRawProfileRoundTrip(t *testing.T) {
 }
 
 func TestRawProtoNumbers(t *testing.T) {
-	want := map[string]int{"bip": 253, "ipip": 4, "gre": 47, "icmp": 1, "udp": 17, "tcp": 6, "esp": 50}
+	want := map[string]int{"bare": 253, "ipip": 4, "gre": 47, "icmp": 1, "udp": 17, "tcp": 6, "esp": 50}
 	for name, n := range want {
 		got, ok := rawProtoFor(name)
 		if !ok || got != n {
@@ -74,21 +74,21 @@ func TestRawProtoNumbers(t *testing.T) {
 }
 
 func TestRawEffProto(t *testing.T) {
-	// bip may take any 1..255; everything else keeps its native number.
+	// bare may take any 1..255; everything else keeps its native number.
 	cases := []struct {
 		profile  string
 		override int
 		want     int
 		wantOK   bool
 	}{
-		{"bip", 0, 253, true},   // unset -> native
-		{"bip", 58, 58, true},   // ICMPv6 override
-		{"bip", 255, 255, true}, // top of range
-		{"bip", 300, 253, true}, // out of range -> native
-		{"bip", -1, 253, true},  // negative -> native
-		{"gre", 58, 47, true},   // override ignored for a headered profile
-		{"udp", 99, 17, true},   // ignored
-		{"nope", 58, 0, false},  // unknown profile
+		{"bare", 0, 253, true},   // unset -> native
+		{"bare", 58, 58, true},   // ICMPv6 override
+		{"bare", 255, 255, true}, // top of range
+		{"bare", 300, 253, true}, // out of range -> native
+		{"bare", -1, 253, true},  // negative -> native
+		{"gre", 58, 47, true},    // override ignored for a headered profile
+		{"udp", 99, 17, true},    // ignored
+		{"nope", 58, 0, false},   // unknown profile
 	}
 	for _, c := range cases {
 		got, ok := rawEffProto(c.profile, c.override)
@@ -98,15 +98,15 @@ func TestRawEffProto(t *testing.T) {
 	}
 }
 
-func TestRawBipCustomProtoRoundTrip(t *testing.T) {
-	// A bip carrier on a custom protocol number (e.g. 58) stays header-less and must
+func TestRawBareCustomProtoRoundTrip(t *testing.T) {
+	// A bare carrier on a custom protocol number (e.g. 58) stays header-less and must
 	// round-trip: the outer IPv4's protocol byte carries the custom number, and decap
-	// keys the header stripping off the profile (bip -> bare), not the number.
+	// keys the header stripping off the profile (bare -> bare), not the number.
 	pl := []byte("the-sealed-aead-frame")
 	const custom = 58
-	l4 := rawEncap("bip", pl, testSrc, testDst, true, 0, 0, 0, 0, 0) // bip is bare -> l4 == pl
+	l4 := rawEncap("bare", pl, testSrc, testDst, true, 0, 0, 0, 0, 0) // bare is bare -> l4 == pl
 	if !bytes.Equal(l4, pl) {
-		t.Fatalf("bip added a header: %x", l4)
+		t.Fatalf("bare added a header: %x", l4)
 	}
 	for _, variant := range []struct {
 		name string
@@ -115,9 +115,9 @@ func TestRawBipCustomProtoRoundTrip(t *testing.T) {
 		{"with-ip", prependIP4(testSrc, testDst, custom, l4)}, // kernel included the proto-58 IPv4 header
 		{"no-ip", l4},
 	} {
-		got, ok := rawDecap("bip", custom, variant.pkt)
+		got, ok := rawDecap("bare", custom, variant.pkt)
 		if !ok {
-			t.Fatalf("%s: bip/proto-%d decap failed", variant.name, custom)
+			t.Fatalf("%s: bare/proto-%d decap failed", variant.name, custom)
 		}
 		if !bytes.Equal(got, pl) {
 			t.Fatalf("%s: got %x want %x", variant.name, got, pl)
@@ -127,7 +127,7 @@ func TestRawBipCustomProtoRoundTrip(t *testing.T) {
 
 func TestRawBipIpipHaveNoL4Header(t *testing.T) {
 	pl := []byte("payload")
-	for _, name := range []string{"bip", "ipip"} {
+	for _, name := range []string{"bare", "ipip"} {
 		l4 := rawEncap(name, pl, testSrc, testDst, true, 0, 0, 0, 0, 0)
 		if !bytes.Equal(l4, pl) {
 			t.Errorf("profile %s added a header: %x", name, l4)
@@ -230,9 +230,9 @@ func TestRawDecapRejectsShortCarrier(t *testing.T) {
 	if _, ok := rawDecap("esp", protoESP, []byte{0x00, 0x00, 0x00, 0x01, 0x00, 0x00}); ok {
 		t.Error("esp decap accepted fewer than 8 header bytes")
 	}
-	// bip/ipip carry no header: any bytes are a valid (opaque) sealed frame.
-	if _, ok := rawDecap("bip", protoBIP, []byte{0x01, 0x02}); !ok {
-		t.Error("bip decap should accept any bytes as the frame")
+	// bare/ipip carry no header: any bytes are a valid (opaque) sealed frame.
+	if _, ok := rawDecap("bare", protoBare, []byte{0x01, 0x02}); !ok {
+		t.Error("bare decap should accept any bytes as the frame")
 	}
 	// A real IPv4-wrapped GRE packet with no room for the GRE header is rejected.
 	if _, ok := rawDecap("gre", protoGRE, prependIP4(testSrc, testDst, protoGRE, []byte{0x00})); ok {

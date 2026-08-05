@@ -70,8 +70,8 @@ func TestBuildIP4Ext(t *testing.T) {
 	dst := net.IPv4(10, 0, 0, 2)
 	payload := []byte("hello desync")
 
-	base := buildIP4(src, dst, protoBIP, payload)
-	ext := buildIP4Ext(src, dst, protoBIP, 64, false, payload)
+	base := buildIP4(src, dst, protoBare, payload)
+	ext := buildIP4Ext(src, dst, protoBare, 64, false, payload)
 	if len(base) != len(ext) {
 		t.Fatalf("lengths differ: %d vs %d", len(base), len(ext))
 	}
@@ -90,15 +90,15 @@ func TestBuildIP4Ext(t *testing.T) {
 	if base[8] != 64 {
 		t.Fatalf("default TTL byte = %d, want 64", base[8])
 	}
-	if base[9] != byte(protoBIP) {
-		t.Fatalf("proto byte = %d, want %d", base[9], protoBIP)
+	if base[9] != byte(protoBare) {
+		t.Fatalf("proto byte = %d, want %d", base[9], protoBare)
 	}
 	// A valid IPv4 header sums (one's complement, including the stored checksum) to zero.
 	if s := onesComplementSum(base[:20]); s != 0 {
 		t.Fatalf("valid header checksum should verify to 0, got %#04x", s)
 	}
 
-	low := buildIP4Ext(src, dst, protoBIP, 3, false, payload)
+	low := buildIP4Ext(src, dst, protoBare, 3, false, payload)
 	if low[8] != 3 {
 		t.Fatalf("low-TTL header TTL = %d, want 3", low[8])
 	}
@@ -106,12 +106,12 @@ func TestBuildIP4Ext(t *testing.T) {
 		t.Fatalf("low-TTL header must still have a VALID checksum, got %#04x", s)
 	}
 
-	bad := buildIP4Ext(src, dst, protoBIP, 64, true, payload)
+	bad := buildIP4Ext(src, dst, protoBare, 64, true, payload)
 	if s := onesComplementSum(bad[:20]); s == 0 {
 		t.Fatal("badSum header must NOT verify (checksum should be corrupted)")
 	}
 	// The only difference from a good header is the checksum field — everything else identical.
-	good := buildIP4Ext(src, dst, protoBIP, 64, false, payload)
+	good := buildIP4Ext(src, dst, protoBare, 64, false, payload)
 	if binary.BigEndian.Uint16(bad[10:12]) == binary.BigEndian.Uint16(good[10:12]) {
 		t.Fatal("badSum checksum must differ from the correct one")
 	}
@@ -138,7 +138,7 @@ func TestBuildIP4ExtBadSumZeroTwin(t *testing.T) {
 	found := false
 	for id := 0; id <= 0xffff; id++ {
 		ipIDCounter.Store(uint32(id) - 1) // nextIPID adds 1 before returning
-		if binary.BigEndian.Uint16(buildIP4Ext(src, dst, protoBIP, 238, false, payload)[10:12]) == 0x0000 {
+		if binary.BigEndian.Uint16(buildIP4Ext(src, dst, protoBare, 238, false, payload)[10:12]) == 0x0000 {
 			ipIDCounter.Store(uint32(id) - 1)
 			found = true
 			break
@@ -148,7 +148,7 @@ func TestBuildIP4ExtBadSumZeroTwin(t *testing.T) {
 		t.Fatal("no Identification value makes this header sum to the 0x0000 twin — the test premise " +
 			"is broken, not the code")
 	}
-	good := buildIP4Ext(src, dst, protoBIP, 238, false, payload)
+	good := buildIP4Ext(src, dst, protoBare, 238, false, payload)
 	if binary.BigEndian.Uint16(good[10:12]) != 0x0000 {
 		t.Fatalf("test premise broken: correct checksum should be 0x0000, got %#04x", binary.BigEndian.Uint16(good[10:12]))
 	}
@@ -156,7 +156,7 @@ func TestBuildIP4ExtBadSumZeroTwin(t *testing.T) {
 	if onesComplementSum(good[:20]) != 0 {
 		t.Fatal("the 0x0000-checksum header must itself verify")
 	}
-	bad := buildIP4Ext(src, dst, protoBIP, 238, true, payload)
+	bad := buildIP4Ext(src, dst, protoBare, 238, true, payload)
 	if onesComplementSum(bad[:20]) == 0 {
 		t.Fatalf("badSum header STILL verifies (zero-twin not handled): checksum=%#04x", binary.BigEndian.Uint16(bad[10:12]))
 	}
@@ -254,7 +254,7 @@ func TestFakePayload(t *testing.T) {
 // every decoy read the same r.seq/r.tcpBytes, so a batch was N byte-for-byte-header packets (and on
 // icmp, N identical id+seq echo requests — a cheap signature). Pure over the seq state, no socket.
 func TestDecoySeqDistinct(t *testing.T) {
-	for _, proto := range []int{protoICMP, protoTCP, protoBIP} {
+	for _, proto := range []int{protoICMP, protoTCP, protoBare} {
 		r := &Raw{proto: proto}
 		r.seq.Store(500)
 		r.tcpBytes.Store(9000)
