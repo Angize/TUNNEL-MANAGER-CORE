@@ -267,3 +267,28 @@ func TestL4ChecksumSplitMatchesReference(t *testing.T) {
 		}
 	}
 }
+
+// TestEveryProfileHasAHeaderLen: rawEncap sizes its buffer from rawHeaderLens and rawDecap skips by it,
+// so a profile missing from that table encapsulates BARE — a silent wire-format break that decodes fine
+// against itself and against nothing else. Registering a profile must therefore register its size.
+func TestEveryProfileHasAHeaderLen(t *testing.T) {
+	for name := range rawProfiles {
+		if _, ok := rawHeaderLens[name]; !ok {
+			t.Errorf("raw/%s is a registered profile with no entry in rawHeaderLens — it would encapsulate "+
+				"with no header while the docs and the node's MTU say otherwise", name)
+		}
+	}
+	for name := range rawHeaderLens {
+		if _, ok := rawProfiles[name]; !ok {
+			t.Errorf("rawHeaderLens carries %q, which is no longer a registered profile", name)
+		}
+	}
+	// And the size the table claims is the size rawEncap really adds.
+	for name := range rawProfiles {
+		pl := []byte("0123456789")
+		got := len(rawEncap(name, pl, testSrc, testDst, true, 1, 0, 2, 3, 4)) - len(pl)
+		if want := rawHeaderLens[name]; got != want {
+			t.Errorf("raw/%s: rawEncap added %d header bytes, rawHeaderLens says %d", name, got, want)
+		}
+	}
+}
