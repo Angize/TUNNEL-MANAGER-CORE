@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/packet"
 )
@@ -387,13 +388,6 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// rawProfiles is the set of valid raw-transport encapsulation profiles. It
-// mirrors the map in the packet package (kept here so config validation does not
-// depend on that package).
-var rawProfiles = map[string]bool{
-	"bip": true, "ipip": true, "gre": true, "icmp": true, "udp": true, "tcp": true, "esp": true,
-}
-
 // validatePoolEndpoint checks one rotation-pool entry (field names it for the error). The pool swaps
 // the endpoint with no DNS step, so every entry must be a literal IP. With needPort (the udp/tcp
 // DESTINATION) it is "ip:port" — the host must be an IP and the port valid; otherwise (raw/flux
@@ -420,6 +414,25 @@ func validatePoolEndpoint(field, e string, needPort bool) error {
 		return errors.New(field + " entry " + strconv.Quote(e) + " must be an IPv4 address")
 	}
 	return nil
+}
+
+// rawProtoBorrowed refuses an outer protocol number that some raw PROFILE owns. It applies to the two
+// headerless carriers that can set one — bip and spoof — and to nothing else.
+//
+// Neither writes an L4 header, so the outer IP header announcing (say) TCP leaves ciphertext exactly
+// where the TCP header belongs: a different random port pair on every packet, no SYN any stateful box
+// ever saw, a checksum that cannot verify. The flow is dropped in the PATH, which reaches the operator
+// as unexplained packet loss rather than as an error. The owning profile exists precisely because it
+// forges that header too, so the message names it.
+func rawProtoBorrowed(proto int) error {
+	owner, taken := packet.RawProfileOwning(proto)
+	if !taken || owner == "bip" { // bip's own native number is not a borrowed one
+		return nil
+	}
+	return errors.New("raw_proto " + strconv.Itoa(proto) + " is the \"" + owner +
+		"\" profile's protocol number, and a headerless carrier sends that number with no header at all —" +
+		" a middlebox parses the ciphertext as a " + owner + " header and drops the flow." +
+		" Use raw_profile \"" + owner + "\" instead")
 }
 
 func (c *Config) validate() error {
@@ -465,8 +478,8 @@ func (c *Config) validate() error {
 	case "", "udp", "tcp":
 		// ok ("" defaults to udp in applyDefaults)
 	case "raw":
-		if c.RawProfile != "" && !rawProfiles[c.RawProfile] {
-			return errors.New("raw_profile must be one of bip|ipip|gre|icmp|udp|tcp|esp")
+		if c.RawProfile != "" && !packet.RawProfileValid(c.RawProfile) {
+			return errors.New("raw_profile must be one of " + strings.Join(packet.RawProfileNames(), "|"))
 		}
 		// rawEffProto honours raw_proto for the bare "bip" profile ONLY — every other profile's number is
 		// tied to its forged L4 header. Left unchecked the value validates, persists and shows as set while
@@ -478,6 +491,9 @@ func (c *Config) validate() error {
 			}
 			if c.RawProto < 1 || c.RawProto > 255 {
 				return errors.New("raw_proto must be in 1..255 (0 = the profile's native protocol number)")
+			}
+			if err := rawProtoBorrowed(c.RawProto); err != nil {
+				return err
 			}
 		}
 		if !c.Crypto.Enabled {
@@ -491,8 +507,13 @@ func (c *Config) validate() error {
 		if !c.Crypto.Enabled {
 			return errors.New("spoof transport requires crypto enabled (the AEAD authenticates every forged-header frame)")
 		}
-		if c.RawProto != 0 && (c.RawProto < 1 || c.RawProto > 255) {
-			return errors.New("raw_proto must be in 1..255 (0 = the bip default 253)")
+		if c.RawProto != 0 {
+			if c.RawProto < 1 || c.RawProto > 255 {
+				return errors.New("raw_proto must be in 1..255 (0 = the bip default 253)")
+			}
+			if err := rawProtoBorrowed(c.RawProto); err != nil {
+				return err
+			}
 		}
 		if c.SpoofSrc != "" && net.ParseIP(c.SpoofSrc).To4() == nil {
 			return errors.New("spoof_src_ip must be an IPv4 address")
