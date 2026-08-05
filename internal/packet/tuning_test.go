@@ -92,3 +92,30 @@ func TestApplyTuning(t *testing.T) {
 		t.Errorf("negative dataFailThreshold should be ignored, got %d", dataFailThreshold)
 	}
 }
+
+// TestDefaultLadderDeepens guards the SHAPE of the compiled-in retest schedule rather than its numbers:
+// each step must wait longer than the one before it, a DEAD entry must come back slower than a suspect
+// one, and every default must survive its own ApplyTuning clamp untouched.
+func TestDefaultLadderDeepens(t *testing.T) {
+	if len(suspectBackoff) == 0 {
+		t.Fatal("an empty suspect ladder leaves peer_pool indexing suspectBackoff[0] on nothing")
+	}
+	for i := 1; i < len(suspectBackoff); i++ {
+		if suspectBackoff[i] <= suspectBackoff[i-1] {
+			t.Errorf("step %d (%ds) does not deepen on step %d (%ds): a repeatedly failing endpoint would be retried as often or sooner",
+				i, suspectBackoff[i], i-1, suspectBackoff[i-1])
+		}
+	}
+	if last := suspectBackoff[len(suspectBackoff)-1]; deadRetest < last {
+		t.Errorf("deadRetest=%ds is shorter than the last suspect step (%ds): a DEAD endpoint would be retried sooner than a suspect one", deadRetest, last)
+	}
+
+	// Feeding the compiled-in defaults back through ApplyTuning must change nothing. A default outside
+	// its own clamp would mean the panel showing that value and saving it unchanged alters behaviour.
+	sb, dr := append([]int64(nil), suspectBackoff...), deadRetest
+	defer func() { suspectBackoff, deadRetest = sb, dr }()
+	ApplyTuning(TuningInput{SuspectBackoff: sb, DeadRetestSecs: dr})
+	if !reflect.DeepEqual(suspectBackoff, sb) || deadRetest != dr {
+		t.Errorf("a default does not survive its own clamp: backoff %v -> %v, deadRetest %d -> %d", sb, suspectBackoff, dr, deadRetest)
+	}
+}
