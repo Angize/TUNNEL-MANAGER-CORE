@@ -34,8 +34,9 @@ func TestRawChecksumBindsSourceMatchesTheEncapsulation(t *testing.T) {
 // lists below must between them name EVERY key of rawProfiles, so a newly registered profile fails this
 // test until someone states which side it is on. The silent default is the dangerous answer.
 func TestRawChecksumBindsSourceCoversEveryProfile(t *testing.T) {
-	bindsSource := []string{"udp", "tcp"}                        // L4 checksum folds in the IPv4 pseudo-header
-	independent := []string{"bip", "ipip", "gre", "icmp", "esp"} // bytes do not depend on the source
+	bindsSource := []string{"udp", "tcp"} // L4 checksum folds in the IPv4 pseudo-header
+	// bytes do not depend on the source: none of these carries a checksum at all
+	independent := []string{"bip", "ipip", "gre", "icmp", "esp", "ah", "etherip", "ipcomp", "l2tpv3"}
 
 	classified := map[string]bool{}
 	for _, p := range bindsSource {

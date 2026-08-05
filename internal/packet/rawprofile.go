@@ -3,13 +3,17 @@
 // "bip", our native minimal framing. Only the carrier header, and so the IP protocol number on the wire,
 // changes between them; the sealed frame is the innermost payload either way:
 //
-//	bip   proto 253  no L4 header            [IPv4][sealed]
-//	ipip  proto 4    no L4 header            [IPv4][sealed]
-//	gre   proto 47   4-byte GRE header       [IPv4][GRE][sealed]
-//	icmp  proto 1    8-byte ICMP echo        [IPv4][ICMP][sealed]  (req 8 / reply 0)
-//	udp   proto 17   8-byte UDP header        [IPv4][UDP][sealed]
-//	tcp   proto 6    20-byte TCP header       [IPv4][TCP][sealed]  (PSH|ACK, live-flow seq/ack/window)
-//	esp   proto 50    8-byte ESP header       [IPv4][ESP][sealed]  (IPsec ESP: per-session SPI + seq)
+//	bip      proto 253   no L4 header             [IPv4][sealed]
+//	ipip     proto 4     no L4 header             [IPv4][sealed]
+//	etherip  proto 97    2-byte EtherIP header    [IPv4][EtherIP][sealed]     (version 3)
+//	ipcomp   proto 108   4-byte IPComp header     [IPv4][IPComp][sealed]      (next=IPIP, CPI=DEFLATE)
+//	gre      proto 47    4-byte GRE header        [IPv4][GRE][sealed]
+//	icmp     proto 1     8-byte ICMP echo         [IPv4][ICMP][sealed]        (req 8 / reply 0)
+//	udp      proto 17    8-byte UDP header        [IPv4][UDP][sealed]
+//	esp      proto 50    8-byte ESP header        [IPv4][ESP][sealed]         (per-session SPI + seq)
+//	l2tpv3   proto 115   8-byte L2TPv3 header     [IPv4][L2TPv3][sealed]      (session id + cookie)
+//	tcp      proto 6     20-byte TCP header       [IPv4][TCP][sealed]         (PSH|ACK, live-flow seq/ack)
+//	ah       proto 51    24-byte AH header        [IPv4][AH][sealed]          (SPI + seq + 12-byte ICV)
 //
 // The receiver ignores the carrier header's contents — the inner AEAD tag is the real integrity check —
 // so it only has to be well formed enough to look like the protocol it imitates and to be skipped.
@@ -23,26 +27,55 @@ import (
 
 // IP protocol numbers, one per profile.
 const (
-	protoICMP = 1
-	protoIPIP = 4
-	protoTCP  = 6
-	protoUDP  = 17
-	protoGRE  = 47
-	protoESP  = 50
-	protoBIP  = 253 // private/experimental range: our native no-L4-header profile
+	protoICMP    = 1
+	protoIPIP    = 4
+	protoTCP     = 6
+	protoUDP     = 17
+	protoGRE     = 47
+	protoESP     = 50
+	protoAH      = 51
+	protoEtherIP = 97
+	protoIPComp  = 108
+	protoL2TPv3  = 115
+	protoBIP     = 253 // private/experimental range: our native no-L4-header profile
 )
 
 // rawProfiles maps a profile name to its IP protocol number. It is also the
 // authoritative set of valid profile names.
 var rawProfiles = map[string]int{
-	"bip":  protoBIP,
-	"ipip": protoIPIP,
-	"gre":  protoGRE,
-	"icmp": protoICMP,
-	"udp":  protoUDP,
-	"tcp":  protoTCP,
-	"esp":  protoESP,
+	"bip":     protoBIP,
+	"ipip":    protoIPIP,
+	"gre":     protoGRE,
+	"icmp":    protoICMP,
+	"udp":     protoUDP,
+	"tcp":     protoTCP,
+	"esp":     protoESP,
+	"ah":      protoAH,
+	"etherip": protoEtherIP,
+	"ipcomp":  protoIPComp,
+	"l2tpv3":  protoL2TPv3,
 }
+
+// rawHeaderLen is the carrier header each profile prepends, in bytes. ONE table: rawEncap sizes its
+// buffer from it, rawDecap skips by it, and the node's MTU arithmetic is checked against it across
+// repositories. A profile missing here would silently encapsulate with no header at all.
+var rawHeaderLens = map[string]int{
+	"bip":     0,
+	"ipip":    0,
+	"etherip": 2,
+	"ipcomp":  4,
+	"gre":     4,
+	"icmp":    8,
+	"udp":     8,
+	"esp":     8,
+	"l2tpv3":  8,
+	"tcp":     20,
+	"ah":      24,
+}
+
+// rawHeaderLen is the carrier header size for a profile, 0 for an unknown one (which encapsulates bare,
+// the same as bip).
+func rawHeaderLen(profile string) int { return rawHeaderLens[profile] }
 
 // Default ports for the tcp/udp profiles: the client's 51820 (inside Linux's 32768-60999 ephemeral
 // range, so an ordinary source port) talking to the server's :443. The SERVER port is what a filter
@@ -159,14 +192,14 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return payload // native / IP-in-IP: the sealed frame is the whole payload
 
 	case protoGRE:
-		h := make([]byte, 4+len(payload))
+		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		// flags+version = 0 (no checksum/key/seq, version 0); protocol type = IPv4
 		binary.BigEndian.PutUint16(h[2:4], 0x0800)
 		copy(h[4:], payload)
 		return h
 
 	case protoICMP:
-		h := make([]byte, 8+len(payload))
+		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		if isClient {
 			h[0] = 8 // echo request
 		} else {
@@ -180,7 +213,7 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 
 	case protoUDP:
 		sp, dp := rawPorts(isClient, port)
-		h := make([]byte, 8+len(payload))
+		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		binary.BigEndian.PutUint16(h[0:2], sp)
 		binary.BigEndian.PutUint16(h[2:4], dp)
 		binary.BigEndian.PutUint16(h[4:6], uint16(len(h)))
@@ -207,13 +240,72 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		// payload". A real ESP flow keeps a constant SPI per Security Association and an
 		// incrementing sequence — spi is fixed for the session, seq advances per packet. The
 		// receiver ignores both (the inner AEAD tag is the real integrity check).
-		h := make([]byte, 8+len(payload))
+		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		binary.BigEndian.PutUint32(h[0:4], spi)
 		binary.BigEndian.PutUint32(h[4:8], seq)
 		copy(h[8:], payload)
 		return h
+
+	case protoL2TPv3:
+		// L2TPv3 over IP (RFC 3931 §4.1.2.1): [Session ID 4B][Cookie 4B]. Both are CONSTANT for the
+		// life of a session in real traffic, which is why this profile costs nothing to imitate — the
+		// repetition that would be a tell elsewhere is the correct behaviour here. Session ID 0 is
+		// reserved for control messages, so it is forced non-zero.
+		h := make([]byte, rawHeaderLen(profile)+len(payload))
+		sess := spi
+		if sess == 0 {
+			sess = 1
+		}
+		binary.BigEndian.PutUint32(h[0:4], sess)
+		binary.BigEndian.PutUint32(h[4:8], spi*0x9E3779B9+0x85EBCA6B) // a cookie unrelated to the id
+		copy(h[8:], payload)
+		return h
+
+	case protoAH:
+		// IPsec AH (RFC 4302) in tunnel mode: [Next 1][PayloadLen 1][Reserved 2][SPI 4][Seq 4][ICV 12].
+		// PayloadLen counts 32-bit words minus two, so 24 bytes -> 4. Next = IPIP, which is what a real
+		// tunnel-mode AH protects. Nothing on the path can verify the ICV (it has no key), it only has
+		// to be unpredictable per packet the way an HMAC is — a constant there would be the tell.
+		h := make([]byte, rawHeaderLen(profile)+len(payload))
+		h[0], h[1] = protoIPIP, 4
+		binary.BigEndian.PutUint32(h[4:8], spi)
+		binary.BigEndian.PutUint32(h[8:12], seq)
+		mix := uint64(spi)<<32 | uint64(seq)
+		for i := 0; i < 12; i += 4 {
+			mix = splitmix64(mix)
+			binary.BigEndian.PutUint32(h[12+i:16+i], uint32(mix>>32))
+		}
+		copy(h[24:], payload)
+		return h
+
+	case protoIPComp:
+		// IPComp (RFC 3173): [Next 1][Flags 1][CPI 2]. Next = IPIP for the same reason as AH; CPI 2 is
+		// DEFLATE, the algorithm essentially every IPComp deployment uses. All three are constant in a
+		// real flow too.
+		h := make([]byte, rawHeaderLen(profile)+len(payload))
+		h[0] = protoIPIP
+		binary.BigEndian.PutUint16(h[2:4], 2)
+		copy(h[4:], payload)
+		return h
+
+	case protoEtherIP:
+		// EtherIP (RFC 3378): a 2-byte header whose top nibble is the version (3) and the rest reserved.
+		// The payload is nominally an Ethernet frame; nothing on the path parses that far.
+		h := make([]byte, rawHeaderLen(profile)+len(payload))
+		h[0] = 0x30
+		copy(h[2:], payload)
+		return h
 	}
 	return payload
+}
+
+// splitmix64 is the standard finalizer, used only to make AH's ICV field unpredictable per packet. It
+// is NOT security-relevant — nothing verifies that field — it just must not be a constant on the wire.
+func splitmix64(x uint64) uint64 {
+	x += 0x9E3779B97F4A7C15
+	x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9
+	x = (x ^ (x >> 27)) * 0x94D049BB133111EB
+	return x ^ (x >> 31)
 }
 
 // rawDecap strips the profile's carrier header, returning the inner sealed frame. A raw ip4 read MAY or
@@ -235,16 +327,16 @@ func rawDecap(profile string, proto int, pkt []byte) ([]byte, bool) {
 	switch framing {
 	case protoBIP, protoIPIP:
 		return pkt, true
-	case protoGRE:
-		return skip(pkt, 4)
-	case protoICMP, protoUDP, protoESP:
-		return skip(pkt, 8) // ICMP echo / UDP / ESP (SPI+seq) all carry an 8-byte header
 	case protoTCP:
+		// The only VARIABLE header: read its own data offset rather than the table, so a peer that
+		// ever adds an option still decodes.
 		if len(pkt) < 20 {
 			return nil, false
 		}
 		off := int(pkt[12]>>4) * 4 // data offset word count -> bytes
 		return skip(pkt, off)
+	case protoGRE, protoICMP, protoUDP, protoESP, protoAH, protoEtherIP, protoIPComp, protoL2TPv3:
+		return skip(pkt, rawHeaderLen(profile))
 	}
 	return nil, false
 }
