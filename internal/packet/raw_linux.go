@@ -39,6 +39,7 @@ type Raw struct {
 	isClient      bool
 	icmpID        uint16 // ICMP echo identifier; PSK-derived and shared by both ends on the icmp profile so replies match requests through a stateful ICMP filter (random elsewhere, ignored on receive)
 	spi           uint32 // per-session ESP Security Parameters Index (esp profile; constant like a real SA)
+	port          uint16 // tcp/udp profiles: the SERVER port stamped on the forged header (0 = the default 443)
 
 	proto int
 	// link is the addressing + admission layer: a directLink for the ordinary raw carrier,
@@ -226,7 +227,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 		if r.proto == protoTCP {
 			dack = r.tcpAck
 		}
-		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, dseq, dack, r.spi)
+		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, r.port, dseq, dack, r.spi)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
 		if out == nil {
 			continue
@@ -279,7 +280,7 @@ func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs, cryptoOn 
 // with everything wired EXCEPT the ipLink (the caller sets it) and FEC. Shared by DialRaw (directLink)
 // and DialSpoof (forgedLink): the datapath is identical, only the addressing layer differs. peerIP may
 // carry a port, which is ignored — raw IP has none of its own.
-func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, rawProto int) (*Raw, error) {
+func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, rawProto, rawPort int) (*Raw, error) {
 	proto, ok := rawEffProto(profile, rawProto)
 	if !ok {
 		return nil, fmt.Errorf("raw: unknown profile %q", profile)
@@ -294,7 +295,7 @@ func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoO
 	}
 	applyConnSockBuf(conn) // this IPConn is the normal raw RX/TX socket
 	r := newRaw(conn, dev, ka, obfs, cryptoOn, psk, cipher, profile, true)
-	r.proto = proto
+	r.proto, r.port = proto, rawPortOr(rawPort)
 	r.peer.Store(&net.IPAddr{IP: ip})
 	if lip := routeLocalIP(ip); lip != nil {
 		r.localIP.Store(&net.IPAddr{IP: lip})
@@ -305,7 +306,7 @@ func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoO
 // listenRawBase binds the server-side raw socket for profile+rawProto, returning a Raw with the
 // receive socket wired EXCEPT the ipLink and FEC (the caller sets them). Shared by ListenRaw and
 // ListenSpoof. listenIP may be empty, "0.0.0.0", a plain IPv4, or an "ip:port" (the port is ignored).
-func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, rawProto int) (*Raw, error) {
+func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, rawProto, rawPort int) (*Raw, error) {
 	proto, ok := rawEffProto(profile, rawProto)
 	if !ok {
 		return nil, fmt.Errorf("raw: unknown profile %q", profile)
@@ -328,14 +329,14 @@ func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs, cry
 		log.Printf("raw: WARNING IP_PKTINFO could not be enabled (%v) — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one", err)
 	}
 	r := newRaw(conn, dev, ka, obfs, cryptoOn, psk, cipher, profile, false)
-	r.proto = proto
+	r.proto, r.port = proto, rawPortOr(rawPort)
 	return r, nil
 }
 
 // DialRaw (client role) opens a raw carrier of the profile's protocol toward peerIP. No IP spoofing —
 // that is the separate "spoof" transport (DialSpoof); a raw carrier always uses an unforged directLink.
-func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
-	r, err := dialRawBase(peerIP, dev, ka, obfs, cryptoOn, psk, cipher, profile, rawProto)
+func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int) (*Raw, error) {
+	r, err := dialRawBase(peerIP, dev, ka, obfs, cryptoOn, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
 	}
@@ -348,8 +349,8 @@ func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bo
 // ListenRaw (server role) binds a raw carrier of the profile's protocol and learns the peer from the
 // first authenticated frame. No IP spoofing — see ListenSpoof; a raw server always uses a directLink,
 // so its IPConn IS the data path in both directions and gets the configured socket buffers.
-func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
-	r, err := listenRawBase(listenIP, dev, ka, obfs, cryptoOn, psk, cipher, profile, rawProto)
+func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int) (*Raw, error) {
+	r, err := listenRawBase(listenIP, dev, ka, obfs, cryptoOn, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
 	}
@@ -452,7 +453,7 @@ func (r *Raw) wire(body []byte, dst net.IP) []byte {
 	} else {
 		seq = r.seq.Add(1)
 	}
-	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, seq, ack, r.spi)
+	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, r.port, seq, ack, r.spi)
 }
 
 // writeOut sends one wrapped packet toward the real peer `to`, delegating the mechanism to the
@@ -638,7 +639,7 @@ const rawSendMark = 0x746e6c01 // "tnl\x01"
 //	udp   BOTH kernels answer an ICMP port-unreachable quoting the packet. Ours are UDP, never ICMP.
 //	tcp   BOTH kernels answer a RST, and since the carrier's flow reverses too it leaves on exactly the
 //	      port pair OUR frames use at this end — so the RST flag is the whole discriminator. Ours are PSH|ACK.
-func rawDropMatches(peer net.IP, profile string, isClient, marked bool) [][]string {
+func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked bool) [][]string {
 	d := peer.String()
 	switch profile {
 	case "icmp":
@@ -654,7 +655,7 @@ func rawDropMatches(peer net.IP, profile string, isClient, marked bool) [][]stri
 	case "tcp":
 		// The peer's frames arrive as rawPorts(!isClient); our kernel resets by swapping them,
 		// which is rawPorts(isClient) — the same pair we send on. Only the flag tells them apart.
-		psp, pdp := rawPorts(!isClient)
+		psp, pdp := rawPorts(!isClient, port)
 		return [][]string{{"-d", d, "-p", "tcp",
 			"--sport", strconv.Itoa(int(pdp)), "--dport", strconv.Itoa(int(psp)),
 			"--tcp-flags", "RST", "RST"}}
@@ -664,9 +665,9 @@ func rawDropMatches(peer net.IP, profile string, isClient, marked bool) [][]stri
 
 // addRawDrop installs rawDropMatches for peer, best-effort, and returns a func that removes
 // exactly the rules that went in (nil if none did).
-func addRawDrop(peer net.IP, profile string, isClient, marked bool) func() {
+func addRawDrop(peer net.IP, profile string, port uint16, isClient, marked bool) func() {
 	var added [][]string
-	for _, m := range rawDropMatches(peer, profile, isClient, marked) {
+	for _, m := range rawDropMatches(peer, profile, port, isClient, marked) {
 		args := append([]string{"-A", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
 		if out, err := exec.Command("iptables", args...).CombinedOutput(); err != nil {
 			log.Printf("raw: anti-leak rule not installed (the peer's kernel may answer our carrier packets): %v: %s", err, strings.TrimSpace(string(out)))
@@ -717,7 +718,7 @@ func (r *Raw) wireAntiLeak() {
 		}
 	}
 	r.leak.init(r.closeCh, func(peer net.IP) func() {
-		return addRawDrop(peer, r.profile, r.isClient, marked)
+		return addRawDrop(peer, r.profile, r.port, r.isClient, marked)
 	})
 	if p := r.peer.Load(); p != nil { // client: the peer is known at dial, so scope it now
 		r.leak.scope(p.IP)

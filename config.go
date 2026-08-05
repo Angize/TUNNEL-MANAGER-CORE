@@ -69,6 +69,13 @@ type Config struct {
 	// ignores. Ignored for the other profiles, whose number is tied to their forged header. Range 1..255.
 	RawProto int `json:"raw_proto"`
 
+	// RawPort overrides the SERVER port the "udp" and "tcp" profiles stamp on their forged L4 header
+	// (0/unset keeps 443). No socket ever binds it — raw carriers open a socket on a PROTOCOL NUMBER, not
+	// a port — so this only changes what a middlebox reads. It exists because the default makes the udp
+	// profile look like QUIC, and a path that drops UDP/443 wholesale therefore drops the whole carrier.
+	// Both ends must be given the same number. Ignored by every profile that forges no ports.
+	RawPort int `json:"raw_port"`
+
 	// SpoofSrc (client) forges the outer IPv4 source address of "spoof"-transport packets so a
 	// per-source egress filter cannot pin the real IP. RealPeer (server) is the client's REAL IP: with a
 	// forged source the server cannot learn where to reply, so it is told here — the AEAD still
@@ -494,6 +501,18 @@ func (c *Config) validate() error {
 			}
 			if err := rawProtoBorrowed(c.RawProto); err != nil {
 				return err
+			}
+		}
+		// raw_port is the mirror rule: only the profiles that FORGE ports have one to override. Left
+		// unchecked it would validate, persist and read as set while the wire keeps 443 — the same silent
+		// no-op raw_proto used to be on the wrong profile.
+		if c.RawPort != 0 {
+			if !packet.RawProfileHasPorts(c.RawProfile) {
+				return errors.New("raw_port sets the forged server port of the \"udp\" and \"tcp\" profiles only" +
+					" (raw_profile \"" + c.RawProfile + "\" forges no ports)")
+			}
+			if c.RawPort < 1 || c.RawPort > 65535 {
+				return errors.New("raw_port must be in 1..65535 (0 = the profile default 443)")
 			}
 		}
 		if !c.Crypto.Enabled {

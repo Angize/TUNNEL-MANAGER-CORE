@@ -28,7 +28,7 @@ import (
 // just raw bip — config validation enforces this, and so does the guard below). rawProto (1..255,
 // 0 = bip's native 253) overrides the outer IP protocol number to slip past a protocol whitelist.
 func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, spoofSrc, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
-	r, err := dialRawBase(peerIP, dev, ka, obfs, cryptoOn, psk, cipher, "bip", rawProto)
+	r, err := dialRawBase(peerIP, dev, ka, obfs, cryptoOn, psk, cipher, "bip", rawProto, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn 
 // clients aim at that decoy: the server receives those frames via AF_PACKET (the decoy is not a local
 // address) and answers AS the decoy. realPeer is required in both cases (config validation enforces it).
 func ListenSpoof(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, realPeer, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
-	r, err := listenRawBase(listenIP, dev, ka, obfs, cryptoOn, psk, cipher, "bip", rawProto)
+	r, err := listenRawBase(listenIP, dev, ka, obfs, cryptoOn, psk, cipher, "bip", rawProto, 0)
 	if err != nil {
 		return nil, err
 	}

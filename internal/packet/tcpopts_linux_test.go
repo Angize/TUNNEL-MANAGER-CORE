@@ -208,7 +208,7 @@ func TestTCPDecoyShapeIsPerConnection(t *testing.T) {
 // TCP flow — they ARE the flow — so options there would change the wire for every raw/tcp tunnel.
 func TestRawTCPProfileKeepsItsWireFormat(t *testing.T) {
 	src, dst := net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 1, 2)
-	seg := rawEncap("tcp", []byte("payload-bytes"), src, dst, true, 0x1111, 7, 9, 0x2222)
+	seg := rawEncap("tcp", []byte("payload-bytes"), src, dst, true, 0x1111, 0, 7, 9, 0x2222)
 	if off := int(seg[12]>>4) * 4; off != 20 {
 		t.Fatalf("raw tcp profile header is %d bytes, want 20 — this is a WIRE CHANGE", off)
 	}
