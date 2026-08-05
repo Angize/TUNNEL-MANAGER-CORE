@@ -680,7 +680,7 @@ func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked 
 	if len(added) == 0 {
 		return nil
 	}
-	log.Printf("raw: anti-leak scoped to %s (%d OUTPUT rule(s), profile %s, owner %s%s)", peer, len(added), profile, ruleOwnerPrefix, tun)
+	log.Printf("raw: anti-leak scoped to %s (%d OUTPUT rule(s), profile %s, owner %s)", peer, len(added), profile, ownerLabel(added[0].owner, tun))
 	return func() {
 		for _, in := range added {
 			del := append([]string{"-D", "OUTPUT"}, append(append([]string{}, in.match...), "-j", "DROP")...)

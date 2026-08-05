@@ -37,6 +37,16 @@ var iptablesRun = func(args []string) ([]byte, error) {
 	return exec.Command("iptables", args...).CombinedOutput()
 }
 
+// ownerLabel is what a log line may claim about a rule that is already installed: the owner it really
+// carries, or "none" when runRule had to drop the comment. Naming an owner the rule does not have sends
+// the operator sweeping for a tag that is not there.
+func ownerLabel(used []string, tun string) string {
+	if len(used) == 0 {
+		return "none"
+	}
+	return ruleOwnerPrefix + tun
+}
+
 // runRule executes one iptables rule, retrying WITHOUT the owner comment if the comment match itself is
 // what failed. A host with no xt_comment module must still get its anti-leak rule: an untagged rule is
 // a cleanup problem, a missing one is a leak.
