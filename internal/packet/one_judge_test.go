@@ -138,6 +138,52 @@ func TestProbeNowMakesEveryBurnSelectableAtOnce(t *testing.T) {
 	}
 }
 
+// TestOneDestinationStillTakesTheVerdict covers the pool shape a client gets when the far node is down
+// to a single IP: one destination, several sources. The single destination can never be burned or moved
+// (failWith returns early below two entries) — but it is the tunnel's verdict MAILBOX, and without it
+// pollPins never reads the file at all, so the node's asks are dropped and the source rotation walks
+// blind. Here the fail must land on the SOURCE and the ok must clear it.
+func TestOneDestinationStillTakesTheVerdict(t *testing.T) {
+	dir := t.TempDir()
+	clk := int64(1000)
+	dst := NewPeerPool([]string{"d1"}, true, 0, filepath.Join(dir, "peerpool"))
+	src := NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(dir, "srcpool"))
+	dst.now = func() int64 { return clk }
+	src.now = func() int64 { return clk }
+	rc := newRotationController(dst, src)
+	noop := func() {}
+	rotDst := func(bool) { dst.fail() }
+	rotSrc := func(bool) { src.fail() }
+
+	writeFileAtomic(dst.cmdPath(), []byte(`{"cmd":"fail","key":"d1"}`), 0o644)
+	rc.pollPins(noop, noop, rotDst, rotSrc, nil)
+
+	dst.mu.Lock()
+	dstBurned := dst.health["d1"] != nil
+	dst.mu.Unlock()
+	if dstBurned {
+		t.Error("the only destination must never be condemned — there is nothing to move to")
+	}
+	src.mu.Lock()
+	burned, cur := src.health["s1"] != nil, src.addrs[src.cur]
+	src.mu.Unlock()
+	if !burned {
+		t.Fatal("the ask must reach the SOURCE: with one destination the source is the only axis left")
+	}
+	if cur != "s2" {
+		t.Errorf("and it must move off the source it burned, got %q", cur)
+	}
+
+	writeFileAtomic(dst.cmdPath(), []byte(`{"cmd":"ok","key":"d1","src":"s1"}`), 0o644)
+	rc.pollPins(noop, noop, rotDst, rotSrc, nil)
+	src.mu.Lock()
+	stillBurned := src.health["s1"] != nil
+	src.mu.Unlock()
+	if stillBurned {
+		t.Error("an ok naming the source must clear it, even though the destination pool holds one entry")
+	}
+}
+
 // TestNodeVerdictsDriveTheLiveDirectPool runs both verdicts through the file a real carrier polls, so
 // the parse, the dispatch, the burn, the clear and the event are all the production path.
 func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {

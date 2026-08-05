@@ -349,9 +349,8 @@ func main() {
 	}
 	// Destination rotation pool (client, direct transports udp/tcp/raw/flux): cycle the peer IPs and burn
 	// a blocked one, so a single filtered server IP does not kill the tunnel. Only the direct carriers
-	// implement SetPeerPool; ws has its own edge pool and the server ignores it. Needs >=2 endpoints to
-	// actually rotate.
-	if cfg.Role == "client" && len(cfg.PeerIPs) >= 2 {
+	// implement SetPeerPool; ws has its own edge pool and the server ignores it.
+	if wantsDestPool(cfg) {
 		if s, ok := b.(interface{ SetPeerPool(*packet.PeerPool) }); ok {
 			pp := packet.NewPeerPool(cfg.PeerIPs, cfg.PeerAutoBurn, time.Duration(cfg.PeerRotateSecs)*time.Second, cfg.PeerStatusPath)
 			s.SetPeerPool(pp)
@@ -362,7 +361,7 @@ func main() {
 	// destination pool. raw/flux swap the crafted-header source, udp rebinds its socket, tcp re-dials with
 	// a new LocalAddr. The gate is >=1, not >=2: a LONE src_ip is a fixed source that supersedes bind_ip,
 	// wired as a one-entry pool that seeds the source and never rotates.
-	if cfg.Role == "client" && len(cfg.SrcIPs) >= 1 {
+	if wantsSourcePool(cfg) {
 		if s, ok := b.(interface{ SetSourcePool(*packet.PeerPool) }); ok {
 			sp := packet.NewPeerPool(cfg.SrcIPs, cfg.PeerAutoBurn, time.Duration(cfg.PeerRotateSecs)*time.Second, cfg.SrcStatusPath)
 			s.SetSourcePool(sp)
@@ -398,6 +397,22 @@ func main() {
 	if err := b.Run(); err != nil {
 		log.Printf("tnl-core: stopped: %v", err)
 	}
+}
+
+// wantsDestPool / wantsSourcePool decide which rotation pools a client gets. ONE destination is enough
+// to build the pool, even though a single endpoint can never rotate or be burned (failWith returns early
+// below two entries): the destination pool is also the tunnel's VERDICT MAILBOX. The node writes both
+// `ok` and `fail` to the destination pool's command file and pollPins reads it only when that pool
+// exists, so a client with one destination and a source pool used to have every verdict it sent thrown
+// away in silence — no burn, no heal, and a source rotation walking blind.
+//
+// Which is why they are a pair: never build a source pool without a destination pool to receive for it.
+func wantsDestPool(cfg *Config) bool {
+	return cfg.Role == "client" && len(cfg.PeerIPs) >= 1
+}
+
+func wantsSourcePool(cfg *Config) bool {
+	return cfg.Role == "client" && len(cfg.SrcIPs) >= 1
 }
 
 func coverTag(cover bool) string {
