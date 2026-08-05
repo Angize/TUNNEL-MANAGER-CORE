@@ -43,8 +43,10 @@ var rawProfiles = map[string]int{
 	"esp":  protoESP,
 }
 
-// Fixed, plausible ports for the tcp/udp profiles: the client's 51820 (inside Linux's
-// 32768-60999 ephemeral range, so an ordinary source port) talking to the server's :443.
+// Default ports for the tcp/udp profiles: the client's 51820 (inside Linux's 32768-60999 ephemeral
+// range, so an ordinary source port) talking to the server's :443. The SERVER port is what a filter
+// keys on, so raw_port overrides it — the udp profile's 443 is QUIC's port, which some paths drop
+// wholesale, and a carrier is not worth much when its one plausible shape is the filtered one.
 const (
 	rawClientPort = 51820
 	rawServerPort = 443
@@ -56,14 +58,31 @@ const (
 )
 
 // rawPorts returns the (source, destination) port pair THIS end stamps on a tcp/udp carrier packet. A
-// conversation reverses — client ephemeral->443, server 443->ephemeral — and two ends both sending
+// conversation reverses — client ephemeral->server, server->ephemeral — and two ends both sending
 // 51820->443 is not one: no middlebox pairs the halves up, so the downstream arrives as an unsolicited
 // NEW inbound flow a NAT drops, and two half-flows aimed at each other are a signature in themselves.
-func rawPorts(isClient bool) (sport, dport uint16) {
-	if isClient {
-		return rawClientPort, rawServerPort
+//
+// srv is the configured server port; 0 keeps rawServerPort. Both ends must be told the same number, or
+// each stamps a pair the other's anti-leak rule does not match.
+func rawPorts(isClient bool, srv uint16) (sport, dport uint16) {
+	if srv == 0 {
+		srv = rawServerPort
 	}
-	return rawServerPort, rawClientPort
+	if isClient {
+		return rawClientPort, srv
+	}
+	return srv, rawClientPort
+}
+
+// RawProfileHasPorts reports whether a profile forges an L4 header with PORTS in it, and so has a
+// server port raw_port can override. Exported for config validation: a raw_port on any other profile
+// would validate, persist and read as set while the wire ignored it. "" is bip, which forges nothing.
+func RawProfileHasPorts(profile string) bool {
+	switch rawProfiles[profile] {
+	case protoUDP, protoTCP:
+		return true
+	}
+	return false
 }
 
 // rawChecksumBindsSource reports whether this profile's carrier header carries a checksum computed over
@@ -101,8 +120,9 @@ func rawEffProto(profile string, rawProto int) (int, bool) {
 // rawEncap prepends profile's carrier header to a sealed frame and returns the bytes to hand the raw
 // socket (the kernel prepends the outer IPv4 header, so it is not included here). src/dst are the tunnel
 // endpoint IPs, needed for the TCP checksum; isClient selects the direction-dependent fields; id/seq make
-// the ICMP/TCP headers look like a live flow; spi is the per-session ESP SPI.
-func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id uint16, seq, ack, spi uint32) []byte {
+// the ICMP/TCP headers look like a live flow; spi is the per-session ESP SPI; port is the configured
+// tcp/udp server port (0 = the default 443).
+func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port uint16, seq, ack, spi uint32) []byte {
 	switch rawProfiles[profile] {
 	case protoBIP, protoIPIP:
 		return payload // native / IP-in-IP: the sealed frame is the whole payload
@@ -128,7 +148,7 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoUDP:
-		sp, dp := rawPorts(isClient)
+		sp, dp := rawPorts(isClient, port)
 		h := make([]byte, 8+len(payload))
 		binary.BigEndian.PutUint16(h[0:2], sp)
 		binary.BigEndian.PutUint16(h[2:4], dp)
@@ -148,7 +168,7 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		// (tcpseg.go).
 		// No options: these are the carrier's OWN frames, with no kernel TCP beside them to be
 		// told apart from, and adding any would change the wire format.
-		sp, dp := rawPorts(isClient)
+		sp, dp := rawPorts(isClient, port)
 		return buildTCPSeg(src, dst, sp, dp, seq, ack, tcpPshAck, rawTCPWindow, nil, payload)
 
 	case protoESP:
@@ -249,4 +269,13 @@ func l4Checksum(src, dst net.IP, proto int, l4 []byte) uint16 {
 	ph[9] = byte(proto)
 	binary.BigEndian.PutUint16(ph[10:12], uint16(len(l4)))
 	return foldComplement(sumBytes(ph[:]) + sumBytes(l4))
+}
+
+// rawPortOr narrows a configured tcp/udp server port to the uint16 the header needs. Out of range
+// (including 0, "not set") means the profile default, which rawPorts then supplies.
+func rawPortOr(port int) uint16 {
+	if port < 1 || port > 65535 {
+		return 0
+	}
+	return uint16(port)
 }
