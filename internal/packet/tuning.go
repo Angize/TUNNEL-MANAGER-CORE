@@ -10,9 +10,9 @@ var (
 	// suspectBackoff is the retest schedule (seconds) for a SUSPECT pool entry: it enters suspect
 	// scheduled +[0] out, and each FAILED retest walks one step further down the list. Running off
 	// the end (the last failed retest) drops the entry to DEAD.
-	suspectBackoff = []int64{30, 60, 120, 300, 600}
+	suspectBackoff = []int64{600, 1800, 3600}
 	// deadRetest is the slow interval (seconds) a DEAD entry is retested on.
-	deadRetest int64 = 1800
+	deadRetest int64 = 21600
 	// pinTTL bounds how long a manual pin keeps FORCING a not-yet-connected edge; it only matters for
 	// a DEAD pinned edge (a healthy pin lands within one handshake and clears itself). Kept short so a
 	// bad manual pick self-releases fast, while still outlasting a real handshake.

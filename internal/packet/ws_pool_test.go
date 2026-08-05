@@ -242,15 +242,16 @@ func TestMarkSuspectPullsFromRotation(t *testing.T) {
 	}
 }
 
-// The suspect backoff walks 30,60,120,300,600 (as nextRetest deltas) over five failed retests,
-// then the entry drops to dead on the sixth failure (the initial markSuspect is failure #1).
+// The suspect backoff walks the whole configured schedule (as nextRetest deltas), one step per failed
+// retest, then drops to dead when it runs off the end (the initial markSuspect is failure #1). Read off
+// suspectBackoff rather than its literals, so retuning the schedule cannot look like a regression here.
 func TestSuspectBackoffThenDead(t *testing.T) {
 	p, now := clockPool([]string{"a", "b"}, snis("x"), true, "")
 	p.markSuspect("ip", "a", "test")
-	if got := p.ipHealth["a"].nextRetest; got != *now+30 {
-		t.Fatalf("entry retest should be now+30, got %d (now=%d)", got, *now)
+	if got := p.ipHealth["a"].nextRetest; got != *now+suspectBackoff[0] {
+		t.Fatalf("entry retest should be now+%d, got %d (now=%d)", suspectBackoff[0], got, *now)
 	}
-	wantNext := []int64{60, 120, 300, 600} // deltas after failed retests 1..4
+	wantNext := suspectBackoff[1:] // deltas after each failed retest, up to the last step
 	for i, w := range wantNext {
 		p.retestResult("ip", "a", false)
 		r := p.ipHealth["a"]
@@ -264,7 +265,7 @@ func TestSuspectBackoffThenDead(t *testing.T) {
 			t.Fatalf("retest %d: nextRetest=%d, want %d", i+1, r.nextRetest, *now+w)
 		}
 	}
-	// Fifth failed retest (sixth failure overall) -> dead on the slow interval.
+	// One more failed retest runs off the end of the schedule -> dead on the slow interval.
 	p.retestResult("ip", "a", false)
 	r := p.ipHealth["a"]
 	if r.state != stateDead || r.nextRetest != *now+deadRetest {
@@ -387,8 +388,8 @@ func TestStatusSnapshotStates(t *testing.T) {
 	if got["ip:a"] != stateSuspect || got["ip:b"] != "healthy" || got["sni:x"] != "healthy" {
 		t.Fatalf("health states wrong: %v", got)
 	}
-	if aNext != *now+30 {
-		t.Fatalf("suspect a next_retest_unix=%d, want %d", aNext, *now+30)
+	if aNext != *now+suspectBackoff[0] {
+		t.Fatalf("suspect a next_retest_unix=%d, want %d", aNext, *now+suspectBackoff[0])
 	}
 	if len(st.Health) != 3 {
 		t.Fatalf("health should list every pool entry (2 ips + 1 sni), got %d", len(st.Health))
@@ -418,7 +419,7 @@ func TestDueRetestsAndProbeAllNow(t *testing.T) {
 	// After the backoff elapses on the clock, it is due with no operator action at all.
 	p2, now2 := clockPool([]string{"a"}, snis("x"), true, "")
 	p2.markSuspect("ip", "a", "test")
-	*now2 = *now + 31
+	*now2 = *now + suspectBackoff[0] + 1
 	if due := p2.dueRetests(); len(due) != 1 {
 		t.Fatalf("entry should be due once its backoff elapses, got %v", due)
 	}
@@ -665,9 +666,9 @@ func TestDataPlaneFaultBurn(t *testing.T) {
 }
 
 // TestDataPlaneSuspectBackoffMonotonic closes the class behind the backwards-backoff bug: a data-plane
-// suspect enters at step 2, so the NEXT failed retest must schedule step 3 — a LONGER wait — not step 1.
-// retestBackoff does fails++ and then reads suspectBackoff[fails], so a record created with fails=0 while
-// its nextRetest came from step 2 walks the schedule from the wrong place. fails must match the step.
+// suspect enters at a fixed step of the schedule, so the NEXT failed retest must schedule a LONGER wait,
+// never step 1 again. retestBackoff does fails++ and then reads suspectBackoff[fails], so a record created
+// with fails=0 while its nextRetest came from a later step walks the schedule from the wrong place.
 func TestDataPlaneSuspectBackoffMonotonic(t *testing.T) {
 	p, now := clockPool([]string{"a", "b"}, snis("x"), true, "")
 	p.dataSuccess("b") // arm the recent-good outage guard
@@ -678,17 +679,26 @@ func TestDataPlaneSuspectBackoffMonotonic(t *testing.T) {
 	if r == nil || r.state != stateSuspect {
 		t.Fatalf("'a' should be a data-plane suspect after %d short deaths", dataFailThreshold)
 	}
-	first := r.nextRetest - *now // the initial wait (step 2 = 120s)
-	if first != suspectBackoff[2] {
-		t.Fatalf("initial data-suspect wait = %d, want suspectBackoff[2]=%d", first, suspectBackoff[2])
+	step, want := suspectStepAt(2) // the entry step, clamped to the last one on a short schedule
+	first := r.nextRetest - *now
+	if first != want {
+		t.Fatalf("initial data-suspect wait = %d, want suspectStepAt(2)=%d", first, want)
+	}
+	if r.fails != step {
+		t.Fatalf("fails=%d must be the step the initial wait came from (%d), or the FSM walks from the wrong place", r.fails, step)
 	}
 
-	// A failed background retest walks the FSM one step. It must grow the wait, not shrink it.
+	// A failed background retest walks the FSM one step. It must grow the wait, not shrink it. Running off
+	// the end of the schedule is a legal forward step too: the entry drops to the slow dead interval.
 	*now += first // arrive at the retest instant
 	p.retestResult("ip", "a", false)
 	second := p.ipHealth["a"].nextRetest - *now
-	if second != suspectBackoff[3] {
-		t.Fatalf("after a failed retest the wait = %d, want suspectBackoff[3]=%d (forward step)", second, suspectBackoff[3])
+	wantSecond := deadRetest
+	if step+1 < len(suspectBackoff) {
+		wantSecond = suspectBackoff[step+1]
+	}
+	if second != wantSecond {
+		t.Fatalf("after a failed retest the wait = %d, want %d (forward step)", second, wantSecond)
 	}
 	if second <= first {
 		t.Fatalf("data-plane retest backoff ran BACKWARDS: %d -> %d (must be monotonic increasing)", first, second)
