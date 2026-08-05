@@ -95,6 +95,7 @@ type Flux struct {
 	dsSend    desyncSend   // outcome of the decoy TRANSMITS — opening inj/sendFd says nothing about them
 	closeCh   chan struct{}
 	closeOnce sync.Once
+	wake      chan struct{} // client-only: cuts clientLoop's sleep short once the session is cleared elsewhere (wakeLoop)
 
 	st      *coreStatus         // client-only: precise self-heal event ring written to the status file (nil = off)
 	pp      *PeerPool           // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
@@ -205,7 +206,7 @@ func newFlux(dev *tun.Device, ka, rotate time.Duration, obfs, cryptoOn bool, psk
 	f := &Flux{
 		dev: dev, keepalive: ka, rotate: rotate, obfs: obfs, cryptoOn: cryptoOn,
 		psk: psk, cipher: cipher, carrier: carrier, shapeProf: shape, epochOffset: epochOffset,
-		isClient: isClient, sendFd: -1, pktFd: -1, closeCh: make(chan struct{}),
+		isClient: isClient, sendFd: -1, pktFd: -1, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 	}
 	f.leak.init(f.closeCh, func(peer net.IP) func() { return addFluxDrop(peer, carrier) })
 	sh := deriveFluxShape(psk, f.epochNow(), shape)
@@ -965,6 +966,9 @@ func (f *Flux) rotatePeerFlux(proactive bool) {
 		return
 	}
 	f.st.down("peer-rotate", "ip:"+addr) // clears the session -> re-handshake -> reconnect pairs the down
+	// Last, so every field the loop reads is settled before it can look. This runs on the pin poller
+	// (only a failover reaches it); the timed rotation above keeps its session and returns first.
+	wakeLoop(f.wake)
 }
 
 // adoptPeerFlux re-points the client at the pool's CURRENT destination — used when an operator pin has
@@ -997,6 +1001,7 @@ func (f *Flux) adoptPeerFlux() {
 	// the active endpoint changes, no down/up in the event ring. The session clear above still forces the
 	// re-handshake onto the pinned peer and setActive (above) keeps "active" tracking it. Emitting
 	// down("peer-pin") here armed a paired reconnect and surfaced a manual jump as a rotation event.
+	wakeLoop(f.wake) // the session is gone; do not make the operator's jump wait out a keepalive
 }
 
 // adoptSourceFlux swaps the crafted-header source to the pool's CURRENT source (an operator source pin).
@@ -1110,6 +1115,7 @@ func (f *Flux) clientLoop() {
 		select {
 		case <-f.closeCh:
 			return
+		case <-f.wake: // the session was cleared under us: re-decide the interval instead of sleeping it out
 		case <-time.After(wait):
 		}
 	}

@@ -120,6 +120,7 @@ type UDP struct {
 
 	closeCh   chan struct{}
 	closeOnce sync.Once
+	wake      chan struct{} // client-only: cuts clientLoop's sleep short once the session is cleared elsewhere (wakeLoop)
 
 	st      *coreStatus         // client-only: precise self-heal event ring written to the status file (nil = off)
 	pp      *PeerPool           // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
@@ -155,6 +156,18 @@ const handshakeRetransmit = time.Second
 // payload analysis at all — and it runs for exactly as long as the tunnel cannot come up, which is
 // when a filtered path is most worth fingerprinting.
 func handshakeRetransmitWait() time.Duration { return jitterFrac(handshakeRetransmit) }
+
+// wakeLoop nudges a datagram client loop out of the sleep it is in. The loop already picks the short
+// handshakeRetransmitWait when there is no session — but it picks BEFORE it sleeps, so a session another
+// goroutine clears mid-sleep goes unnoticed until the sleep ends, putting a whole keepalive between a
+// failover (or an operator's jump) and its re-handshake. Buffered to one and non-blocking: the loop
+// needs to know THAT something changed, never how often. Nil-safe.
+func wakeLoop(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
 
 // pinFailRelease is how many proven-dead rounds a manual pin absorbs before it auto-releases, so the
 // tunnel recovers instead of freezing on a blocked endpoint for the rest of pinTTL. A round is now one
@@ -201,6 +214,9 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 		return
 	}
 	b.st.down("peer-rotate", "ip:"+addr) // clears the session -> re-handshake -> reconnect pairs the down
+	// Last, so every field the loop reads is settled before it can look. This runs on the pin poller
+	// (only a failover reaches it); the timed rotation above keeps its session and returns first.
+	wakeLoop(b.wake)
 }
 
 // SetSourcePool (client) wires a source-IP rotation pool: the client cycles the local IP it sends FROM.
@@ -331,6 +347,7 @@ func (b *UDP) adoptPeerUDP() {
 	// re-handshake onto the pinned peer; setActive keeps "active" tracking it (see rotatePeerUDP). We do NOT
 	// emit down("peer-pin") — that armed a paired reconnect and surfaced a manual jump as a rotation event.
 	b.st.setActive("udp · " + ua.String())
+	wakeLoop(b.wake) // the session is gone; do not make the operator's jump wait out a keepalive
 }
 
 // adoptSourceUDP rebinds the socket onto the pool's CURRENT source (an operator source pin). Safe from
@@ -475,7 +492,8 @@ func Dial(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, crypt
 		return nil, err
 	}
 	applyConnSockBuf(conn)
-	b := &UDP{dev: dev, keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, isClient: true, closeCh: make(chan struct{})}
+	b := &UDP{dev: dev, keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, isClient: true,
+		closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
 	b.conn.Store(conn)
 	b.peer.Store(ra)
 	b.initFec(fec, fecData, fecParity)
@@ -1076,6 +1094,7 @@ func (b *UDP) clientLoop() {
 		select {
 		case <-b.closeCh:
 			return
+		case <-b.wake: // the session was cleared under us: re-decide the interval instead of sleeping it out
 		case <-time.After(wait):
 		}
 	}
