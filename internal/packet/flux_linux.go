@@ -21,9 +21,7 @@ import (
 	"encoding/binary"
 	"log"
 	"net"
-	"os/exec"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -208,7 +206,7 @@ func newFlux(dev *tun.Device, ka, rotate time.Duration, obfs, cryptoOn bool, psk
 		psk: psk, cipher: cipher, carrier: carrier, shapeProf: shape, epochOffset: epochOffset,
 		isClient: isClient, sendFd: -1, pktFd: -1, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 	}
-	f.leak.init(f.closeCh, func(peer net.IP) func() { return addFluxDrop(peer, carrier) })
+	f.leak.init(f.closeCh, func(peer net.IP) func() { return addFluxDrop(peer, carrier, f.tunName()) })
 	sh := deriveFluxShape(psk, f.epochNow(), shape)
 	f.curShape.Store(&sh)
 	// Seed logEp to the startup epoch so rotateWatcher logs the FIRST genuine rotation — even one that
@@ -514,23 +512,34 @@ func fluxDropMatches(peer net.IP, carrier string) [][]string {
 // co-located tunnel (e.g. raw/bare on proto 253) to the same peer keeps working.
 // AF_PACKET taps before this chain, so flux's receive is unaffected. Returns a
 // cleanup func that removes every rule it managed to install (nil if none).
-func addFluxDrop(peer net.IP, carrier string) func() {
-	var added [][]string
+// tunName is the tunnel this carrier belongs to, and so the owner stamped on its firewall rules.
+func (f *Flux) tunName() string {
+	if f.dev == nil {
+		return ""
+	}
+	return f.dev.Name
+}
+
+func addFluxDrop(peer net.IP, carrier, tun string) func() {
+	type installed struct {
+		match, owner []string
+	}
+	var added []installed
 	for _, m := range fluxDropMatches(peer, carrier) {
 		args := append([]string{"-t", "raw", "-A", "PREROUTING"}, append(append([]string{}, m...), "-j", "DROP")...)
-		if out, err := exec.Command("iptables", args...).CombinedOutput(); err != nil {
-			log.Printf("flux: anti-leak rule not installed (kernel may ICMP-reject our carrier): %v: %s", err, strings.TrimSpace(string(out)))
+		own, ok := runRule(args, ownerMatch(tun), "flux: anti-leak")
+		if !ok {
 			continue
 		}
-		added = append(added, m)
+		added = append(added, installed{m, own})
 	}
 	if len(added) == 0 {
 		return nil
 	}
 	return func() {
-		for _, m := range added {
-			del := append([]string{"-t", "raw", "-D", "PREROUTING"}, append(append([]string{}, m...), "-j", "DROP")...)
-			_ = exec.Command("iptables", del...).Run()
+		for _, in := range added {
+			del := append([]string{"-t", "raw", "-D", "PREROUTING"}, append(append([]string{}, in.match...), "-j", "DROP")...)
+			_, _ = iptablesRun(append(del, in.owner...))
 		}
 	}
 }

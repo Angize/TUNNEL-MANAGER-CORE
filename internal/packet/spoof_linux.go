@@ -98,7 +98,7 @@ func ListenSpoof(listenIP string, dev *tun.Device, ka time.Duration, obfs, crypt
 		}
 		// decoy = the AF_PACKET receive filter; spoofSrc = dip so replies leave AS the decoy.
 		r.link = &forgedLink{r: r, spoofFd: fd, pktFd: pfd, spoofSrc: dip, decoy: dip,
-			fixedPeer: fixedPeer, antiLeak: addAntiLeak(r.proto, dip)} // anti-leak best-effort; stops the kernel forwarding the decoy dst
+			fixedPeer: fixedPeer, antiLeak: addAntiLeak(r.proto, dip, r.tunName())} // anti-leak best-effort; stops the kernel forwarding the decoy dst
 		// NO applyConnSockBuf here on purpose: this link receives via pktFd and sends via spoofFd, so
 		// r.conn is never read and never written. Sizing it pinned the whole sock_buf (4 MiB by default)
 		// on a socket nothing drains — and the kernel would keep queuing matching frames into it forever.
