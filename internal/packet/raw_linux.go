@@ -104,6 +104,7 @@ type Raw struct {
 
 	closeCh   chan struct{}
 	closeOnce sync.Once
+	wake      chan struct{} // client-only: cuts clientLoop's sleep short once the session is cleared elsewhere (wakeLoop)
 
 	st      *coreStatus         // client-only: precise self-heal event ring written to the status file (nil = off)
 	pp      *PeerPool           // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
@@ -269,7 +270,7 @@ func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs, cryptoOn 
 	return &Raw{
 		conn: conn, dev: dev, keepalive: ka, obfs: obfs, cryptoOn: cryptoOn,
 		psk: psk, cipher: cipher, profile: profile, isClient: isClient, fakeFd: -1,
-		icmpID: icmpID, closeCh: make(chan struct{}),
+		icmpID: icmpID, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 		tcpISN: binary.BigEndian.Uint32(idb[2:6]), tcpAck: binary.BigEndian.Uint32(idb[6:10]), spi: spi,
 	}
 }
@@ -1220,6 +1221,9 @@ func (r *Raw) rotatePeerRaw(proactive bool) {
 		return
 	}
 	r.st.down("peer-rotate", "ip:"+addr) // clears the session -> re-handshake -> reconnect pairs the down
+	// Last, so every field the loop reads is settled before it can look. This runs on the pin poller
+	// (only a failover reaches it); the timed rotation above keeps its session and returns first.
+	wakeLoop(r.wake)
 }
 
 // adoptPeerRaw re-points the client at the pool's CURRENT destination — used when an operator pin has
@@ -1247,6 +1251,7 @@ func (r *Raw) adoptPeerRaw() {
 	// "Make this active" is a deliberate operator jump — SILENT, like udp/tcp and the ws edge pool: only
 	// the active endpoint changes, no down/up in the event ring. The session clear above still forces the
 	// re-handshake onto the pinned peer, and setActive keeps "active" tracking it.
+	wakeLoop(r.wake) // the session is gone; do not make the operator's jump wait out a keepalive
 }
 
 // adoptSourceRaw swaps the crafted-header source to the pool's CURRENT source (an operator source pin).
@@ -1359,6 +1364,7 @@ func (r *Raw) clientLoop() {
 		select {
 		case <-r.closeCh:
 			return
+		case <-r.wake: // the session was cleared under us: re-decide the interval instead of sleeping it out
 		case <-time.After(wait):
 		}
 	}
