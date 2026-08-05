@@ -18,6 +18,7 @@ package packet
 import (
 	"encoding/binary"
 	"net"
+	"sort"
 )
 
 // IP protocol numbers, one per profile.
@@ -64,6 +65,36 @@ func rawPorts(isClient bool) (sport, dport uint16) {
 		return rawClientPort, rawServerPort
 	}
 	return rawServerPort, rawClientPort
+}
+
+// RawProfileNames lists the valid profile names, sorted, for config validation and its error messages.
+// Exported so config.go reads the same map the wire does instead of keeping a second copy of it.
+func RawProfileNames() []string {
+	out := make([]string, 0, len(rawProfiles))
+	for name := range rawProfiles {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// RawProfileValid reports whether name is a registered profile.
+func RawProfileValid(name string) bool {
+	_, ok := rawProfiles[name]
+	return ok
+}
+
+// RawProfileOwning returns the profile that owns an IP protocol number, if any. It is what stops bip's
+// raw_proto from borrowing a number whose header a middlebox will try to parse: bip sends no L4 header,
+// so an outer "protocol 6" with ciphertext where the TCP header belongs reads as a malformed segment on
+// every stateful box in the path — random ports, no SYN it ever saw, a checksum that cannot verify.
+func RawProfileOwning(proto int) (string, bool) {
+	for _, name := range RawProfileNames() { // sorted: one number, one owner, deterministically
+		if rawProfiles[name] == proto {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // rawChecksumBindsSource reports whether this profile's carrier header carries a checksum computed over
