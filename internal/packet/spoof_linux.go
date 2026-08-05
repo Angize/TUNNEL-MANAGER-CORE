@@ -1,6 +1,6 @@
 //go:build linux
 
-// The "spoof" transport is a standalone IP-spoofing carrier. It rides the same bip-like raw-IP datapath
+// The "spoof" transport is a standalone IP-spoofing carrier. It rides the same bare-like raw-IP datapath
 // as the raw carrier — identical framing, AEAD, replay guard, handshake, keepalive, FEC and TUN plumbing,
 // all shared Raw code — but forges an outer IPv4 field:
 //
@@ -25,10 +25,10 @@ import (
 
 // DialSpoof (client role) opens a spoof carrier toward peerIP, forging the outer source and/or
 // destination. At least one of spoofSrc / spoofDst must be set (a carrier that forges nothing is
-// just raw bip — config validation enforces this, and so does the guard below). rawProto (1..255,
-// 0 = bip's native 253) overrides the outer IP protocol number to slip past a protocol whitelist.
+// just raw bare — config validation enforces this, and so does the guard below). rawProto (1..255,
+// 0 = bare's native 253) overrides the outer IP protocol number to slip past a protocol whitelist.
 func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, spoofSrc, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
-	r, err := dialRawBase(peerIP, dev, ka, obfs, cryptoOn, psk, cipher, "bip", rawProto, 0)
+	r, err := dialRawBase(peerIP, dev, ka, obfs, cryptoOn, psk, cipher, "bare", rawProto, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +47,7 @@ func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn 
 	}
 	if spoofSrcIP == nil && spoofDstIP == nil {
 		r.conn.Close()
-		return nil, fmt.Errorf("spoof: needs a forged source or destination (a carrier that forges nothing is just raw bip)")
+		return nil, fmt.Errorf("spoof: needs a forged source or destination (a carrier that forges nothing is just raw bare)")
 	}
 	fd, err := openHdrincl(r.proto) // the forged header is built and sent via IP_HDRINCL
 	if err != nil {
@@ -64,7 +64,7 @@ func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn 
 // clients aim at that decoy: the server receives those frames via AF_PACKET (the decoy is not a local
 // address) and answers AS the decoy. realPeer is required in both cases (config validation enforces it).
 func ListenSpoof(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, realPeer, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
-	r, err := listenRawBase(listenIP, dev, ka, obfs, cryptoOn, psk, cipher, "bip", rawProto, 0)
+	r, err := listenRawBase(listenIP, dev, ka, obfs, cryptoOn, psk, cipher, "bare", rawProto, 0)
 	if err != nil {
 		return nil, err
 	}

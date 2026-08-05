@@ -22,7 +22,7 @@ func TestDegradedSendDropsOnlyTheSourceBoundProfiles(t *testing.T) {
 		proto     int
 		delivered bool
 	}{
-		{"bip", protoBIP, true},   // no checksum at all — the degraded send is a VALID packet
+		{"bare", protoBare, true}, // no checksum at all — the degraded send is a VALID packet
 		{"icmp", protoICMP, true}, // checksum covers the icmp header+payload only
 		{"udp", protoUDP, false},  // pseudo-header: the bytes are only valid from the pinned source
 		{"tcp", protoTCP, false},

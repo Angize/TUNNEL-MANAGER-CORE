@@ -36,7 +36,7 @@ func TestRawChecksumBindsSourceMatchesTheEncapsulation(t *testing.T) {
 func TestRawChecksumBindsSourceCoversEveryProfile(t *testing.T) {
 	bindsSource := []string{"udp", "tcp"} // L4 checksum folds in the IPv4 pseudo-header
 	// bytes do not depend on the source: none of these carries a checksum at all
-	independent := []string{"bip", "ipip", "gre", "icmp", "esp", "ah", "etherip", "ipcomp", "l2tpv3"}
+	independent := []string{"bare", "ipip", "gre", "icmp", "esp", "ah", "etherip", "ipcomp", "l2tpv3"}
 
 	classified := map[string]bool{}
 	for _, p := range bindsSource {

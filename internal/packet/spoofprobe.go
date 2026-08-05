@@ -1,6 +1,6 @@
 package packet
 
-// SpoofProbe reports whether this host can run IP spoofing for the raw bip transport. It is a LOCAL
+// SpoofProbe reports whether this host can run IP spoofing for the raw bare transport. It is a LOCAL
 // capability check only: it does NOT prove the upstream network will forward a forged source, since a
 // datacenter may still drop spoofed egress (BCP38), which only shows up once a real tunnel fails.
 type SpoofProbe struct {

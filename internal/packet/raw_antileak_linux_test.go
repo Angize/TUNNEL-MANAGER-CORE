@@ -239,10 +239,10 @@ func TestRawPortedProfilesReverseTheFlow(t *testing.T) {
 	}
 }
 
-// TestRawAntiLeakLeavesQuietProfilesAlone: bip/ipip/gre/esp have no kernel handler that answers,
+// TestRawAntiLeakLeavesQuietProfilesAlone: bare/ipip/gre/esp have no kernel handler that answers,
 // so they must not pay for an iptables rule (nor risk one that drops their traffic).
 func TestRawAntiLeakLeavesQuietProfilesAlone(t *testing.T) {
-	for _, profile := range []string{"bip", "ipip", "gre", "esp"} {
+	for _, profile := range []string{"bare", "ipip", "gre", "esp"} {
 		for _, isClient := range []bool{true, false} {
 			if got := rawDropMatches(leakPeer, profile, 0, isClient, true); len(got) != 0 {
 				t.Fatalf("raw/%s installed %v; no kernel handler answers that protocol", profile, got)

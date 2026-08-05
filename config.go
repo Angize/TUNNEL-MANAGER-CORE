@@ -57,13 +57,13 @@ type Config struct {
 	// clock-derived schedule, with no wire signal), or "ws" (CDN-frontable — see WSHost).
 	Transport string `json:"transport"`
 
-	// RawProfile selects the raw-transport encapsulation (Transport=="raw" only): "bip" (native, proto
+	// RawProfile selects the raw-transport encapsulation (Transport=="raw" only): "bare" (native, proto
 	// 253), "ipip" (4), "gre" (47), "icmp" (1), "udp" (17), "tcp" (6) or "esp" (50). The sealed frame is
 	// identical across profiles; only the IP-layer carrier header changes. Raw sockets need CAP_NET_RAW
 	// and Linux; ipip/gre often do not cross NAT.
 	RawProfile string `json:"raw_profile"`
 
-	// RawProto overrides the outer IP protocol number for the BARE "bip" profile only — bip carries no L4
+	// RawProto overrides the outer IP protocol number for the "bare" profile only — it carries no L4
 	// header, so only the number on the wire changes (0/unset keeps 253). Set it to slip past a
 	// protocol-whitelist filter that passes a "known" number, e.g. 58 (ICMPv6), which the IPv4 kernel
 	// ignores. Ignored for the other profiles, whose number is tied to their forged header. Range 1..255.
@@ -355,7 +355,7 @@ func (c *Config) applyDefaults() {
 		c.Peer = c.PeerIPs[0]
 	}
 	if c.Transport == "raw" && c.RawProfile == "" {
-		c.RawProfile = "bip"
+		c.RawProfile = "bare"
 	}
 	if c.Transport == "flux" {
 		if c.FluxRotateSecs == 0 {
@@ -424,7 +424,7 @@ func validatePoolEndpoint(field, e string, needPort bool) error {
 }
 
 // rawProtoBorrowed refuses an outer protocol number that some raw PROFILE owns. It applies to the two
-// headerless carriers that can set one — bip and spoof — and to nothing else.
+// headerless carriers that can set one — bare and spoof — and to nothing else.
 //
 // Neither writes an L4 header, so the outer IP header announcing (say) TCP leaves ciphertext exactly
 // where the TCP header belongs: a different random port pair on every packet, no SYN any stateful box
@@ -433,7 +433,7 @@ func validatePoolEndpoint(field, e string, needPort bool) error {
 // forges that header too, so the message names it.
 func rawProtoBorrowed(proto int) error {
 	owner, taken := packet.RawProfileOwning(proto)
-	if !taken || owner == "bip" { // bip's own native number is not a borrowed one
+	if !taken || owner == "bare" { // bare's own native number is not a borrowed one
 		return nil
 	}
 	return errors.New("raw_proto " + strconv.Itoa(proto) + " is the \"" + owner +
@@ -488,13 +488,13 @@ func (c *Config) validate() error {
 		if c.RawProfile != "" && !packet.RawProfileValid(c.RawProfile) {
 			return errors.New("raw_profile must be one of " + strings.Join(packet.RawProfileNames(), "|"))
 		}
-		// rawEffProto honours raw_proto for the bare "bip" profile ONLY — every other profile's number is
+		// rawEffProto honours raw_proto for the "bare" profile ONLY — every other profile's number is
 		// tied to its forged L4 header. Left unchecked the value validates, persists and shows as set while
 		// the wire keeps the native number: a protocol-whitelist evasion the operator believes is on and is
-		// not. RawProfile "" is bip here, since validate() runs BEFORE applyDefaults.
+		// not. RawProfile "" is bare here, since validate() runs BEFORE applyDefaults.
 		if c.RawProto != 0 {
-			if c.RawProfile != "" && c.RawProfile != "bip" {
-				return errors.New("raw_proto overrides the outer protocol number for the \"bip\" profile only (raw_profile \"" + c.RawProfile + "\" is tied to its forged header)")
+			if c.RawProfile != "" && c.RawProfile != "bare" {
+				return errors.New("raw_proto overrides the outer protocol number for the \"bare\" profile only (raw_profile \"" + c.RawProfile + "\" is tied to its forged header)")
 			}
 			if c.RawProto < 1 || c.RawProto > 255 {
 				return errors.New("raw_proto must be in 1..255 (0 = the profile's native protocol number)")
@@ -519,20 +519,26 @@ func (c *Config) validate() error {
 			return errors.New("raw transport requires crypto enabled (the AEAD both encrypts and authenticates each raw packet)")
 		}
 	case "spoof":
-		// Standalone IP-spoofing carrier: a bip-like raw-IP datapath that forges the outer source
+		// Standalone IP-spoofing carrier: a bare-like raw-IP datapath that forges the outer source
 		// and/or destination. NO rotation of any kind. Crypto is mandatory (the AEAD authenticates
 		// every forged-header frame, and there is no other integrity on a raw IP packet). rawProto
-		// (1..255) overrides the outer IP protocol number like a bip carrier does.
+		// (1..255) overrides the outer IP protocol number like a bare carrier does.
 		if !c.Crypto.Enabled {
 			return errors.New("spoof transport requires crypto enabled (the AEAD authenticates every forged-header frame)")
 		}
 		if c.RawProto != 0 {
 			if c.RawProto < 1 || c.RawProto > 255 {
-				return errors.New("raw_proto must be in 1..255 (0 = the bip default 253)")
+				return errors.New("raw_proto must be in 1..255 (0 = the bare default 253)")
 			}
 			if err := rawProtoBorrowed(c.RawProto); err != nil {
 				return err
 			}
+		}
+		// spoof is headerless by definition, so it has no forged port to override. Accepting raw_port
+		// here would be the silent no-op the raw case refuses: it validates, persists and reads back as
+		// set while nothing on the wire changes.
+		if c.RawPort != 0 {
+			return errors.New("raw_port sets a forged L4 port, and the spoof carrier writes no L4 header at all")
 		}
 		if c.SpoofSrc != "" && net.ParseIP(c.SpoofSrc).To4() == nil {
 			return errors.New("spoof_src_ip must be an IPv4 address")
@@ -545,7 +551,7 @@ func (c *Config) validate() error {
 		}
 		switch c.Role {
 		case "client":
-			// The client is the one that forges. A carrier that forges nothing is just raw bip.
+			// The client is the one that forges. A carrier that forges nothing is just raw bare.
 			if c.SpoofSrc == "" && c.SpoofDst == "" {
 				return errors.New("spoof transport requires at least one of spoof_src_ip / spoof_dst_ip on the client")
 			}

@@ -74,13 +74,13 @@ func TestRawTransportValidAndDefaults(t *testing.T) {
 		t.Fatalf("valid raw config rejected: %v", err)
 	}
 	c.applyDefaults()
-	if c.RawProfile != "bip" {
-		t.Errorf("raw_profile default = %q, want bip", c.RawProfile)
+	if c.RawProfile != "bare" {
+		t.Errorf("raw_profile default = %q, want bare", c.RawProfile)
 	}
 }
 
 func TestRawTransportProfiles(t *testing.T) {
-	for _, p := range []string{"bip", "ipip", "gre", "icmp", "udp", "tcp"} {
+	for _, p := range []string{"bare", "ipip", "gre", "icmp", "udp", "tcp"} {
 		c := validRaw()
 		c.RawProfile = p
 		if err := c.validate(); err != nil {
@@ -165,7 +165,7 @@ func TestSpoofValidation(t *testing.T) {
 		t.Error("bogus spoof_dst_ip accepted")
 	}
 
-	// A client that forges nothing is just raw bip — rejected.
+	// A client that forges nothing is just raw bare — rejected.
 	c = validSpoof()
 	c.SpoofSrc = ""
 	c.SpoofDst = ""
@@ -350,11 +350,11 @@ func TestListenIPsRejectedWhereItIsIgnored(t *testing.T) {
 	}
 }
 
-// TestRawProtoOnlyOnBip guards that raw_proto is refused on the profiles that cannot honour it.
-// rawEffProto applies it to the bare "bip" profile only — every other profile's protocol number is
+// TestRawProtoOnlyOnBare guards that raw_proto is refused on the profiles that cannot honour it.
+// rawEffProto applies it to the bare "bare" profile only — every other profile's protocol number is
 // tied to its forged L4 header — so on icmp/udp/tcp/gre/esp the value validated, persisted and showed
 // as set while the wire carried the profile's native number: a whitelist evasion believed to be on.
-func TestRawProtoOnlyOnBip(t *testing.T) {
+func TestRawProtoOnlyOnBare(t *testing.T) {
 	for _, p := range []string{"ipip", "gre", "icmp", "udp", "tcp", "esp"} {
 		c := validRaw()
 		c.RawProfile = p
@@ -371,8 +371,8 @@ func TestRawProtoOnlyOnBip(t *testing.T) {
 			t.Errorf("%s: rejected for the wrong reason (%v)", p, err)
 		}
 	}
-	// bip honours it, and an UNSET profile is bip (applyDefaults runs after validate).
-	for _, p := range []string{"bip", ""} {
+	// bare honours it, and an UNSET profile is bare (applyDefaults runs after validate).
+	for _, p := range []string{"bare", ""} {
 		c := validRaw()
 		c.RawProfile = p
 		c.RawProto = 58
@@ -380,12 +380,12 @@ func TestRawProtoOnlyOnBip(t *testing.T) {
 			t.Errorf("raw_profile %q must accept raw_proto: %v", p, err)
 		}
 	}
-	// The range check still applies on bip.
+	// The range check still applies on bare.
 	c := validRaw()
-	c.RawProfile = "bip"
+	c.RawProfile = "bare"
 	c.RawProto = 256
 	if err := c.validate(); err == nil {
-		t.Error("out-of-range raw_proto accepted on bip")
+		t.Error("out-of-range raw_proto accepted on bare")
 	}
 }
 

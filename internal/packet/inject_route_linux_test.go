@@ -81,7 +81,7 @@ func TestL2InjectResolvesPerDestination(t *testing.T) {
 // handing a frame to the NIC succeeds — so every decoy kept going to the first destination's next hop.
 func TestRawBadsumDecoyFollowsDestination(t *testing.T) {
 	f := &fakeResolver{}
-	r := &Raw{isClient: true, proto: protoBIP, profile: "bip", fakeFd: -1}
+	r := &Raw{isClient: true, proto: protoBare, profile: "bare", fakeFd: -1}
 	r.link = &directLink{r: r}
 	r.localIP.Store(&net.IPAddr{IP: net.IPv4(192, 0, 2, 1)})
 	r.desync = newDesyncCfg(true, 4, 2, "badsum") // every decoy is badsum -> every one goes via the injector
@@ -134,7 +134,7 @@ func TestRawBadsumDecoyFramesForTheRoutedPeer(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &fakeResolver{}
-			r := &Raw{isClient: true, proto: protoBIP, profile: "bip", fakeFd: -1}
+			r := &Raw{isClient: true, proto: protoBare, profile: "bare", fakeFd: -1}
 			r.link = tc.link(r)
 			r.localIP.Store(&net.IPAddr{IP: net.IPv4(192, 0, 2, 1)})
 			r.desync = newDesyncCfg(true, 4, 2, "badsum") // every decoy is badsum -> every one goes via the injector

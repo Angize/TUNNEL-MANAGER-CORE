@@ -219,7 +219,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 	copy(sa.Addr[:], to.IP.To4())
 	for i, sp := range r.desync.specs() {
 		// Wrap the decoy in the SAME profile header the real frames carry. A bare payload is well-formed only
-		// on bip/ipip, whose encap is a no-op; elsewhere it puts random bytes where the carrier header belongs,
+		// on bare/ipip, whose encap is a no-op; elsewhere it puts random bytes where the carrier header belongs,
 		// and a DPI cannot be desynced by something it discards as malformed. Decoys take their own sequence
 		// space so they never collide with a real frame, and the per-decoy +i keeps one batch's decoys distinct.
 		dseq := r.decoySeq(i)
@@ -565,7 +565,7 @@ func htons(v uint16) uint16 { return v<<8 | v>>8 }
 
 // ProbeSpoof checks whether the raw sockets IP spoofing needs can be opened here.
 // It opens (and immediately closes) an IP_HDRINCL raw socket and an AF_PACKET socket;
-// EPERM on either means the process lacks CAP_NET_RAW. bip's protocol number (253) is
+// EPERM on either means the process lacks CAP_NET_RAW. bare's protocol number (253) is
 // used for the raw-socket probe. This is a local check only — see SpoofProbe.
 func ProbeSpoof() SpoofProbe {
 	p := SpoofProbe{}
@@ -660,7 +660,8 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked b
 			"--sport", strconv.Itoa(int(pdp)), "--dport", strconv.Itoa(int(psp)),
 			"--tcp-flags", "RST", "RST"}}
 	}
-	return nil // bip / ipip / gre / esp: no kernel handler answers those protocol numbers
+	// Everything else: no kernel handler answers those protocol numbers, so nothing of ours leaks.
+	return nil
 }
 
 // addRawDrop installs rawDropMatches for peer, best-effort, and returns a func that removes
@@ -1072,7 +1073,7 @@ func (r *Raw) provenFrom(ip net.IP) {
 
 // SetPeerPool (client) wires a destination-IP rotation pool: a peer whose handshake never completes
 // is burned and the client re-points at the next live endpoint (a proactive timer also rotates).
-// nil / single-endpoint = no rotation. Rotates only the DESTINATION; a spoofed source (bip) is
+// nil / single-endpoint = no rotation. Rotates only the DESTINATION; a spoofed source (bare) is
 // unaffected. main wires it via the shared SetPeerPool type assertion.
 func (r *Raw) SetPeerPool(pp *PeerPool) {
 	if r.isClient {

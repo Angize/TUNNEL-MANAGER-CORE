@@ -18,7 +18,7 @@ func TestDesyncWireEmission(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("needs root (raw sockets / CAP_NET_RAW)")
 	}
-	const proto = protoBIP
+	const proto = protoBare
 	const ttl = 7
 	const count = 3
 

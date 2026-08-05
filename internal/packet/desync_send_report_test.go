@@ -19,7 +19,7 @@ import (
 // (Raw.sendFakes) with a resolver that fails, not the reporter.
 func TestDecoyTransmitFailureIsReported(t *testing.T) {
 	f := &fakeResolver{err: errors.New("no next hop")}
-	r := &Raw{isClient: true, proto: protoBIP, profile: "bip", fakeFd: -1}
+	r := &Raw{isClient: true, proto: protoBare, profile: "bare", fakeFd: -1}
 	r.link = &directLink{r: r}
 	r.localIP.Store(&net.IPAddr{IP: net.IPv4(192, 0, 2, 1)})
 	r.desync = newDesyncCfg(true, 4, 2, "badsum") // every decoy is badsum -> every one goes via the injector

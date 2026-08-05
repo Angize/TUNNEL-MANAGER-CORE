@@ -22,9 +22,9 @@ func TestCraftedHeadersLookLikeTheFlowTheyJoin(t *testing.T) {
 			name string
 			pkt  []byte
 		}{
-			{"buildIP4 (flux + spoof REAL data)", buildIP4(src, dst, protoBIP, body)},
-			{"low-TTL decoy", buildIP4Ext(src, dst, protoBIP, 4, false, body)},
-			{"bad-checksum decoy", buildIP4Ext(src, dst, protoBIP, 64, true, body)},
+			{"buildIP4 (flux + spoof REAL data)", buildIP4(src, dst, protoBare, body)},
+			{"low-TTL decoy", buildIP4Ext(src, dst, protoBare, 4, false, body)},
+			{"bad-checksum decoy", buildIP4Ext(src, dst, protoBare, 64, true, body)},
 		} {
 			if tc.pkt == nil {
 				t.Fatalf("%s: builder refused a normal payload", tc.name)
