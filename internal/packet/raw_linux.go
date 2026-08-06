@@ -76,10 +76,20 @@ type Raw struct {
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
 	peerAnswered atomic.Bool
 
-	pc     pingClock                  // times the keepalive round trip (see coreStatus.roundTrip)
-	fecEnc *fecEncoder                // non-nil when FEC is on: buffers data frames into RS blocks on send
-	fecDec *fecDecoder                // non-nil when FEC is on: reassembles + reconstructs blocks on receive
-	rxAddr atomic.Pointer[net.IPAddr] // src of the packet currently feeding fecDec (deliver reads it)
+	pc      pingClock                  // times the keepalive round trip (see coreStatus.roundTrip)
+	fecEnc  *fecEncoder                // non-nil when FEC is on: buffers data frames into RS blocks on send
+	fecDec  *fecDecoder                // non-nil when FEC is on: reassembles + reconstructs blocks on receive
+	rxAddr  atomic.Pointer[net.IPAddr] // src of the packet currently feeding fecDec (deliver reads it)
+	rxSport atomic.Uint32              // ...and its carrier source port, same lifetime, same single reader
+
+	// cliPort is the CLIENT's carrier source port for this conversation, 0 = the fixed rawClientPort.
+	// One field, two readings: on the client it is the port we stamp as source and re-roll while the
+	// tunnel runs; on the server it is the port we stamp as DESTINATION, learned from an authenticated
+	// frame. The server needs it because a reply aimed at a port the client never sent from reaches a
+	// stateful middlebox as an unsolicited flow and is dropped -- the client's own receive path does not
+	// care, since rawDecap skips the carrier header by length and never reads a port.
+	cliPort     atomic.Uint32
+	sportRandom bool // client: re-roll cliPort for the life of the tunnel. Server: widen the anti-leak rule.
 
 	// leak owns the filter-OUTPUT DROP rules that stop the receiving kernel answering this
 	// profile's carrier packets (icmp echo reply / udp port-unreachable / tcp RST). Wired only for
@@ -225,7 +235,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 		if r.proto == protoTCP {
 			dack = r.tcpAck
 		}
-		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, r.port, dseq, dack, r.spi)
+		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, r.port, r.cport(), dseq, dack, r.spi)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
 		if out == nil {
 			continue
@@ -333,12 +343,15 @@ func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs, cry
 
 // DialRaw (client role) opens a raw carrier of the profile's protocol toward peerIP. No IP spoofing —
 // that is the separate "spoof" transport (DialSpoof); a raw carrier always uses an unforged directLink.
-func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int) (*Raw, error) {
+func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool) (*Raw, error) {
 	r, err := dialRawBase(peerIP, dev, ka, obfs, cryptoOn, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
 	}
 	r.link = &directLink{r: r}
+	// Draw the FIRST port here, not in the loop: the loop waits out an interval before its first roll,
+	// so without this the tunnel would open on the fixed default and only start moving a minute later.
+	r.setSportMode(sportRandom)
 	r.initFec(fec, fecData, fecParity)
 	r.wireAntiLeak()
 	return r, nil
@@ -347,13 +360,14 @@ func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bo
 // ListenRaw (server role) binds a raw carrier of the profile's protocol and learns the peer from the
 // first authenticated frame. No IP spoofing — see ListenSpoof; a raw server always uses a directLink,
 // so its IPConn IS the data path in both directions and gets the configured socket buffers.
-func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int) (*Raw, error) {
+func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool) (*Raw, error) {
 	r, err := listenRawBase(listenIP, dev, ka, obfs, cryptoOn, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
 	}
 	r.link = &directLink{r: r}
-	applyConnSockBuf(r.conn) // a directLink server sends AND receives on this conn
+	r.setSportMode(sportRandom) // server: no rolling, but the anti-leak rule must still take the range
+	applyConnSockBuf(r.conn)    // a directLink server sends AND receives on this conn
 	r.initFec(fec, fecData, fecParity)
 	r.wireAntiLeak() // no peer yet — learnPeer scopes it on the first authenticated frame
 	return r, nil
@@ -369,7 +383,7 @@ func (r *Raw) initFec(fec bool, fecData, fecParity int) {
 				r.writeOut(r.wire(pkt, p.IP), p)
 			}
 		},
-		func(frame []byte) { r.deliver(frame, r.rxAddr.Load()) })
+		func(frame []byte) { r.deliver(frame, r.rxAddr.Load(), uint16(r.rxSport.Load())) })
 }
 
 // Run blocks until one of the loops fails (e.g. the socket or device closes).
@@ -384,6 +398,9 @@ func (r *Raw) Run() error {
 	go heartbeat(r.st, &r.hbRx, r.closeCh, dw) // ...and pace the republish off it, so an idle tunnel reads live, not half-open
 	if r.isClient {
 		go r.clientLoop()
+		if r.sportRandom {
+			go r.sportLoop()
+		}
 	}
 	return <-errc
 }
@@ -451,7 +468,7 @@ func (r *Raw) wire(body []byte, dst net.IP) []byte {
 	} else {
 		seq = r.seq.Add(1)
 	}
-	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, r.port, seq, ack, r.spi)
+	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, r.port, r.cport(), seq, ack, r.spi)
 }
 
 // writeOut sends one wrapped packet toward the real peer `to`, delegating the mechanism to the
@@ -637,7 +654,7 @@ const rawSendMark = 0x746e6c01 // "tnl\x01"
 //	udp   BOTH kernels answer an ICMP port-unreachable quoting the packet. Ours are UDP, never ICMP.
 //	tcp   BOTH kernels answer a RST, and since the carrier's flow reverses too it leaves on exactly the
 //	      port pair OUR frames use at this end — so the RST flag is the whole discriminator. Ours are PSH|ACK.
-func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked bool) [][]string {
+func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked, sportRandom bool) [][]string {
 	d := peer.String()
 	switch profile {
 	case "icmp":
@@ -653,9 +670,22 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked b
 	case "tcp":
 		// The peer's frames arrive as rawPorts(!isClient); our kernel resets by swapping them,
 		// which is rawPorts(isClient) — the same pair we send on. Only the flag tells them apart.
-		psp, pdp := rawPorts(!isClient, port)
+		psp, pdp := rawPorts(!isClient, port, 0)
+		sp, dp := strconv.Itoa(int(pdp)), strconv.Itoa(int(psp))
+		// A rotating client port would otherwise need the rule re-installed on every roll, and each
+		// re-install is a window with NO rule in which the kernel answers. One RANGE covers every port
+		// the rotation can draw, so the rule outlives them all. It is the CLIENT's side of the pair
+		// that moves: our source on the client, our destination on the server.
+		if sportRandom {
+			rng := strconv.Itoa(rawSportLo) + ":" + strconv.Itoa(rawSportHi)
+			if isClient {
+				sp = rng
+			} else {
+				dp = rng
+			}
+		}
 		return [][]string{{"-d", d, "-p", "tcp",
-			"--sport", strconv.Itoa(int(pdp)), "--dport", strconv.Itoa(int(psp)),
+			"--sport", sp, "--dport", dp,
 			"--tcp-flags", "RST", "RST"}}
 	}
 	// Everything else: no kernel handler answers those protocol numbers, so nothing of ours leaks.
@@ -664,12 +694,12 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked b
 
 // addRawDrop installs rawDropMatches for peer, best-effort, and returns a func that removes
 // exactly the rules that went in (nil if none did).
-func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked bool) func() {
+func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked, sportRandom bool) func() {
 	type installed struct {
 		match, owner []string
 	}
 	var added []installed
-	for _, m := range rawDropMatches(peer, profile, port, isClient, marked) {
+	for _, m := range rawDropMatches(peer, profile, port, isClient, marked, sportRandom) {
 		args := append([]string{"-A", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
 		own, ok := runRule(args, ownerMatch(tun), "raw: anti-leak")
 		if !ok {
@@ -712,6 +742,58 @@ func setSendMark(conn *net.IPConn) error {
 // the forged address, not to us, and its decoy destination has its own rule (addAntiLeak).
 // tunName is the tunnel this carrier belongs to, and so the owner stamped on its firewall rules.
 // Empty when there is no device (a hand-built carrier in a test), which tags nothing.
+// cport is the client-side carrier port to stamp right now: our own on the client, the peer's last
+// authenticated one on the server. 0 means "none yet", which rawPorts reads as the fixed default.
+func (r *Raw) cport() uint16 { return uint16(r.cliPort.Load()) }
+
+// setSportMode arms the rotation. Only a profile that forges ports has one to rotate, so anything else
+// stays fixed however it was configured -- and the anti-leak rule then keeps its exact match instead of
+// widening to a range it has no use for. wireAntiLeak reads r.sportRandom, so this runs BEFORE it.
+func (r *Raw) setSportMode(on bool) {
+	r.sportRandom = on && RawProfileHasPorts(r.profile)
+	if r.sportRandom && r.isClient {
+		if p := rawRollSport(); p != 0 {
+			r.cliPort.Store(uint32(p))
+		}
+	}
+}
+
+// learnClientPort records the source port of an AUTHENTICATED frame, so the server's replies go back to
+// the port the client is sending from now. Server-side only: on the client the field is its own rolling
+// port and adopting the peer's would overwrite it with the server's :443.
+func (r *Raw) learnClientPort(sport uint16) {
+	if r.isClient || sport == 0 || !RawProfileHasPorts(r.profile) {
+		return
+	}
+	r.cliPort.Store(uint32(sport))
+}
+
+// sportLoop re-rolls the client's carrier source port for the life of the tunnel. There is nothing to
+// tear down or re-handshake: the port lives only in the forged header, no socket binds it (the carrier
+// socket is opened on a PROTOCOL NUMBER), and the peer picks the new one up from the next authenticated
+// frame. A roll that fails to draw simply keeps the current port.
+func (r *Raw) sportLoop() {
+	for {
+		select {
+		case <-r.closeCh:
+			return
+		case <-time.After(jitterFrac(rawSportEvery)):
+		}
+		p := rawRollSport()
+		if p == 0 {
+			continue
+		}
+		r.cliPort.Store(uint32(p))
+		// ...and say so at once. Until a packet carrying the new port reaches the server, its downstream
+		// is still stamped for the old one, and on a path with a stateful box those are dropped. Waiting
+		// for whatever the client happens to send next makes that window a whole keepalive interval on a
+		// download-only flow; one ping makes it half a round trip.
+		if peer := r.peer.Load(); peer != nil {
+			r.send(typePing, nil, peer)
+		}
+	}
+}
+
 func (r *Raw) tunName() string {
 	if r.dev == nil {
 		return ""
@@ -729,7 +811,7 @@ func (r *Raw) wireAntiLeak() {
 		}
 	}
 	r.leak.init(r.closeCh, func(peer net.IP) func() {
-		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked)
+		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked, r.sportRandom)
 	})
 	if p := r.peer.Load(); p != nil { // client: the peer is known at dial, so scope it now
 		r.leak.scope(p.IP)
@@ -857,7 +939,7 @@ func afpacketLoop(fd int, closeCh <-chan struct{}, handle func(pkt []byte, ihl i
 // the common tail of both receive paths (AF_INET and AF_PACKET). Frames that do not
 // open as data are tried as handshake messages.
 func (r *Raw) handleRaw(raw []byte, addr *net.IPAddr) {
-	body, ok := rawDecap(r.profile, r.proto, raw)
+	body, sport, ok := rawDecap(r.profile, r.proto, raw)
 	if !ok {
 		return
 	}
@@ -865,20 +947,21 @@ func (r *Raw) handleRaw(raw []byte, addr *net.IPAddr) {
 		// The two receive loops are the only readers, so rxAddr is stable for the
 		// whole input() call (the decoder delivers recovered frames synchronously).
 		r.rxAddr.Store(addr)
+		r.rxSport.Store(uint32(sport))
 		r.fecDec.input(body)
 		return
 	}
-	r.deliver(body, addr)
+	r.deliver(body, addr, sport)
 }
 
 // deliver dispatches one received frame (already de-FEC'd and de-encap'd):
 // authenticated data in crypto mode, or unauthenticated legacy framing in clear mode.
-func (r *Raw) deliver(body []byte, addr *net.IPAddr) {
+func (r *Raw) deliver(body []byte, addr *net.IPAddr, sport uint16) {
 	if addr == nil {
 		return
 	}
 	if r.cryptoOn {
-		r.handleCrypto(body, addr)
+		r.handleCrypto(body, addr, sport)
 		return
 	}
 	if len(body) < 2 || body[0] != magic {
@@ -887,6 +970,7 @@ func (r *Raw) deliver(body []byte, addr *net.IPAddr) {
 	r.markRx()            // the peer is answering (clear mode has no session to prove it)
 	r.provenFrom(addr.IP) // ...and, unless it came from an endpoint we left, the current one is alive
 	r.learnPeer(addr)
+	r.learnClientPort(sport)
 	r.dispatch(body[1], iff(body[1] == typeData, body[2:], nil), addr)
 }
 
@@ -896,12 +980,13 @@ func (r *Raw) openWith(s Sealer, body []byte) (typ byte, session, seq uint64, pa
 	return openFrame(s, body, r.obfs)
 }
 
-func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr) {
+func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
 	if s := r.sealer(); s != nil {
 		if typ, session, seq, payload, oerr := r.openWith(s, body); oerr == nil && r.rp.ok(session, seq) {
 			r.markRx()            // the session is answering
 			r.provenFrom(addr.IP) // ...and, unless it came from an endpoint we left, the current one is alive
 			r.learnPeer(addr)
+			r.learnClientPort(sport)
 			r.dispatch(typ, payload, addr)
 			return
 		}
@@ -918,11 +1003,12 @@ func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr) {
 			r.staged = nil
 			r.markRx() // a pending session promoted -> genuine inbound
 			r.learnPeer(addr)
+			r.learnClientPort(sport)
 			r.dispatch(typ, payload, addr)
 			return
 		}
 	}
-	r.tryHandshake(body, addr)
+	r.tryHandshake(body, addr, sport)
 }
 
 // learnPeer records the peer address (and, on the server, the local source IP
@@ -956,7 +1042,7 @@ func (r *Raw) learnLocalIP(peer net.IP) {
 	}
 }
 
-func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr) {
+func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 	if r.isClient {
 		ci := r.ci.Load()
 		if ci == nil {
@@ -1009,6 +1095,13 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr) {
 	// cannot wedge the tunnel. Peer rebinding is likewise deferred to that first frame.
 	r.staged = stageSession(r.staged, s)
 	r.learnLocalIP(addr.IP)
+	// The RESP below is the FIRST thing this server sends, and it goes out before any data frame has
+	// authenticated -- so without this it is stamped for the fixed default port while a rolling client
+	// is already somewhere else in the range. On a path with a stateful box that reply is an unsolicited
+	// flow and is dropped, and the handshake never completes. ParseInit above is the authentication:
+	// the sender proved the PSK. The replayed-init fast path further up deliberately does NOT learn --
+	// it re-serves a cached response without proving anything new, so it must not steer where we send.
+	r.learnClientPort(hsSport)
 	if msg2 := crypto.RespMsg(r.psk, eInit, sr); msg2 != nil {
 		// Cache this init and its response so a replay of the same init (while a staged session
 		// is still current) is served without recomputing the crypto above. put copies body

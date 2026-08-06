@@ -20,10 +20,10 @@ func TestRawPortReachesBothTheWireAndTheAntiLeakRule(t *testing.T) {
 
 	for _, profile := range []string{"udp", "tcp"} {
 		for _, isClient := range []bool{true, false} {
-			pkt := rawEncap(profile, []byte("payload"), testSrc, testDst, isClient, 0xBEEF, custom, 7, 9, 0x11223344)
+			pkt := rawEncap(profile, []byte("payload"), testSrc, testDst, isClient, 0xBEEF, custom, 0, 7, 9, 0x11223344)
 			sport := binary.BigEndian.Uint16(pkt[0:2])
 			dport := binary.BigEndian.Uint16(pkt[2:4])
-			wantS, wantD := rawPorts(isClient, custom)
+			wantS, wantD := rawPorts(isClient, custom, 0)
 			if sport != wantS || dport != wantD {
 				t.Errorf("raw/%s isClient=%v: wire ports %d->%d, want %d->%d",
 					profile, isClient, sport, dport, wantS, wantD)
@@ -42,7 +42,7 @@ func TestRawPortReachesBothTheWireAndTheAntiLeakRule(t *testing.T) {
 	// The tcp anti-leak rule matches OUR kernel's RST, whose ports are the pair we send on. It must be
 	// built from the same number, or the rule stops matching the moment the port is changed.
 	for _, isClient := range []bool{true, false} {
-		got := rawDropMatches(testDst, "tcp", custom, isClient, false)
+		got := rawDropMatches(testDst, "tcp", custom, isClient, false, false)
 		if len(got) != 1 {
 			t.Fatalf("tcp isClient=%v: want exactly one anti-leak rule, got %v", isClient, got)
 		}
@@ -63,7 +63,7 @@ func TestRawPortReachesBothTheWireAndTheAntiLeakRule(t *testing.T) {
 			t.Errorf("rawPortOr(%d) = %d, want 0 so rawPorts falls back to the default", bad, got)
 		}
 	}
-	if s, d := rawPorts(true, 0); s != rawClientPort || d != rawServerPort {
+	if s, d := rawPorts(true, 0, 0); s != rawClientPort || d != rawServerPort {
 		t.Errorf("an unset port must keep the default pair, got %d->%d", s, d)
 	}
 

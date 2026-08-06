@@ -46,8 +46,8 @@ func TestTheRemovalMatchesTheInstallOnTheRealPath(t *testing.T) {
 		name string
 		run  func() func()
 	}{
-		{"raw tcp", func() func() { return addRawDrop(testDst, "tcp", "core42", 0, true, false) }},
-		{"raw icmp", func() func() { return addRawDrop(testDst, "icmp", "core42", 0, false, true) }},
+		{"raw tcp", func() func() { return addRawDrop(testDst, "tcp", "core42", 0, true, false, false) }},
+		{"raw icmp", func() func() { return addRawDrop(testDst, "icmp", "core42", 0, false, true, false) }},
 		{"spoof decoy", func() func() { return addAntiLeak(253, testDst, "core42") }},
 		{"flux udp", func() func() { return addFluxDrop(testDst, "udp", "core42") }},
 	} {
@@ -101,8 +101,8 @@ func TestRuleBuildersStayInStep(t *testing.T) {
 		name  string
 		match []string
 	}{
-		{"tcp RST drop", rawDropMatches(testDst, "tcp", 0, true, false)[0]},
-		{"icmp reply drop", rawDropMatches(testDst, "icmp", 0, false, true)[0]},
+		{"tcp RST drop", rawDropMatches(testDst, "tcp", 0, true, false, false)[0]},
+		{"icmp reply drop", rawDropMatches(testDst, "icmp", 0, false, true, false)[0]},
 	} {
 		add := append(append([]string{"-A", "OUTPUT"}, append(append([]string{}, tc.match...), "-j", "DROP")...), owner...)
 		del := append(append([]string{"-D", "OUTPUT"}, append(append([]string{}, tc.match...), "-j", "DROP")...), owner...)

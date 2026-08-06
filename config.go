@@ -76,6 +76,14 @@ type Config struct {
 	// Both ends must be given the same number. Ignored by every profile that forges no ports.
 	RawPort int `json:"raw_port"`
 
+	// RawSportRandom re-rolls the CLIENT's forged source port over Linux's ephemeral range for the life
+	// of the tunnel, instead of the one constant 51820. A stateful middlebox keys a flow on the whole
+	// 4-tuple, so a constant source port means every packet of every raw tunnel from a host hits the
+	// same one — and once that tuple is burned the carrier is dead until something else changes. Only
+	// the profiles that forge ports have a port to roll. The server is told too: it does not roll
+	// anything, but its anti-leak rule has to cover the range the client can draw from.
+	RawSportRandom bool `json:"raw_sport_random"`
+
 	// SpoofSrc (client) forges the outer IPv4 source address of "spoof"-transport packets so a
 	// per-source egress filter cannot pin the real IP. RealPeer (server) is the client's REAL IP: with a
 	// forged source the server cannot learn where to reply, so it is told here — the AEAD still
@@ -515,6 +523,12 @@ func (c *Config) validate() error {
 				return errors.New("raw_port must be in 1..65535 (0 = the profile default 443)")
 			}
 		}
+		// Same rule for the same reason: a profile with no ports has no source port to roll, and
+		// accepting it would persist and read back as set while the wire never changed.
+		if c.RawSportRandom && !packet.RawProfileHasPorts(c.RawProfile) {
+			return errors.New("raw_sport_random rolls the forged SOURCE port of the \"udp\" and \"tcp\"" +
+				" profiles only (raw_profile \"" + c.RawProfile + "\" forges no ports)")
+		}
 		if !c.Crypto.Enabled {
 			return errors.New("raw transport requires crypto enabled (the AEAD both encrypts and authenticates each raw packet)")
 		}
@@ -539,6 +553,9 @@ func (c *Config) validate() error {
 		// set while nothing on the wire changes.
 		if c.RawPort != 0 {
 			return errors.New("raw_port sets a forged L4 port, and the spoof carrier writes no L4 header at all")
+		}
+		if c.RawSportRandom {
+			return errors.New("raw_sport_random rolls a forged L4 source port, and the spoof carrier writes no L4 header at all")
 		}
 		if c.SpoofSrc != "" && net.ParseIP(c.SpoofSrc).To4() == nil {
 			return errors.New("spoof_src_ip must be an IPv4 address")
