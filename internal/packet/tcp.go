@@ -401,6 +401,7 @@ type TCP struct {
 	// once the destination pool has cycled through every endpoint against it. Written by the dial loop and
 	// by the rotation timer (which reaches burnAdvance through buildWarm), hence atomic.
 	destRot   atomic.Int64
+	destWant  atomic.Int64 // ...and how many that round set out to try, snapshotted before the first burn
 	destTick  atomic.Int32 // timed-rotation beats since the source last moved (the odometer's low digit)
 	srcWarned sync.Map     // sources already reported as unbindable (one log line per source)
 	probing   atomic.Bool  // a retest batch is in flight; keeps the retest tick free for the operator pin
@@ -517,10 +518,17 @@ func (b *TCP) burnAdvance(carrierGone bool) (string, bool) {
 		}
 		return "", false
 	}
-	// ELIGIBLE, not size, and read BEFORE the burn — see rotationController.fail: a condemned
-	// destination cannot be tried, so counting the raw list blames the source for a lap that never
-	// happened. Floored at one: with nothing eligible, the endpoint we are on IS the experiment.
-	want := b.pp.eligibleCount()
+	// ELIGIBLE, not size, and sized ONCE at the start of the round — see rotationController.fail, which
+	// snapshots it the same way. A condemned destination cannot be tried, so counting the raw list blames
+	// the source for a lap that never happened; and re-reading the ELIGIBLE count on every ask is the
+	// same bug one step in: each burn shrinks the number the next ask compares against, so three
+	// destinations declare a lap after two. Floored at one: with nothing eligible, the endpoint we are
+	// on IS the experiment.
+	want := int(b.destWant.Load())
+	if b.destRot.Load() == 0 {
+		want = b.pp.eligibleCount()
+		b.destWant.Store(int64(want))
+	}
 	if want < 1 {
 		want = 1
 	}
