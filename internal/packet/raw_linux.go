@@ -779,8 +779,17 @@ func (r *Raw) sportLoop() {
 			return
 		case <-time.After(jitterFrac(rawSportEvery)):
 		}
-		if p := rawRollSport(); p != 0 {
-			r.cliPort.Store(uint32(p))
+		p := rawRollSport()
+		if p == 0 {
+			continue
+		}
+		r.cliPort.Store(uint32(p))
+		// ...and say so at once. Until a packet carrying the new port reaches the server, its downstream
+		// is still stamped for the old one, and on a path with a stateful box those are dropped. Waiting
+		// for whatever the client happens to send next makes that window a whole keepalive interval on a
+		// download-only flow; one ping makes it half a round trip.
+		if peer := r.peer.Load(); peer != nil {
+			r.send(typePing, nil, peer)
 		}
 	}
 }
@@ -999,7 +1008,7 @@ func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
 			return
 		}
 	}
-	r.tryHandshake(body, addr)
+	r.tryHandshake(body, addr, sport)
 }
 
 // learnPeer records the peer address (and, on the server, the local source IP
@@ -1033,7 +1042,7 @@ func (r *Raw) learnLocalIP(peer net.IP) {
 	}
 }
 
-func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr) {
+func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 	if r.isClient {
 		ci := r.ci.Load()
 		if ci == nil {
@@ -1086,6 +1095,13 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr) {
 	// cannot wedge the tunnel. Peer rebinding is likewise deferred to that first frame.
 	r.staged = stageSession(r.staged, s)
 	r.learnLocalIP(addr.IP)
+	// The RESP below is the FIRST thing this server sends, and it goes out before any data frame has
+	// authenticated -- so without this it is stamped for the fixed default port while a rolling client
+	// is already somewhere else in the range. On a path with a stateful box that reply is an unsolicited
+	// flow and is dropped, and the handshake never completes. ParseInit above is the authentication:
+	// the sender proved the PSK. The replayed-init fast path further up deliberately does NOT learn --
+	// it re-serves a cached response without proving anything new, so it must not steer where we send.
+	r.learnClientPort(hsSport)
 	if msg2 := crypto.RespMsg(r.psk, eInit, sr); msg2 != nil {
 		// Cache this init and its response so a replay of the same init (while a staged session
 		// is still current) is served without recomputing the crypto above. put copies body

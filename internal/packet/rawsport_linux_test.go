@@ -3,9 +3,13 @@
 package packet
 
 import (
+	"encoding/binary"
+	"net"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
 // The client's forged source port may rotate for the life of the tunnel. Four things have to hold, and
@@ -203,3 +207,68 @@ func TestTheAntiLeakRuleCoversTheWholeRotation(t *testing.T) {
 		}
 	}
 }
+
+// The handshake RESP is the FIRST thing a server sends, and it goes out BEFORE any data frame has
+// authenticated. If the server has not learned the client's rolled port by then it stamps the fixed
+// default, and on a path with a stateful box that reply is an unsolicited flow that gets dropped -- the
+// handshake never completes and the tunnel never comes up at all.
+//
+// A netns lab cannot see this: there is no stateful box between two namespaces, so the mis-addressed
+// reply arrives anyway and the tunnel looks healthy. This drives the real tryHandshake instead.
+func TestTheHandshakeReplyGoesToTheRolledPort(t *testing.T) {
+	const psk = "tVYafNLrHaId1AaEM80YebyPzXThOEr2adA27E6mbRc="
+	const rolled = 54321
+
+	srv := &Raw{profile: "tcp", isClient: false, psk: psk, cipher: "chacha20-poly1305"}
+	srv.setSportMode(true)
+	cap := &capturingLink{r: srv}
+	srv.link = cap
+	srv.peer.Store(&net.IPAddr{IP: testSrc})
+	srv.localIP.Store(&net.IPAddr{IP: testDst})
+
+	ci, err := crypto.GenerateEphemeral()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.tryHandshake(crypto.InitMsg(psk, ci), &net.IPAddr{IP: testSrc}, rolled)
+
+	if srv.cport() != rolled {
+		t.Fatalf("server did not learn the client's port from the authenticated init: got %d want %d",
+			srv.cport(), rolled)
+	}
+	if len(cap.sent) != 1 {
+		t.Fatalf("expected one handshake reply, got %d", len(cap.sent))
+	}
+	// The reply's forged header must be addressed to the port the init came from.
+	dport := binary.BigEndian.Uint16(cap.sent[0][2:4])
+	if dport != rolled {
+		t.Errorf("handshake reply is stamped for port %d, but the client sent from %d — a stateful box "+
+			"drops that as an unsolicited flow and the tunnel never comes up", dport, rolled)
+	}
+	// A REPLAYED init served from the cache must NOT be able to steer where we send: it re-serves a
+	// cached response without proving anything new.
+	srv.tryHandshake(crypto.InitMsg(psk, ci), &net.IPAddr{IP: testSrc}, 40000)
+	if srv.cport() != rolled {
+		t.Errorf("a replayed init moved the learned port to %d", srv.cport())
+	}
+}
+
+// capturingLink is a directLink that records what would go on the wire instead of opening a socket.
+// The interface is the seam, so no production hook is needed to see the bytes a handshake sends.
+type capturingLink struct {
+	r    *Raw
+	sent [][]byte
+}
+
+func (c *capturingLink) send(pkt []byte, _ *net.IPAddr) {
+	c.sent = append(c.sent, append([]byte(nil), pkt...))
+}
+func (c *capturingLink) recvLoop() error                     { return nil }
+func (c *capturingLink) replyTo(src *net.IPAddr) *net.IPAddr { return src }
+func (c *capturingLink) filterSrc() bool                     { return true }
+func (c *capturingLink) pinsSource() bool                    { return false }
+func (c *capturingLink) fakeFD() int                         { return -1 }
+func (c *capturingLink) header(realSrc net.IP, to *net.IPAddr) (net.IP, net.IP) {
+	return realSrc, to.IP
+}
+func (c *capturingLink) close() {}
