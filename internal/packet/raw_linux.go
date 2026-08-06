@@ -13,9 +13,7 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"os/exec"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -666,24 +664,27 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked b
 
 // addRawDrop installs rawDropMatches for peer, best-effort, and returns a func that removes
 // exactly the rules that went in (nil if none did).
-func addRawDrop(peer net.IP, profile string, port uint16, isClient, marked bool) func() {
-	var added [][]string
+func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked bool) func() {
+	type installed struct {
+		match, owner []string
+	}
+	var added []installed
 	for _, m := range rawDropMatches(peer, profile, port, isClient, marked) {
 		args := append([]string{"-A", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
-		if out, err := exec.Command("iptables", args...).CombinedOutput(); err != nil {
-			log.Printf("raw: anti-leak rule not installed (the peer's kernel may answer our carrier packets): %v: %s", err, strings.TrimSpace(string(out)))
+		own, ok := runRule(args, ownerMatch(tun), "raw: anti-leak")
+		if !ok {
 			continue
 		}
-		added = append(added, m)
+		added = append(added, installed{m, own})
 	}
 	if len(added) == 0 {
 		return nil
 	}
-	log.Printf("raw: anti-leak scoped to %s (%d OUTPUT rule(s), profile %s)", peer, len(added), profile)
+	log.Printf("raw: anti-leak scoped to %s (%d OUTPUT rule(s), profile %s, owner %s)", peer, len(added), profile, ownerLabel(added[0].owner, tun))
 	return func() {
-		for _, m := range added {
-			del := append([]string{"-D", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
-			_ = exec.Command("iptables", del...).Run()
+		for _, in := range added {
+			del := append([]string{"-D", "OUTPUT"}, append(append([]string{}, in.match...), "-j", "DROP")...)
+			_, _ = iptablesRun(append(del, in.owner...))
 		}
 	}
 }
@@ -709,6 +710,15 @@ func setSendMark(conn *net.IPConn) error {
 // packets the receiving kernel answers get an OUTPUT DROP scoped to the current peer, re-scoped on
 // every destination rotation and pin. A spoofing link is deliberately NOT wired — its answers go to
 // the forged address, not to us, and its decoy destination has its own rule (addAntiLeak).
+// tunName is the tunnel this carrier belongs to, and so the owner stamped on its firewall rules.
+// Empty when there is no device (a hand-built carrier in a test), which tags nothing.
+func (r *Raw) tunName() string {
+	if r.dev == nil {
+		return ""
+	}
+	return r.dev.Name
+}
+
 func (r *Raw) wireAntiLeak() {
 	marked := false
 	if r.profile == "icmp" && !r.isClient {
@@ -719,7 +729,7 @@ func (r *Raw) wireAntiLeak() {
 		}
 	}
 	r.leak.init(r.closeCh, func(peer net.IP) func() {
-		return addRawDrop(peer, r.profile, r.port, r.isClient, marked)
+		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked)
 	})
 	if p := r.peer.Load(); p != nil { // client: the peer is known at dial, so scope it now
 		r.leak.scope(p.IP)
@@ -730,17 +740,17 @@ func (r *Raw) wireAntiLeak() {
 // packets in the raw table's PREROUTING chain, so the kernel does not try to forward
 // or answer them. AF_PACKET taps the frame before this chain runs, so our receive path
 // is unaffected. Returns a cleanup func (nil if the rule could not be installed).
-func addAntiLeak(proto int, decoy net.IP) func() {
+func addAntiLeak(proto int, decoy net.IP, tun string) func() {
 	args := []string{"-t", "raw", "-A", "PREROUTING", "-p", strconv.Itoa(proto), "-d", decoy.String(), "-j", "DROP"}
-	if out, err := exec.Command("iptables", args...).CombinedOutput(); err != nil {
-		log.Printf("raw: anti-leak rule not installed (kernel may forward the decoy dst): %v: %s", err, strings.TrimSpace(string(out)))
+	own, ok := runRule(args, ownerMatch(tun), "raw: decoy anti-leak")
+	if !ok {
 		return nil
 	}
 	log.Printf("raw: anti-leak rule installed (iptables raw PREROUTING -p %d -d %s DROP)", proto, decoy)
 	return func() {
 		del := append([]string(nil), args...)
 		del[2] = "-D"
-		_ = exec.Command("iptables", del...).Run()
+		_, _ = iptablesRun(append(del, own...))
 	}
 }
 
