@@ -505,13 +505,39 @@ func (p *PeerPool) cmdPath() string {
 	return p.statusPath + ".cmd"
 }
 
-// poolCmd is one request from the node, read out of the sidecar file. Cmd names an action and the rest
-// says which endpoints it is about; with no Cmd it is the panel's per-IP pin button, and Key alone is
-// the endpoint to pin.
+// poolCmd is one request from the node, read out of a pool's sidecar file. Cmd names an action and the
+// rest says which entries it is about; with no Cmd it is the panel's pin button, and Key alone is the
+// entry to pin.
+//
+// One shape for both pools. They ask the same two questions of the same judge and differ only in how
+// many axes they name: the direct pool's endpoints are Key (destination) and Src (source), the CDN edge
+// pool's are IP (edge) and SNI, with Kind saying which axis a PIN is for. Every field is optional on the
+// wire, so each writer sends only what its pool has.
 type poolCmd struct {
-	Key string `json:"key"` // a pin's endpoint; on cmdFail/cmdOK, the DESTINATION the verdict was measured on
-	Src string `json:"src"` // cmdOK only: the SOURCE the verdict was measured on
-	Cmd string `json:"cmd"`
+	Cmd  string `json:"cmd"`  // "" = a pin; otherwise cmdOK | cmdFail
+	Key  string `json:"key"`  // a pin's entry; on a DIRECT verdict, the destination it was measured on
+	Src  string `json:"src"`  // direct cmdOK only: the source it was measured on
+	Kind string `json:"kind"` // edge-pool pin only: which axis, "ip" | "sni"
+	IP   string `json:"ip"`   // edge-pool verdict: the EDGE it was measured on
+	SNI  string `json:"sni"`  // edge-pool verdict: the SNI it was measured with
+}
+
+// readPoolCmd consumes a pending command file and returns what it held. The file is REMOVED once read,
+// so a command fires exactly once — a reader that left it would re-apply the same verdict every tick.
+// ok=false when there is no file, it cannot be parsed, or it names neither an action nor an entry.
+func readPoolCmd(path string) (c poolCmd, ok bool) {
+	if path == "" {
+		return c, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return c, false
+	}
+	os.Remove(path)
+	if json.Unmarshal(data, &c) != nil || (c.Key == "" && c.Cmd == "") {
+		return poolCmd{}, false
+	}
+	return c, true
 }
 
 // cmdFail is the node asking us to treat the endpoint it names as dead: burn it and advance, the same
@@ -530,23 +556,8 @@ const cmdFail = "fail"
 // silence also means the node is inside its post-walk cooldown, where it says nothing about anything.
 const cmdOK = "ok"
 
-// readCmd consumes a pending command (written by the node) and returns it. ok=false when none is
-// pending or it carries neither field. The file is removed once read, so a command fires exactly once.
-func (p *PeerPool) readCmd() (c poolCmd, ok bool) {
-	cp := p.cmdPath()
-	if cp == "" {
-		return c, false
-	}
-	data, err := os.ReadFile(cp)
-	if err != nil {
-		return c, false
-	}
-	os.Remove(cp)
-	if json.Unmarshal(data, &c) != nil || (c.Key == "" && c.Cmd == "") {
-		return poolCmd{}, false
-	}
-	return c, true
-}
+// readCmd consumes this pool's pending command, if any.
+func (p *PeerPool) readCmd() (poolCmd, bool) { return readPoolCmd(p.cmdPath()) }
 
 // rotationController couples a client carrier's DESTINATION pool with an optional SOURCE pool and
 // centralizes the failover/proactive policy, so every carrier drives rotation identically — it decides

@@ -2579,9 +2579,9 @@ func (b *TCP) peerPinPollLoop() {
 // (burn/heal) or the panel's pin. Split out of the ticker so the whole wire — file, keying,
 // decision — is drivable end to end.
 func (b *TCP) pollWsCmd() {
-	if cmd, ok := b.pool.readWsCmd(); ok {
+	if cmd, ok := b.pool.readCmd(); ok {
 		switch {
-		case cmd.Cmd == wsCmdOK:
+		case cmd.Cmd == cmdOK:
 			// The probe found traffic crossing, so BOTH halves of the combo it measured are
 			// proven. Cleared separately: the two axes rotate independently and either can
 			// slide under a verdict.
@@ -2591,7 +2591,7 @@ func (b *TCP) pollWsCmd() {
 			if cmd.SNI != "" && b.pool.clearBurn("sni", cmd.SNI) {
 				b.pool.event("heal", "tun-probe", "sni:"+cmd.SNI)
 			}
-		case cmd.Cmd == wsCmdFail:
+		case cmd.Cmd == cmdFail:
 			// The verdict names the COMBO it was measured on, and that name is the whole guard:
 			// this is a ticker and the carrier rotates on its own timers, so a verdict that
 			// crossed with a rotation would otherwise condemn a combo the probe never tested.

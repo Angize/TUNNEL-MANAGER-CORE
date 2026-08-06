@@ -758,40 +758,11 @@ func (p *wsPool) cmdPath() string {
 	return p.statusPath + ".cmd"
 }
 
-// wsCmd is what the node writes into the pool's command file. It carries either a PIN (kind+key, the
-// panel's "activate this edge") or a VERDICT from the node's tun probe (cmd + both axes).
-//
-// The verdict is keyed on BOTH axes for the same reason the direct pool's is: this file is read on a
-// ticker and the carrier fails over on its own timers too, so between the probe and this read the live
-// edge can already have moved. An unkeyed verdict would then condemn a combo the probe never tested.
-// Warm standby makes it sharper still — two connections are live and the probe only ever measured the
-// active one.
-type wsCmd struct {
-	Kind string `json:"kind"` // pin only: "ip" | "sni"
-	Key  string `json:"key"`  // pin only: the entry to activate
-	Cmd  string `json:"cmd"`  // verdict: wsCmdOK | wsCmdFail
-	IP   string `json:"ip"`   // verdict: the EDGE the verdict was measured on
-	SNI  string `json:"sni"`  // verdict: the SNI it was measured with
-}
-
-const (
-	wsCmdOK   = "ok"
-	wsCmdFail = "fail"
-)
-
-// readWsCmd consumes a pending command and returns it. The file is removed once read, so a command
-// fires exactly once. ok=false when none is pending or it is malformed.
-func (p *wsPool) readWsCmd() (c wsCmd, ok bool) {
-	cp := p.cmdPath()
-	if cp == "" {
-		return c, false
-	}
-	data, err := os.ReadFile(cp)
-	if err != nil {
-		return c, false
-	}
-	os.Remove(cp)
-	if json.Unmarshal(data, &c) != nil || (c.Key == "" && c.Cmd == "") {
+// readCmd consumes this pool's pending command, if any, and defaults the PIN axis. A pin that names no
+// axis is an edge pin: that is the axis the panel's button has always meant, and "" would silently look
+// up an entry in the SNI map.
+func (p *wsPool) readCmd() (c poolCmd, ok bool) {
+	if c, ok = readPoolCmd(p.cmdPath()); !ok {
 		return c, false
 	}
 	if c.Kind != "sni" {
