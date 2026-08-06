@@ -72,7 +72,19 @@ func TestServerPublishesItsOwnHeartbeat(t *testing.T) {
 		t.Fatalf("role = %q, want \"server\" — a reader must be able to tell a server WAITING for its "+
 			"first client from a client that went quiet", srole)
 	}
-	if chb, _, crole := readHB(cliStatus); chb == 0 || crole != "client" {
+	// WAIT for the client too. The two ends publish on their own timers, so the server's first heartbeat
+	// says nothing about whether the client has stamped one yet — reading it once asserted an ordering
+	// nothing establishes. Its OWN deadline: the loop above may have spent most of the shared one.
+	var chb int64
+	var crole string
+	cliDeadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(cliDeadline) {
+		if chb, _, crole = readHB(cliStatus); chb > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if chb == 0 || crole != "client" {
 		t.Fatalf("the client end regressed: hb=%d role=%q", chb, crole)
 	}
 }
