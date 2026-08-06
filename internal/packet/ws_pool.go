@@ -471,15 +471,9 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 	}
 	p.mu.Lock()
 	fresh := p.healthMap(kind).sideline(key)
-	// If the burned entry is the one the operator just pinned, drop the pin so the tunnel recovers NOW
-	// instead of hanging the whole force window on an edge we already know is down.
-	unpinned := p.releasePinLocked(kind, key)
 	p.mu.Unlock()
 	if fresh {
 		p.event("burn", reason, kind+":"+key) // only log the transition into suspect, not repeats
-	}
-	if unpinned {
-		p.event("pool", "pin_dropped", kind+":"+key) // pinned edge proven blocked -> pin auto-released, recover now
 	}
 	p.writeStatus()
 	if fresh && kind == "ip" {
@@ -487,23 +481,18 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 	}
 }
 
-// releasePinLocked drops a manual pin whose target edge has just been burned, so current() stops forcing
-// the dead edge for the rest of pinTTL. Releases only the axis that was burned: an IP-pin held around a
-// guilty SNI is untouched, since current() then heals the free axis.
-func (p *wsPool) releasePinLocked(kind, key string) bool {
-	released := false
-	if kind == "ip" && p.pinIP != "" && p.pinIP == key {
-		p.pinIP = ""
-		released = true
+// releasePin drops any manual pin outright, on both axes. The counted release the verdict path performs
+// once a pin has absorbed its second opinion — see burnAdvanceWS and rotationController.fail, which do
+// the same thing for the other four carriers.
+func (p *wsPool) releasePin() {
+	p.mu.Lock()
+	changed := p.pinIP != "" || p.pinSNI != ""
+	p.pinIP, p.pinSNI, p.pinUntil = "", "", 0
+	p.mu.Unlock()
+	if changed {
+		p.writeStatus()
+		p.event("pool", "pin_dropped", "tun-probe")
 	}
-	if kind == "sni" && p.pinSNI != "" && p.pinSNI == key {
-		p.pinSNI = ""
-		released = true
-	}
-	if released && p.pinIP == "" && p.pinSNI == "" {
-		p.pinUntil = 0
-	}
-	return released
 }
 
 // reassessRotation emits a ONE-SHOT event when the pool crosses the "can it still rotate its IP axis?"
