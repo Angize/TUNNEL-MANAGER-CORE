@@ -1938,21 +1938,20 @@ func (b *TCP) dialLoop() {
 		b.cur.CompareAndSwap(cf, nil)
 		// Classify why this carrier died and feed the pool's health + event log. A drop we caused
 		// ourselves — an operator pin/rotate, or a scheduled proactive rotation — is NOT a failure
-		// and is not logged as "down". A genuine death records a precise core-observed "down" reason
-		// and updates data-plane health (short session -> throttle fault + move off; sustained -> ok).
+		// and is not logged as "down". A genuine death records a precise core-observed "down" reason.
 		deliberate := false // a proactive rotation / operator pin that WE induced — re-dial at once, no backoff
 		if b.pool != nil && !b.closed.Load() {
 			cause := b.takeLastErr()
 			if b.manualSwitch.Swap(false) || rotated.Load() {
 				deliberate = true
-				b.pool.dataSuccess(label) // deliberate, healthy switch — confirm the edge was fine
 			} else {
 				b.pool.down(classifyErr(cause), label) // arms the paired "up" the next reconnect emits
 				if time.Since(connectedAt) < minLiveness {
-					b.pool.dataFailure(label)
-					b.pool.advance() // don't re-stick on the bad edge
-				} else {
-					b.pool.dataSuccess(label)
+					// A short-lived carrier is NOT a verdict on this edge — the tun probe decides that,
+					// the same way it does for the direct pools. Still move off it though: a dial that
+					// succeeds puts no sleep on the path, so re-dialing the same edge spins
+					// connect -> die -> reconnect with nothing slowing it down.
+					b.pool.advance()
 				}
 			}
 		} else if (b.pp != nil || b.sp != nil) && !b.closed.Load() {
@@ -2252,12 +2251,6 @@ func (b *TCP) dialLoopWarm() {
 			return false
 		}
 		old := active
-		// Proactive rotation retires a still-live active — count its sustained session as healthy
-		// so its edge isn't wrongly suspected. (On a FAILOVER the caller has already nil'd active
-		// and accounted for its death, so old==nil here and this is skipped.)
-		if old != nil && activeLabel != "" && time.Since(activeSince) >= minLiveness {
-			b.pool.dataSuccess(activeLabel)
-		}
 		active = standby
 		activeLabel = standbyLabel
 		activeCombo = standbyCombo
@@ -2351,18 +2344,14 @@ func (b *TCP) dialLoopWarm() {
 				manual := b.manualSwitch.Swap(false)
 				cause := b.takeLastErr()
 				if !manual && activeLabel != "" {
-					// Genuine failure: log a precise core-observed "down" reason and attribute
-					// data-plane health (short-lived -> throttle fault; sustained -> confirm healthy).
+					// Genuine failure: log a precise core-observed "down" reason. Who is to BLAME is the
+					// tun probe's call, not ours.
 					b.pool.down(classifyErr(cause), activeLabel) // arms the paired "up" the next reconnect emits
 					if time.Since(activeSince) < minLiveness {
-						b.pool.dataFailure(activeLabel)
-						// ...and MOVE OFF it, exactly as dialLoop does. Without this the cursor stays put,
-						// current() still reports the dead edge healthy, and dialActiveAsync re-dials the SAME
-						// one — and because that dial succeeds there is no sleep on the path, so the tunnel
-						// spins connect -> die -> reconnect back to back without ever burning.
+						// MOVE OFF it, exactly as dialLoop does. Without this the cursor stays put and
+						// dialActiveAsync re-dials the SAME edge — and because that dial succeeds there is
+						// no sleep on the path, so the tunnel spins connect -> die -> reconnect.
 						b.pool.advance()
-					} else {
-						b.pool.dataSuccess(activeLabel)
 					}
 				}
 				b.cur.CompareAndSwap(active, nil)
