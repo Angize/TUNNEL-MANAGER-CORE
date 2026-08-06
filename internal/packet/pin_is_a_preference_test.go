@@ -159,3 +159,45 @@ func TestPinnedIsNotPinnedOnceItLapses(t *testing.T) {
 		t.Fatal("a lapsed pin still reports as pinned, so it would keep absorbing verdicts forever")
 	}
 }
+
+// TestAHealthySessionEndsTheRound is the other half of "consecutive": the counters a round feeds -- the
+// pin's allowance and the lap it is walking -- are per OUTAGE, and a carrier that came up healthy ends
+// it. udp/raw/flux get this from rotationController.success; tcp and the edge pool reach the same reset
+// through succeedBoth, which used to be wired on the direct branch ONLY. The edge pool's own counters
+// therefore ran for the life of the process: a round that burned two of three SNIs an hour ago would
+// make the NEXT outage convict the edge after one verdict.
+func TestAHealthySessionEndsTheRound(t *testing.T) {
+	t.Run("the direct pool's counters", func(t *testing.T) {
+		dir := t.TempDir()
+		b := &TCP{
+			pp: NewPeerPool([]string{"d1", "d2", "d3"}, true, 0, filepath.Join(dir, "d.json")),
+			sp: NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(dir, "s.json")),
+		}
+		if !b.pp.selectEntry("d2") {
+			t.Fatal("could not pin")
+		}
+		b.burnAdvance(true) // absorbed; the allowance is now partly spent
+		b.destRot.Store(3)  // ...and a lap is half walked
+		b.endRound()
+		if got := b.pinFails.Load(); got != 0 {
+			t.Fatalf("the pin's allowance survived a healthy session (pinFails=%d)", got)
+		}
+		if got := b.destRot.Load(); got != 0 {
+			t.Fatalf("the lap survived a healthy session (destRot=%d)", got)
+		}
+	})
+	t.Run("the edge pool's counters", func(t *testing.T) {
+		p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2", "s3"), true, filepath.Join(t.TempDir(), "st.json"))
+		b := &TCP{pool: p}
+		b.sniRot.Store(2)
+		b.pinFails.Store(1)
+		b.endRound()
+		if got := b.sniRot.Load(); got != 0 {
+			t.Fatalf("the edge pool's half-walked lap survived a healthy session (sniRot=%d) — the next "+
+				"outage would convict the edge after one verdict", got)
+		}
+		if got := b.pinFails.Load(); got != 0 {
+			t.Fatalf("the edge pool's pin allowance survived a healthy session (pinFails=%d)", got)
+		}
+	})
+}

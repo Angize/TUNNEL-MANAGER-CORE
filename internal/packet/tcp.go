@@ -509,6 +509,16 @@ func (b *TCP) sourceIP() string {
 	return b.bindIP
 }
 
+// endRound clears the bookkeeping ONE outage owns: the lap each pool is walking and the allowance an
+// operator pin has left. Both are counts of CONSECUTIVE proven-dead rounds, so a carrier that came up
+// healthy ends the run — this is rotationController.success, for the two carriers that reach their
+// odometer through this file instead of through that controller.
+func (b *TCP) endRound() {
+	b.destRot.Store(0)
+	b.sniRot.Store(0)
+	b.pinFails.Store(0)
+}
+
 // burnAdvance burns+advances the destination pool and, once that pool has cycled through every endpoint
 // against the current source, walks the SOURCE too. Returns the endpoint the pool now points at, and
 // PUBLISHES NOTHING — the caller owns every event, because make-before-break burns an endpoint the live
@@ -1725,12 +1735,6 @@ func (b *TCP) dialLoop() {
 			w.conn.Close() // built just as Close fired — do not leak the fd
 		}
 	}()
-	succeedBoth := func() {
-		// No heal here either — a connection that came up proves the endpoint accepted US. cmdOK is
-		// where a heal comes from now. All that is left is the attribution counter.
-		b.destRot.Store(0)
-		b.sniRot.Store(0)
-	}
 	// reconnect backoff: grows on each failed dial/handshake, resets on a successful connect, so a
 	// dead/blocked destination is re-probed with an exponential backoff instead of a fixed-1s beacon.
 	backoff := time.Duration(0)
@@ -1972,6 +1976,7 @@ func (b *TCP) dialLoop() {
 			cause := b.takeLastErr()
 			if b.manualSwitch.Swap(false) || rotated.Load() {
 				deliberate = true
+				b.endRound()
 			} else {
 				b.pool.down(classifyErr(cause), label) // arms the paired "up" the next reconnect emits
 				if time.Since(connectedAt) < minLiveness {
@@ -1980,6 +1985,8 @@ func (b *TCP) dialLoop() {
 					// succeeds puts no sleep on the path, so re-dialing the same edge spins
 					// connect -> die -> reconnect with nothing slowing it down.
 					b.pool.advance()
+				} else {
+					b.endRound() // a sustained session ends the round: the counters it fed are stale
 				}
 			}
 		} else if (b.pp != nil || b.sp != nil) && !b.closed.Load() {
@@ -1989,11 +1996,11 @@ func (b *TCP) dialLoop() {
 			// lifetime is an ordinary drop: keep the endpoints and clear stale burns.
 			if b.manualSwitch.Swap(false) || rotated.Load() {
 				deliberate = true
-				succeedBoth()
+				b.endRound()
 			} else if time.Since(connectedAt) < minLiveness {
 				// a short-lived carrier is not a verdict on this endpoint; the tun probe decides
 			} else {
-				succeedBoth()
+				b.endRound()
 			}
 		}
 		// Single-edge (non-pool) status file: surface a GENUINE carrier loss as a precise "down", paired with
