@@ -19,13 +19,13 @@ import (
 // it can really be tested: by being selected again once its backoff has elapsed.
 type PeerPool struct {
 	mu         sync.Mutex
-	writeMu    sync.Mutex            // serializes the status file write+rename so concurrent writers don't race the shared .tmp
-	addrs      []string              // candidate endpoints ("ip" or "ip:port"), in operator order
-	health     map[string]*healthRec // absent == healthy; only suspect/dead entries are tracked
-	cur        int                   // index of the active endpoint
-	autoBurn   bool                  // burn a failing endpoint (vs. only rotate past it)
-	rotate     time.Duration         // proactive rotation interval (0 = failover-only)
-	statusPath string                // status file the panel reads (empty = off; also gates the pin cmd file)
+	writeMu    sync.Mutex    // serializes the status file write+rename so concurrent writers don't race the shared .tmp
+	addrs      []string      // candidate endpoints ("ip" or "ip:port"), in operator order
+	health     healthSet     // absent == healthy; only suspect/dead entries are tracked
+	cur        int           // index of the active endpoint
+	autoBurn   bool          // burn a failing endpoint (vs. only rotate past it)
+	rotate     time.Duration // proactive rotation interval (0 = failover-only)
+	statusPath string        // status file the panel reads (empty = off; also gates the pin cmd file)
 	// pinKey/pinUntil back the panel's "make this active" button — a MOMENTARY jump, NOT a lock. The pin
 	// RELEASES the instant the carrier lands on it (about one handshake); pinUntil is only a CEILING for a
 	// pick that never connects, so a dead choice cannot strand the tunnel for the whole TTL.
@@ -44,8 +44,9 @@ type PeerPool struct {
 func NewPeerPool(addrs []string, autoBurn bool, rotate time.Duration, statusPath string) *PeerPool {
 	cp := make([]string, len(addrs))
 	copy(cp, addrs)
-	p := &PeerPool{addrs: cp, health: map[string]*healthRec{}, autoBurn: autoBurn, rotate: rotate,
+	p := &PeerPool{addrs: cp, autoBurn: autoBurn, rotate: rotate,
 		statusPath: statusPath, now: func() int64 { return time.Now().Unix() }}
+	p.health = newHealthSet(&p.now)
 	p.writeStatus() // publish the initial state so the panel sees the pool immediately
 	return p
 }
@@ -90,7 +91,6 @@ func (p *PeerPool) currentLocked() string {
 		}
 	}
 	n := len(p.addrs)
-	now := p.now()
 	// Pass 0: the endpoint an advance deliberately chose. The passes below re-select under DIFFERENT rules,
 	// so without this a reader walks straight back off the rotation's choice — a failover lands on a DUE
 	// burned endpoint that pass 1 refuses while anything healthy exists, and steps OFF what it just burned
@@ -101,14 +101,14 @@ func (p *PeerPool) currentLocked() string {
 	// Pass 1: a fully-healthy endpoint, scanning forward from cur (consecutive picks vary).
 	for k := 0; k < n; k++ {
 		idx := (p.cur + k) % n
-		if p.health[p.addrs[idx]] == nil {
+		if p.health.healthy(p.addrs[idx]) {
 			return p.pickLocked(idx)
 		}
 	}
 	// Pass 2: none healthy — a DUE burned endpoint (its retest time arrived) gets a live retry.
 	for k := 0; k < n; k++ {
 		idx := (p.cur + k) % n
-		if r := p.health[p.addrs[idx]]; r != nil && r.nextRetest <= now {
+		if p.health.due(p.addrs[idx]) {
 			return p.pickLocked(idx)
 		}
 	}
@@ -123,13 +123,7 @@ func (p *PeerPool) currentLocked() string {
 func (p *PeerPool) eligibleCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	now, n := p.now(), 0
-	for _, a := range p.addrs {
-		if r := p.health[a]; r == nil || r.nextRetest <= now {
-			n++
-		}
-	}
-	return n
+	return p.health.countEligible(p.addrs)
 }
 
 // activeIdx is the cursor's current index — read before and after a rotate to tell whether the pool
@@ -153,16 +147,7 @@ func (p *PeerPool) all() []string {
 
 // tierLocked ranks an endpoint for the least-bad fallback: 0 healthy, 1 suspect, 2 dead, with its
 // nextRetest as the tiebreak within a tier. Caller holds the lock.
-func (p *PeerPool) tierLocked(addr string) (tier int, next int64) {
-	r := p.health[addr]
-	if r == nil {
-		return 0, 0
-	}
-	if r.state == stateDead {
-		return 2, r.nextRetest
-	}
-	return 1, r.nextRetest
-}
+func (p *PeerPool) tierLocked(addr string) (tier int, next int64) { return p.health.tier(addr) }
 
 // bestIdxLocked returns the index of the least-bad endpoint (healthy < suspect < dead, soonest
 // nextRetest breaking ties), optionally excluding one index (so fail() always MOVES off the endpoint
@@ -191,12 +176,7 @@ func (p *PeerPool) bestIdxLocked(except int) int {
 // itself — the callers do, and differently: fail() is about a REMOTE endpoint that looks unreachable,
 // which is what auto-burn is a policy for; failUnusable/rejectCandidate are about a LOCAL impossibility.
 func (p *PeerPool) burnLocked(addr string) {
-	r := p.health[addr]
-	if r == nil {
-		p.health[addr] = &healthRec{state: stateSuspect, nextRetest: p.now() + suspectBackoff[0]}
-		return
-	}
-	p.failRetestLocked(r)
+	p.health.burn(addr)
 }
 
 // retestBackoff walks a failing endpoint's suspect->dead backoff FSM: healthy/suspect steps down the
@@ -215,29 +195,21 @@ func retestBackoff(r *healthRec, now int64) {
 	r.nextRetest = now + suspectBackoff[r.fails]
 }
 
-// failRetestLocked reschedules a tracked endpoint after a failed (re)try: a suspect walks the backoff
-// list; running off its end drops it to dead; a dead endpoint stays dead on the slow interval. Same
-// schedule the ws edge pool uses. Caller holds the lock.
-func (p *PeerPool) failRetestLocked(r *healthRec) {
-	retestBackoff(r, p.now())
-}
-
 // advanceFailLocked moves cur OFF the just-failed endpoint to the best next one to try: a healthy
 // endpoint if any, else a due burned one, else the least-bad OTHER endpoint (never re-sticks on the
 // endpoint we just burned). Caller holds the lock; addrs has >=2 entries.
 func (p *PeerPool) advanceFailLocked() {
 	n := len(p.addrs)
-	now := p.now()
 	for k := 1; k <= n; k++ { // healthy, starting past cur so we move off it
 		idx := (p.cur + k) % n
-		if p.health[p.addrs[idx]] == nil {
+		if p.health.healthy(p.addrs[idx]) {
 			p.commitLocked(idx)
 			return
 		}
 	}
 	for k := 1; k <= n; k++ { // else a due burned endpoint
 		idx := (p.cur + k) % n
-		if r := p.health[p.addrs[idx]]; r != nil && r.nextRetest <= now {
+		if p.health.due(p.addrs[idx]) {
 			p.commitLocked(idx)
 			return
 		}
@@ -253,13 +225,12 @@ func (p *PeerPool) advanceFailLocked() {
 // nothing. Caller holds the lock; addrs has >=2 entries.
 func (p *PeerPool) advanceEligibleLocked() bool {
 	n := len(p.addrs)
-	now := p.now()
 	for k := 1; k <= n; k++ {
 		idx := (p.cur + k) % n
 		if idx == p.cur {
 			break
 		}
-		if r := p.health[p.addrs[idx]]; r == nil || r.nextRetest <= now {
+		if p.health.eligible(p.addrs[idx]) {
 			p.commitLocked(idx)
 			return true
 		}
@@ -366,8 +337,8 @@ func (p *PeerPool) rejectCandidate(prev string) {
 	}
 	for idx, a := range p.addrs {
 		if a == prev {
-			delete(p.health, prev) // prev is the live source: undo the failover burn / any stale mark
-			p.commitLocked(idx)    // the socket never left prev, so prev IS the deliberate endpoint
+			p.health.clear(prev) // prev is the live source: undo the failover burn / any stale mark
+			p.commitLocked(idx)  // the socket never left prev, so prev IS the deliberate endpoint
 			break
 		}
 	}
@@ -380,8 +351,7 @@ func (p *PeerPool) rejectCandidate(prev string) {
 // the tunnel has already left. Returns true only on the transition, so the carrier emits one event.
 func (p *PeerPool) clearBurn(addr string) bool {
 	p.mu.Lock()
-	cleared := p.health[addr] != nil
-	delete(p.health, addr)
+	cleared := p.health.clear(addr)
 	p.mu.Unlock()
 	if cleared {
 		p.writeStatus()
@@ -421,10 +391,7 @@ func (p *PeerPool) burnNamed(addr string) bool {
 // the panel offers it as "probe now" (a signal, which carries no key — hence all of them).
 func (p *PeerPool) probeAllNow() {
 	p.mu.Lock()
-	now := p.now()
-	for _, r := range p.health {
-		r.nextRetest = now
-	}
+	p.health.probeAllNow()
 	p.mu.Unlock()
 	p.writeStatus()
 }
@@ -440,8 +407,8 @@ func (p *PeerPool) selectEntry(key string) bool {
 		if a == key {
 			p.pinKey = key
 			p.pinUntil = p.now() + pinTTL
-			delete(p.health, key) // the operator picked this one deliberately: burn and condemnation both
-			p.pickLocked(idx)     // the pin key governs while it is live; normal selection resumes once it lapses
+			p.health.clear(key) // the operator picked this one deliberately: burn and condemnation both
+			p.pickLocked(idx)   // the pin key governs while it is live; normal selection resumes once it lapses
 			ok = true
 			break
 		}
@@ -790,7 +757,7 @@ func (p *PeerPool) writeStatus() {
 	health := make([]healthStatus, 0, len(p.addrs))
 	for _, a := range p.addrs {
 		hs := healthStatus{Key: a, Kind: "ip", State: "healthy"}
-		if r := p.health[a]; r != nil {
+		if r := p.health.rec(a); r != nil {
 			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
 		}
 		health = append(health, hs)

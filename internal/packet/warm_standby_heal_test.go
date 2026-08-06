@@ -28,7 +28,7 @@ func TestWarmStandbyResumesRotationAfterThePoolHeals(t *testing.T) {
 	pool := newWSPool([]string{addr}, snis("front-a", "front-b"), false, "")
 	// Burn front-b far into the future, leaving exactly ONE healthy combo.
 	pool.mu.Lock()
-	pool.sniHealth["front-b"] = &healthRec{state: stateSuspect, nextRetest: pool.now() + 86400}
+	pool.sniHealth.recs["front-b"] = &healthRec{state: stateSuspect, nextRetest: pool.now() + 86400}
 	pool.mu.Unlock()
 
 	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, keepalive: ka, psk: psk,
@@ -63,7 +63,7 @@ func TestHasHealthyEdgeOtherThan(t *testing.T) {
 	burn := func(p *wsPool, kind string, keys ...string) {
 		p.mu.Lock()
 		for _, k := range keys {
-			p.healthMap(kind)[k] = &healthRec{state: stateSuspect, nextRetest: p.now() + 86400}
+			p.healthMap(kind).recs[k] = &healthRec{state: stateSuspect, nextRetest: p.now() + 86400}
 		}
 		p.mu.Unlock()
 	}

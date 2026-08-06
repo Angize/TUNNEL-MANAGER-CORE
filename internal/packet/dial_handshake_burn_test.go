@@ -55,7 +55,7 @@ func TestDialFailureLeavesTheDirectPoolAlone(t *testing.T) {
 			t.Fatalf("a failed handshake moved the pool to %s — only the node's tun probe may", pp.current())
 		}
 		pp.mu.Lock()
-		n := len(pp.health)
+		n := len(pp.health.recs)
 		pp.mu.Unlock()
 		if n != 0 {
 			t.Fatalf("a failed handshake burned %d endpoint(s) — only the node's tun probe may", n)

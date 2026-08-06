@@ -78,9 +78,9 @@ type wsPool struct {
 	writeMu     sync.Mutex // serializes the status file write+rename so concurrent writers don't race the shared .tmp
 	ips         []string
 	snis        []wsSNIEntry
-	ipHealth    map[string]*healthRec // absent == healthy
-	sniHealth   map[string]*healthRec // absent == healthy
-	i, j        int                   // current ip / sni index
+	ipHealth    healthSet // absent == healthy
+	sniHealth   healthSet // absent == healthy
+	i, j        int       // current ip / sni index
 	autoBurn    bool
 	statusPath  string
 	active      string
@@ -136,14 +136,15 @@ func (p *wsPool) down(code, detail string) {
 }
 
 func newWSPool(ips []string, snis []wsSNIEntry, autoBurn bool, statusPath string) *wsPool {
-	p := &wsPool{ips: ips, snis: snis, ipHealth: map[string]*healthRec{}, sniHealth: map[string]*healthRec{},
+	p := &wsPool{ips: ips, snis: snis,
 		autoBurn: autoBurn, statusPath: statusPath, now: func() int64 { return time.Now().Unix() }}
+	p.ipHealth, p.sniHealth = newHealthSet(&p.now), newHealthSet(&p.now)
 	p.writeStatus()
 	return p
 }
 
 // healthMap returns the record map for the given axis ("ip" or "sni"). Caller holds the lock.
-func (p *wsPool) healthMap(kind string) map[string]*healthRec {
+func (p *wsPool) healthMap(kind string) healthSet {
 	if kind == "sni" {
 		return p.sniHealth
 	}
@@ -183,7 +184,7 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 	for k := 0; k < n; k++ {
 		ip := p.ips[p.i%len(p.ips)]
 		sni := p.snis[p.j%len(p.snis)]
-		if p.ipHealth[ip] == nil && p.sniHealth[sni.host] == nil {
+		if p.ipHealth.healthy(ip) && p.sniHealth.healthy(sni.host) {
 			return ip, sni, true
 		}
 		p.stepLocked()
@@ -271,7 +272,7 @@ func (p *wsPool) resolvePinSNILocked() wsSNIEntry {
 // healthyOrBestIPLocked returns the first healthy IP, else the least-bad one. Caller holds the lock.
 func (p *wsPool) healthyOrBestIPLocked() string {
 	for _, ip := range p.ips {
-		if p.ipHealth[ip] == nil {
+		if p.ipHealth.healthy(ip) {
 			return ip
 		}
 	}
@@ -280,7 +281,7 @@ func (p *wsPool) healthyOrBestIPLocked() string {
 
 func (p *wsPool) healthyOrBestSNILocked() wsSNIEntry {
 	for _, s := range p.snis {
-		if p.sniHealth[s.host] == nil {
+		if p.sniHealth.healthy(s.host) {
 			return s
 		}
 	}
@@ -299,16 +300,7 @@ func (p *wsPool) isPinned() bool {
 // bestIPLocked / bestSNILocked return the least-bad entry for the current() fallback: a
 // healthy one if any, else the tracked entry with the soonest nextRetest, preferring suspect
 // over dead. Caller holds the lock; the underlying slice is non-empty.
-func (p *wsPool) bestIPLocked() string {
-	best := p.ips[0]
-	bt, bn := p.tierLocked("ip", best)
-	for _, ip := range p.ips[1:] {
-		if t, n := p.tierLocked("ip", ip); t < bt || (t == bt && n < bn) {
-			best, bt, bn = ip, t, n
-		}
-	}
-	return best
-}
+func (p *wsPool) bestIPLocked() string { return p.ipHealth.best(p.ips) }
 
 func (p *wsPool) bestSNILocked() wsSNIEntry {
 	best := p.snis[0]
@@ -324,14 +316,7 @@ func (p *wsPool) bestSNILocked() wsSNIEntry {
 // tierLocked ranks an entry for the current() fallback: 0 healthy, 1 suspect, 2 dead, with
 // its nextRetest as the tiebreak within a tier. Caller holds the lock.
 func (p *wsPool) tierLocked(kind, key string) (tier int, next int64) {
-	r := p.healthMap(kind)[key]
-	if r == nil {
-		return 0, 0
-	}
-	if r.state == stateDead {
-		return 2, r.nextRetest
-	}
-	return 1, r.nextRetest
+	return p.healthMap(kind).tier(key)
 }
 
 // stepLocked advances to the next (ip, sni) combination (caller holds the lock).
@@ -370,11 +355,11 @@ func (p *wsPool) hasHealthyEdgeOtherThan(combo string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, ip := range p.ips {
-		if p.ipHealth[ip] != nil {
+		if !p.ipHealth.healthy(ip) {
 			continue
 		}
 		for _, sni := range p.snis {
-			if p.sniHealth[sni.host] == nil && ip+activeSep+sni.host != combo {
+			if p.sniHealth.healthy(sni.host) && ip+activeSep+sni.host != combo {
 				return true
 			}
 		}
@@ -398,7 +383,7 @@ func (p *wsPool) aimStandby() {
 	}
 	for off := 1; off <= len(p.ips); off++ {
 		idx := (p.i + off) % len(p.ips)
-		if ip := p.ips[idx]; ip != activeIP && p.ipHealth[ip] == nil {
+		if ip := p.ips[idx]; ip != activeIP && p.ipHealth.healthy(ip) {
 			p.i = idx // a healthy edge on a DIFFERENT IP than the active — the standby's home
 			p.aimNextHealthySNILocked()
 			return
@@ -414,7 +399,7 @@ func (p *wsPool) aimStandby() {
 func (p *wsPool) aimNextHealthySNILocked() {
 	for off := 1; off <= len(p.snis); off++ {
 		idx := (p.j + off) % len(p.snis)
-		if p.sniHealth[p.snis[idx].host] == nil {
+		if p.sniHealth.healthy(p.snis[idx].host) {
 			p.j = idx
 			return
 		}
@@ -444,8 +429,8 @@ func (p *wsPool) advanceEdgeFreshRow() {
 	if len(p.ips) > 0 {
 		p.i = (p.i + 1) % len(p.ips)
 	}
-	cleared := len(p.sniHealth) > 0
-	p.sniHealth = map[string]*healthRec{}
+	cleared := len(p.sniHealth.recs) > 0
+	p.sniHealth = newHealthSet(&p.now)
 	p.mu.Unlock()
 	if cleared {
 		p.writeStatus()
@@ -473,7 +458,7 @@ func (p *wsPool) eligibleSNIs() int {
 	defer p.mu.Unlock()
 	n := 0
 	for _, e := range p.snis {
-		if p.sniHealth[e.host] == nil {
+		if p.sniHealth.healthy(e.host) {
 			n++
 		}
 	}
@@ -485,11 +470,7 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 		return
 	}
 	p.mu.Lock()
-	m := p.healthMap(kind)
-	fresh := m[key] == nil
-	if fresh {
-		m[key] = &healthRec{state: stateSuspect, nextRetest: p.now() + suspectBackoff[0]}
-	}
+	fresh := p.healthMap(kind).sideline(key)
 	// If the burned entry is the one the operator just pinned, drop the pin so the tunnel recovers NOW
 	// instead of hanging the whole force window on an edge we already know is down.
 	unpinned := p.releasePinLocked(kind, key)
@@ -537,7 +518,7 @@ func (p *wsPool) reassessRotation() {
 	}
 	healthy := 0
 	for _, ip := range p.ips {
-		if p.ipHealth[ip] == nil {
+		if p.ipHealth.healthy(ip) {
 			healthy++
 		}
 	}
@@ -560,9 +541,8 @@ func (p *wsPool) reassessRotation() {
 // both its IP and its SNI healthy right now. Only writes the status file if something changed.
 func (p *wsPool) succeeded(ip, host string) {
 	p.mu.Lock()
-	changed := p.ipHealth[ip] != nil || p.sniHealth[host] != nil
-	delete(p.ipHealth, ip)
-	delete(p.sniHealth, host)
+	changed := p.ipHealth.clear(ip)
+	changed = p.sniHealth.clear(host) || changed
 	p.mu.Unlock()
 	if changed {
 		p.writeStatus()
@@ -575,15 +555,15 @@ func (p *wsPool) succeeded(ip, host string) {
 func (p *wsPool) retestResult(kind, key string, success bool) {
 	p.mu.Lock()
 	m := p.healthMap(kind)
-	r := m[key]
+	r := m.rec(key)
 	if r == nil { // cleared from under us (e.g. a concurrent live success) — nothing to do
 		p.mu.Unlock()
 		return
 	}
 	if success {
-		delete(m, key)
+		m.clear(key)
 	} else {
-		p.failRetestLocked(r)
+		m.retestFailed(r)
 	}
 	p.mu.Unlock()
 	if success {
@@ -596,13 +576,6 @@ func (p *wsPool) retestResult(kind, key string, success bool) {
 	if kind == "ip" {
 		p.reassessRotation() // a recovered/dead ip may have crossed the "can still rotate" boundary
 	}
-}
-
-// failRetestLocked reschedules a tracked entry after a FAILED retest. A suspect walks the
-// backoff list; running off its end (fails == len) drops it to dead. A dead entry stays dead
-// on the slow interval. Caller holds the lock.
-func (p *wsPool) failRetestLocked(r *healthRec) {
-	retestBackoff(r, p.now())
 }
 
 // retestSpec is one entry the scheduler should probe now, paired with a partner on the OTHER
@@ -621,15 +594,14 @@ type retestSpec struct {
 func (p *wsPool) dueRetests() []retestSpec {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	now := p.now()
 	var out []retestSpec
 	for _, ip := range p.ips {
-		if r := p.ipHealth[ip]; r != nil && r.nextRetest <= now {
+		if p.ipHealth.due(ip) {
 			out = append(out, retestSpec{kind: "ip", key: ip, ip: ip, sni: p.partnerSNILocked()})
 		}
 	}
 	for _, s := range p.snis {
-		if r := p.sniHealth[s.host]; r != nil && r.nextRetest <= now {
+		if p.sniHealth.due(s.host) {
 			out = append(out, retestSpec{kind: "sni", key: s.host, ip: p.partnerIPLocked(), sni: s})
 		}
 	}
@@ -640,7 +612,7 @@ func (p *wsPool) dueRetests() []retestSpec {
 // falling back to the currently-selected one when none is healthy. Caller holds the lock.
 func (p *wsPool) partnerSNILocked() wsSNIEntry {
 	for _, s := range p.snis {
-		if p.sniHealth[s.host] == nil {
+		if p.sniHealth.healthy(s.host) {
 			return s
 		}
 	}
@@ -649,7 +621,7 @@ func (p *wsPool) partnerSNILocked() wsSNIEntry {
 
 func (p *wsPool) partnerIPLocked() string {
 	for _, ip := range p.ips {
-		if p.ipHealth[ip] == nil {
+		if p.ipHealth.healthy(ip) {
 			return ip
 		}
 	}
@@ -662,7 +634,7 @@ func (p *wsPool) altHealthySNI(exclude string) (wsSNIEntry, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, s := range p.snis {
-		if s.host != exclude && p.sniHealth[s.host] == nil {
+		if s.host != exclude && p.sniHealth.healthy(s.host) {
 			return s, true
 		}
 	}
@@ -675,7 +647,7 @@ func (p *wsPool) altHealthyIP(exclude string) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, ip := range p.ips {
-		if ip != exclude && p.ipHealth[ip] == nil {
+		if ip != exclude && p.ipHealth.healthy(ip) {
 			return ip, true
 		}
 	}
@@ -687,13 +659,8 @@ func (p *wsPool) altHealthyIP(exclude string) (string, bool) {
 // carry a specific key, so this sweeps them all — cheap TLS-only probes).
 func (p *wsPool) probeAllNow() {
 	p.mu.Lock()
-	now := p.now()
-	for _, r := range p.ipHealth {
-		r.nextRetest = now
-	}
-	for _, r := range p.sniHealth {
-		r.nextRetest = now
-	}
+	p.ipHealth.probeAllNow()
+	p.sniHealth.probeAllNow()
 	p.mu.Unlock()
 }
 
@@ -709,7 +676,7 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 			if s.host == key {
 				p.j = idx
 				p.pinSNI = key
-				delete(p.sniHealth, key)
+				p.sniHealth.clear(key)
 				ok = true
 				break
 			}
@@ -719,7 +686,7 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 			if ip == key {
 				p.i = idx
 				p.pinIP = key
-				delete(p.ipHealth, key)
+				p.ipHealth.clear(key)
 				ok = true
 				break
 			}
@@ -849,9 +816,7 @@ func (p *wsPool) activeCombo() (ip, sni string) {
 // immediately instead of waiting out its retest ladder. Reports whether anything was actually cleared.
 func (p *wsPool) clearBurn(kind, key string) bool {
 	p.mu.Lock()
-	m := p.healthMap(kind)
-	_, had := m[key]
-	delete(m, key)
+	had := p.healthMap(kind).clear(key)
 	p.mu.Unlock()
 	if had {
 		p.writeStatus()
@@ -926,14 +891,14 @@ func (p *wsPool) writeStatus() {
 	health := make([]healthStatus, 0, len(p.ips)+len(p.snis))
 	for _, ip := range p.ips {
 		hs := healthStatus{Key: ip, Kind: "ip", State: "healthy"}
-		if r := p.ipHealth[ip]; r != nil {
+		if r := p.ipHealth.rec(ip); r != nil {
 			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
 		}
 		health = append(health, hs)
 	}
 	for _, s := range p.snis {
 		hs := healthStatus{Key: s.host, Kind: "sni", State: "healthy"}
-		if r := p.sniHealth[s.host]; r != nil {
+		if r := p.sniHealth.rec(s.host); r != nil {
 			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
 		}
 		health = append(health, hs)

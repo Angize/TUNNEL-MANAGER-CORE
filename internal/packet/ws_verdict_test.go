@@ -26,7 +26,7 @@ func wsBurned(p *wsPool, kind string) map[string]bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := map[string]bool{}
-	for k, r := range p.healthMap(kind) {
+	for k, r := range p.healthMap(kind).recs {
 		if r != nil {
 			out[k] = true
 		}

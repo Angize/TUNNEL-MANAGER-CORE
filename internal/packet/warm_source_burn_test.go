@@ -99,7 +99,7 @@ func poolBurned(p *PeerPool) []string {
 	defer p.mu.Unlock()
 	var out []string
 	for _, a := range p.addrs {
-		if p.health[a] != nil {
+		if p.health.recs[a] != nil {
 			out = append(out, a)
 		}
 	}

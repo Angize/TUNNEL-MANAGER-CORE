@@ -230,7 +230,7 @@ func TestPoolDownReconnectPairing(t *testing.T) {
 func TestMarkSuspectPullsFromRotation(t *testing.T) {
 	p := newWSPool([]string{"a", "b"}, snis("x"), true, "")
 	p.markSuspect("ip", "a", "test")
-	if r := p.ipHealth["a"]; r == nil || r.state != stateSuspect || r.fails != 0 {
+	if r := p.ipHealth.recs["a"]; r == nil || r.state != stateSuspect || r.fails != 0 {
 		t.Fatalf("a should be suspect with fails=0, got %#v", r)
 	}
 	for i := 0; i < 5; i++ {
@@ -248,13 +248,13 @@ func TestMarkSuspectPullsFromRotation(t *testing.T) {
 func TestSuspectBackoffThenDead(t *testing.T) {
 	p, now := clockPool([]string{"a", "b"}, snis("x"), true, "")
 	p.markSuspect("ip", "a", "test")
-	if got := p.ipHealth["a"].nextRetest; got != *now+suspectBackoff[0] {
+	if got := p.ipHealth.recs["a"].nextRetest; got != *now+suspectBackoff[0] {
 		t.Fatalf("entry retest should be now+%d, got %d (now=%d)", suspectBackoff[0], got, *now)
 	}
 	wantNext := suspectBackoff[1:] // deltas after each failed retest, up to the last step
 	for i, w := range wantNext {
 		p.retestResult("ip", "a", false)
-		r := p.ipHealth["a"]
+		r := p.ipHealth.recs["a"]
 		if r.state != stateSuspect {
 			t.Fatalf("retest %d: still suspect expected, got %q", i+1, r.state)
 		}
@@ -267,14 +267,14 @@ func TestSuspectBackoffThenDead(t *testing.T) {
 	}
 	// One more failed retest runs off the end of the schedule -> dead on the slow interval.
 	p.retestResult("ip", "a", false)
-	r := p.ipHealth["a"]
+	r := p.ipHealth.recs["a"]
 	if r.state != stateDead || r.nextRetest != *now+deadRetest {
 		t.Fatalf("expected dead at now+%d, got state=%q next=%d", deadRetest, r.state, r.nextRetest)
 	}
 	// A dead entry's failed retest stays dead and reschedules on the slow interval from now.
 	*now = 5000
 	p.retestResult("ip", "a", false)
-	if r := p.ipHealth["a"]; r.state != stateDead || r.nextRetest != 5000+deadRetest {
+	if r := p.ipHealth.recs["a"]; r.state != stateDead || r.nextRetest != 5000+deadRetest {
 		t.Fatalf("dead entry should stay dead at 5000+%d, got state=%q next=%d", deadRetest, r.state, r.nextRetest)
 	}
 }
@@ -315,15 +315,15 @@ func TestSuccessfulRetestHealsToHealthy(t *testing.T) {
 	p.markSuspect("ip", "a", "test")
 	p.retestResult("ip", "a", false) // suspect, fails=1
 	p.retestResult("ip", "a", true)  // heals
-	if p.ipHealth["a"] != nil {
-		t.Fatalf("a should be healthy again, got %#v", p.ipHealth["a"])
+	if p.ipHealth.recs["a"] != nil {
+		t.Fatalf("a should be healthy again, got %#v", p.ipHealth.recs["a"])
 	}
 	// Also proven healthy via a live success on a dead entry.
 	p.markSuspect("sni", "x", "test")
-	p.ipHealth["a"] = &healthRec{state: stateDead, nextRetest: 9999}
+	p.ipHealth.recs["a"] = &healthRec{state: stateDead, nextRetest: 9999}
 	p.succeeded("a", "x")
-	if p.ipHealth["a"] != nil || p.sniHealth["x"] != nil {
-		t.Fatalf("succeeded must clear both axes; ip=%#v sni=%#v", p.ipHealth["a"], p.sniHealth["x"])
+	if p.ipHealth.recs["a"] != nil || p.sniHealth.recs["x"] != nil {
+		t.Fatalf("succeeded must clear both axes; ip=%#v sni=%#v", p.ipHealth.recs["a"], p.sniHealth.recs["x"])
 	}
 }
 
@@ -332,10 +332,10 @@ func TestSuccessfulRetestHealsToHealthy(t *testing.T) {
 func TestCurrentFallbackLeastBad(t *testing.T) {
 	p, _ := clockPool([]string{"a", "b"}, snis("x", "y"), true, "")
 	// a dead (sooner) vs b suspect (later); x suspect (later) vs y dead (sooner).
-	p.ipHealth["a"] = &healthRec{state: stateDead, nextRetest: 1005}
-	p.ipHealth["b"] = &healthRec{state: stateSuspect, nextRetest: 1100}
-	p.sniHealth["x"] = &healthRec{state: stateSuspect, nextRetest: 1050}
-	p.sniHealth["y"] = &healthRec{state: stateDead, nextRetest: 1010}
+	p.ipHealth.recs["a"] = &healthRec{state: stateDead, nextRetest: 1005}
+	p.ipHealth.recs["b"] = &healthRec{state: stateSuspect, nextRetest: 1100}
+	p.sniHealth.recs["x"] = &healthRec{state: stateSuspect, nextRetest: 1050}
+	p.sniHealth.recs["y"] = &healthRec{state: stateDead, nextRetest: 1010}
 	ip, sni, ok := p.current()
 	if !ok {
 		t.Fatal("fallback must still return a combo")
@@ -344,8 +344,8 @@ func TestCurrentFallbackLeastBad(t *testing.T) {
 		t.Fatalf("least-bad should prefer suspect over dead: want b/x, got %s/%s", ip, sni.host)
 	}
 	// Within the same tier, the soonest nextRetest wins.
-	p.ipHealth["a"] = &healthRec{state: stateSuspect, nextRetest: 1005}
-	p.ipHealth["b"] = &healthRec{state: stateSuspect, nextRetest: 1100}
+	p.ipHealth.recs["a"] = &healthRec{state: stateSuspect, nextRetest: 1005}
+	p.ipHealth.recs["b"] = &healthRec{state: stateSuspect, nextRetest: 1100}
 	if ip, _, _ := p.current(); ip != "a" {
 		t.Fatalf("same-tier tiebreak should pick soonest retest a, got %s", ip)
 	}
@@ -413,7 +413,7 @@ func TestDueRetestsAndProbeAllNow(t *testing.T) {
 	if due[0].ip != "a" {
 		t.Fatalf("retest spec should dial the entry itself, got %q", due[0].ip)
 	}
-	if p.sniHealth[due[0].sni.host] != nil {
+	if p.sniHealth.recs[due[0].sni.host] != nil {
 		t.Fatalf("retest partner SNI must be healthy, got %q", due[0].sni.host)
 	}
 	// After the backoff elapses on the clock, it is due with no operator action at all.
@@ -449,7 +449,7 @@ func TestSelectEntryPinsAndClears(t *testing.T) {
 	if !p.selectEntry("ip", "b") {
 		t.Fatal("selectEntry should find b")
 	}
-	if p.ipHealth["b"] != nil {
+	if p.ipHealth.recs["b"] != nil {
 		t.Fatal("selecting b must clear its suspect mark")
 	}
 	if ip, _, ok := p.current(); !ok || ip != "b" {
@@ -557,8 +557,8 @@ func TestPinHeldOnGuiltyPartnerAxis(t *testing.T) {
 func TestAutoBurnOffNoTracking(t *testing.T) {
 	p := newWSPool([]string{"a", "b"}, snis("x"), false, "") // manual-only
 	p.markSuspect("ip", "a", "test")                         // must NOT track
-	if p.ipHealth["a"] != nil {
-		t.Fatalf("autoBurn=off must not sideline an entry, got %#v", p.ipHealth["a"])
+	if p.ipHealth.recs["a"] != nil {
+		t.Fatalf("autoBurn=off must not sideline an entry, got %#v", p.ipHealth.recs["a"])
 	}
 	got := map[string]bool{}
 	for i := 0; i < 4; i++ {

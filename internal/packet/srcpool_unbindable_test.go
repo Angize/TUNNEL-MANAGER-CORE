@@ -32,7 +32,7 @@ func TestUnusableSourceIsBurnedNotSilentlyIgnored(t *testing.T) {
 	if got := b.lastSourceUsed(); got != "" {
 		t.Fatalf("lastSourceUsed reports %q for a dial that applied no bind — a source pin would be released against it", got)
 	}
-	if sp.health[unbindableSrc] == nil {
+	if sp.health.recs[unbindableSrc] == nil {
 		t.Fatalf("%s was not burned, so every rotation comes straight back to it and the pool still shows it healthy", unbindableSrc)
 	}
 	if got := sp.current(); got != "127.0.0.1" {
@@ -108,7 +108,7 @@ func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 	}
 	// Abandoned, not consumed-as-landed: the jump is over AND the IP is out of rotation.
 	waitFor(t, 5*time.Second, "the impossible jump was abandoned", func() bool { return !sp.isPinned() })
-	if sp.health[unbindableSrc] == nil {
+	if sp.health.recs[unbindableSrc] == nil {
 		t.Fatalf("%s was reported as a landed jump instead of an abandoned one: it stays active in the pool and the next rotation walks straight back onto it", unbindableSrc)
 	}
 	if got := sp.current(); got != "127.0.0.1" {
