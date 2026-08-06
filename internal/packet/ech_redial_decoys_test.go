@@ -147,7 +147,7 @@ func TestEveryDialledConnectionGetsDecoysAcrossTheECHRedial(t *testing.T) {
 
 	// It must FAIL — the leaf chains to a private CA the uTLS handshake does not trust — but it must
 	// fail having walked the self-heal, which is what puts a second connection on the wire.
-	if conn, _, _, eerr := b.establishWS(false); eerr == nil {
+	if conn, _, _, eerr := b.establishWS(); eerr == nil {
 		conn.Close()
 		t.Fatal("establishWS succeeded against a privately-signed edge; the self-heal path was not exercised")
 	}

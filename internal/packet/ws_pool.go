@@ -488,6 +488,26 @@ func (p *wsPool) advanceIP() {
 	p.mu.Unlock()
 }
 
+// advanceEdgeFreshRow moves to the next EDGE and starts its row clean, dropping every SNI burn.
+//
+// Both halves are needed. A whole row of SNIs failing on one edge convicts the EDGE — the SNIs were
+// never shown to be bad on their own, only in combination with it, so on the next edge they each deserve
+// the fresh try that is the whole experiment. And carrying the burns forward is not merely unfair, it
+// STALLS the walk: with every SNI condemned, currentLocked finds no healthy combo, falls through to
+// best-effort and hands back the edge the cursor just left.
+func (p *wsPool) advanceEdgeFreshRow() {
+	p.mu.Lock()
+	if len(p.ips) > 0 {
+		p.i = (p.i + 1) % len(p.ips)
+	}
+	cleared := len(p.sniHealth) > 0
+	p.sniHealth = map[string]*healthRec{}
+	p.mu.Unlock()
+	if cleared {
+		p.writeStatus()
+	}
+}
+
 func (p *wsPool) advanceSNI() {
 	p.mu.Lock()
 	if len(p.snis) > 0 {
@@ -500,6 +520,22 @@ func (p *wsPool) advanceSNI() {
 // +30s retest). A no-op when autoBurn is off (a manual-only pool never auto-sidelines an
 // entry) or when the entry is already tracked — a fresh live failure must not reset an
 // in-progress backoff; the retest scheduler owns the entry's cadence from here.
+// eligibleSNIs is how many SNIs the rotation could actually try right now: the healthy ones, or the
+// whole list when none is tracked. Read BEFORE a burn to size one lap of the matrix — a condemned SNI
+// cannot be tried, so counting the raw list would call a lap complete that never happened and walk the
+// edge off an SNI that never varied.
+func (p *wsPool) eligibleSNIs() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, e := range p.snis {
+		if p.sniHealth[e.host] == nil {
+			n++
+		}
+	}
+	return n
+}
+
 func (p *wsPool) markSuspect(kind, key, reason string) {
 	if !p.autoBurn {
 		return
@@ -510,9 +546,7 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 	if fresh {
 		m[key] = &healthRec{state: stateSuspect, nextRetest: p.now() + suspectBackoff[0]}
 	}
-	// This burn is a DIFFERENTIALLY-PROVEN block (attributeFailure only reaches here on a
-	// verdictIP/SNIGuilty; a transient failure returns verdictTransient and never burns). If the
-	// proven-blocked edge is the one the operator just pinned, drop the pin so the tunnel recovers NOW
+	// If the burned entry is the one the operator just pinned, drop the pin so the tunnel recovers NOW
 	// instead of hanging the whole force window on an edge we already know is down.
 	unpinned := p.releasePinLocked(kind, key)
 	p.mu.Unlock()
@@ -528,10 +562,9 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 	}
 }
 
-// releasePinLocked drops a manual pin whose target edge has just been PROVEN blocked, so current() stops
-// forcing the dead edge for the rest of pinTTL. A pin still rides out a TRANSIENT outage — that path
-// returns verdictTransient and never burns, so it never reaches here. Releases only the axis that was
-// burned: an IP-pin held around a guilty SNI is untouched, since current() then heals the free axis.
+// releasePinLocked drops a manual pin whose target edge has just been burned, so current() stops forcing
+// the dead edge for the rest of pinTTL. Releases only the axis that was burned: an IP-pin held around a
+// guilty SNI is untouched, since current() then heals the free axis.
 func (p *wsPool) releasePinLocked(kind, key string) bool {
 	released := false
 	if kind == "ip" && p.pinIP != "" && p.pinIP == key {
@@ -805,8 +838,8 @@ func (p *wsPool) pinMatches(ip, host string) bool {
 	return true
 }
 
-// cmdPath is the sidecar file the node writes a "select edge" request into (JSON {kind,key}).
-// Empty when the pool has no status path (nothing to poll).
+// cmdPath is the sidecar file the node writes its commands into. Empty when the pool has no status
+// path (nothing to poll).
 func (p *wsPool) cmdPath() string {
 	if p.statusPath == "" {
 		return ""
@@ -814,30 +847,72 @@ func (p *wsPool) cmdPath() string {
 	return p.statusPath + ".cmd"
 }
 
-// readSelectCmd consumes a pending select-edge command (written by the node for the panel's
-// per-edge pin button) and returns the requested (kind,key). ok=false when none is pending or
-// it is malformed. The file is removed once read so a command fires exactly once.
-func (p *wsPool) readSelectCmd() (kind, key string, ok bool) {
+// wsCmd is what the node writes into the pool's command file. It carries either a PIN (kind+key, the
+// panel's "activate this edge") or a VERDICT from the node's tun probe (cmd + both axes).
+//
+// The verdict is keyed on BOTH axes for the same reason the direct pool's is: this file is read on a
+// ticker and the carrier fails over on its own timers too, so between the probe and this read the live
+// edge can already have moved. An unkeyed verdict would then condemn a combo the probe never tested.
+// Warm standby makes it sharper still — two connections are live and the probe only ever measured the
+// active one.
+type wsCmd struct {
+	Kind string `json:"kind"` // pin only: "ip" | "sni"
+	Key  string `json:"key"`  // pin only: the entry to activate
+	Cmd  string `json:"cmd"`  // verdict: wsCmdOK | wsCmdFail
+	IP   string `json:"ip"`   // verdict: the EDGE the verdict was measured on
+	SNI  string `json:"sni"`  // verdict: the SNI it was measured with
+}
+
+const (
+	wsCmdOK   = "ok"
+	wsCmdFail = "fail"
+)
+
+// readWsCmd consumes a pending command and returns it. The file is removed once read, so a command
+// fires exactly once. ok=false when none is pending or it is malformed.
+func (p *wsPool) readWsCmd() (c wsCmd, ok bool) {
 	cp := p.cmdPath()
 	if cp == "" {
-		return "", "", false
+		return c, false
 	}
 	data, err := os.ReadFile(cp)
 	if err != nil {
-		return "", "", false
+		return c, false
 	}
 	os.Remove(cp)
-	var c struct {
-		Kind string `json:"kind"`
-		Key  string `json:"key"`
-	}
-	if json.Unmarshal(data, &c) != nil || c.Key == "" {
-		return "", "", false
+	if json.Unmarshal(data, &c) != nil || (c.Key == "" && c.Cmd == "") {
+		return c, false
 	}
 	if c.Kind != "sni" {
 		c.Kind = "ip"
 	}
-	return c.Kind, c.Key, true
+	return c, true
+}
+
+// activeCombo splits the published "active" label back into the edge and the SNI it was published
+// with. Empty strings when nothing is active yet.
+func (p *wsPool) activeCombo() (ip, sni string) {
+	p.mu.Lock()
+	a := p.active
+	p.mu.Unlock()
+	if i := strings.Index(a, activeSep); i >= 0 {
+		return a[:i], a[i+len(activeSep):]
+	}
+	return a, ""
+}
+
+// clearBurn drops an entry's health record outright, so a proven-carrying combo is healthy again
+// immediately instead of waiting out its retest ladder. Reports whether anything was actually cleared.
+func (p *wsPool) clearBurn(kind, key string) bool {
+	p.mu.Lock()
+	m := p.healthMap(kind)
+	_, had := m[key]
+	delete(m, key)
+	p.mu.Unlock()
+	if had {
+		p.writeStatus()
+	}
+	return had
 }
 
 // echCmdPath is the sidecar file the node writes a LIVE ECH-key update into (JSON {"snis":{host:base64}}).

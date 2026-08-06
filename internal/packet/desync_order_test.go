@@ -79,7 +79,7 @@ func assertDecoysFirst(t *testing.T, b *TCP, relay *countingRelay) {
 		already = relay.up.Load()
 		got = c
 	}
-	conn, _, _, err := b.dialCarrier(false)
+	conn, _, _, err := b.dialCarrier()
 	if err != nil {
 		t.Fatalf("dialCarrier: %v", err)
 	}
