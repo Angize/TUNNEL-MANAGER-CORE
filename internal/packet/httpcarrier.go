@@ -508,7 +508,7 @@ func (b *TCP) httpcEdge() (dialAddr, host string, ech []byte, path string, err e
 // Both upstream styles share the same fronting (TLS+ECH mirror wss) and the same pool rotation: post
 // (default) is a long-lived downstream GET plus short seq-tagged POSTs, the most CDN-compatible shape;
 // grpc is one full-duplex request presented as a real gRPC call, which needs HTTP/2 to the edge.
-func (b *TCP) establishHTTPC(attribute bool) (net.Conn, string, string, error) {
+func (b *TCP) establishHTTPC() (net.Conn, string, string, error) {
 	dialAddr, host, ech, path, err := b.httpcEdge()
 	if err != nil {
 		return nil, "", "", err
@@ -529,18 +529,10 @@ func (b *TCP) establishHTTPC(attribute bool) (net.Conn, string, string, error) {
 			}
 		}
 	}
-	// Attribute the outcome to the health FSM here, one place for both modes: a failure runs the
-	// differential probe to decide IP vs SNI vs transient, a success clears both axes. attribute is FALSE
-	// on the warm-standby build — that probe fires several full establishes and would block the single
-	// standby-build goroutine with standbyBuilding still set, silently freezing proactive rotation.
-	if b.pool != nil {
-		if err != nil {
-			if attribute {
-				b.attributeFailure(dialAddr, wsSNIEntry{host: host, ech: ech, path: path})
-			}
-		} else {
-			b.pool.succeeded(dialAddr, host)
-		}
+	// A dial that came up proves the edge accepted us, so it clears both axes. A dial that FAILED
+	// burns nothing: the node's tun probe is the only judge here, exactly as it is for the direct pools.
+	if b.pool != nil && err == nil {
+		b.pool.succeeded(dialAddr, host)
 	}
 	combo := ""
 	if err == nil {

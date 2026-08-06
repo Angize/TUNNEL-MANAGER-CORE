@@ -361,7 +361,7 @@ type TCP struct {
 	splitTTL int    // disorder head-segment TTL (0 = default)
 
 	// probeFn lets tests substitute a deterministic reachability oracle for the real network probe.
-	// nil in production -> the differential prober uses probeEdgeFull (a full ws-upgrade / httpc-grpc
+	// nil in production -> probe() uses probeEdgeFull (a full ws-upgrade / httpc-grpc
 	// establish, so a CDN that terminates TLS for a dead origin isn't read as reachable).
 	probeFn func(ip string, sni wsSNIEntry) bool
 
@@ -402,6 +402,8 @@ type TCP struct {
 	// by the rotation timer (which reaches burnAdvance through buildWarm), hence atomic.
 	destRot   atomic.Int64
 	destTick  atomic.Int32 // timed-rotation beats since the source last moved (the odometer's low digit)
+	sniRot    atomic.Int64 // ws edge pool: SNI burns on this edge since the last healthy session
+	sniWant   atomic.Int64 // ...and how many that round set out to try, snapshotted before the first burn
 	srcWarned sync.Map     // sources already reported as unbindable (one log line per source)
 	probing   atomic.Bool  // a retest batch is in flight; keeps the retest tick free for the operator pin
 	// lastSrc is the source the dialer really BOUND to — empty when no bind was applied (none
@@ -1370,10 +1372,9 @@ func chromeSpec(alpn []string) (utls.ClientHelloSpec, error) {
 }
 
 // establishWS opens one WebSocket connection: it picks the current pool edge (or the single configured
-// one), dials it, does the wss TLS+ECH, and performs the upgrade. In pool mode any failure goes to
-// attributeFailure, which probes to decide whether the IP, the SNI or neither is at fault; a successful
-// connect clears both axes. attribute is FALSE on the warm-standby build — see establishHTTPC for why.
-func (b *TCP) establishWS(attribute bool) (net.Conn, string, string, error) {
+// one), dials it, does the wss TLS+ECH, and performs the upgrade. A failure burns nothing: the node's
+// tun probe is the only judge of an edge, exactly as it is for the direct pools.
+func (b *TCP) establishWS() (net.Conn, string, string, error) {
 	dialAddr, host, ech, path := b.addr, b.wsHost, b.wsECH, b.wsPath
 	if b.pool != nil {
 		ip, sni, ok := b.pool.current()
@@ -1385,15 +1386,8 @@ func (b *TCP) establishWS(attribute bool) (net.Conn, string, string, error) {
 	if host == "" {
 		host = dialAddr
 	}
-	sniEnt := wsSNIEntry{host: host, ech: ech, path: path} // for failure attribution / probes
-	attrib := func() {
-		if attribute {
-			b.attributeFailure(dialAddr, sniEnt) // differential probe: IP vs SNI vs transient
-		}
-	}
 	conn, err := b.dialer(10*time.Second).Dial("tcp", dialAddr)
 	if err != nil {
-		attrib()
 		return nil, dialAddr, "", err
 	}
 	// Decoys go out on the bare 4-tuple, BEFORE the wss handshake and the WebSocket upgrade below, so
@@ -1402,7 +1396,6 @@ func (b *TCP) establishWS(attribute bool) (net.Conn, string, string, error) {
 	if b.wsTLS {
 		tc, terr := b.tlsToEdge(conn, dialAddr, host, ech, true, handshakeTimeout) // live carrier: a self-heal is panel-worthy
 		if terr != nil {
-			attrib()
 			return nil, dialAddr, "", terr
 		}
 		conn = tc
@@ -1410,7 +1403,6 @@ func (b *TCP) establishWS(attribute bool) (net.Conn, string, string, error) {
 	r, werr := wsClientHandshake(conn, host, path, time.Now().Add(handshakeTimeout))
 	if werr != nil {
 		conn.Close()
-		attrib()
 		return nil, dialAddr, "", werr
 	}
 	if b.pool != nil {
@@ -1419,16 +1411,14 @@ func (b *TCP) establishWS(attribute bool) (net.Conn, string, string, error) {
 	return &wsConn{Conn: conn, r: r, client: true}, dialAddr, activeLabel(dialAddr, host), nil
 }
 
-// probeVerdict is the outcome of a differential failure probe: which axis of a failed
-// (ip, sni) combo is actually at fault.
-type probeVerdict int
-
-const (
-	verdictUnknown   probeVerdict = iota // no healthy alternative answered -> blame nothing
-	verdictTransient                     // the same combo worked on retry -> a blip, blame nothing
-	verdictIPGuilty                      // a healthy SNI proved the IP the culprit
-	verdictSNIGuilty                     // a healthy IP proved the SNI the culprit
-)
+// probe is the reachability oracle the retest ladder asks. Production runs the real network probe;
+// tests substitute probeFn.
+func (b *TCP) probe(ip string, sni wsSNIEntry) bool {
+	if b.probeFn != nil {
+		return b.probeFn(ip, sni)
+	}
+	return b.probeEdgeFull(ip, sni)
+}
 
 // probeEdgeFull completes the FULL client control path to (ip, sni) — TCP + wss TLS/ECH + the WebSocket
 // UPGRADE — then closes, with no data and no pool-state changes. A LIVE success requires the upgrade, so
@@ -1488,68 +1478,6 @@ func (b *TCP) probeEdgeFull(ip string, sni wsSNIEntry) bool {
 	_, werr := wsClientHandshake(conn, host, path, time.Now().Add(handshakeTimeout))
 	conn.Close()
 	return werr == nil
-}
-
-// differentialProbe attributes a failed (ip, sni) connect to a specific axis. It REPRODUCES first (a
-// combo that works on retry was a transient blip, so nothing is blamed), then changes ONE variable
-// against a known-healthy partner: the axis that still works convicts the other. Both failing while both
-// partners are healthy pins the IP, once a known-good combo has cleared our own uplink; else UNKNOWN.
-func (b *TCP) differentialProbe(failIP string, failSNI wsSNIEntry) probeVerdict {
-	probe := b.probeEdgeFull // full TLS+ws-upgrade path, so a dead origin isn't read as "reachable"
-	if b.probeFn != nil {
-		probe = b.probeFn
-	}
-	// 1. Reproduce. A working combo means the original failure was transient — do NOT blame
-	// an axis (this is what stops good edges from flapping into "suspect").
-	if probe(failIP, failSNI) {
-		return verdictTransient
-	}
-	// 2. Isolate: does the IP work with a known-good SNI? does the SNI work on a known-good IP?
-	// A reachability is only KNOWN when a healthy partner exists to test it against.
-	altIP, hasAltIP := b.pool.altHealthyIP(failIP)
-	altSNI, hasAltSNI := b.pool.altHealthySNI(failSNI.host)
-	ipOK, ipKnown := false, hasAltSNI
-	if hasAltSNI {
-		ipOK = probe(failIP, altSNI) // failIP with a healthy SNI
-	}
-	sniOK, sniKnown := false, hasAltIP
-	if hasAltIP {
-		sniOK = probe(altIP, failSNI) // failSNI on a healthy IP
-	}
-	// 3. Decide by which isolated variable still works. Only POSITIVE evidence pins a verdict.
-	switch {
-	case sniKnown && sniOK && !(ipKnown && ipOK):
-		return verdictIPGuilty // the SNI works elsewhere but the IP doesn't -> IP is the culprit
-	case ipKnown && ipOK && !(sniKnown && sniOK):
-		return verdictSNIGuilty // the IP works elsewhere but the SNI doesn't -> SNI is the culprit
-	case ipKnown && !ipOK && sniKnown && !sniOK:
-		// Both isolated probes failed though both partners are FSM-healthy: either both edges
-		// are genuinely blocked, OR the client's own uplink just dropped. Confirm with a
-		// KNOWN-GOOD combo before blaming, so a local/broad outage never falsely burns a clean
-		// edge (which is exactly the false-positive this whole rewrite exists to prevent).
-		if probe(altIP, altSNI) {
-			return verdictIPGuilty // uplink is fine -> both edges really are down; pin the IP (SNI heals on retest)
-		}
-		return verdictUnknown // even a known-good combo fails -> local/broad outage; blame nothing
-	default:
-		return verdictUnknown // both work in isolation (ambiguous/origin), or nothing to compare
-	}
-}
-
-// attributeFailure runs the differential probe for a failed pool combo and moves the guilty
-// axis (if any) into suspect. A no-op when there is no pool or autoBurn is off (nothing would
-// be marked, so the probe traffic is skipped).
-func (b *TCP) attributeFailure(ip string, sni wsSNIEntry) {
-	if b.pool == nil || !b.pool.autoBurn {
-		return
-	}
-	switch b.differentialProbe(ip, sni) {
-	case verdictIPGuilty:
-		b.pool.markSuspect("ip", ip, "ip_blocked") // IP unreachable while a healthy SNI worked elsewhere
-	case verdictSNIGuilty:
-		b.pool.markSuspect("sni", sni.host, "sni_blocked") // SNI failed even on a healthy IP (DPI on ClientHello)
-	}
-	// transient / unknown: mark nothing
 }
 
 // setLastErr records the CAUSE of a client carrier death for the pool's "down" event. It ignores
@@ -1614,10 +1542,7 @@ func (b *TCP) retestLoop() {
 		case <-b.closeCh:
 			return
 		case <-t.C:
-			if kind, key, ok := b.pool.readSelectCmd(); ok { // panel "pin this edge" request
-				log.Printf("core/ws: select edge %s=%s (panel pin)", kind, key)
-				b.SelectEdge(kind, key)
-			}
+			b.pollWsCmd()
 			if hosts := b.pool.readECHCmd(); len(hosts) > 0 { // panel live-pushed a fresh ECH key
 				// Hot-swapped in memory (updateECH); the next dial presents the fresh key with no rebuild,
 				// so the live core stays ahead of Cloudflare's key rotation instead of failing first.
@@ -1635,7 +1560,7 @@ func (b *TCP) retestLoop() {
 						}
 						// Full TLS+ws-upgrade probe so a suspect isn't falsely healed by a TLS-only
 						// success on an edge whose ws/origin path is actually broken.
-						b.pool.retestResult(spec.kind, spec.key, b.probeEdgeFull(spec.ip, spec.sni))
+						b.pool.retestResult(spec.kind, spec.key, b.probe(spec.ip, spec.sni))
 					}
 				}(due)
 			}
@@ -1719,7 +1644,7 @@ func (b *TCP) buildWarm(burn func(), srcAddr string, dstMoved bool, dstPrev stri
 	if b.closed.Load() {
 		return false
 	}
-	conn, label, combo, err := b.dialCarrier(true)
+	conn, label, combo, err := b.dialCarrier()
 	if err != nil {
 		burn()
 		b.pp.keepCursorOn(dstPrev)
@@ -1776,6 +1701,7 @@ func (b *TCP) dialLoop() {
 		// No heal here either — a connection that came up proves the endpoint accepted US. cmdOK is
 		// where a heal comes from now. All that is left is the attribution counter.
 		b.destRot.Store(0)
+		b.sniRot.Store(0)
 	}
 	// reconnect backoff: grows on each failed dial/handshake, resets on a successful connect, so a
 	// dead/blocked destination is re-probed with an exponential backoff instead of a fixed-1s beacon.
@@ -1821,7 +1747,7 @@ func (b *TCP) dialLoop() {
 			}
 		} else {
 			var err error
-			conn, label, combo, err = b.dialCarrier(true) // primary dial: attribute failures. logs the transport failure itself
+			conn, label, combo, err = b.dialCarrier() // logs the transport failure itself
 			if err != nil {
 				if b.pool != nil {
 					b.pool.advance() // rotate to the next combo for the retry
@@ -1842,7 +1768,7 @@ func (b *TCP) dialLoop() {
 				// core handshake is the signature of a DPI that lets the SYN through and kills the payload.
 				// A DIRECT pool does not: the tun probe is its only judge, and it sees the same silence.
 				if b.pool != nil {
-					b.pool.advance() // rotate to the next combo; edge health stays for attributeFailure/dataFailure
+					b.pool.advance() // rotate to the next combo; the tun probe judges which one is blocked
 				}
 				backoff = nextReconnectDelay(backoff)
 				if b.sleep(backoff) {
@@ -2061,19 +1987,19 @@ func (b *TCP) dialLoop() {
 	}
 }
 
-// dialCarrier opens the transport connection for ONE dial attempt: a pool/single ws or httpc edge (with
-// failure attribution inside establishWS/establishHTTPC), or a plain/cover TCP dial. It returns the live
+// dialCarrier opens the transport connection for ONE dial attempt: a pool/single ws or httpc edge, or a
+// plain/cover TCP dial. It returns the live
 // conn and a label for logging, and logs the transport-level failure itself so callers only decide retry
 // policy. It does NOT frame or handshake. attribute is false on the warm-standby build.
-func (b *TCP) dialCarrier(attribute bool) (net.Conn, string, string, error) {
+func (b *TCP) dialCarrier() (net.Conn, string, string, error) {
 	if b.ws { // pool or single edge: dial + wss(+ECH) + upgrade, burning on failure
 		var c net.Conn
 		var edge, combo string
 		var err error
 		if b.httpc {
-			c, edge, combo, err = b.establishHTTPC(attribute)
+			c, edge, combo, err = b.establishHTTPC()
 		} else {
-			c, edge, combo, err = b.establishWS(attribute)
+			c, edge, combo, err = b.establishWS()
 		}
 		if err != nil {
 			log.Printf("core/ws: connect via %s failed: %v", edge, err)
@@ -2173,7 +2099,7 @@ func (b *TCP) warmEstablish(standby bool) (*connFramer, net.Conn, string, string
 	// and would block this single build goroutine with standbyBuilding still set, starving
 	// requestStandby() and silently freezing proactive rotation. It just retries; the retest loop
 	// attributes edge health independently. The warm ACTIVE dial still attributes.
-	conn, label, combo, err := b.dialCarrier(!standby)
+	conn, label, combo, err := b.dialCarrier()
 	if err != nil {
 		if b.pool != nil {
 			b.pool.advance() // move off the failing edge for the next attempt
@@ -2366,8 +2292,7 @@ func (b *TCP) dialLoopWarm() {
 	dialActiveBlocking := func() bool {
 		// Exponential + jittered, like dialLoop. A fixed 1s retry against a filtered edge is a perfectly
 		// periodic SYN/TLS train — a tunnel signature that confirms the endpoint to a censor, and one that
-		// never stops here: the standby path skips attributeFailure, so a blocked edge is never burned and
-		// the beacon is permanent rather than transient.
+		// only stops when the tun probe's verdict burns the edge, which is several sweeps away.
 		var backoff time.Duration
 		for {
 			if b.closed.Load() {
@@ -2651,6 +2576,80 @@ func (b *TCP) peerPinPollLoop() {
 			}
 		}
 	}
+}
+
+// pollWsCmd reads one pending node command for the edge pool and acts on it: a tun-probe verdict
+// (burn/heal) or the panel's pin. Split out of the ticker so the whole wire — file, keying,
+// decision — is drivable end to end.
+func (b *TCP) pollWsCmd() {
+	if cmd, ok := b.pool.readWsCmd(); ok {
+		switch {
+		case cmd.Cmd == wsCmdOK:
+			// The probe found traffic crossing, so BOTH halves of the combo it measured are
+			// proven. Cleared separately: the two axes rotate independently and either can
+			// slide under a verdict.
+			if cmd.IP != "" && b.pool.clearBurn("ip", cmd.IP) {
+				b.pool.event("heal", "tun-probe", "ip:"+cmd.IP)
+			}
+			if cmd.SNI != "" && b.pool.clearBurn("sni", cmd.SNI) {
+				b.pool.event("heal", "tun-probe", "sni:"+cmd.SNI)
+			}
+		case cmd.Cmd == wsCmdFail:
+			// The verdict names the COMBO it was measured on, and that name is the whole guard:
+			// this is a ticker and the carrier rotates on its own timers, so a verdict that
+			// crossed with a rotation would otherwise condemn a combo the probe never tested.
+			// Both arms live in THIS case, never as sibling cases: a fail must not fall through
+			// to the pin arm below and select the very edge it condemns.
+			ip, sni := b.pool.activeCombo()
+			if cmd.IP == ip && cmd.SNI == sni {
+				if b.burnAdvanceWS(sni) {
+					log.Printf("core/ws: %s%s%s failed by the node's tun probe — burning the SNI and advancing", ip, activeSep, sni)
+					b.manualSwitch.Store(true) // induced drop: no fault accounting on top of the verdict
+					if c := b.curConn.Load(); c != nil {
+						(*c).Close() // unblocks serve(); dialLoop re-dials on the next combo
+					}
+				}
+			} else if cmd.SNI != "" {
+				// It moved under the verdict. Burn what was MEASURED and leave the connection
+				// alone: it is already somewhere no verdict covers.
+				log.Printf("core/ws: %s%s%s failed by the node's tun probe, but the carrier has since moved to %s%s%s — burning what was measured, staying put",
+					cmd.IP, activeSep, cmd.SNI, ip, activeSep, sni)
+				b.pool.markSuspect("sni", cmd.SNI, "tun-probe")
+			}
+		case cmd.Key != "": // panel "pin this edge" request
+			log.Printf("core/ws: select edge %s=%s (panel pin)", cmd.Kind, cmd.Key)
+			b.SelectEdge(cmd.Kind, cmd.Key)
+		}
+	}
+}
+
+// burnAdvanceWS is the ws edge pool's half of the odometer, and the exact mirror of burnAdvance: the
+// SNI is the low digit and burns, the EDGE is the high digit and only WALKS — a tun probe sees silence,
+// which names the combo it measured and never one axis, so the edge is convicted only by a whole lap of
+// SNIs failing on it. Returns whether the pool actually moved, so the caller only drops a live carrier
+// that has somewhere else to land.
+func (b *TCP) burnAdvanceWS(sni string) bool {
+	// Size the lap ONCE, at the start of the round: ELIGIBLE SNIs, before the first burn. Re-reading it
+	// every ask is the trap — each burn shrinks the count the next ask compares against, so three SNIs
+	// declare a lap after two and the edge is convicted a step early. Floored at one: with nothing else
+	// eligible, the SNI we are sitting on IS the whole experiment.
+	want := b.sniWant.Load()
+	if b.sniRot.Load() == 0 {
+		want = int64(b.pool.eligibleSNIs())
+		b.sniWant.Store(want)
+	}
+	if want < 1 {
+		want = 1
+	}
+	b.pool.markSuspect("sni", sni, "tun-probe")
+	if b.pool.isPinned() {
+		return false // the pin outlived the burn (a different axis) — it forces the edge, so do not walk
+	}
+	if n := b.sniRot.Add(1); n >= want {
+		b.pool.advanceEdgeFreshRow() // every SNI that could be tried has been — the edge is what did not vary
+		b.sniRot.Store(0)
+	}
+	return true
 }
 
 // SelectEdge pins a specific pool edge (kind "ip"|"sni", key its value) as the active one and

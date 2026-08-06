@@ -146,7 +146,7 @@ func TestCarrierWiresTheRightFingerprint(t *testing.T) {
 				t.Fatalf("DialHTTPC: %v", err)
 			}
 			t.Cleanup(func() { cli.Close() })
-			if _, _, _, err := cli.establishHTTPC(false); err == nil {
+			if _, _, _, err := cli.establishHTTPC(); err == nil {
 				t.Fatal("the establish should have failed on the self-signed certificate")
 			}
 			<-done

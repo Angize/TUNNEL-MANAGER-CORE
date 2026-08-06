@@ -242,7 +242,7 @@ func TestHTTPCClientGrpcWriteFailsInsteadOfParkingOnAStalledPeer(t *testing.T) {
 
 	b := &TCP{addr: ts.Listener.Addr().String(), ws: true, httpc: true, httpcMode: "grpc",
 		wsPath: "/", wsTLS: true, httpcTLS: &tls.Config{InsecureSkipVerify: true}}
-	conn, _, _, err := b.establishHTTPC(true)
+	conn, _, _, err := b.establishHTTPC()
 	if err != nil {
 		t.Fatalf("establishHTTPC: %v", err)
 	}

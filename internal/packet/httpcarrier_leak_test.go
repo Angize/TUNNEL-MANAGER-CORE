@@ -49,7 +49,7 @@ func TestHTTPCGrpcNoConnLeakOnRotation(t *testing.T) {
 		wsPath: "/", wsTLS: true, httpcTLS: &tls.Config{InsecureSkipVerify: true}}
 
 	establishAndRetire := func() {
-		conn, _, _, err := b.establishHTTPC(true)
+		conn, _, _, err := b.establishHTTPC()
 		if err != nil {
 			t.Fatalf("establishHTTPC: %v", err)
 		}

@@ -135,7 +135,7 @@ func TestHTTPCCarrierRoundTrip(t *testing.T) {
 	srv := echoHTTPC()
 	defer srv.Close()
 	b := &TCP{addr: srv.Listener.Addr().String(), wsPath: "/", wsTLS: false}
-	conn, _, _, err := b.establishHTTPC(true)
+	conn, _, _, err := b.establishHTTPC()
 	if err != nil {
 		t.Fatalf("establishHTTPC: %v", err)
 	}
