@@ -38,7 +38,7 @@ func burnedIn(p *PeerPool) map[string]bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := map[string]bool{}
-	for a, r := range p.health {
+	for a, r := range p.health.recs {
 		if r != nil {
 			out[a] = true
 		}

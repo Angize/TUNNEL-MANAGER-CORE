@@ -44,7 +44,7 @@ func TestTCPTunProbeBurnNamesTheEndpointItBurned(t *testing.T) {
 		t.Fatalf("the burn event names %s, but the node condemned %s", burn.Detail, gone)
 	}
 	p.mu.Lock()
-	burned := p.health[gone] != nil
+	burned := p.health.recs[gone] != nil
 	p.mu.Unlock()
 	if !burned {
 		t.Fatalf("%s was named but never burned", gone)

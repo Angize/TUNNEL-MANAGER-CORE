@@ -56,7 +56,7 @@ func TestPeerPoolNeverDeadEndsWhenAllBurned(t *testing.T) {
 		t.Fatalf("after all-burned: got %q moved=%v, want a true (advance off the failed endpoint)", a, moved)
 	}
 	p.mu.Lock()
-	na, nb := p.health["a"] != nil, p.health["b"] != nil
+	na, nb := p.health.recs["a"] != nil, p.health.recs["b"] != nil
 	p.mu.Unlock()
 	if !na || !nb {
 		t.Fatalf("both endpoints should stay burned (suspect) after all-burned, got a=%v b=%v", na, nb)
@@ -67,7 +67,7 @@ func TestPeerPoolAutoBurnOffJustRotates(t *testing.T) {
 	p := NewPeerPool([]string{"a", "b"}, false, 0, "") // auto-burn OFF
 	p.fail()
 	p.mu.Lock()
-	nb := len(p.health)
+	nb := len(p.health.recs)
 	p.mu.Unlock()
 	if nb != 0 {
 		t.Fatalf("auto-burn off must not burn, got %d burned", nb)
@@ -83,7 +83,7 @@ func TestPeerPoolSuspectToDeadBackoff(t *testing.T) {
 	p.now = func() int64 { return clk }
 	// a fails -> suspect, nextRetest = now + suspectBackoff[0]
 	p.fail()
-	rec := p.health["a"]
+	rec := p.health.recs["a"]
 	if rec == nil || rec.state != stateSuspect || rec.fails != 0 || rec.nextRetest != clk+suspectBackoff[0] {
 		t.Fatalf("first fail should make a suspect at +%ds, got %+v", suspectBackoff[0], rec)
 	}
@@ -159,7 +159,7 @@ func TestPeerPoolSelectPin(t *testing.T) {
 		t.Fatalf("fail() while pinned must stay on c: got %q moved=%v, want c false", a, moved)
 	}
 	p.mu.Lock()
-	burnedC := p.health["c"] != nil
+	burnedC := p.health.recs["c"] != nil
 	p.mu.Unlock()
 	if burnedC {
 		t.Fatal("fail() while pinned must not burn the pinned endpoint")
@@ -186,11 +186,11 @@ func TestPeerPoolProbeAllNow(t *testing.T) {
 	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
 	p.now = func() int64 { return clk }
 	p.fail() // burn a, +30s
-	if r := p.health["a"]; r == nil || r.nextRetest <= clk {
+	if r := p.health.recs["a"]; r == nil || r.nextRetest <= clk {
 		t.Fatalf("a should be burned with a future retest, got %+v", r)
 	}
 	p.probeAllNow()
-	if r := p.health["a"]; r == nil || r.nextRetest != clk {
+	if r := p.health.recs["a"]; r == nil || r.nextRetest != clk {
 		t.Fatalf("probeAllNow should pull a's retest to now, got %+v", r)
 	}
 }
@@ -376,10 +376,10 @@ func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
 	if got := b.sp.current(); got != "127.0.0.1" {
 		t.Fatalf("pool active = %q after a failed rebind; the socket never left 127.0.0.1", got)
 	}
-	if b.sp.health["127.0.0.1"] != nil {
+	if b.sp.health.recs["127.0.0.1"] != nil {
 		t.Fatal("the healthy, in-use source 127.0.0.1 was burned by a rotation that never took effect")
 	}
-	if b.sp.health["192.0.2.1"] == nil {
+	if b.sp.health.recs["192.0.2.1"] == nil {
 		t.Fatal("the unbindable candidate 192.0.2.1 was not burned — rotation will retry it every beat")
 	}
 	b.conn.Load().Close()

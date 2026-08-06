@@ -16,7 +16,7 @@ func burnUntilDue(t *testing.T, p *PeerPool, at int, clk *int64) {
 	p.cur = 0
 	p.chosen = ""
 	p.mu.Unlock()
-	r := p.health[p.addrs[at]]
+	r := p.health.recs[p.addrs[at]]
 	if r == nil {
 		t.Fatalf("burnLocked did not track %s", p.addrs[at])
 	}
@@ -58,7 +58,7 @@ func TestProactiveRotationRetriesADueBurnButNotAPendingOne(t *testing.T) {
 	p2 := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, true, 0, "")
 	p2.now = func() int64 { return clk }
 	p2.mu.Lock()
-	p2.health["10.0.0.2"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600}
+	p2.health.recs["10.0.0.2"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600}
 	p2.cur, p2.chosen = 0, ""
 	p2.mu.Unlock()
 	if a, m := p2.nextEndpoint(true); !m || a != "10.0.0.3" {
@@ -66,7 +66,7 @@ func TestProactiveRotationRetriesADueBurnButNotAPendingOne(t *testing.T) {
 	}
 	// ...and with every alternative pending, the timer must not move at all.
 	p2.mu.Lock()
-	p2.health["10.0.0.1"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600}
+	p2.health.recs["10.0.0.1"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600}
 	p2.mu.Unlock()
 	if a, m := p2.nextEndpoint(true); m {
 		t.Fatalf("nothing is eligible — the timer must stay put, it moved to %q", a)
@@ -96,7 +96,7 @@ func TestFailoverLandsOnADueEndpointAndIsNotSticky(t *testing.T) {
 			p.now = func() int64 { return clk }
 			burnUntilDue(t, p, 1, &clk) // .2 burned, retest due
 			p.mu.Lock()
-			p.health["10.0.0.3"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600} // .3 burned, NOT due
+			p.health.recs["10.0.0.3"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600} // .3 burned, NOT due
 			p.mu.Unlock()
 			// cur is .1: the failover burns it, finds nothing healthy, and takes the only DUE endpoint.
 			if a, moved := p.nextEndpoint(false); !moved || a != "10.0.0.2" {
@@ -139,10 +139,10 @@ func TestEveryAdvanceAgreesWithCurrent(t *testing.T) {
 				p.now = func() int64 { return clk }
 				p.mu.Lock()
 				for _, i := range tc.burnedDue {
-					p.health[p.addrs[i]] = &healthRec{state: stateSuspect, nextRetest: clk - 1}
+					p.health.recs[p.addrs[i]] = &healthRec{state: stateSuspect, nextRetest: clk - 1}
 				}
 				for _, i := range tc.burnedCold {
-					p.health[p.addrs[i]] = &healthRec{state: stateSuspect, nextRetest: clk + 3600}
+					p.health.recs[p.addrs[i]] = &healthRec{state: stateSuspect, nextRetest: clk + 3600}
 				}
 				p.cur = 0
 				p.mu.Unlock()
@@ -193,7 +193,7 @@ func TestTheRotationWalksEveryCombination(t *testing.T) {
 	}
 	// With only one destination eligible the source must move on EVERY beat, or the pool stops rotating.
 	dst.mu.Lock()
-	dst.health["d2"] = &healthRec{state: stateSuspect, nextRetest: dst.now() + 3600}
+	dst.health.recs["d2"] = &healthRec{state: stateSuspect, nextRetest: dst.now() + 3600}
 	dst.mu.Unlock()
 	before := src.current()
 	at = at.Add(2 * time.Minute)
@@ -214,7 +214,7 @@ func TestASourceIsOnlyBlamedAfterARealLap(t *testing.T) {
 	src := NewPeerPool([]string{"s1", "s2"}, true, 0, "")
 	src.now = func() int64 { return clk }
 	dst.mu.Lock()
-	dst.health["d2"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600} // condemned, cannot be tried
+	dst.health.recs["d2"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600} // condemned, cannot be tried
 	dst.mu.Unlock()
 
 	rc := newRotationController(dst, src)

@@ -32,7 +32,7 @@ func TestNothingButTheNodeClearsABurn(t *testing.T) {
 	rc := newRotationController(p, nil)
 	rc.success() // the carrier is up and answering on it — this must change nothing about the burn
 	p.mu.Lock()
-	stillBurned := p.health["a"] != nil
+	stillBurned := p.health.recs["a"] != nil
 	p.mu.Unlock()
 	if !stillBurned {
 		t.Fatal("a live carrier cleared a burn — only the tun probe may")
@@ -41,7 +41,7 @@ func TestNothingButTheNodeClearsABurn(t *testing.T) {
 		t.Fatal("an OK for a different endpoint must not clear this one")
 	}
 	p.mu.Lock()
-	stillBurned = p.health["a"] != nil
+	stillBurned = p.health.recs["a"] != nil
 	p.mu.Unlock()
 	if !stillBurned {
 		t.Fatal("an OK keyed elsewhere cleared the wrong endpoint")
@@ -84,7 +84,7 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 		p.mu.Unlock()
 		p.fail()
 		p.mu.Lock()
-		r := p.health["a"]
+		r := p.health.recs["a"]
 		fails, next := r.fails, r.nextRetest
 		p.mu.Unlock()
 		if fails != i || next != clk+want {
@@ -96,7 +96,7 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 	p.mu.Unlock()
 	p.fail()
 	p.mu.Lock()
-	state, next := p.health["a"].state, p.health["a"].nextRetest
+	state, next := p.health.recs["a"].state, p.health.recs["a"].nextRetest
 	p.mu.Unlock()
 	if state != stateDead || next != clk+deadRetest {
 		t.Fatalf("past the last step it must go dead at +%ds, got %s at +%d", deadRetest, state, next-clk)
@@ -109,7 +109,7 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 	p.mu.Unlock()
 	p.fail()
 	p.mu.Lock()
-	fails := p.health["a"].fails
+	fails := p.health.recs["a"].fails
 	p.mu.Unlock()
 	if fails != 0 {
 		t.Fatalf("after an OK the ladder starts over, got fails=%d", fails)
@@ -128,7 +128,7 @@ func TestProbeNowMakesEveryBurnSelectableAtOnce(t *testing.T) {
 	}
 	p.probeAllNow()
 	p.mu.Lock()
-	stillBurned := p.health["a"] != nil
+	stillBurned := p.health.recs["a"] != nil
 	p.mu.Unlock()
 	if !stillBurned {
 		t.Fatal("probe now must not declare anything healthy — only the tun probe does that")
@@ -159,13 +159,13 @@ func TestOneDestinationStillTakesTheVerdict(t *testing.T) {
 	rc.pollPins(noop, noop, rotDst, rotSrc, nil)
 
 	dst.mu.Lock()
-	dstBurned := dst.health["d1"] != nil
+	dstBurned := dst.health.recs["d1"] != nil
 	dst.mu.Unlock()
 	if dstBurned {
 		t.Error("the only destination must never be condemned — there is nothing to move to")
 	}
 	src.mu.Lock()
-	burned, cur := src.health["s1"] != nil, src.addrs[src.cur]
+	burned, cur := src.health.recs["s1"] != nil, src.addrs[src.cur]
 	src.mu.Unlock()
 	if !burned {
 		t.Fatal("the ask must reach the SOURCE: with one destination the source is the only axis left")
@@ -177,7 +177,7 @@ func TestOneDestinationStillTakesTheVerdict(t *testing.T) {
 	writeFileAtomic(dst.cmdPath(), []byte(`{"cmd":"ok","key":"d1","src":"s1"}`), 0o644)
 	rc.pollPins(noop, noop, rotDst, rotSrc, nil)
 	src.mu.Lock()
-	stillBurned := src.health["s1"] != nil
+	stillBurned := src.health.recs["s1"] != nil
 	src.mu.Unlock()
 	if stillBurned {
 		t.Error("an ok naming the source must clear it, even though the destination pool holds one entry")
@@ -194,7 +194,7 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		p.mu.Lock()
-		burned := p.health[a1] != nil
+		burned := p.health.recs[a1] != nil
 		p.mu.Unlock()
 		if burned {
 			break
@@ -209,7 +209,7 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 	deadline = time.Now().Add(15 * time.Second)
 	for {
 		p.mu.Lock()
-		burned := p.health[a1] != nil
+		burned := p.health.recs[a1] != nil
 		p.mu.Unlock()
 		if !burned {
 			break
