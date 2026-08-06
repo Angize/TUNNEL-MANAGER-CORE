@@ -12,16 +12,15 @@ import (
 func TestApplyTuning(t *testing.T) {
 	save := struct {
 		sb                 []int64
-		dr, pt, dgw        int64
-		dft                int
+		dr, pt             int64
 		im, ims, ssm, ssmn int64
 		plt                int32
 		ml, pto            time.Duration
-	}{suspectBackoff, deadRetest, pinTTL, dataGoodWindow, dataFailThreshold,
+	}{suspectBackoff, deadRetest, pinTTL,
 		idleMult, idleMinSecs, sessionStaleMult, sessionStaleMinSecs, pingLossThreshold,
 		minLiveness, probeTimeout}
 	defer func() {
-		suspectBackoff, deadRetest, pinTTL, dataGoodWindow, dataFailThreshold = save.sb, save.dr, save.pt, save.dgw, save.dft
+		suspectBackoff, deadRetest, pinTTL = save.sb, save.dr, save.pt
 		idleMult, idleMinSecs, sessionStaleMult, sessionStaleMinSecs = save.im, save.ims, save.ssm, save.ssmn
 		pingLossThreshold = save.plt
 		minLiveness, probeTimeout = save.ml, save.pto
@@ -36,15 +35,15 @@ func TestApplyTuning(t *testing.T) {
 	// Real values apply.
 	ApplyTuning(TuningInput{
 		SuspectBackoff: []int64{5, 10, 20}, DeadRetestSecs: 900, PinTTLSecs: 45,
-		DataFailThreshold: 4, DataGoodWindowSecs: 200, IdleMult: 6, IdleMinSecs: 30,
+		IdleMult: 6, IdleMinSecs: 30,
 		SessionStaleMult: 2, SessionStaleMinSecs: 8, PingLossThreshold: 5,
 		MinLivenessSecs: 12, ProbeTimeoutSecs: 7,
 	})
 	if !reflect.DeepEqual(suspectBackoff, []int64{5, 10, 20}) {
 		t.Errorf("suspectBackoff=%v", suspectBackoff)
 	}
-	if deadRetest != 900 || pinTTL != 45 || dataFailThreshold != 4 || dataGoodWindow != 200 {
-		t.Errorf("health FSM: deadRetest=%d pinTTL=%d dft=%d dgw=%d", deadRetest, pinTTL, dataFailThreshold, dataGoodWindow)
+	if deadRetest != 900 || pinTTL != 45 {
+		t.Errorf("health FSM: deadRetest=%d pinTTL=%d", deadRetest, pinTTL)
 	}
 	if idleMult != 6 || idleMinSecs != 30 || sessionStaleMult != 2 || sessionStaleMinSecs != 8 || pingLossThreshold != 5 {
 		t.Errorf("dead-detect: im=%d ims=%d ssm=%d ssmn=%d plt=%d", idleMult, idleMinSecs, sessionStaleMult, sessionStaleMinSecs, pingLossThreshold)
@@ -60,36 +59,13 @@ func TestApplyTuning(t *testing.T) {
 		t.Errorf("idleFor(2s)=%v want 30s (floor)", got)
 	}
 
-	// Regression: a SHORT custom suspect_backoff must not panic the fixed-index caller (ws_pool used a
-	// literal suspectBackoff[2]). suspectStepAt clamps to the last element instead of indexing out of
-	// range — and returns the index it used, which the caller stamps into healthRec.fails.
-	ApplyTuning(TuningInput{SuspectBackoff: []int64{7}})
-	if i, got := suspectStepAt(2); got != 7 || i != 0 { // len==1 -> clamped to [0]
-		t.Errorf("suspectStepAt(2) on a 1-element schedule = (%d, %d), want (0, 7) clamped", i, got)
-	}
-	if i, got := suspectStepAt(0); got != 7 || i != 0 {
-		t.Errorf("suspectStepAt(0) = (%d, %d), want (0, 7)", i, got)
-	}
-	ApplyTuning(TuningInput{SuspectBackoff: []int64{5, 10, 20}})
-	if i, got := suspectStepAt(2); got != 20 || i != 2 {
-		t.Errorf("suspectStepAt(2) = (%d, %d), want (2, 20)", i, got)
-	}
-	// The returned index must be the one that indexes the returned value — that pairing is what keeps
-	// healthRec.fails and nextRetest from drifting apart (the backwards-backoff bug).
-	if i, got := suspectStepAt(2); suspectBackoff[i] != got {
-		t.Errorf("suspectStepAt(2) returned index %d and value %d, but suspectBackoff[%d]=%d", i, got, i, suspectBackoff[i])
-	}
-
 	// Out-of-range values clamp instead of taking effect verbatim.
-	ApplyTuning(TuningInput{PinTTLSecs: 999999, ProbeTimeoutSecs: 999999, DataFailThreshold: -3})
+	ApplyTuning(TuningInput{PinTTLSecs: 999999, ProbeTimeoutSecs: 999999})
 	if pinTTL != 3600 {
 		t.Errorf("pinTTL not clamped: %d", pinTTL)
 	}
 	if probeTimeout != 120*time.Second {
 		t.Errorf("probeTimeout not clamped: %v", probeTimeout)
-	}
-	if dataFailThreshold != 4 { // negative is <=0 -> ignored, keeps the prior applied 4
-		t.Errorf("negative dataFailThreshold should be ignored, got %d", dataFailThreshold)
 	}
 }
 

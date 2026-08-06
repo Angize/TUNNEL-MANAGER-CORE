@@ -17,11 +17,6 @@ var (
 	// a DEAD pinned edge (a healthy pin lands within one handshake and clears itself). Kept short so a
 	// bad manual pick self-releases fast, while still outlasting a real handshake.
 	pinTTL int64 = 30
-	// dataFailThreshold: consecutive short-lived sessions on an IP before it is suspected.
-	dataFailThreshold = 2
-	// dataGoodWindow (sec): only blame an edge for a short session if SOME edge sustained a session
-	// this recently — so a whole-server/local outage (every edge dies fast) never burns the pool.
-	dataGoodWindow int64 = 120
 )
 
 // Category 2 — dead-detection / self-heal windows (derived from the per-tunnel keepalive):
@@ -54,8 +49,6 @@ type TuningInput struct {
 	SuspectBackoff      []int64
 	DeadRetestSecs      int64
 	PinTTLSecs          int64
-	DataFailThreshold   int
-	DataGoodWindowSecs  int64
 	IdleMult            int64
 	IdleMinSecs         int64
 	SessionStaleMult    int64
@@ -87,12 +80,6 @@ func ApplyTuning(t TuningInput) {
 	if t.PinTTLSecs > 0 {
 		pinTTL = tclamp(t.PinTTLSecs, 1, 3600)
 	}
-	if t.DataFailThreshold > 0 {
-		dataFailThreshold = tclamp(t.DataFailThreshold, 1, 100)
-	}
-	if t.DataGoodWindowSecs > 0 {
-		dataGoodWindow = tclamp(t.DataGoodWindowSecs, 1, 86400)
-	}
 	if t.IdleMult > 0 {
 		idleMult = tclamp(t.IdleMult, 1, 100)
 	}
@@ -114,20 +101,6 @@ func ApplyTuning(t TuningInput) {
 	if t.ProbeTimeoutSecs > 0 {
 		probeTimeout = time.Duration(tclamp(t.ProbeTimeoutSecs, 1, 120)) * time.Second
 	}
-}
-
-// suspectStepAt returns the i-th suspect backoff step AND the index it actually used, clamped to the
-// LAST element when the config-tunable schedule is shorter than i+1, so a short custom suspect_backoff
-// cannot index out of range. It returns the INDEX because a caller entering the FSM at a fixed step must
-// stamp healthRec.fails with that same index — retestBackoff does fails++ and then reads the schedule.
-func suspectStepAt(i int) (int, int64) {
-	if n := len(suspectBackoff); i >= n {
-		i = n - 1
-	}
-	if i < 0 {
-		i = 0
-	}
-	return i, suspectBackoff[i]
 }
 
 // tclamp clamps v to [lo, hi]. One generic over the integer widths the tuning knobs use (was two

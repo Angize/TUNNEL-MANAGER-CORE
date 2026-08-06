@@ -58,7 +58,7 @@ const (
 	stateDead    = "dead"    // failed enough retests; retested only on the slow interval
 )
 
-// suspectBackoff, deadRetest, dataFailThreshold and dataGoodWindow are the pool health-FSM timings —
+// suspectBackoff and deadRetest are the pool health-FSM timings —
 // now operator-tunable package vars, defined with their defaults in tuning.go.
 
 // healthRec tracks one non-healthy pool entry. fails counts failed retests since it entered
@@ -84,18 +84,16 @@ type wsPool struct {
 	autoBurn    bool
 	statusPath  string
 	active      string
-	rotDegraded bool           // true once the healthy-IP count fell below 2 (rotation paused); drives the degraded/restored event
-	dataFail    map[string]int // per-IP count of consecutive short-lived (data-plane-fault) sessions
-	lastGood    int64          // unix time of the last SUSTAINED session on any edge (outage guard)
-	hb          int64          // unix-seconds of the carrier's lastRx — periodic liveness heartbeat
-	dw          int64          // resolved dead-window in seconds — the single number a reader ages hb against
-	events      []coreEvent    // rolling ring of core-observed events (down/burn) for the panel log
-	evSeq       int64          // monotonic sequence so the panel can consume each event exactly once
-	wasDown     bool           // a genuine carrier down is pending its matching "up" (down/reconnect pairing)
-	pinIP       string         // operator-pinned IP: current() forces it until pinUntil (one-shot jump)
-	pinSNI      string         // operator-pinned SNI: current() forces it until pinUntil
-	pinUntil    int64          // unix time the pin is honoured until; after it, normal rotation resumes
-	now         func() int64   // injectable clock (unix seconds); overridden in tests
+	rotDegraded bool         // true once the healthy-IP count fell below 2 (rotation paused); drives the degraded/restored event
+	hb          int64        // unix-seconds of the carrier's lastRx — periodic liveness heartbeat
+	dw          int64        // resolved dead-window in seconds — the single number a reader ages hb against
+	events      []coreEvent  // rolling ring of core-observed events (down/burn) for the panel log
+	evSeq       int64        // monotonic sequence so the panel can consume each event exactly once
+	wasDown     bool         // a genuine carrier down is pending its matching "up" (down/reconnect pairing)
+	pinIP       string       // operator-pinned IP: current() forces it until pinUntil (one-shot jump)
+	pinSNI      string       // operator-pinned SNI: current() forces it until pinUntil
+	pinUntil    int64        // unix time the pin is honoured until; after it, normal rotation resumes
+	now         func() int64 // injectable clock (unix seconds); overridden in tests
 }
 
 // pinTTL (manual-pin force window, dead-pin self-release cap) is an operator-tunable package var,
@@ -139,63 +137,9 @@ func (p *wsPool) down(code, detail string) {
 
 func newWSPool(ips []string, snis []wsSNIEntry, autoBurn bool, statusPath string) *wsPool {
 	p := &wsPool{ips: ips, snis: snis, ipHealth: map[string]*healthRec{}, sniHealth: map[string]*healthRec{},
-		dataFail: map[string]int{}, autoBurn: autoBurn, statusPath: statusPath, now: func() int64 { return time.Now().Unix() }}
+		autoBurn: autoBurn, statusPath: statusPath, now: func() int64 { return time.Now().Unix() }}
 	p.writeStatus()
 	return p
-}
-
-// dataSuccess records a SUSTAINED session on ip: it clears the IP's data-plane fault counter and
-// stamps the fleet "something worked recently" clock, which suppresses data-plane burns during a
-// whole-server / local outage. Called by the pool client when a carrier lived long enough to be
-// considered genuinely healthy.
-func (p *wsPool) dataSuccess(ip string) {
-	p.mu.Lock()
-	delete(p.dataFail, ip)
-	p.lastGood = p.now()
-	p.mu.Unlock()
-}
-
-// dataFailure records a SHORT-lived session on ip — the handshake succeeded but the data plane died
-// quickly (throttle / blackhole-after-handshake), which the connect-time prober cannot see. After
-// dataFailThreshold consecutive short deaths the IP is marked suspect so rotation skips it. Guarded
-// against false burns: autoBurn on, a healthy alternative exists, and a good session happened recently.
-func (p *wsPool) dataFailure(ip string) {
-	if !p.autoBurn {
-		return
-	}
-	p.mu.Lock()
-	burned := false
-	recentGood := p.lastGood > 0 && p.now()-p.lastGood < dataGoodWindow
-	hasAlt := false
-	for _, o := range p.ips {
-		if o != ip && p.ipHealth[o] == nil {
-			hasAlt = true
-			break
-		}
-	}
-	unpinned := false
-	if recentGood && hasAlt {
-		p.dataFail[ip]++
-		if p.dataFail[ip] >= dataFailThreshold && p.ipHealth[ip] == nil {
-			// A data-plane suspect starts on a LONGER backoff (step 2), and fails MUST match that step or the FSM
-			// runs backwards: retestBackoff does fails++ then reads suspectBackoff[fails], so leaving fails=0
-			// schedules a SHORTER wait than the initial one. suspectStepAt returns the clamped index together
-			// with its value, precisely so the two cannot drift apart here.
-			step, wait := suspectStepAt(2)
-			p.ipHealth[ip] = &healthRec{state: stateSuspect, fails: step, nextRetest: p.now() + wait}
-			p.dataFail[ip] = 0
-			burned = true
-			unpinned = p.releasePinLocked("ip", ip) // a pinned edge proven data-dead: release so we recover now
-		}
-	}
-	p.mu.Unlock()
-	if burned {
-		p.event("burn", "throttle", "ip:"+ip) // handshake-OK-but-data-dead: throttled/blackholed
-		if unpinned {
-			p.event("pool", "pin_dropped", "ip:"+ip) // pinned edge proven blocked -> pin auto-released, recover now
-		}
-		p.reassessRotation() // this burn may have left only one healthy edge -> rotation paused
-	}
 }
 
 // healthMap returns the record map for the given axis ("ip" or "sni"). Caller holds the lock.
