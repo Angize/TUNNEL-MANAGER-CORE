@@ -400,8 +400,12 @@ type TCP struct {
 	// destRot counts destination burns since the last healthy session, so the SOURCE pool is only walked
 	// once the destination pool has cycled through every endpoint against it. Written by the dial loop and
 	// by the rotation timer (which reaches burnAdvance through buildWarm), hence atomic.
-	destRot   atomic.Int64
-	destWant  atomic.Int64 // ...and how many that round set out to try, snapshotted before the first burn
+	destRot  atomic.Int64
+	destWant atomic.Int64 // ...and how many that round set out to try, snapshotted before the first burn
+	// pinFails counts consecutive proven-dead rounds while an operator pin is in force, so a pin costs
+	// a SECOND OPINION to break rather than being either absolute or worth one measurement. One field
+	// for both pools: a carrier has direct endpoints or a CDN edge pool, never both.
+	pinFails  atomic.Int64
 	destTick  atomic.Int32 // timed-rotation beats since the source last moved (the odometer's low digit)
 	sniRot    atomic.Int64 // ws edge pool: SNI burns on this edge since the last healthy session
 	sniWant   atomic.Int64 // ...and how many that round set out to try, snapshotted before the first burn
@@ -510,8 +514,24 @@ func (b *TCP) sourceIP() string {
 // PUBLISHES NOTHING — the caller owns every event, because make-before-break burns an endpoint the live
 // carrier never went to. carrierGone=false (a failed warm build) advances without burning or announcing.
 func (b *TCP) burnAdvance(carrierGone bool) (string, bool) {
+	// An operator pin is a PREFERENCE, not a hostage-taking: it holds off failover, but only until the
+	// probe has said the same thing pinFailRelease times. Freezing outright left a tunnel pinned to a
+	// blocked endpoint down for the whole of pinTTL while udp/raw/flux recovered from the identical
+	// evidence — this is that same second opinion, on the same counter.
 	if (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned()) {
-		return "", false // an operator pin freezes failover: current()/sourceIP() force the pinned endpoint
+		if n := b.pinFails.Add(1); int(n) < pinFailRelease {
+			return "", false
+		}
+		b.pinFails.Store(0)
+		if b.pp != nil {
+			b.pp.releasePin()
+		}
+		if b.sp != nil {
+			b.sp.releasePin()
+		}
+		// pins cleared — fall through and burn+advance off the blocked endpoint this round
+	} else {
+		b.pinFails.Store(0) // not pinned -> a later pin starts its release count fresh
 	}
 	walkSource := func() { b.rotateSourceTCP(!carrierGone) }
 	if b.pp == nil {
@@ -2626,6 +2646,19 @@ func (b *TCP) pollWsCmd() {
 // SNIs failing on it. Returns whether the pool actually moved, so the caller only drops a live carrier
 // that has somewhere else to land.
 func (b *TCP) burnAdvanceWS(sni string) bool {
+	// Same second opinion as every other carrier. It used to release on the FIRST verdict (markSuspect
+	// dropped the pin as it burned), which broke the operator's pick on one measurement while udp/raw/flux
+	// asked for two.
+	if b.pool.isPinned() {
+		if n := b.pinFails.Add(1); int(n) < pinFailRelease {
+			return false
+		}
+		b.pinFails.Store(0)
+		b.pool.releasePin()
+		// pin cleared — fall through and burn+advance off the blocked combination this round
+	} else {
+		b.pinFails.Store(0)
+	}
 	// Size the lap ONCE, at the start of the round: ELIGIBLE SNIs, before the first burn. Re-reading it
 	// every ask is the trap — each burn shrinks the count the next ask compares against, so three SNIs
 	// declare a lap after two and the edge is convicted a step early. Floored at one: with nothing else
@@ -2639,9 +2672,6 @@ func (b *TCP) burnAdvanceWS(sni string) bool {
 		want = 1
 	}
 	b.pool.markSuspect("sni", sni, "tun-probe")
-	if b.pool.isPinned() {
-		return false // the pin outlived the burn (a different axis) — it forces the edge, so do not walk
-	}
 	if n := b.sniRot.Add(1); n >= want {
 		b.pool.advanceEdgeFreshRow() // every SNI that could be tried has been — the edge is what did not vary
 		b.sniRot.Store(0)

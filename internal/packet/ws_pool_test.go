@@ -500,10 +500,14 @@ func TestPinOneShot(t *testing.T) {
 	}
 }
 
-// TestPinReleasesOnProvenBlock locks in the pin-safety rule: pinning an edge that turns out to be
-// genuinely blocked must not hang the tunnel for the whole pinTTL. When a differential probe PROVES the
-// pinned edge blocked, the pin self-releases at once so current() falls back to a healthy edge
-// immediately, instead of the tunnel dropping for the rest of the window and never landing.
+// TestPinReleasesOnProvenBlock locks in the pin-safety rule at the POOL level: pinning an edge that
+// turns out to be genuinely blocked must not hang the tunnel for the whole pinTTL. WHEN that release
+// happens is the verdict path's call and is asserted in pin_is_a_preference_test.go (after
+// pinFailRelease proven-dead rounds, the same second opinion every other carrier asks for). What this
+// one pins is the release itself: both axes cleared, the fallback immediate, and exactly one event.
+//
+// It used to assert that markSuspect released the pin by itself, which made ONE measurement override the
+// operator while udp/raw/flux wanted two.
 func TestPinReleasesOnProvenBlock(t *testing.T) {
 	p, _ := clockPool([]string{"a", "b"}, snis("x"), true, "")
 	if !p.selectEntry("ip", "b") { // operator jumps onto b
@@ -512,19 +516,21 @@ func TestPinReleasesOnProvenBlock(t *testing.T) {
 	if ip, _, _ := p.current(); ip != "b" {
 		t.Fatalf("pin must force b, got %q", ip)
 	}
-	// The dial onto b fails and the differential probe proves b blocked -> markSuspect("ip","b").
-	p.markSuspect("ip", "b", "ip_blocked")
-	if p.isPinned() {
-		t.Fatal("a proven block of the pinned edge must release the pin, not hold it for pinTTL")
+	// A burn ALONE must not break the operator's pick any more.
+	p.markSuspect("ip", "b", "tun-probe")
+	if !p.isPinned() {
+		t.Fatal("one burn released the pin — the operator's pick costs a second opinion to override")
 	}
-	if p.pinIP != "" || p.pinUntil != 0 {
+
+	p.releasePin() // what the verdict path calls once the pin has absorbed its rounds
+	if p.isPinned() || p.pinIP != "" || p.pinUntil != 0 {
 		t.Fatalf("pin state not cleared: pinIP=%q pinUntil=%d", p.pinIP, p.pinUntil)
 	}
 	// Recovery is immediate: current() now returns the healthy edge a, not the blocked pinned b.
 	if ip, _, ok := p.current(); !ok || ip != "a" {
 		t.Fatalf("after the pin released, current() must fall back to healthy a, got %q ok=%v", ip, ok)
 	}
-	// The auto-release is surfaced to the operator as a pool/pin_dropped event.
+	// The release is surfaced to the operator as a pool/pin_dropped event.
 	got := 0
 	p.mu.Lock()
 	for _, e := range p.events {
