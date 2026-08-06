@@ -97,7 +97,7 @@ func ruleMatches(t *testing.T, m []string, p nfPacket) bool {
 func ourFrame(profile string, isClient, marked bool) nfPacket {
 	body := []byte("sealed-frame-bytes-0123456789abcdef")
 	src, dst := net.IPv4(10, 9, 0, 1), net.IPv4(10, 9, 0, 2)
-	pkt := rawEncap(profile, body, src, dst, isClient, 0xBEEF, 0, 7, 9, 0x11223344)
+	pkt := rawEncap(profile, body, src, dst, isClient, 0xBEEF, 0, 0, 7, 9, 0x11223344)
 	role := "server"
 	if isClient {
 		role = "client"
@@ -139,7 +139,7 @@ func kernelAnswers(profile string, isClient bool) []nfPacket {
 	case "tcp":
 		// Derived from the physics, not from the rule: a kernel that cannot deliver a segment
 		// resets by REVERSING it, so build the answer out of the frame the PEER sends us.
-		psp, pdp := rawPorts(!isClient, 0)
+		psp, pdp := rawPorts(!isClient, 0, 0)
 		return []nfPacket{{what: "the kernel's RST", proto: protoTCP, icmpType: -1,
 			sport: int(pdp), dport: int(psp), rst: true}}
 	}
@@ -157,7 +157,7 @@ func TestRawAntiLeakNeverMatchesOurOwnFrames(t *testing.T) {
 		for _, isClient := range []bool{true, false} {
 			for _, marked := range []bool{true, false} {
 				ours := ourFrame(profile, isClient, marked)
-				for _, m := range rawDropMatches(leakPeer, profile, 0, isClient, marked) {
+				for _, m := range rawDropMatches(leakPeer, profile, 0, isClient, marked, false) {
 					if ruleMatches(t, m, ours) {
 						t.Fatalf("raw/%s (isClient=%v marked=%v): the anti-leak rule %v matches %s — this silently black-holes the tunnel",
 							profile, isClient, marked, m, ours.what)
@@ -181,7 +181,7 @@ func TestRawAntiLeakSuppressesEveryMeasuredKernelAnswer(t *testing.T) {
 		for _, isClient := range roles {
 			for _, ans := range kernelAnswers(profile, isClient) {
 				covered := false
-				for _, m := range rawDropMatches(leakPeer, profile, 0, isClient, true) {
+				for _, m := range rawDropMatches(leakPeer, profile, 0, isClient, true, false) {
 					if ruleMatches(t, m, ans) {
 						covered = true
 					}
@@ -200,15 +200,15 @@ func TestRawAntiLeakSuppressesEveryMeasuredKernelAnswer(t *testing.T) {
 // mark the rule cannot exempt our own downstream frames, and installing it anyway would take the
 // tunnel dark. Leaking is bad; going dark is worse.
 func TestRawIcmpRuleIsSkippedWithoutTheMark(t *testing.T) {
-	if got := rawDropMatches(leakPeer, "icmp", 0, false, false); len(got) != 0 {
+	if got := rawDropMatches(leakPeer, "icmp", 0, false, false, false); len(got) != 0 {
 		t.Fatalf("an icmp server with no SO_MARK still installed %v — that drops its own downstream frames", got)
 	}
-	if got := rawDropMatches(leakPeer, "icmp", 0, false, true); len(got) != 1 {
+	if got := rawDropMatches(leakPeer, "icmp", 0, false, true, false); len(got) != 1 {
 		t.Fatalf("an icmp server WITH the mark should install exactly one rule, got %v", got)
 	}
 	// The client sends echo requests, which no kernel answers — it must install nothing either way.
 	for _, marked := range []bool{true, false} {
-		if got := rawDropMatches(leakPeer, "icmp", 0, true, marked); len(got) != 0 {
+		if got := rawDropMatches(leakPeer, "icmp", 0, true, marked, false); len(got) != 0 {
 			t.Fatalf("an icmp CLIENT (marked=%v) installed %v; nothing answers its echo replies", marked, got)
 		}
 	}
@@ -244,7 +244,7 @@ func TestRawPortedProfilesReverseTheFlow(t *testing.T) {
 func TestRawAntiLeakLeavesQuietProfilesAlone(t *testing.T) {
 	for _, profile := range []string{"bare", "ipip", "gre", "esp"} {
 		for _, isClient := range []bool{true, false} {
-			if got := rawDropMatches(leakPeer, profile, 0, isClient, true); len(got) != 0 {
+			if got := rawDropMatches(leakPeer, profile, 0, isClient, true, false); len(got) != 0 {
 				t.Fatalf("raw/%s installed %v; no kernel handler answers that protocol", profile, got)
 			}
 		}

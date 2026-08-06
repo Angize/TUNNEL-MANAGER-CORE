@@ -20,9 +20,12 @@
 package packet
 
 import (
+	"crypto/rand"
 	"encoding/binary"
+	"io"
 	"net"
 	"sort"
+	"time"
 )
 
 // IP protocol numbers, one per profile.
@@ -84,6 +87,16 @@ func rawHeaderLen(profile string) int { return rawHeaderLens[profile] }
 const (
 	rawClientPort = 51820
 	rawServerPort = 443
+	// The client source port may instead ROTATE for the life of the tunnel, over Linux's own ephemeral
+	// range. A stateful middlebox keys a flow on the whole 4-tuple, so one constant source port means
+	// every packet of every raw tunnel from this host hits the same 4-tuple — measured burned on the
+	// Iran path. These bounds are not configurable: the ephemeral range is what an ordinary client's
+	// source port looks like, and any narrower or shifted range is MORE distinctive, not less.
+	rawSportLo = 32768
+	rawSportHi = 60999
+	// rawSportEvery is the middle of the re-roll interval; each wait is jittered around it (jitterFrac),
+	// because a port that changes on an exact clock is itself the period a DPI would lock onto.
+	rawSportEvery = 60 * time.Second
 	// rawTCPWindow is the advertised window on the synthetic tcp profile. A fixed 0xffff
 	// paired with a zero ACK reads as a forged segment to a stateful DPI; a realistic,
 	// steady-state window plus a non-zero ACK (set in wire()) make it look like a live
@@ -97,15 +110,39 @@ const (
 // NEW inbound flow a NAT drops, and two half-flows aimed at each other are a signature in themselves.
 //
 // srv is the configured server port; 0 keeps rawServerPort. Both ends must be told the same number, or
-// each stamps a pair the other's anti-leak rule does not match.
-func rawPorts(isClient bool, srv uint16) (sport, dport uint16) {
+// each stamps a pair the other's anti-leak rule does not match. cli is the CLIENT's port for this
+// conversation — its own current one on the client, the one it last authenticated as on the server —
+// and 0 keeps rawClientPort, which is the whole of the fixed mode.
+func rawPorts(isClient bool, srv, cli uint16) (sport, dport uint16) {
 	if srv == 0 {
 		srv = rawServerPort
 	}
-	if isClient {
-		return rawClientPort, srv
+	if cli == 0 {
+		cli = rawClientPort
 	}
-	return srv, rawClientPort
+	if isClient {
+		return cli, srv
+	}
+	return srv, cli
+}
+
+// rawRollSport draws the next client source port. Uniform over the ephemeral range via rejection
+// sampling — a plain modulo would bias the low ports, and a source-port histogram skewed to one end of
+// the range is exactly the kind of tell the rotation exists to remove. Returns 0 on a rand error, which
+// every caller reads as "keep the port you have".
+func rawRollSport() uint16 {
+	const span = rawSportHi - rawSportLo + 1
+	limit := 65536 - (65536 % span) // reject the short tail so the modulo below is uniform
+	for i := 0; i < 8; i++ {
+		var rb [2]byte
+		if _, err := io.ReadFull(rand.Reader, rb[:]); err != nil {
+			return 0
+		}
+		if v := int(binary.BigEndian.Uint16(rb[:])); v < limit {
+			return uint16(rawSportLo + v%span)
+		}
+	}
+	return 0
 }
 
 // RawProfileHasPorts reports whether a profile forges an L4 header with PORTS in it, and so has a
@@ -186,7 +223,7 @@ func rawEffProto(profile string, rawProto int) (int, bool) {
 // endpoint IPs, needed for the TCP checksum; isClient selects the direction-dependent fields; id/seq make
 // the ICMP/TCP headers look like a live flow; spi is the per-session ESP SPI; port is the configured
 // tcp/udp server port (0 = the default 443).
-func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port uint16, seq, ack, spi uint32) []byte {
+func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi uint32) []byte {
 	switch rawProfiles[profile] {
 	case protoBare, protoIPIP:
 		return payload // native / IP-in-IP: the sealed frame is the whole payload
@@ -212,7 +249,7 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoUDP:
-		sp, dp := rawPorts(isClient, port)
+		sp, dp := rawPorts(isClient, port, cport)
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		binary.BigEndian.PutUint16(h[0:2], sp)
 		binary.BigEndian.PutUint16(h[2:4], dp)
@@ -232,7 +269,7 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		// (tcpseg.go).
 		// No options: these are the carrier's OWN frames, with no kernel TCP beside them to be
 		// told apart from, and adding any would change the wire format.
-		sp, dp := rawPorts(isClient, port)
+		sp, dp := rawPorts(isClient, port, cport)
 		return buildTCPSeg(src, dst, sp, dp, seq, ack, tcpPshAck, rawTCPWindow, nil, payload)
 
 	case protoESP:
@@ -312,7 +349,12 @@ func splitmix64(x uint64) uint64 {
 // may not include the outer IPv4 header depending on the platform, so rawDecap detects a genuine one
 // (version 4, total-length and protocol matching) and strips it only then. proto is the EFFECTIVE outer
 // protocol number, used only to recognise that header; the stripping itself keys off the PROFILE.
-func rawDecap(profile string, proto int, pkt []byte) ([]byte, bool) {
+// sport is the SOURCE port off the carrier header, 0 for a profile that forges none. It is read here
+// rather than by the caller because only this function knows whether the read included an IPv4 header,
+// and a second copy of that decision is a second thing to get wrong. It is UNAUTHENTICATED at this
+// point -- anyone can send bytes with any port in them -- so a caller may only commit it after the
+// inner AEAD tag has verified, exactly like the peer address.
+func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16, ok bool) {
 	framing := rawProfiles[profile]
 	if len(pkt) >= 20 && pkt[0]>>4 == 4 {
 		ihl := int(pkt[0]&0x0f) * 4
@@ -326,19 +368,27 @@ func rawDecap(profile string, proto int, pkt []byte) ([]byte, bool) {
 	}
 	switch framing {
 	case protoBare, protoIPIP:
-		return pkt, true
+		return pkt, 0, true
 	case protoTCP:
 		// The only VARIABLE header: read its own data offset rather than the table, so a peer that
 		// ever adds an option still decodes.
 		if len(pkt) < 20 {
-			return nil, false
+			return nil, 0, false
 		}
 		off := int(pkt[12]>>4) * 4 // data offset word count -> bytes
-		return skip(pkt, off)
-	case protoGRE, protoICMP, protoUDP, protoESP, protoAH, protoEtherIP, protoIPComp, protoL2TPv3:
-		return skip(pkt, rawHeaderLen(profile))
+		b, ok := skip(pkt, off)
+		return b, binary.BigEndian.Uint16(pkt[0:2]), ok
+	case protoUDP:
+		if len(pkt) < rawHeaderLen(profile) {
+			return nil, 0, false
+		}
+		b, ok := skip(pkt, rawHeaderLen(profile))
+		return b, binary.BigEndian.Uint16(pkt[0:2]), ok
+	case protoGRE, protoICMP, protoESP, protoAH, protoEtherIP, protoIPComp, protoL2TPv3:
+		b, ok := skip(pkt, rawHeaderLen(profile))
+		return b, 0, ok
 	}
-	return nil, false
+	return nil, 0, false
 }
 
 func skip(pkt []byte, n int) ([]byte, bool) {
