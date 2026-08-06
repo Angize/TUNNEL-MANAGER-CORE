@@ -10,7 +10,7 @@ import (
 // wsVerdict writes one command file exactly as the node does, then runs the poll that reads it. It goes
 // through pollWsCmd on purpose: the keying this file is about lives in that switch, not in any pool
 // method, so a test that called the pool directly would pass while the wire stayed broken.
-func wsVerdict(t *testing.T, b *TCP, c wsCmd) {
+func wsVerdict(t *testing.T, b *TCP, c poolCmd) {
 	t.Helper()
 	data, err := json.Marshal(c)
 	if err != nil {
@@ -63,7 +63,7 @@ func TestWSFailBurnsWhatItMeasured(t *testing.T) {
 		t.Fatalf("advance() did not change the SNI (%s) — the test cannot show the stale case", sni.host)
 	}
 
-	wsVerdict(t, b, wsCmd{Cmd: wsCmdFail, IP: measuredIP, SNI: measuredSNI})
+	wsVerdict(t, b, poolCmd{Cmd: cmdFail, IP: measuredIP, SNI: measuredSNI})
 
 	burned := wsBurned(b.pool, "sni")
 	if !burned[measuredSNI] {
@@ -87,7 +87,7 @@ func TestWSVerdictWalksTheMatrix(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		ip, sni, _ := b.pool.current()
 		b.pool.setActive(activeLabel(ip, sni.host))
-		wsVerdict(t, b, wsCmd{Cmd: wsCmdFail, IP: ip, SNI: sni.host})
+		wsVerdict(t, b, poolCmd{Cmd: cmdFail, IP: ip, SNI: sni.host})
 		if got, _, _ := b.pool.current(); i < 3 && got != startIP {
 			t.Fatalf("the edge moved after %d of 3 SNIs (%s -> %s) — it is convicted too early", i, startIP, got)
 		}
@@ -105,7 +105,7 @@ func TestWSOKClearsBothAxes(t *testing.T) {
 	b.pool.markSuspect("ip", "e1", "test")
 	b.pool.markSuspect("sni", "s1", "test")
 
-	wsVerdict(t, b, wsCmd{Cmd: wsCmdOK, IP: "e1", SNI: "s1"})
+	wsVerdict(t, b, poolCmd{Cmd: cmdOK, IP: "e1", SNI: "s1"})
 
 	if wsBurned(b.pool, "ip")["e1"] {
 		t.Fatal("the edge stayed burned while the probe watched it carry")
@@ -122,7 +122,7 @@ func TestWSStaleOKClearsOnlyWhatItMeasured(t *testing.T) {
 	b.pool.markSuspect("sni", "s1", "test")
 	b.pool.markSuspect("sni", "s2", "test")
 
-	wsVerdict(t, b, wsCmd{Cmd: wsCmdOK, IP: "e1", SNI: "s1"})
+	wsVerdict(t, b, poolCmd{Cmd: cmdOK, IP: "e1", SNI: "s1"})
 
 	if wsBurned(b.pool, "sni")["s1"] {
 		t.Fatal("s1 was measured carrying and stayed burned")
@@ -137,7 +137,7 @@ func TestWSStaleOKClearsOnlyWhatItMeasured(t *testing.T) {
 func TestWSPinStillWorks(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2"})
 
-	wsVerdict(t, b, wsCmd{Kind: "ip", Key: "e2"})
+	wsVerdict(t, b, poolCmd{Kind: "ip", Key: "e2"})
 
 	if got, _, _ := b.pool.current(); got != "e2" {
 		t.Fatalf("the panel's pin did not land: current edge is %s, want e2", got)
