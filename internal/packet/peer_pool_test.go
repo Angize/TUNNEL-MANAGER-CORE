@@ -171,11 +171,17 @@ func TestPeerPoolSelectPin(t *testing.T) {
 	if p.isPinned() {
 		t.Fatal("pinLanded on the pinned endpoint must release the pin")
 	}
-	// After the TTL a stale pin self-releases even without a land.
+	// A pin that CANNOT land releases on the core's own evidence — no clock is involved.
 	p.selectEntry("a")
-	clk += pinTTL + 1
+	for i := 1; i < pinFailRelease; i++ {
+		p.pinAttemptFailed("a")
+		if !p.isPinned() {
+			t.Fatalf("attempt %d of %d released the pin — one failure is not evidence", i, pinFailRelease)
+		}
+	}
+	p.pinAttemptFailed("a")
 	if p.isPinned() {
-		t.Fatal("a pin past its TTL must self-release")
+		t.Fatalf("after %d failed attempts on the pinned endpoint the pin must go", pinFailRelease)
 	}
 }
 
@@ -500,13 +506,14 @@ func TestPeerPoolExpirePinFlushesStatus(t *testing.T) {
 	if readPin() != "b" {
 		t.Fatalf("status should show pinned b, got %q", readPin())
 	}
-	p.expirePinIfLapsed() // still within TTL -> no change
+	p.pinAttemptFailed("zzz") // a failure somewhere else says nothing about this pin
 	if readPin() != "b" {
-		t.Fatalf("pin within its TTL must stay in the status file, got %q", readPin())
+		t.Fatalf("a failure on another endpoint must not touch the pin, got %q", readPin())
 	}
-	clk += pinTTL + 1 // TTL lapses
-	p.expirePinIfLapsed()
+	for i := 0; i < pinFailRelease; i++ {
+		p.pinAttemptFailed("b")
+	}
 	if readPin() != "" {
-		t.Fatalf("status must clear the pin once its TTL lapses, got %q", readPin())
+		t.Fatalf("the status file must clear the pin the moment it is released, got %q", readPin())
 	}
 }

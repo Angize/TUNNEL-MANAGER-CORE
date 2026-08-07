@@ -170,7 +170,7 @@ func wakeLoop(ch chan struct{}) {
 }
 
 // pinFailRelease is how many proven-dead rounds a manual pin absorbs before it auto-releases, so the
-// tunnel recovers instead of freezing on a blocked endpoint for the rest of pinTTL. A round is now one
+// tunnel recovers instead of freezing on a blocked endpoint indefinitely. A round is now one
 // node-driven failover ask — the node has already confirmed the silence over two sweeps before it asks,
 // so two of them is a deliberate second opinion, not a retry count.
 const pinFailRelease = 2
@@ -362,7 +362,7 @@ func (b *UDP) adoptSourceUDP() {
 		log.Printf("core/udp: pinned source to %s", host)
 		// THIS is the landing. A source swap keeps the AEAD session, so no handshake follows that anyone
 		// could read one off, and the success path that releases a pin only runs when something failed
-		// first — so on a healthy tunnel the operator's jump would sit "in progress" for the whole pinTTL.
+		// first — so on a healthy tunnel the operator's jump would sit "in progress" indefinitely.
 		b.sp.pinLandedOn(addr)
 		// Silent, like the ws edge pool: a manual source "make this active" changes only the active source
 		// (the source pool's own status file reflects it). The session survives, so there's nothing to
@@ -370,7 +370,7 @@ func (b *UDP) adoptSourceUDP() {
 		return
 	}
 	// The rebind failed, so the socket never left the old source and the jump did NOT land. Leaving the pin
-	// live holds the whole pinTTL forcing a source the host cannot bind, and the ordinary success path then
+	// live holds indefinitely forcing a source the host cannot bind, and the ordinary success path then
 	// releases it as though it HAD landed. End the jump — it is momentary, not a lock — and burn the entry,
 	// in that order, since failWith refuses to touch a pinned one. Unconditional, like adoptableSource.
 	if b.sp.pinCannotLand(addr) {

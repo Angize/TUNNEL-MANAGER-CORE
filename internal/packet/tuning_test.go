@@ -12,15 +12,15 @@ import (
 func TestApplyTuning(t *testing.T) {
 	save := struct {
 		sb                 []int64
-		dr, pt             int64
+		dr                 int64
 		im, ims, ssm, ssmn int64
 		plt                int32
 		ml, pto            time.Duration
-	}{suspectBackoff, deadRetest, pinTTL,
+	}{suspectBackoff, deadRetest,
 		idleMult, idleMinSecs, sessionStaleMult, sessionStaleMinSecs, pingLossThreshold,
 		minLiveness, probeTimeout}
 	defer func() {
-		suspectBackoff, deadRetest, pinTTL = save.sb, save.dr, save.pt
+		suspectBackoff, deadRetest = save.sb, save.dr
 		idleMult, idleMinSecs, sessionStaleMult, sessionStaleMinSecs = save.im, save.ims, save.ssm, save.ssmn
 		pingLossThreshold = save.plt
 		minLiveness, probeTimeout = save.ml, save.pto
@@ -28,13 +28,13 @@ func TestApplyTuning(t *testing.T) {
 
 	// A zero input must be a no-op: every default survives.
 	ApplyTuning(TuningInput{})
-	if pinTTL != save.pt || deadRetest != save.dr || !reflect.DeepEqual(suspectBackoff, save.sb) {
-		t.Fatalf("zero input mutated a default: pinTTL=%d deadRetest=%d backoff=%v", pinTTL, deadRetest, suspectBackoff)
+	if deadRetest != save.dr || !reflect.DeepEqual(suspectBackoff, save.sb) {
+		t.Fatalf("zero input mutated a default: deadRetest=%d backoff=%v", deadRetest, suspectBackoff)
 	}
 
 	// Real values apply.
 	ApplyTuning(TuningInput{
-		SuspectBackoff: []int64{5, 10, 20}, DeadRetestSecs: 900, PinTTLSecs: 45,
+		SuspectBackoff: []int64{5, 10, 20}, DeadRetestSecs: 900,
 		IdleMult: 6, IdleMinSecs: 30,
 		SessionStaleMult: 2, SessionStaleMinSecs: 8, PingLossThreshold: 5,
 		MinLivenessSecs: 12, ProbeTimeoutSecs: 7,
@@ -42,8 +42,8 @@ func TestApplyTuning(t *testing.T) {
 	if !reflect.DeepEqual(suspectBackoff, []int64{5, 10, 20}) {
 		t.Errorf("suspectBackoff=%v", suspectBackoff)
 	}
-	if deadRetest != 900 || pinTTL != 45 {
-		t.Errorf("health FSM: deadRetest=%d pinTTL=%d", deadRetest, pinTTL)
+	if deadRetest != 900 {
+		t.Errorf("health FSM: deadRetest=%d", deadRetest)
 	}
 	if idleMult != 6 || idleMinSecs != 30 || sessionStaleMult != 2 || sessionStaleMinSecs != 8 || pingLossThreshold != 5 {
 		t.Errorf("dead-detect: im=%d ims=%d ssm=%d ssmn=%d plt=%d", idleMult, idleMinSecs, sessionStaleMult, sessionStaleMinSecs, pingLossThreshold)
@@ -60,10 +60,7 @@ func TestApplyTuning(t *testing.T) {
 	}
 
 	// Out-of-range values clamp instead of taking effect verbatim.
-	ApplyTuning(TuningInput{PinTTLSecs: 999999, ProbeTimeoutSecs: 999999})
-	if pinTTL != 3600 {
-		t.Errorf("pinTTL not clamped: %d", pinTTL)
-	}
+	ApplyTuning(TuningInput{ProbeTimeoutSecs: 999999})
 	if probeTimeout != 120*time.Second {
 		t.Errorf("probeTimeout not clamped: %v", probeTimeout)
 	}

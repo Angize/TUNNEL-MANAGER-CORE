@@ -3,7 +3,6 @@ package packet
 import (
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // A pin means the same thing on every carrier: the operator's PREFERENCE, held against the probe until
@@ -142,22 +141,50 @@ func TestPinCountResetsBetweenPins(t *testing.T) {
 	}
 }
 
-// TestPinnedIsNotPinnedOnceItLapses guards the input the whole rule reads: an expired pin is not a pin,
-// so a lapsed one must not go on absorbing verdicts.
-func TestPinnedIsNotPinnedOnceItLapses(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
-	clk := time.Now().Unix()
-	p.now = func() int64 { return clk }
-	if !p.selectEntry("b") {
-		t.Fatal("could not pin")
-	}
-	if !p.isPinned() {
-		t.Fatal("a fresh pin does not report as pinned")
-	}
-	clk += pinTTL + 1
-	if p.isPinned() {
-		t.Fatal("a lapsed pin still reports as pinned, so it would keep absorbing verdicts forever")
-	}
+// TestAPinEndsOnEvidenceNeverOnAClock: there is no TTL. A pin ends exactly two ways — the carrier lands
+// on it, or the core's own attempts disprove it — and both are things that were MEASURED. A clock could
+// only ever guess, and it guessed badly in both directions: too short froze a jump that was still
+// connecting, too long stranded the tunnel on a dead pick.
+func TestAPinEndsOnEvidenceNeverOnAClock(t *testing.T) {
+	t.Run("it lands", func(t *testing.T) {
+		p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+		if !p.selectEntry("b") || !p.isPinned() {
+			t.Fatal("could not pin")
+		}
+		p.pinLandedOn("b")
+		if p.isPinned() {
+			t.Fatal("a landed pin must release at once")
+		}
+	})
+	t.Run("it cannot land", func(t *testing.T) {
+		p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+		if !p.selectEntry("b") || !p.isPinned() {
+			t.Fatal("could not pin")
+		}
+		p.pinAttemptFailed("a") // a failure on a DIFFERENT endpoint proves nothing about this pin
+		for i := 1; i < pinFailRelease; i++ {
+			p.pinAttemptFailed("b")
+			if !p.isPinned() {
+				t.Fatalf("attempt %d of %d released it — one failure is not evidence", i, pinFailRelease)
+			}
+		}
+		p.pinAttemptFailed("b")
+		if p.isPinned() {
+			t.Fatalf("after %d failed attempts on the pinned endpoint the pin must go", pinFailRelease)
+		}
+	})
+	t.Run("time alone does nothing", func(t *testing.T) {
+		p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+		clk := int64(1000)
+		p.now = func() int64 { return clk }
+		if !p.selectEntry("b") {
+			t.Fatal("could not pin")
+		}
+		clk += 86400 // a whole day
+		if !p.isPinned() {
+			t.Fatal("the clock released a pin that nothing had disproven")
+		}
+	})
 }
 
 // TestAHealthySessionEndsTheRound is the other half of "consecutive": the counters a round feeds -- the

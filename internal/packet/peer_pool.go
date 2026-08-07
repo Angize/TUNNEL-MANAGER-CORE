@@ -26,11 +26,11 @@ type PeerPool struct {
 	autoBurn   bool          // burn a failing endpoint (vs. only rotate past it)
 	rotate     time.Duration // proactive rotation interval (0 = failover-only)
 	statusPath string        // status file the panel reads (empty = off; also gates the pin cmd file)
-	// pinKey/pinUntil back the panel's "make this active" button — a MOMENTARY jump, NOT a lock. The pin
-	// RELEASES the instant the carrier lands on it (about one handshake); pinUntil is only a CEILING for a
-	// pick that never connects, so a dead choice cannot strand the tunnel for the whole TTL.
-	pinKey   string // operator "make active" endpoint; current() forces it until it lands OR pinUntil lapses
-	pinUntil int64  // unix-secs ceiling for a NOT-YET-LANDED pin only; a landed pin releases well before this
+	// pinKey backs the panel's "make this active" button — a MOMENTARY jump, NOT a lock. It RELEASES on
+	// EVIDENCE and never on a clock: the instant the carrier lands on it, or once enough proven-dead
+	// rounds say it cannot. A clock could only ever guess, and every carrier already reports both outcomes.
+	pinKey   string // operator "make active" endpoint; current() forces it until it lands or is disproven
+	pinTries int    // failed attempts on the pinned endpoint; at pinFailRelease the pin goes
 	// chosen is the endpoint an ADVANCE deliberately moved onto, which currentLocked returns instead of
 	// re-selecting: the two follow different rules on purpose, and a reader must not overrule the rotation.
 	// Maintained only by commitLocked/pickLocked, so it can never point somewhere cur is not.
@@ -79,16 +79,12 @@ func (p *PeerPool) pickLocked(idx int) string {
 
 func (p *PeerPool) currentLocked() string {
 	if p.pinKey != "" {
-		if p.now() < p.pinUntil {
-			for idx, a := range p.addrs {
-				if a == p.pinKey {
-					return p.pickLocked(idx)
-				}
+		for idx, a := range p.addrs {
+			if a == p.pinKey {
+				return p.pickLocked(idx)
 			}
-			p.pinKey, p.pinUntil = "", 0 // pinned endpoint was removed from the pool -> forget it
-		} else {
-			p.pinKey, p.pinUntil = "", 0 // expired -> resume normal rotation
 		}
+		p.pinKey = "" // pinned endpoint was removed from the pool -> forget it
 	}
 	n := len(p.addrs)
 	// Pass 0: the endpoint an advance deliberately chose. The passes below re-select under DIFFERENT rules,
@@ -397,7 +393,7 @@ func (p *PeerPool) probeAllNow() {
 }
 
 // selectEntry PINS a specific endpoint as the active one: current() forces it until the carrier lands on
-// it (pinApplied clears the pin) or pinTTL elapses with no land. So it is "jump exactly here and keep
+// it (pinLandedOn clears the pin) or the evidence disproves it. So it is "jump exactly here and keep
 // trying until connected" — it survives a transient outage but self-releases on success and cannot
 // strand the tunnel on a dead endpoint. It also clears any suspect/dead mark. False if key is unknown.
 func (p *PeerPool) selectEntry(key string) bool {
@@ -406,7 +402,6 @@ func (p *PeerPool) selectEntry(key string) bool {
 	for idx, a := range p.addrs {
 		if a == key {
 			p.pinKey = key
-			p.pinUntil = p.now() + pinTTL
 			p.health.clear(key) // the operator picked this one deliberately: burn and condemnation both
 			p.pickLocked(idx)   // the pin key governs while it is live; normal selection resumes once it lapses
 			ok = true
@@ -426,9 +421,10 @@ func (p *PeerPool) selectEntry(key string) bool {
 // while the tunnel sits somewhere else, and resumes rotation as if the pick had been honoured.
 func (p *PeerPool) pinLandedOn(addr string) {
 	p.mu.Lock()
+	p.pinTries = 0
 	changed := p.pinnedLocked() && p.pinKey == addr
 	if changed {
-		p.pinKey, p.pinUntil = "", 0
+		p.pinKey = ""
 	}
 	p.mu.Unlock()
 	if changed {
@@ -436,15 +432,34 @@ func (p *PeerPool) pinLandedOn(addr string) {
 	}
 }
 
+// pinAttemptFailed is the remote twin of pinCannotLand: that one fires on a LOCAL impossibility (a source
+// the host cannot bind), this one on a remote attempt that did not come up. At pinFailRelease the pin is
+// released so normal rotation resumes. It is the core's own evidence, which is why a pin needs no clock.
+// A no-op unless the pin targets what just failed.
+func (p *PeerPool) pinAttemptFailed(addr string) {
+	p.mu.Lock()
+	released := false
+	if p.pinKey != "" && p.pinKey == addr {
+		if p.pinTries++; p.pinTries >= pinFailRelease {
+			p.pinKey, p.pinTries = "", 0
+			released = true
+		}
+	}
+	p.mu.Unlock()
+	if released {
+		p.writeStatus()
+	}
+}
+
 // pinCannotLand is pinLandedOn's opposite: the jump's endpoint turned out to be unusable outright — a
 // source IP not configured on this host, which no number of retries can fix — so it clears the pin and
-// the pool moves on at once. pinTTL is a ceiling for a pick that MIGHT still connect; once "cannot be
+// the pool moves on at once. A pick that MIGHT still connect keeps the pin; once "cannot be
 // used at all" is settled there is nothing to wait for. Keyed, so it never cancels a re-aimed jump.
 func (p *PeerPool) pinCannotLand(key string) bool {
 	p.mu.Lock()
 	cleared := p.pinnedLocked() && p.pinKey == key
 	if cleared {
-		p.pinKey, p.pinUntil = "", 0
+		p.pinKey = ""
 	}
 	p.mu.Unlock()
 	if cleared {
@@ -454,13 +469,13 @@ func (p *PeerPool) pinCannotLand(key string) bool {
 }
 
 // releasePin drops a manual pin whose endpoint has been PROVEN blocked (repeated failovers that never
-// landed), so current() stops forcing the dead endpoint for the rest of pinTTL and the tunnel recovers
+// landed), so current() stops forcing the dead endpoint and the tunnel recovers
 // on a live one at once. A transient outage heals before the fail threshold and never reaches here.
 func (p *PeerPool) releasePin() {
 	p.mu.Lock()
 	changed := p.pinKey != ""
 	if changed {
-		p.pinKey, p.pinUntil = "", 0
+		p.pinKey = ""
 	}
 	p.mu.Unlock()
 	if changed {
@@ -468,24 +483,8 @@ func (p *PeerPool) releasePin() {
 	}
 }
 
-// expirePinIfLapsed clears — and flushes to the status file — a pin whose TTL has just lapsed with no
-// landing. current() also drops a lapsed pin, but it runs under the hot lock and cannot write the status
-// file, so without this the panel keeps showing a pin the dataplane no longer honours until the next
-// unrelated status write. Writes ONLY on the expiry transition, so it is a no-op on the steady 1s tick.
-func (p *PeerPool) expirePinIfLapsed() {
-	p.mu.Lock()
-	lapsed := p.pinKey != "" && p.now() >= p.pinUntil
-	if lapsed {
-		p.pinKey, p.pinUntil = "", 0
-	}
-	p.mu.Unlock()
-	if lapsed {
-		p.writeStatus()
-	}
-}
-
 // pinnedLocked reports whether a manual pin is still in its force window. Caller holds p.mu.
-func (p *PeerPool) pinnedLocked() bool { return p.pinKey != "" && p.now() < p.pinUntil }
+func (p *PeerPool) pinnedLocked() bool { return p.pinKey != "" }
 
 // isPinned reports whether a manual pin is still in its force window, during which failover and
 // proactive rotation are held off so the jump lands exactly. After the window it returns false and
@@ -608,7 +607,7 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 	defer c.mu.Unlock()
 	if c.pinned() {
 		// A pinned endpoint proven blocked auto-releases so the tunnel recovers NOW instead of freezing on it
-		// for the rest of pinTTL. Each call here is already a proven-dead round, so a transient blip never
+		// indefinitely. Each call here is already a proven-dead round, so a transient blip never
 		// reaches even one; only after pinFailRelease decisive rounds does the pin drop and failover resume.
 		c.pinFails++
 		if c.pinFails < pinFailRelease {
@@ -740,7 +739,6 @@ func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc 
 				applyDst()
 			}
 		}
-		c.dst.expirePinIfLapsed() // flush the status file the moment a lapsed pin stops being honoured
 	}
 	if c.src != nil {
 		// The source pool takes pins only. A tun probe cannot tell a bad SOURCE from a bad DESTINATION,
@@ -748,7 +746,6 @@ func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc 
 		if cmd, ok := c.src.readCmd(); ok && cmd.Key != "" && c.src.selectEntry(cmd.Key) {
 			applySrc()
 		}
-		c.src.expirePinIfLapsed()
 	}
 }
 

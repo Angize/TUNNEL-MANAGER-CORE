@@ -29,8 +29,8 @@ func TestPinHeldUntilAppliedThenReleased(t *testing.T) {
 
 	// The carrier finally lands on the pinned edge — the pin is consumed at once.
 	p.pinApplied("2.2.2.2", "a.example")
-	if p.pinIP != "" || p.pinUntil != 0 {
-		t.Fatalf("pin not cleared after apply: pinIP=%q pinUntil=%d", p.pinIP, p.pinUntil)
+	if p.pinIP != "" {
+		t.Fatalf("pin not cleared after apply: pinIP=%q", p.pinIP)
 	}
 
 	// A non-matching apply must NOT clear a live pin (only the exact edge releases it).
@@ -42,20 +42,22 @@ func TestPinHeldUntilAppliedThenReleased(t *testing.T) {
 		t.Fatalf("non-matching apply wrongly cleared the SNI pin: pinSNI=%q", p.pinSNI)
 	}
 	p.pinApplied("1.1.1.1", "b.example") // SNI matches -> that axis releases
-	if p.pinSNI != "" || p.pinUntil != 0 {
-		t.Fatalf("matching SNI apply did not clear pin: pinSNI=%q pinUntil=%d", p.pinSNI, p.pinUntil)
+	if p.pinSNI != "" {
+		t.Fatalf("matching SNI apply did not clear pin: pinSNI=%q", p.pinSNI)
 	}
 
-	// After the pinTTL ceiling with NO apply, current() self-releases so a permanently-dead pinned
-	// edge can't strand the tunnel forever.
+	// With NO apply, the pin releases on the core's own failed attempts, so a permanently-dead pinned
+	// edge cannot strand the tunnel. No clock is involved — that is the whole point.
 	if !p.selectEntry("ip", "1.1.1.1") {
 		t.Fatal("selectEntry: unknown key")
 	}
-	clk += pinTTL + 1
+	for i := 0; i < pinFailRelease; i++ {
+		p.pinAttemptFailed("1.1.1.1", "")
+	}
 	if _, _, ok := p.current(); !ok {
 		t.Fatal("current: pool empty")
 	}
-	if p.pinIP != "" || p.pinUntil != 0 {
-		t.Fatalf("pin did not self-release past the TTL ceiling: pinIP=%q pinUntil=%d", p.pinIP, p.pinUntil)
+	if p.pinIP != "" {
+		t.Fatalf("pin did not self-release past the TTL ceiling: pinIP=%q", p.pinIP)
 	}
 }

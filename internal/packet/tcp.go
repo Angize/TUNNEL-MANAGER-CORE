@@ -64,6 +64,16 @@ const (
 	// established-connection idle deadline, to blunt slowloris/half-open floods.
 	handshakeTimeout = 10 * time.Second
 
+	// connectTimeout bounds ONE TCP connect to an endpoint. It is only ever spent on something that is
+	// not answering: a live CDN edge completes the connect in ~115ms, measured three times each against
+	// three of them from a clean host, so ten seconds was eighty-odd times the real cost and every one of
+	// those seconds was a dead pin or a dead endpoint the pool could already have moved off.
+	//
+	// Four seconds still covers a lossy path: Linux re-sends the SYN at t=0, 1 and 3, so this budget
+	// tolerates TWO lost SYNs before giving up. And it is what puts a cannot-land pin inside ten seconds
+	// end to end -- two attempts plus the reconnect backoff between them.
+	connectTimeout = 4 * time.Second
+
 	// writeTimeout caps a single frame write so a peer advertising a zero receive
 	// window cannot block the sole TUN reader (tunLoop) indefinitely.
 	writeTimeout = 30 * time.Second
@@ -519,6 +529,18 @@ func (b *TCP) endRound() {
 	b.pinFails.Store(0)
 }
 
+// pinFailedOn reports one failed attempt against (ip, host) to whichever pool this carrier has, so an
+// operator pin that cannot land is released on the core's OWN evidence rather than waiting for the
+// node's tunnel verdict. nil-safe on both.
+func (b *TCP) pinFailedOn(ip, host string) {
+	if b.pool != nil {
+		b.pool.pinAttemptFailed(ip, host)
+	}
+	if b.pp != nil {
+		b.pp.pinAttemptFailed(ip)
+	}
+}
+
 // burnAdvance burns+advances the destination pool and, once that pool has cycled through every endpoint
 // against the current source, walks the SOURCE too. Returns the endpoint the pool now points at, and
 // PUBLISHES NOTHING — the caller owns every event, because make-before-break burns an endpoint the live
@@ -526,7 +548,7 @@ func (b *TCP) endRound() {
 func (b *TCP) burnAdvance(carrierGone bool) (string, bool) {
 	// An operator pin is a PREFERENCE, not a hostage-taking: it holds off failover, but only until the
 	// probe has said the same thing pinFailRelease times. Freezing outright left a tunnel pinned to a
-	// blocked endpoint down for the whole of pinTTL while udp/raw/flux recovered from the identical
+	// blocked endpoint down indefinitely while udp/raw/flux recovered from the identical
 	// evidence — this is that same second opinion, on the same counter.
 	if (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned()) {
 		if n := b.pinFails.Add(1); int(n) < pinFailRelease {
@@ -1424,8 +1446,9 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 	if host == "" {
 		host = dialAddr
 	}
-	conn, err := b.dialer(10*time.Second).Dial("tcp", dialAddr)
+	conn, err := b.dialer(connectTimeout).Dial("tcp", dialAddr)
 	if err != nil {
+		b.pinFailedOn(dialAddr, host)
 		return nil, dialAddr, "", err
 	}
 	// Decoys go out on the bare 4-tuple, BEFORE the wss handshake and the WebSocket upgrade below, so
@@ -1830,7 +1853,7 @@ func (b *TCP) dialLoop() {
 			// active edge — current() no longer touches it, so a standby dial can't corrupt it.
 			b.pool.setActive(combo)
 			// A pin that targeted this edge has now LANDED — release it so a healthy pin does not freeze
-			// rotation for the whole pinTTL window (current() forces the pinned edge, and the rotation
+			// rotation while the pin is in force (current() forces the pinned edge, and the rotation
 			// timer skips every beat while isPinned()). The warm loop already does this on connect; the
 			// non-warm loop must too. No-op when no pin is in force (single-locked, no TOCTOU).
 			b.pool.pinApplied(label, strings.TrimPrefix(combo, label+" · "))
@@ -2042,7 +2065,7 @@ func (b *TCP) dialCarrier() (net.Conn, string, string, error) {
 		return c, edge, combo, nil
 	}
 	target := b.dialTarget() // the rotation pool's current endpoint, or the fixed peer
-	c, err := b.dialer(10*time.Second).Dial("tcp", target)
+	c, err := b.dialer(connectTimeout).Dial("tcp", target)
 	if err != nil {
 		log.Printf("core/tcp: dial %s failed: %v", target, err)
 		return nil, target, "", err
@@ -2456,7 +2479,7 @@ func (b *TCP) dialLoopWarm() {
 				// This dial resolved its edge BEFORE the pin. The outage-adopt arm above leaves an in-flight active
 				// dial to be dropped when it lands, but leaves activeBuilding set — so a pin arriving in that window
 				// starts nothing, and this stale result would be adopted on the pre-pin edge without clearing the
-				// pin, freezing rotation for the rest of pinTTL. Discard it; warmEstablish reads current().
+				// pin, freezing rotation while it is in force. Discard it; warmEstablish reads current().
 				log.Printf("core/tcp: discarding a pre-pin active dial on %s — re-dialing on the pinned edge", wc.label)
 				wc.conn.Close()
 				dialActiveAsync()
@@ -2588,7 +2611,6 @@ func (b *TCP) peerPinPollLoop() {
 						drop()
 					}
 				}
-				b.pp.expirePinIfLapsed() // flush the status file the moment a lapsed pin stops being honoured (current() drops it under the hot lock but can't write)
 			}
 			if b.sp != nil {
 				// pins only: a tun probe cannot tell a bad SOURCE from a bad DESTINATION
@@ -2596,7 +2618,6 @@ func (b *TCP) peerPinPollLoop() {
 					log.Printf("core/tcp: pin source %s (panel select)", cmd.Key)
 					drop()
 				}
-				b.sp.expirePinIfLapsed()
 			}
 		}
 	}

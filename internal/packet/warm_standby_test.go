@@ -241,11 +241,11 @@ func TestNonWarmPinReleasesOnLanding(t *testing.T) {
 	}
 	cli.SelectEdge("sni", target) // pin the other SNI; the carrier re-dials onto it
 
-	// Once it lands on the pinned edge, pinApplied must clear the pin — it must NOT linger to pinTTL.
+	// Once it lands on the pinned edge, pinApplied must clear the pin — it must NOT linger.
 	waitFor(t, 5*time.Second, "pin released on landing", func() bool {
 		pool.mu.Lock()
 		defer pool.mu.Unlock()
-		return pool.pinSNI == "" && pool.pinUntil == 0 && pool.active == addr+" · "+target
+		return pool.pinSNI == "" && pool.active == addr+" · "+target
 	})
 }
 
