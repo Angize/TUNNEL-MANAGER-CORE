@@ -84,16 +84,20 @@ type wsPool struct {
 	autoBurn    bool
 	statusPath  string
 	active      string
-	rotDegraded bool         // true once the healthy-IP count fell below 2 (rotation paused); drives the degraded/restored event
-	hb          int64        // unix-seconds of the carrier's lastRx — periodic liveness heartbeat
-	dw          int64        // resolved dead-window in seconds — the single number a reader ages hb against
-	events      []coreEvent  // rolling ring of core-observed events (down/burn) for the panel log
-	evSeq       int64        // monotonic sequence so the panel can consume each event exactly once
-	wasDown     bool         // a genuine carrier down is pending its matching "up" (down/reconnect pairing)
-	pinIP       string       // operator-pinned IP: current() forces it until it lands or is disproven
-	pinSNI      string       // operator-pinned SNI: same
-	pinTries    int          // failed attempts on the pinned combination; at pinFailRelease the pin goes
-	now         func() int64 // injectable clock (unix seconds); overridden in tests
+	rotDegraded bool        // true once the healthy-IP count fell below 2 (rotation paused); drives the degraded/restored event
+	hb          int64       // unix-seconds of the carrier's lastRx — periodic liveness heartbeat
+	dw          int64       // resolved dead-window in seconds — the single number a reader ages hb against
+	events      []coreEvent // rolling ring of core-observed events (down/burn) for the panel log
+	evSeq       int64       // monotonic sequence so the panel can consume each event exactly once
+	wasDown     bool        // a genuine carrier down is pending its matching "up" (down/reconnect pairing)
+	pinIP       string      // operator-pinned IP: current() forces it until it lands or is disproven
+	pinSNI      string      // operator-pinned SNI: same
+	pinTries    int         // failed attempts on the pinned combination; at pinFailRelease the pin goes
+	// pinTook holds the health records the pin CLEARED, so a pin that turns out not to land can put the
+	// pool back exactly as it found it. Clearing is the operator saying "try this one again"; it is not a
+	// verdict, and a jump that never connected must not leave a dead entry looking healthy on the panel.
+	pinTook map[string]*healthRec // "ip:<k>" / "sni:<k>" -> what was there before the pin
+	now     func() int64          // injectable clock (unix seconds); overridden in tests
 }
 
 // suspectBackoff and deadRetest are operator-tunable package vars,
@@ -476,6 +480,22 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 	}
 }
 
+// restorePinTookLocked puts back the health records the pin cleared. Called only when the pin is
+// abandoned WITHOUT landing: the clear was the operator asking for a fresh try, and a try that never
+// happened must not leave the pool believing a dead entry recovered. A landed pin keeps the clear --
+// there the entry really did prove itself. Caller holds the lock.
+func (p *wsPool) restorePinTookLocked() {
+	for k, rec := range p.pinTook {
+		if rec == nil {
+			continue // it was healthy before the pin; leave it healthy
+		}
+		if kind, key, found := strings.Cut(k, ":"); found {
+			p.healthMap(kind).recs[key] = rec
+		}
+	}
+	clear(p.pinTook)
+}
+
 // pinAttemptFailed is the core's OWN evidence about a pin, and the reason a pin needs no clock: it
 // watches the dial to the pinned edge fail, which says more about that exact edge than the node's tunnel
 // probe can, and says it in one timeout instead of two sweeps plus a settle window. At pinFailRelease
@@ -490,6 +510,7 @@ func (p *wsPool) pinAttemptFailed(ip, host string) {
 	released := false
 	if counted {
 		if p.pinTries++; p.pinTries >= pinFailRelease {
+			p.restorePinTookLocked()
 			p.pinIP, p.pinSNI, p.pinTries = "", "", 0
 			released = true
 		}
@@ -507,6 +528,9 @@ func (p *wsPool) pinAttemptFailed(ip, host string) {
 func (p *wsPool) releasePin() {
 	p.mu.Lock()
 	changed := p.pinIP != "" || p.pinSNI != ""
+	if changed {
+		p.restorePinTookLocked() // abandoned without landing -- see restorePinTookLocked
+	}
 	p.pinIP, p.pinSNI = "", ""
 	p.mu.Unlock()
 	if changed {
@@ -680,11 +704,15 @@ func (p *wsPool) probeAllNow() {
 func (p *wsPool) selectEntry(kind, key string) bool {
 	p.mu.Lock()
 	ok := false
+	if p.pinTook == nil {
+		p.pinTook = map[string]*healthRec{}
+	}
 	if kind == "sni" {
 		for idx, s := range p.snis {
 			if s.host == key {
 				p.j = idx
 				p.pinSNI = key
+				p.pinTook["sni:"+key] = p.sniHealth.rec(key)
 				p.sniHealth.clear(key)
 				ok = true
 				break
@@ -695,6 +723,7 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 			if ip == key {
 				p.i = idx
 				p.pinIP = key
+				p.pinTook["ip:"+key] = p.ipHealth.rec(key)
 				p.ipHealth.clear(key)
 				ok = true
 				break
@@ -702,6 +731,15 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 		}
 	}
 	if ok {
+		p.pinTries = 0
+		// `active` follows the pin, before any dial. It is what the NODE keys its verdict on, and while a
+		// pin is in force the tunnel really is trying THAT combination -- leaving it on the previous one
+		// meant a verdict measured during the jump named an edge nothing was attempting, and burned it.
+		// The direct pool has always done this (peerPoolStatus publishes the cursor, which selectEntry
+		// moves); the edge pool published a string only a successful dial ever wrote.
+		if ip, sni, got := p.currentLocked(); got {
+			p.active = activeLabel(ip, sni.host)
+		}
 	}
 	p.mu.Unlock()
 	if ok {
@@ -724,6 +762,7 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 func (p *wsPool) pinApplied(ip, host string) {
 	p.mu.Lock()
 	p.pinTries = 0
+	clear(p.pinTook) // it landed: the entry proved itself, so the clear stands
 	changed := false
 	if p.pinIP != "" && p.pinIP == ip {
 		p.pinIP = ""
