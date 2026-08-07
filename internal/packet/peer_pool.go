@@ -564,6 +564,12 @@ func (p *PeerPool) readCmd() (poolCmd, bool) { return readPoolCmd(p.cmdPath()) }
 // WHEN, the carrier's own funcs do the swapping. Policy: burn and advance the destination on a dead
 // peer, walk the SOURCE once every destination has been tried against it, and freeze both under a pin.
 type rotationController struct {
+	// mu guards every counter below. They are written from TWO goroutines -- the carrier's client loop
+	// calls success() and proactive(), while the pin-poll loop reaches fail() through pollPins -- and
+	// nothing synchronised them, so a lap could be counted twice or not at all and the source convicted
+	// early or late. The rot*/apply* callbacks never reach back into the controller, so holding this
+	// across them cannot invert against the pools' own locks.
+	mu       sync.Mutex
 	dst, src *PeerPool
 	destRot  int
 	destTick int // beats since the source last moved — the odometer's low digit (see proactive)
@@ -598,6 +604,8 @@ func (c *rotationController) pinned() bool {
 // fail is called when the current peer looks dead. rotDst/rotSrc are the carrier's swap funcs. While an
 // operator pin is in force it holds off failover until pinFailRelease proven-dead rounds auto-release it.
 func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.pinned() {
 		// A pinned endpoint proven blocked auto-releases so the tunnel recovers NOW instead of freezing on it
 		// for the rest of pinTTL. Each call here is already a proven-dead round, so a transient blip never
@@ -646,6 +654,8 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 // tun probe does that, through cmdOK — and it releases no pin, which the carriers do themselves on the
 // endpoint they are PROVEN up on (see the clientLoops).
 func (c *rotationController) success() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.destRot = 0
 	c.pinFails = 0
 }
@@ -657,6 +667,8 @@ func (c *rotationController) success() {
 // combinations: (src1,dst1) and (src2,dst2), the other pair never seen. Held off under a pin so the
 // manual switch is not overridden.
 func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.rotate <= 0 || c.rotateAt.IsZero() || !now.After(c.rotateAt) {
 		return
 	}
