@@ -308,7 +308,6 @@ type Config struct {
 type TuningCfg struct {
 	SuspectBackoff      []int64 `json:"suspect_backoff"`        // retest schedule (secs) for a suspect pool entry
 	DeadRetestSecs      int64   `json:"dead_retest_secs"`       // slow retest interval (secs) for a dead entry
-	PinTTLSecs          int64   `json:"pin_ttl_secs"`           // manual-pin force window (dead-pin release cap)
 	IdleMult            int64   `json:"idle_mult"`              // ws/tcp read deadline = mult × keepalive
 	IdleMinSecs         int64   `json:"idle_min_secs"`          // …floored at this many seconds
 	SessionStaleMult    int64   `json:"session_stale_mult"`     // udp/raw/flux stale window = mult × keepalive

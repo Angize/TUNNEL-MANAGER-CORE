@@ -550,8 +550,16 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 
 	// rawDial always targets the fixed edge, regardless of the request URL host, so the Host/SNI
 	// stays the fronting domain while we connect to a specific (clean) CDN IP.
+	// The CONNECT gets its own, much smaller budget: `budget` covers the whole attempt (connect + TLS +
+	// request), and letting the connect eat all of it means a dead edge holds the attempt for the full
+	// window while a live one answers in ~115ms. The ctx still bounds the total, so this only ever
+	// shortens — never lengthens — what an attempt may take. Same number the ws shape uses.
 	rawDial := func(ctx context.Context) (net.Conn, error) {
-		return b.dialer(budget).DialContext(ctx, "tcp", dialAddr)
+		d := budget
+		if d > connectTimeout {
+			d = connectTimeout
+		}
+		return b.dialer(d).DialContext(ctx, "tcp", dialAddr)
 	}
 
 	// Track every underlying TCP conn this attempt dials so teardown can FORCE them shut. The h2 path is

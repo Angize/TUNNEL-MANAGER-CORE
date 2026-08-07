@@ -13,10 +13,6 @@ var (
 	suspectBackoff = []int64{600, 1800, 3600}
 	// deadRetest is the slow interval (seconds) a DEAD entry is retested on.
 	deadRetest int64 = 21600
-	// pinTTL bounds how long a manual pin keeps FORCING a not-yet-connected edge; it only matters for
-	// a DEAD pinned edge (a healthy pin lands within one handshake and clears itself). Kept short so a
-	// bad manual pick self-releases fast, while still outlasting a real handshake.
-	pinTTL int64 = 30
 )
 
 // Category 2 — dead-detection / self-heal windows (derived from the per-tunnel keepalive):
@@ -48,7 +44,6 @@ var (
 type TuningInput struct {
 	SuspectBackoff      []int64
 	DeadRetestSecs      int64
-	PinTTLSecs          int64
 	IdleMult            int64
 	IdleMinSecs         int64
 	SessionStaleMult    int64
@@ -76,9 +71,6 @@ func ApplyTuning(t TuningInput) {
 	}
 	if t.DeadRetestSecs > 0 {
 		deadRetest = tclamp(t.DeadRetestSecs, 5, 86400)
-	}
-	if t.PinTTLSecs > 0 {
-		pinTTL = tclamp(t.PinTTLSecs, 1, 3600)
 	}
 	if t.IdleMult > 0 {
 		idleMult = tclamp(t.IdleMult, 1, 100)

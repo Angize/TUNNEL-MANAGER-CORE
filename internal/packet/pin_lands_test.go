@@ -26,15 +26,12 @@ func TestManualPinReleasesOnLanding(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	// Landed. The pin must be gone far sooner than its TTL — the whole point of a momentary jump.
-	if int64(5) >= pinTTL {
-		t.Fatalf("this test needs pinTTL (%ds) well above its 5s window", pinTTL)
-	}
+	// Landed. The pin must be gone at once — the whole point of a momentary jump.
 	deadline = time.Now().Add(5 * time.Second)
 	for cli.pp.isPinned() {
 		if time.Now().After(deadline) {
-			t.Fatalf("the pin survived the landing — it now holds for the rest of pinTTL (%ds), freezing "+
-				"failover and rotation behind a jump that already succeeded", pinTTL)
+			t.Fatal("the pin survived the landing — it now holds indefinitely, freezing failover and " +
+				"rotation behind a jump that already succeeded")
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

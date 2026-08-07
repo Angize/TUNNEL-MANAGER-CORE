@@ -80,7 +80,7 @@ func main() {
 	// package vars at construction). One process = one tunnel, so this is safe process-global state.
 	if t := cfg.Tuning; t != nil {
 		packet.ApplyTuning(packet.TuningInput{
-			SuspectBackoff: t.SuspectBackoff, DeadRetestSecs: t.DeadRetestSecs, PinTTLSecs: t.PinTTLSecs,
+			SuspectBackoff: t.SuspectBackoff, DeadRetestSecs: t.DeadRetestSecs,
 			IdleMult: t.IdleMult, IdleMinSecs: t.IdleMinSecs,
 			SessionStaleMult: t.SessionStaleMult, SessionStaleMinSecs: t.SessionStaleMinSecs,
 			PingLossThreshold: t.PingLossThreshold, MinLivenessSecs: t.MinLivenessSecs,

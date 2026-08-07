@@ -460,12 +460,12 @@ func TestSelectEntryPinsAndClears(t *testing.T) {
 	}
 }
 
-// TestPinOneShot locks down a pin as a ONE-SHOT exact jump: within its short window it FORCES exactly the
-// chosen edge — no drift onto a neighbour, even across advance() or a suspect partner — and after the
-// window it clears so normal rotation resumes. It does NOT lock forever. A PROVEN burn of the pinned edge
-// is covered separately by TestPinReleasesOnProvenBlock.
+// TestPinOneShot locks down a pin as a ONE-SHOT exact jump: while it is in force it FORCES exactly the
+// chosen edge — no drift onto a neighbour, even across advance() or a suspect partner — and once the
+// core has disproven it, it clears so normal rotation resumes. It does NOT lock forever. A PROVEN burn of
+// the pinned edge is covered separately by TestPinReleasesOnProvenBlock.
 func TestPinOneShot(t *testing.T) {
-	p, now := clockPool([]string{"a", "b", "c"}, snis("x", "y"), true, "")
+	p, _ := clockPool([]string{"a", "b", "c"}, snis("x", "y"), true, "")
 	p.markSuspect("sni", "x", "test") // messy partner axis
 	p.markSuspect("ip", "a", "test")
 	if !p.selectEntry("ip", "c") {
@@ -488,15 +488,21 @@ func TestPinOneShot(t *testing.T) {
 	if ip, _, _ := p.current(); ip != "c" {
 		t.Fatalf("a burn of a non-pinned edge must not override the pin, got %q", ip)
 	}
-	// It is not sticky-forever: without a land, the pin self-releases once pinTTL lapses (c was never
-	// burned, so this exercises pure time-expiry — the proven-block release path is TestPinReleasesOnProvenBlock).
-	*now += pinTTL + 1
-	if p.isPinned() {
-		t.Fatal("pin must no longer be honoured after pinTTL")
+	// It is not sticky-forever: without a land, the core's own failed attempts release it (c was never
+	// burned, so this is the cannot-land path; the proven-block one is TestPinReleasesOnProvenBlock).
+	for i := 1; i < pinFailRelease; i++ {
+		p.pinAttemptFailed("c", "")
+		if !p.isPinned() {
+			t.Fatalf("attempt %d of %d released the pin — one failure is not evidence", i, pinFailRelease)
+		}
 	}
-	p.current() // the expired pin is lazily cleared on the next selection
-	if p.pinIP != "" || p.pinUntil != 0 {
-		t.Fatalf("expired pin not cleared: pinIP=%q pinUntil=%d", p.pinIP, p.pinUntil)
+	p.pinAttemptFailed("c", "")
+	if p.isPinned() {
+		t.Fatalf("after %d failed attempts the pin must no longer be honoured", pinFailRelease)
+	}
+	p.current()
+	if p.pinIP != "" {
+		t.Fatalf("expired pin not cleared: pinIP=%q", p.pinIP)
 	}
 }
 
@@ -523,8 +529,8 @@ func TestPinReleasesOnProvenBlock(t *testing.T) {
 	}
 
 	p.releasePin() // what the verdict path calls once the pin has absorbed its rounds
-	if p.isPinned() || p.pinIP != "" || p.pinUntil != 0 {
-		t.Fatalf("pin state not cleared: pinIP=%q pinUntil=%d", p.pinIP, p.pinUntil)
+	if p.isPinned() || p.pinIP != "" {
+		t.Fatalf("pin state not cleared: pinIP=%q", p.pinIP)
 	}
 	// Recovery is immediate: current() now returns the healthy edge a, not the blocked pinned b.
 	if ip, _, ok := p.current(); !ok || ip != "a" {

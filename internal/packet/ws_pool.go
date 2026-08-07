@@ -90,13 +90,13 @@ type wsPool struct {
 	events      []coreEvent  // rolling ring of core-observed events (down/burn) for the panel log
 	evSeq       int64        // monotonic sequence so the panel can consume each event exactly once
 	wasDown     bool         // a genuine carrier down is pending its matching "up" (down/reconnect pairing)
-	pinIP       string       // operator-pinned IP: current() forces it until pinUntil (one-shot jump)
-	pinSNI      string       // operator-pinned SNI: current() forces it until pinUntil
-	pinUntil    int64        // unix time the pin is honoured until; after it, normal rotation resumes
+	pinIP       string       // operator-pinned IP: current() forces it until it lands or is disproven
+	pinSNI      string       // operator-pinned SNI: same
+	pinTries    int          // failed attempts on the pinned combination; at pinFailRelease the pin goes
 	now         func() int64 // injectable clock (unix seconds); overridden in tests
 }
 
-// pinTTL (manual-pin force window, dead-pin self-release cap) is an operator-tunable package var,
+// suspectBackoff and deadRetest are operator-tunable package vars,
 // defined with its default in tuning.go.
 
 // coreEvent is one core-observed occurrence surfaced to the panel's system log: the CORE knows the
@@ -168,17 +168,12 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 	if len(p.ips) == 0 || len(p.snis) == 0 {
 		return "", wsSNIEntry{}, false
 	}
-	// A manual pin is a ONE-SHOT exact jump: while it is fresh (within pinTTL) current() FORCES the
-	// chosen axis, so the jump — and any warm-standby promotion during it — lands on EXACTLY that
-	// edge, never a neighbour. Once the pin expires it is cleared and normal rotation resumes; the
-	// active edge simply stays put (no self-triggered re-dial) until the next proactive rotation.
+	// A manual pin is a ONE-SHOT exact jump: while it is in force current() FORCES the chosen axis, so
+	// the jump — and any warm-standby promotion during it — lands on EXACTLY that edge, never a
+	// neighbour. It ends on EVIDENCE, never on a clock: pinApplied when the carrier lands, or the
+	// verdict path once enough proven-dead rounds say it cannot.
 	if p.pinIP != "" || p.pinSNI != "" {
-		if p.now() < p.pinUntil {
-			ip := p.resolvePinIPLocked()
-			sni := p.resolvePinSNILocked()
-			return ip, sni, true
-		}
-		p.pinIP, p.pinSNI, p.pinUntil = "", "", 0 // expired -> resume normal rotation
+		return p.resolvePinIPLocked(), p.resolvePinSNILocked(), true
 	}
 	n := len(p.ips) * len(p.snis)
 	for k := 0; k < n; k++ {
@@ -294,7 +289,7 @@ func (p *wsPool) healthyOrBestSNILocked() wsSNIEntry {
 func (p *wsPool) isPinned() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return (p.pinIP != "" || p.pinSNI != "") && p.now() < p.pinUntil
+	return p.pinIP != "" || p.pinSNI != ""
 }
 
 // bestIPLocked / bestSNILocked return the least-bad entry for the current() fallback: a
@@ -481,13 +476,38 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 	}
 }
 
+// pinAttemptFailed is the core's OWN evidence about a pin, and the reason a pin needs no clock: it
+// watches the dial to the pinned edge fail, which says more about that exact edge than the node's tunnel
+// probe can, and says it in one timeout instead of two sweeps plus a settle window. At pinFailRelease
+// the pin is released so normal rotation resumes; a landing resets the count (pinApplied clears the pin
+// outright, so only a not-yet-landed pin is ever counting).
+//
+// A no-op unless the pin actually targets what just failed — under warm standby a STANDBY dial to some
+// other edge is failing beside the pinned one, and that says nothing about the operator's pick.
+func (p *wsPool) pinAttemptFailed(ip, host string) {
+	p.mu.Lock()
+	counted := (p.pinIP != "" && p.pinIP == ip) || (p.pinSNI != "" && p.pinSNI == host)
+	released := false
+	if counted {
+		if p.pinTries++; p.pinTries >= pinFailRelease {
+			p.pinIP, p.pinSNI, p.pinTries = "", "", 0
+			released = true
+		}
+	}
+	p.mu.Unlock()
+	if released {
+		p.writeStatus()
+		p.event("pool", "pin_dropped", "cannot-land")
+	}
+}
+
 // releasePin drops any manual pin outright, on both axes. The counted release the verdict path performs
 // once a pin has absorbed its second opinion — see burnAdvanceWS and rotationController.fail, which do
 // the same thing for the other four carriers.
 func (p *wsPool) releasePin() {
 	p.mu.Lock()
 	changed := p.pinIP != "" || p.pinSNI != ""
-	p.pinIP, p.pinSNI, p.pinUntil = "", "", 0
+	p.pinIP, p.pinSNI = "", ""
 	p.mu.Unlock()
 	if changed {
 		p.writeStatus()
@@ -654,7 +674,7 @@ func (p *wsPool) probeAllNow() {
 }
 
 // selectEntry PINS a specific edge as the active one on its axis: current() forces the chosen edge until
-// the carrier lands on it (pinApplied clears the pin) or pinTTL elapses with no land. So it is "jump
+// the carrier lands on it (pinApplied clears the pin) or the evidence disproves it. So it is "jump
 // exactly here and keep trying until connected" — it survives a transient outage but self-releases on
 // success and on a dead edge. It also clears any suspect/dead mark. False if the key is unknown.
 func (p *wsPool) selectEntry(kind, key string) bool {
@@ -682,7 +702,6 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 		}
 	}
 	if ok {
-		p.pinUntil = p.now() + pinTTL // force the exact edge until it lands (pinApplied) or the window lapses
 	}
 	p.mu.Unlock()
 	if ok {
@@ -700,10 +719,11 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 
 // pinApplied clears a manual pin once the carrier has ACTUALLY landed on the pinned edge, so a pin
 // behaves as "jump there and keep retrying until connected" (surviving a transient outage — see
-// pinTTL) yet releases the instant it succeeds instead of freezing rotation for the whole window.
+// yet releases the instant it succeeds instead of freezing rotation.
 // Each axis is cleared independently: an IP-only pin releases when the live IP matches, likewise SNI.
 func (p *wsPool) pinApplied(ip, host string) {
 	p.mu.Lock()
+	p.pinTries = 0
 	changed := false
 	if p.pinIP != "" && p.pinIP == ip {
 		p.pinIP = ""
@@ -712,9 +732,6 @@ func (p *wsPool) pinApplied(ip, host string) {
 	if p.pinSNI != "" && p.pinSNI == host {
 		p.pinSNI = ""
 		changed = true
-	}
-	if p.pinIP == "" && p.pinSNI == "" {
-		p.pinUntil = 0
 	}
 	p.mu.Unlock()
 	if changed {
