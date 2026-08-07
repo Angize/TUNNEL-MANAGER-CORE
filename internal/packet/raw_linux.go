@@ -1274,8 +1274,8 @@ func (r *Raw) rotateSourceRaw(proactive bool) {
 	ip := adoptableSource("raw", r.sp, addr, &r.srcWarned)
 	if ip == nil {
 		// The pool advanced onto a source this host cannot send from. Undo the move, exactly as
-		// rotateSourceUDP does: not one packet left prev, so publishing a src-rotate naming the new one would
-		// describe a move that never happened, and a later success() would heal-clear an IP never tried.
+		// rotateSourceUDP does: not one packet left prev, so publishing a src-rotate naming the new one
+		// would describe a move that never happened.
 		r.sp.rejectCandidate(prev)
 		return
 	}

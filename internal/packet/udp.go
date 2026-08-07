@@ -284,9 +284,9 @@ func (b *UDP) rotateSourceUDP(proactive bool) {
 		return
 	}
 	// The pool advanced onto a source that will not bind on this host (the IP was removed from the
-	// interface but not from the pool). The socket never left prev, so undo the pool move: otherwise the
-	// status file names a source the datagram path never adopted, the healthy in-use source stays burned,
-	// and a later success() heal-clears the never-tried IP. No src-rotate event either — nothing moved.
+	// interface but not from the pool). The socket never left prev, so undo the pool MOVE — otherwise the
+	// status file names a source the datagram path never adopted. Only the move: prev's health is left
+	// exactly as it was, since nothing here measured it. No src-rotate event either — nothing moved.
 	b.sp.rejectCandidate(prev)
 }
 
