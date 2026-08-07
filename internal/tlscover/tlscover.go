@@ -24,6 +24,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"sync"
@@ -140,8 +141,9 @@ type Server struct {
 	queue chan struct{}
 	idle  time.Duration // relay idle bound; a field only so tests can shorten it
 
-	mu   sync.Mutex
-	seen map[[32]byte]int64 // session-id token -> expiry (anti-replay)
+	mu         sync.Mutex
+	seen       map[[32]byte]int64 // session-id token -> expiry (anti-replay)
+	destLogged int64              // unix-seconds of the last "cannot reach dest" line (rate limit)
 }
 
 // NewServer builds a cover server that borrows destHost (its :443 is proxied to
@@ -154,6 +156,43 @@ func NewServer(psk, destHost string) (*Server, error) {
 	return &Server{cert: cert, psk: psk, dest: net.JoinHostPort(destHost, "443"),
 		relay: make(chan struct{}, maxRelays), queue: make(chan struct{}, maxWaiting),
 		idle: relayIdle, seen: map[[32]byte]int64{}}, nil
+}
+
+// CheckDest says out loud, once, whether the cover site can be reached AT ALL from this server. Nothing
+// about the cover works without that: every unauthenticated connection is relayed to dest, so when dest
+// is unreachable proxyToDest can only close -- and an instant FIN right after a ClientHello is the exact
+// distinguisher this whole path exists to deny a censor. A foreign cover domain on an Iran-side server is
+// the ordinary way to end up there, and it used to be silent.
+//
+// The CALLER starts it, when the server goes into service. Not the constructor: one that spawns a
+// goroutine reading its own fields races whoever finishes configuring the value afterwards.
+func (sv *Server) CheckDest() {
+	c, err := net.DialTimeout("tcp", sv.dest, 8*time.Second)
+	if err != nil {
+		log.Printf("cover: the cover site %s is UNREACHABLE from this server (%v) — every probe will be "+
+			"closed on the spot instead of relayed, which is the fingerprint the cover exists to remove. "+
+			"Set cover_sni to a site this server can actually reach.", sv.dest, err)
+		return
+	}
+	c.Close()
+	log.Printf("cover: borrowing %s (reachable)", sv.dest)
+}
+
+// destUnreachable reports a relay dial failure, at most one line a minute. Rate-limited on purpose: a
+// censor scanning the port would otherwise turn this into its own log amplifier, and one line a minute
+// is enough to tell an operator the cover is down.
+func (sv *Server) destUnreachable(err error) {
+	now := time.Now().Unix()
+	sv.mu.Lock()
+	quiet := now < sv.destLogged+60
+	if !quiet {
+		sv.destLogged = now
+	}
+	sv.mu.Unlock()
+	if !quiet {
+		log.Printf("cover: cannot reach the cover site %s (%v) — probes are being closed on the spot "+
+			"instead of relayed to it", sv.dest, err)
+	}
 }
 
 // Handle reads the ClientHello and either returns a TLS conn (authenticated
@@ -250,6 +289,7 @@ func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 		defer func() { <-sv.relay }()
 		dst, err := net.DialTimeout("tcp", sv.dest, 8*time.Second)
 		if err != nil {
+			sv.destUnreachable(err)
 			raw.Close()
 			return
 		}

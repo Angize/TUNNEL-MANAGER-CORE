@@ -883,6 +883,7 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, keepalive time.Duration, o
 			return nil, err
 		}
 		b.coverSrv = cs
+		go cs.CheckDest() // one log line, off the startup path — nothing waits on the answer
 	}
 	return b, nil
 }
