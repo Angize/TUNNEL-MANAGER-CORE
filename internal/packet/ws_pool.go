@@ -581,6 +581,24 @@ func (p *wsPool) restorePinTookLocked() {
 	clear(p.pinTook)
 }
 
+// restorePinTookAxisLocked puts back what a live pin on ONE axis took, when that pin is being replaced by
+// a pin on a different entry of the same axis. The other axis is untouched -- its pin is still live.
+// Caller holds the lock.
+func (p *wsPool) restorePinTookAxisLocked(kind, key string) {
+	live := p.pinIP
+	if kind == "sni" {
+		live = p.pinSNI
+	}
+	if live == "" || live == key {
+		return
+	}
+	k := kind + ":" + live
+	if rec := p.pinTook[k]; rec != nil {
+		p.healthMap(kind).recs[live] = rec
+	}
+	delete(p.pinTook, k)
+}
+
 // pinAttemptFailed is the core's OWN evidence about a pin, and the reason a pin needs no clock: it
 // watches the dial to the pinned edge fail, which says more about that exact edge than the node's tunnel
 // probe can, and says it in one timeout instead of two sweeps plus a settle window. At pinFailRelease
@@ -777,6 +795,10 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 	if p.pinTook == nil {
 		p.pinTook = map[string]*healthRec{}
 	}
+	// Re-pinning an axis ABANDONS what that axis was holding, and an abandoned pin puts back what it took.
+	// Without this the first target's burn stays laundered forever: a landing only ever settles the entry
+	// it landed on, so nothing is left to restore the one the operator moved off.
+	p.restorePinTookAxisLocked(kind, key)
 	if kind == "sni" {
 		for idx, s := range p.snis {
 			if s.host == key {
@@ -831,16 +853,24 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 // Each axis is cleared independently: an IP-only pin releases when the live IP matches, likewise SNI.
 func (p *wsPool) pinApplied(ip, host string) {
 	p.mu.Lock()
-	p.pinTries = 0
-	clear(p.pinTook) // it landed: the entry proved itself, so the clear stands
 	changed := false
+	// PER AXIS, and only for an axis this landing actually satisfies. A landing elsewhere is the case
+	// pinMatches exists for -- a standby built before the pin, promoted beside it -- and settling the
+	// pin's memory for it wiped the burn the pin was holding and reset the count that is the pin's only
+	// way to end. Dropping the whole map on a one-axis landing was wrong too: the OTHER axis is still
+	// pinned, and its entry has proven nothing.
 	if p.pinIP != "" && p.pinIP == ip {
+		delete(p.pinTook, "ip:"+ip) // it landed: this entry proved itself, so its clear stands
 		p.pinIP = ""
 		changed = true
 	}
 	if p.pinSNI != "" && p.pinSNI == host {
+		delete(p.pinTook, "sni:"+host)
 		p.pinSNI = ""
 		changed = true
+	}
+	if changed {
+		p.pinTries = 0 // a landing on the pin is progress; the count starts over for whatever is left
 	}
 	p.mu.Unlock()
 	if changed {

@@ -357,8 +357,15 @@ func TestUDPSourcePoolBindsInitialSource(t *testing.T) {
 
 // TestUDPSourceRebindFailureKeepsSocketAndPool: when a source rotation advances onto an IP that is no
 // longer on the interface the rebind fails, and the pool must NOT be left claiming that IP active while
-// the socket still egresses from the previous one — nextEndpoint has by then burned the healthy, in-use
-// source and pointed the status file at the unbindable one.
+// the socket still egresses from the previous one — nextEndpoint has by then pointed the status file at
+// the unbindable one.
+//
+// What is undone is the MOVE, and only the move. It used to clear the previous source's health as well,
+// on the reading that a rotation which never took effect should leave no trace. But this is the failover
+// path: that burn is the odometer's attribution, earned by a whole lap of destinations failing against
+// this source, and the next IP not being on the interface is a separate, local fact that measured
+// nothing. Clearing it meant a pool whose only alternative is unbindable could never record anything
+// about the source it is stuck on — it read healthy on the panel for as long as it kept failing.
 func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
 	c0, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -382,11 +389,22 @@ func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
 	if got := b.sp.current(); got != "127.0.0.1" {
 		t.Fatalf("pool active = %q after a failed rebind; the socket never left 127.0.0.1", got)
 	}
-	if b.sp.health.recs["127.0.0.1"] != nil {
-		t.Fatal("the healthy, in-use source 127.0.0.1 was burned by a rotation that never took effect")
-	}
 	if b.sp.health.recs["192.0.2.1"] == nil {
 		t.Fatal("the unbindable candidate 192.0.2.1 was not burned — rotation will retry it every beat")
+	}
+	if r := b.sp.health.recs["127.0.0.1"]; r == nil {
+		t.Fatal("the failover's own attribution was erased because the NEXT source would not bind — a " +
+			"pool whose only alternative is unbindable then never records anything about the source it " +
+			"is stuck on, and shows it healthy however long it keeps failing")
+	} else if r.state != stateSuspect || r.fails != 0 {
+		t.Fatalf("127.0.0.1 sits at %+v — one failover round is one step, no more", *r)
+	}
+	// ...and being burned must not strand it: the pool commits to the source the socket is really on, so
+	// current() keeps naming it whatever its health says.
+	for i := 0; i < 3; i++ {
+		if got := b.sp.current(); got != "127.0.0.1" {
+			t.Fatalf("ask %d gave %q — the commitment must hold", i, got)
+		}
 	}
 	b.conn.Load().Close()
 }
