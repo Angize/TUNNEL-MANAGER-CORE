@@ -464,6 +464,14 @@ func (p *wsPool) eligibleSNIs() int {
 	return n
 }
 
+// snisCount is how many domains the pool holds. One means the SNI axis cannot vary at all, which changes
+// WHICH axis a verdict is allowed to blame -- see burnAdvanceWS.
+func (p *wsPool) snisCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.snis)
+}
+
 func (p *wsPool) markSuspect(kind, key, reason string) {
 	if !p.autoBurn {
 		return

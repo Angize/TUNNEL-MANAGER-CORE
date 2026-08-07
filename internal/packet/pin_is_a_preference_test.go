@@ -87,7 +87,7 @@ func TestPinAbsorbsExactlyOneSecondOpinion_CDN(t *testing.T) {
 	p.setActive(activeLabel(ip, sni.host))
 
 	for i := 1; i < pinFailRelease; i++ {
-		if b.burnAdvanceWS(sni.host) {
+		if b.burnAdvanceWS(ip, sni.host) {
 			t.Fatalf("verdict %d of %d already burned — a pin must absorb the first ones", i, pinFailRelease)
 		}
 		if !p.isPinned() {
@@ -97,7 +97,7 @@ func TestPinAbsorbsExactlyOneSecondOpinion_CDN(t *testing.T) {
 			t.Fatalf("verdict %d of %d burned the SNI while the pin was still in force", i, pinFailRelease)
 		}
 	}
-	if !b.burnAdvanceWS(sni.host) {
+	if !b.burnAdvanceWS(ip, sni.host) {
 		t.Fatal("the pin absorbed its second opinion and the pool still did not burn")
 	}
 	if p.isPinned() {

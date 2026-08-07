@@ -2647,8 +2647,8 @@ func (b *TCP) pollWsCmd() {
 			// to the pin arm below and select the very edge it condemns.
 			ip, sni := b.pool.activeCombo()
 			if cmd.IP == ip && cmd.SNI == sni {
-				if b.burnAdvanceWS(sni) {
-					log.Printf("core/ws: %s%s%s failed by the node's tun probe — burning the SNI and advancing", ip, activeSep, sni)
+				if b.burnAdvanceWS(ip, sni) {
+					log.Printf("core/ws: %s%s%s failed by the node's tun probe — burning the axis the walk varies and advancing", ip, activeSep, sni)
 					b.manualSwitch.Store(true) // induced drop: no fault accounting on top of the verdict
 					if c := b.curConn.Load(); c != nil {
 						(*c).Close() // unblocks serve(); dialLoop re-dials on the next combo
@@ -2671,9 +2671,10 @@ func (b *TCP) pollWsCmd() {
 // burnAdvanceWS is the ws edge pool's half of the odometer, and the exact mirror of burnAdvance: the
 // SNI is the low digit and burns, the EDGE is the high digit and only WALKS — a tun probe sees silence,
 // which names the combo it measured and never one axis, so the edge is convicted only by a whole lap of
-// SNIs failing on it. Returns whether the pool actually moved, so the caller only drops a live carrier
-// that has somewhere else to land.
-func (b *TCP) burnAdvanceWS(sni string) bool {
+// SNIs failing on it. A pool with ONE SNI has no low digit at all, and there the edge is what varies and
+// what burns. Returns whether the pool actually moved, so the caller only drops a live carrier that has
+// somewhere else to land.
+func (b *TCP) burnAdvanceWS(ip, sni string) bool {
 	// Same second opinion as every other carrier. It used to release on the FIRST verdict (markSuspect
 	// dropped the pin as it burned), which broke the operator's pick on one measurement while udp/raw/flux
 	// asked for two.
@@ -2686,6 +2687,22 @@ func (b *TCP) burnAdvanceWS(sni string) bool {
 		// pin cleared — fall through and burn+advance off the blocked combination this round
 	} else {
 		b.pinFails.Store(0)
+	}
+	// Burn whatever the walk actually VARIES. That is the whole attribution: the probe sees silence,
+	// silence names the COMBINATION, and only the axis being changed between combinations can be told
+	// apart from the one that is not.
+	//
+	// With two or more SNIs the walk varies the SNI, so the SNI burns and the edge is convicted only by a
+	// whole row failing on it. With exactly ONE SNI there is no SNI axis: every beat changes the EDGE, so
+	// the edge is what varies and the edge is what burns. Burning the lone SNI instead was worse than
+	// useless -- advanceEdgeFreshRow cleared the row on the very next line, so the burn was undone as
+	// fast as it was made and NO edge was ever blacklisted. A pool advertised as "rotate + blacklist"
+	// only rotated: a dead edge came back every cycle, dropped the tunnel, and was walked off again.
+	if b.pool.snisCount() < 2 {
+		b.pool.markSuspect("ip", ip, "tun-probe")
+		b.pool.advanceIP()
+		b.sniRot.Store(0)
+		return true
 	}
 	// Size the lap ONCE, at the start of the round: ELIGIBLE SNIs, before the first burn. Re-reading it
 	// every ask is the trap — each burn shrinks the count the next ask compares against, so three SNIs
