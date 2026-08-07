@@ -147,43 +147,44 @@ func TestHealthSetProbeAllNow(t *testing.T) {
 }
 
 // TestSidelineDoesNotWalkTheLadder is the difference between the two pools' burns, and it is worth its
-// own test because collapsing them is silent: everything still compiles, every other test still passes,
-// and the only symptom is a CDN edge racing to dead several verdicts sooner than its schedule says.
+// own test because getting it wrong is silent: everything still compiles, every other test still passes,
+// and the only symptom is an edge racing to dead several verdicts early, or never moving off due at all.
 //
-// markSuspect (edge pool) SIDELINES: from the first burn on, the retest scheduler owns that entry's
-// cadence, and a second live verdict arriving while it waits must not push it further down. burnLocked
-// (direct pool) BURNS: its failures come one per failover round, so stepping is the ladder working.
-func TestSidelineDoesNotWalkTheLadder(t *testing.T) {
+// It is ONE rule, and the question it asks is what the failure actually MEASURED. A verdict arriving while
+// the entry is waiting out its backoff measured a combination the rotation was not even trying, so it
+// changes nothing. A verdict on a DUE entry is the result of the live retry the ladder just granted it,
+// so it costs a step.
+func TestABurnStepsOnlyTheEntryItMeasured(t *testing.T) {
 	clk := int64(5000)
 	h := newHealthSet(&[]func() int64{func() int64 { return clk }}[0])
 
-	if !h.sideline("a") {
-		t.Fatal("the first sideline must report the transition")
+	if !h.burn("a") {
+		t.Fatal("the first burn must report the transition")
 	}
 	first := h.rec("a").nextRetest
 	for i := 0; i < 5; i++ {
-		if h.sideline("a") {
-			t.Fatal("a repeat sideline is not a transition")
+		if h.burn("a") {
+			t.Fatal("a repeat burn is not a transition")
 		}
 	}
 	r := h.rec("a")
 	if r.nextRetest != first || r.fails != 0 || r.state != stateSuspect {
-		t.Fatalf("five more verdicts moved a sidelined entry: fails=%d state=%v nextRetest%+d — the "+
-			"scheduler owns its cadence from the first burn on", r.fails, r.state, r.nextRetest-first)
+		t.Fatalf("five verdicts arriving DURING the wait moved the entry: fails=%d state=%v nextRetest%+d "+
+			"— the scheduler owns its cadence while it waits", r.fails, r.state, r.nextRetest-first)
 	}
 
-	// ...while burn() is the other half of the pair and MUST step.
-	h.burn("b")
-	stepped := h.rec("b").nextRetest
-	h.burn("b")
-	if h.rec("b").nextRetest == stepped || h.rec("b").fails == 0 {
-		t.Fatal("burn must walk the ladder on a repeat — that is what makes the direct pool's rounds count")
+	// ...and once the wait elapses the rotation hands it live traffic, so THAT failure is news.
+	clk = first
+	h.burn("a")
+	if h.rec("a").nextRetest == first || h.rec("a").fails == 0 {
+		t.Fatal("a verdict on a DUE entry did not walk the ladder — it stays due, and every rotation tick " +
+			"then walks straight back onto a dead entry, forever")
 	}
 }
 
-// TestMarkSuspectSidelines drives the real caller, not the helper: the edge pool's markSuspect must not
-// step an entry that a previous verdict already burned.
-func TestMarkSuspectSidelines(t *testing.T) {
+// TestMarkSuspectDoesNotStepAWaitingEntry drives the real caller, not the helper: repeated verdicts
+// against an edge that is waiting out its backoff must not race it to dead.
+func TestMarkSuspectDoesNotStepAWaitingEntry(t *testing.T) {
 	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), true, filepath.Join(t.TempDir(), "st.json"))
 	clk := int64(5000)
 	p.now = func() int64 { return clk }

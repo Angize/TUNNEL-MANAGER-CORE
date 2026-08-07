@@ -56,10 +56,10 @@ func TestWarmStandbyResumesRotationAfterThePoolHeals(t *testing.T) {
 	})
 }
 
-// TestHasHealthyEdgeOtherThan pins the query the manager decides on. It must answer on the COMBO,
+// TestHasEligibleEdgeOtherThan pins the query the manager decides on. It must answer on the COMBO,
 // not the IP: with a single-IP pool an SNI-only move is still a real rotation, so answering "no
 // distinct IP" there would keep rotation frozen exactly where the fix is supposed to release it.
-func TestHasHealthyEdgeOtherThan(t *testing.T) {
+func TestHasEligibleEdgeOtherThan(t *testing.T) {
 	burn := func(p *wsPool, kind string, keys ...string) {
 		p.mu.Lock()
 		for _, k := range keys {
@@ -70,34 +70,50 @@ func TestHasHealthyEdgeOtherThan(t *testing.T) {
 	t.Run("one ip, one healthy sni -> nothing else", func(t *testing.T) {
 		p := newWSPool([]string{"1.1.1.1"}, snis("a", "b"), false, "")
 		burn(p, "sni", "b")
-		if p.hasHealthyEdgeOtherThan("1.1.1.1" + activeSep + "a") {
+		if p.hasEligibleEdgeOtherThan("1.1.1.1" + activeSep + "a") {
 			t.Fatal("only one healthy combo exists, yet the pool claims another")
 		}
 	})
 	t.Run("one ip, two healthy snis -> an sni-only move is a real rotation", func(t *testing.T) {
 		p := newWSPool([]string{"1.1.1.1"}, snis("a", "b"), false, "")
-		if !p.hasHealthyEdgeOtherThan("1.1.1.1" + activeSep + "a") {
+		if !p.hasEligibleEdgeOtherThan("1.1.1.1" + activeSep + "a") {
 			t.Fatal("front-b is healthy on the same ip — that is a rotation the manager must be allowed to make")
 		}
 	})
 	t.Run("second ip healthy", func(t *testing.T) {
 		p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, snis("a"), false, "")
-		if !p.hasHealthyEdgeOtherThan("1.1.1.1" + activeSep + "a") {
+		if !p.hasEligibleEdgeOtherThan("1.1.1.1" + activeSep + "a") {
 			t.Fatal("a healthy second ip was not seen")
 		}
 	})
 	t.Run("everything burned", func(t *testing.T) {
 		p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, snis("a", "b"), false, "")
 		burn(p, "ip", "1.1.1.1", "2.2.2.2")
-		if p.hasHealthyEdgeOtherThan("1.1.1.1" + activeSep + "a") {
+		if p.hasEligibleEdgeOtherThan("1.1.1.1" + activeSep + "a") {
 			t.Fatal("no edge is healthy, yet the pool claims one — this would rebuild a standby every interval")
+		}
+	})
+	t.Run("a DUE burned edge counts — a standby is how it gets its live try", func(t *testing.T) {
+		p, now := clockPool([]string{"1.1.1.1", "2.2.2.2"}, snis("a"), false, "")
+		p.mu.Lock()
+		p.ipHealth.recs["2.2.2.2"] = &healthRec{state: stateSuspect, nextRetest: p.now() + 60}
+		p.mu.Unlock()
+		if p.hasEligibleEdgeOtherThan("1.1.1.1" + activeSep + "a") {
+			t.Fatal("2.2.2.2 is still waiting out its backoff — building a standby on it now would tear " +
+				"the live connection down for an edge the ladder said not to try yet")
+		}
+		*now += 60
+		if !p.hasEligibleEdgeOtherThan("1.1.1.1" + activeSep + "a") {
+			t.Fatal("its wait elapsed, so the rotation may reach it — and a standby is exactly how a burned " +
+				"edge is handed the live traffic the tun probe needs to judge it. Answering no here is what " +
+				"leaves an edge condemned for the life of the pool")
 		}
 	})
 	t.Run("a burned sni cannot rescue a healthy ip", func(t *testing.T) {
 		p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, snis("a", "b"), false, "")
 		burn(p, "sni", "b")
 		burn(p, "ip", "2.2.2.2")
-		if p.hasHealthyEdgeOtherThan("1.1.1.1" + activeSep + "a") {
+		if p.hasEligibleEdgeOtherThan("1.1.1.1" + activeSep + "a") {
 			t.Fatal("both axes must be healthy for a combo to count")
 		}
 	})

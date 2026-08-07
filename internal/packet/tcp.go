@@ -1466,9 +1466,6 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 		conn.Close()
 		return nil, dialAddr, "", werr
 	}
-	if b.pool != nil {
-		b.pool.succeeded(dialAddr, host) // combo works: clear any suspicion on this IP and SNI
-	}
 	return &wsConn{Conn: conn, r: r, client: true}, dialAddr, activeLabel(dialAddr, host), nil
 }
 
@@ -2512,7 +2509,7 @@ func (b *TCP) dialLoopWarm() {
 				// while one is held — so once the pool healed there was no way to build a standby on the edge that
 				// came back. Retire it as soon as another edge is actually available and the NEXT tick rotates for
 				// real; while nothing else is healthy we still just skip, since rebuilding is a dial train of its own.
-				if b.pool != nil && b.pool.hasHealthyEdgeOtherThan(activeCombo) {
+				if b.pool != nil && b.pool.hasEligibleEdgeOtherThan(activeCombo) {
 					log.Printf("core/tcp: the pool healed — retiring the same-edge warm standby (%s) so the next rotation is real", activeCombo)
 					dropStandby()
 					requestStandby()

@@ -68,15 +68,21 @@ func (p *PeerPool) current() string {
 // undone — so currentLocked hands that endpoint back instead of re-selecting (see the chosen field).
 // pickLocked is the same move WITHOUT the commit, for currentLocked's own passes and for a pin. Every
 // write to p.cur goes through one of the two, so chosen can never go stale.
+//
+// Both mark the endpoint TRIED, because that is what handing it to the carrier means. Both can land on a
+// burned endpoint whose wait has NOT elapsed — there is no dead-end, so with the whole pool burned the
+// least-bad is handed out anyway — and the verdict that comes back has to be allowed to walk its ladder.
 func (p *PeerPool) commitLocked(idx int) string {
 	p.cur = idx
 	p.chosen = p.addrs[idx]
+	p.health.markTried(p.chosen)
 	return p.chosen
 }
 
 func (p *PeerPool) pickLocked(idx int) string {
 	p.cur = idx
 	p.chosen = ""
+	p.health.markTried(p.addrs[idx])
 	return p.addrs[idx]
 }
 

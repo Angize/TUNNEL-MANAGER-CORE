@@ -71,17 +71,32 @@ func TestABurnedEndpointIsSelectableOnceDue(t *testing.T) {
 	}
 }
 
-// TestTheLadderDeepensWhileOnlyTheNodeSpeaks walks the whole schedule. Each verdict from the node pushes
-// the next retry further out, so an endpoint that keeps failing is tried rarely rather than every cycle;
-// and one OK wipes the record, so a genuine recovery starts clean.
+// TestTheLadderDeepensWhileOnlyTheNodeSpeaks walks the whole schedule the way the pool really walks it:
+// a verdict burns the endpoint, the rotation leaves it alone until its wait elapses, then picks it up
+// again — which is the only way any endpoint is ever retried — and the next verdict pushes the retry
+// further out. An endpoint that keeps failing is tried rarely rather than every cycle; one OK wipes the
+// record, so a genuine recovery starts clean.
+//
+// Driving it through rotateOnce/current, not by writing the cursor, is the point: a verdict only ever
+// arrives about the endpoint the carrier is USING, so "two verdicts while it waits" is not a state the
+// pool can be in, and a test that forces it proves nothing about the ladder.
 func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
 	p.now = func() int64 { return clk }
-	for i, want := range suspectBackoff {
+	backOntoA := func(t *testing.T) {
+		t.Helper()
 		p.mu.Lock()
-		p.cur, p.chosen = 0, ""
+		clk = p.health.rec("a").nextRetest // its wait elapsed
 		p.mu.Unlock()
+		if _, moved := p.rotateOnce(); !moved || p.current() != "a" {
+			t.Fatalf("the rotation would not return to a once it came due, current=%q", p.current())
+		}
+	}
+	for i, want := range suspectBackoff {
+		if i > 0 {
+			backOntoA(t)
+		}
 		p.fail()
 		p.mu.Lock()
 		r := p.health.recs["a"]
@@ -91,9 +106,7 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 			t.Fatalf("verdict #%d should sit at step %d (+%ds), got fails=%d next=+%d", i+1, i, want, fails, next-clk)
 		}
 	}
-	p.mu.Lock()
-	p.cur, p.chosen = 0, ""
-	p.mu.Unlock()
+	backOntoA(t)
 	p.fail()
 	p.mu.Lock()
 	state, next := p.health.recs["a"].state, p.health.recs["a"].nextRetest
@@ -105,7 +118,7 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 		t.Fatal("an OK must clear even a dead endpoint")
 	}
 	p.mu.Lock()
-	p.cur, p.chosen = 0, ""
+	p.cur, p.chosen = 0, "" // a is healthy again, so the cursor may sit on it as it would after a heal
 	p.mu.Unlock()
 	p.fail()
 	p.mu.Lock()
