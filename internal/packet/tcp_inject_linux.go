@@ -58,14 +58,39 @@ func (b *TCP) tcpFakeSegs(conn net.Conn) (net.IP, [][]byte) {
 	}
 	opts, window := tcpDecoyShape(conn)
 	d := newDesyncCfg(b.dsOn, b.dsTTL, b.dsCount, b.dsMode)
+	body := b.decoyBody()
 	var pkts [][]byte
 	for _, sp := range d.specsTCP() {
-		seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), randSeq32(), randSeq32(), tcpPshAck, window, opts, fakePayload())
+		seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), randSeq32(), randSeq32(), tcpPshAck, window, opts, body())
 		if ip := buildIP4Ext(src, dst, protoTCP, sp.ttl, sp.badSum, seg); ip != nil {
 			pkts = append(pkts, ip)
 		}
 	}
 	return dst, pkts
+}
+
+// decoyBody picks what a decoy segment carries, which has to be whatever the REAL segments of this
+// carrier carry. On tcp and on plain ws the real bytes are AEAD ciphertext, so fakePayload's random bytes
+// already match. On a cover or wss carrier every real byte is a TLS record, and there a decoy of bare
+// random bytes is the one thing on the 4-tuple that could not be a record at all -- which makes the
+// INJECTION identifiable, whatever it does to the DPI's reassembly.
+func (b *TCP) decoyBody() func() []byte {
+	if b.cover || (b.ws && b.wsTLS) {
+		return tlsRecordPayload
+	}
+	return fakePayload
+}
+
+// tlsRecordPayload wraps random bytes in a well-formed TLS application_data record. application_data is
+// opaque by design, so one carrying random bytes is indistinguishable from every other record in the
+// flow -- which is the point, since the decoy is the only segment here that is not one.
+func tlsRecordPayload() []byte {
+	body := fakePayload()[5:] // keep the segment the same size on the wire as the bare form
+	rec := make([]byte, 5+len(body))
+	rec[0], rec[1], rec[2] = 0x17, 0x03, 0x03 // application_data, TLS 1.2 legacy record version
+	binary.BigEndian.PutUint16(rec[3:5], uint16(len(body)))
+	copy(rec[5:], body)
+	return rec
 }
 
 // randSeq32 returns a random 32-bit value for a decoy segment's sequence/ack fields.

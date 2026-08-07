@@ -22,7 +22,7 @@ const convergeRounds = 200
 // silence everywhere except one (destination, source) pair.
 func TestTheDirectWalkFindsTheOnePairThatWorks(t *testing.T) {
 	shapes := []struct {
-		dests, srcs int
+		dests, srcs  int
 		goodD, goodS int
 	}{
 		{3, 2, 3, 2}, // the last pair — the walk has to cover the whole matrix to reach it
