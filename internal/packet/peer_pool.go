@@ -31,6 +31,9 @@ type PeerPool struct {
 	// rounds say it cannot. A clock could only ever guess, and every carrier already reports both outcomes.
 	pinKey   string // operator "make active" endpoint; current() forces it until it lands or is disproven
 	pinTries int    // failed attempts on the pinned endpoint; at pinFailRelease the pin goes
+	// pinTook holds the health record the pin CLEARED, so a pin that never lands puts the pool back
+	// exactly as it found it. Clearing is the operator saying "try this one again", not a verdict.
+	pinTook *healthRec
 	// chosen is the endpoint an ADVANCE deliberately moved onto, which currentLocked returns instead of
 	// re-selecting: the two follow different rules on purpose, and a reader must not overrule the rotation.
 	// Maintained only by commitLocked/pickLocked, so it can never point somewhere cur is not.
@@ -401,9 +404,10 @@ func (p *PeerPool) selectEntry(key string) bool {
 	ok := false
 	for idx, a := range p.addrs {
 		if a == key {
-			p.pinKey = key
-			p.health.clear(key) // the operator picked this one deliberately: burn and condemnation both
-			p.pickLocked(idx)   // the pin key governs while it is live; normal selection resumes once it lapses
+			p.pinKey, p.pinTries = key, 0
+			p.pinTook = p.health.rec(key) // kept, so an abandoned pin can put it back
+			p.health.clear(key)           // the operator picked this one deliberately: burn and condemnation both
+			p.pickLocked(idx)             // the pin key governs while it is live
 			ok = true
 			break
 		}
@@ -422,6 +426,7 @@ func (p *PeerPool) selectEntry(key string) bool {
 func (p *PeerPool) pinLandedOn(addr string) {
 	p.mu.Lock()
 	p.pinTries = 0
+	p.pinTook = nil // it landed: the endpoint proved itself, so the clear stands
 	changed := p.pinnedLocked() && p.pinKey == addr
 	if changed {
 		p.pinKey = ""
@@ -430,6 +435,17 @@ func (p *PeerPool) pinLandedOn(addr string) {
 	if changed {
 		p.writeStatus()
 	}
+}
+
+// restorePinTookLocked puts back the health record the pin cleared. Called only when the pin is abandoned
+// WITHOUT landing: the clear was the operator asking for a fresh try, and a try that never happened must
+// not leave the pool believing a dead endpoint recovered. A landed pin keeps the clear -- there the
+// endpoint really did prove itself. Caller holds the lock.
+func (p *PeerPool) restorePinTookLocked(key string) {
+	if p.pinTook != nil && key != "" {
+		p.health.recs[key] = p.pinTook
+	}
+	p.pinTook = nil
 }
 
 // pinAttemptFailed is the remote twin of pinCannotLand: that one fires on a LOCAL impossibility (a source
@@ -441,6 +457,7 @@ func (p *PeerPool) pinAttemptFailed(addr string) {
 	released := false
 	if p.pinKey != "" && p.pinKey == addr {
 		if p.pinTries++; p.pinTries >= pinFailRelease {
+			p.restorePinTookLocked(addr)
 			p.pinKey, p.pinTries = "", 0
 			released = true
 		}
@@ -459,6 +476,7 @@ func (p *PeerPool) pinCannotLand(key string) bool {
 	p.mu.Lock()
 	cleared := p.pinnedLocked() && p.pinKey == key
 	if cleared {
+		p.restorePinTookLocked(key) // abandoned without landing -- see restorePinTookLocked
 		p.pinKey = ""
 	}
 	p.mu.Unlock()
@@ -475,6 +493,7 @@ func (p *PeerPool) releasePin() {
 	p.mu.Lock()
 	changed := p.pinKey != ""
 	if changed {
+		p.restorePinTookLocked(p.pinKey) // abandoned without landing -- see restorePinTookLocked
 		p.pinKey = ""
 	}
 	p.mu.Unlock()
