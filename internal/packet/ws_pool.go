@@ -84,7 +84,8 @@ type wsPool struct {
 	autoBurn    bool
 	statusPath  string
 	active      string
-	rotDegraded bool        // true once the healthy-IP count fell below 2 (rotation paused); drives the degraded/restored event
+	rotDegraded bool        // true once fewer than 2 edges are reachable; drives the degraded/restored event
+	chosen      string      // the combo a proactive rotate committed to, "" otherwise (see currentLocked pass 0)
 	hb          int64       // unix-seconds of the carrier's lastRx — periodic liveness heartbeat
 	dw          int64       // resolved dead-window in seconds — the single number a reader ages hb against
 	events      []coreEvent // rolling ring of core-observed events (down/burn) for the panel log
@@ -179,7 +180,18 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 	if p.pinIP != "" || p.pinSNI != "" {
 		return p.resolvePinIPLocked(), p.resolvePinSNILocked(), true
 	}
+	// Pass 0: the combination a proactive rotate DELIBERATELY moved onto. The passes below re-select under
+	// their own rules and would walk straight back off a DUE burned combination — the only kind a live
+	// retry can ever be run on. This is the direct pool's pass 0, for the same reason.
+	if p.chosen != "" {
+		ip := p.ips[p.i%len(p.ips)]
+		sni := p.snis[p.j%len(p.snis)]
+		if activeLabel(ip, sni.host) == p.chosen {
+			return ip, sni, true
+		}
+	}
 	n := len(p.ips) * len(p.snis)
+	// Pass 1: a fully-HEALTHY combination.
 	for k := 0; k < n; k++ {
 		ip := p.ips[p.i%len(p.ips)]
 		sni := p.snis[p.j%len(p.snis)]
@@ -188,9 +200,56 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 		}
 		p.stepLocked()
 	}
+	// Pass 2: none healthy -- a combination whose backoff has ELAPSED gets a live try, which is the only
+	// way the tun probe can ever judge it. Without this pass a burned entry never carries traffic again,
+	// so nothing can ever prove it recovered, and the retest probe had to do the readmitting itself --
+	// off a control handshake that says nothing about whether DATA crosses. This is the direct pool's
+	// pass 2, for the same reason.
+	for k := 0; k < n; k++ {
+		ip := p.ips[p.i%len(p.ips)]
+		sni := p.snis[p.j%len(p.snis)]
+		if p.ipHealth.eligible(ip) && p.sniHealth.eligible(sni.host) {
+			return ip, sni, true
+		}
+		p.stepLocked()
+	}
+	// Pass 3: nothing healthy or due — the least-bad combination, marked as tried because that is what
+	// handing it out means. Every path that yields a tracked entry leaves it DUE, which is what lets the
+	// next verdict deepen its ladder instead of freezing it on the first backoff step.
 	ip := p.bestIPLocked()
 	sni := p.bestSNILocked()
+	p.ipHealth.markTried(ip)
+	p.sniHealth.markTried(sni.host)
+	p.chosen = ""
 	return ip, sni, true
+}
+
+// commitLocked records the combination at the cursor as a DELIBERATE choice, so currentLocked hands it
+// back instead of re-selecting past it. Only the two deliberate moves use it — the proactive rotate and
+// the warm-standby aim — because only they may spend a live connection on a DUE burned combination.
+// Refuses to commit to one the rotation could not pick at all; there the passes know better.
+func (p *wsPool) commitLocked() bool {
+	ip := p.ips[p.i%len(p.ips)]
+	sni := p.snis[p.j%len(p.snis)]
+	if !p.ipHealth.eligible(ip) || !p.sniHealth.eligible(sni.host) {
+		return false
+	}
+	p.chosen = activeLabel(ip, sni.host)
+	return true
+}
+
+// stepToEligibleLocked walks the odometer to the next combination the rotation can actually pick and
+// commits to it, reporting whether it found one. Shared by the proactive rotate and the standby aim's
+// fallback, so both spend their live try on the same set of combinations.
+func (p *wsPool) stepToEligibleLocked() bool {
+	n := len(p.ips) * len(p.snis)
+	for k := 0; k < n; k++ {
+		p.stepLocked()
+		if p.commitLocked() {
+			return true
+		}
+	}
+	return false
 }
 
 // updateECH replaces the stored ECHConfigList for the pool SNI matching host with the fresh key the edge
@@ -320,6 +379,7 @@ func (p *wsPool) tierLocked(kind, key string) (tier int, next int64) {
 
 // stepLocked advances to the next (ip, sni) combination (caller holds the lock).
 func (p *wsPool) stepLocked() {
+	p.chosen = ""
 	p.j++
 	if p.j >= len(p.snis) {
 		p.j = 0
@@ -330,35 +390,48 @@ func (p *wsPool) stepLocked() {
 	}
 }
 
-// advance rotates to the next combination and reports whether the edge the carrier would actually DIAL
-// changed. With every other combination burned a step lands straight back on the same edge, and a caller
-// that drops the live connection anyway pays a re-dial and a traffic gap every interval for nothing. The
-// comparison resolves through currentLocked() both times: the cursor always moves, the resolved edge not.
+// advance rotates to the next ELIGIBLE combination and reports whether the edge the carrier would
+// actually DIAL changed. A caller that drops the live connection on a false "moved" pays a re-dial and a
+// traffic gap every interval for nothing, so the answer is the resolved combo, never the cursor.
+//
+// ELIGIBLE, not healthy: a burned combination whose backoff has elapsed is one the rotation is MEANT to
+// reach. Only live traffic can prove an edge recovered and only the node's tun probe may say so, so a
+// walk that visits healthy combinations only can never readmit anything — the edge stays condemned for
+// the life of the pool. The choice is then committed, or currentLocked would re-select past it. Same
+// rule, same reason, as the direct pool's advanceEligibleLocked.
 func (p *wsPool) advance() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	beforeIP, beforeSNI, okBefore := p.currentLocked()
-	p.stepLocked()
-	afterIP, afterSNI, okAfter := p.currentLocked()
-	if !okBefore || !okAfter {
+	beforeIP, beforeSNI, ok := p.currentLocked()
+	if !ok {
 		return false // empty pool — there is nothing to rotate onto
 	}
-	return beforeIP != afterIP || beforeSNI.host != afterSNI.host
+	if p.pinIP != "" || p.pinSNI != "" {
+		return false // a pin freezes proactive rotation, exactly as it does on the direct pool
+	}
+	if !p.stepToEligibleLocked() {
+		return false // nothing else the rotation can reach — leave the live connection alone
+	}
+	ip := p.ips[p.i%len(p.ips)]
+	sni := p.snis[p.j%len(p.snis)]
+	return ip != beforeIP || sni.host != beforeSNI.host
 }
 
-// hasHealthyEdgeOtherThan reports whether the pool can currently produce a HEALTHY (ip · sni) combo that
-// is not `combo`. Read-only — no cursor movement, no status write — because the warm-standby manager asks
-// it every rotation tick: its standby may sit on the active's own edge, so has anything healed since? It
-// mirrors currentLocked's rule (both axes unburned), since an SNI-only move on one IP is a real rotation.
-func (p *wsPool) hasHealthyEdgeOtherThan(combo string) bool {
+// hasEligibleEdgeOtherThan reports whether the pool can currently produce an (ip · sni) combo that is not
+// `combo` and that the rotation could actually pick. Read-only — no cursor movement, no status write —
+// because the warm-standby manager asks it every rotation tick: its standby may sit on the active's own
+// edge, so has anything become reachable since? It must mirror advance()'s rule exactly, both in taking
+// DUE burned entries (a standby is how they are handed live traffic) and in counting an SNI-only move on
+// a single IP as a real rotation.
+func (p *wsPool) hasEligibleEdgeOtherThan(combo string) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, ip := range p.ips {
-		if !p.ipHealth.healthy(ip) {
+		if !p.ipHealth.eligible(ip) {
 			continue
 		}
 		for _, sni := range p.snis {
-			if p.sniHealth.healthy(sni.host) && ip+activeSep+sni.host != combo {
+			if p.sniHealth.eligible(sni.host) && ip+activeSep+sni.host != combo {
 				return true
 			}
 		}
@@ -366,13 +439,14 @@ func (p *wsPool) hasHealthyEdgeOtherThan(combo string) bool {
 	return false
 }
 
-// aimStandby positions the rotation cursor for the WARM STANDBY dial: onto a HEALTHY edge whose IP
+// aimStandby positions the rotation cursor for the WARM STANDBY dial: onto an ELIGIBLE edge whose IP
 // differs from the LIVE ACTIVE edge's, so the standby can never collide with it. A blind advance() will
 // not do — the shared cursor is not anchored to the active edge, so a plain step can walk the standby
 // onto the active's own IP, and promoting that is no switch at all. Falls back to a plain step.
 func (p *wsPool) aimStandby() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.chosen = ""
 	if len(p.ips) == 0 || len(p.snis) == 0 {
 		return
 	}
@@ -382,23 +456,27 @@ func (p *wsPool) aimStandby() {
 	}
 	for off := 1; off <= len(p.ips); off++ {
 		idx := (p.i + off) % len(p.ips)
-		if ip := p.ips[idx]; ip != activeIP && p.ipHealth.healthy(ip) {
-			p.i = idx // a healthy edge on a DIFFERENT IP than the active — the standby's home
-			p.aimNextHealthySNILocked()
+		if ip := p.ips[idx]; ip != activeIP && p.ipHealth.eligible(ip) {
+			p.i = idx // a reachable edge on a DIFFERENT IP than the active — the standby's home
+			p.aimNextEligibleSNILocked()
+			p.commitLocked()
 			return
 		}
 	}
-	p.stepLocked() // no distinct healthy IP available — degrade to a plain step (still varies the SNI axis)
+	// No distinct reachable IP — degrade to a walk over the SNI axis, which on a single-IP pool is the
+	// only rotation there is. Committed like advance(), or current() re-selects straight back onto the
+	// active's own combination and the standby is a copy of what is already running.
+	p.stepToEligibleLocked()
 }
 
-// aimNextHealthySNILocked advances the SNI cursor to the next HEALTHY domain, wrapping. Without it
-// aimStandby's IP-anchoring path writes only p.i and rotation degrades to IP-only, so a flagged domain is
-// never rotated off and one permanently-reused SNI becomes a stable fingerprint. Landing on a HEALTHY SNI
-// is deliberate: current() calls stepLocked on an unhealthy combo, walking off the IP just picked.
-func (p *wsPool) aimNextHealthySNILocked() {
+// aimNextEligibleSNILocked advances the SNI cursor to the next domain the rotation can pick, wrapping.
+// Without it aimStandby's IP-anchoring path writes only p.i and rotation degrades to IP-only, so a
+// flagged domain is never rotated off and one permanently-reused SNI becomes a stable fingerprint.
+// Landing on a pickable SNI is deliberate: current() steps off a combination it would not select.
+func (p *wsPool) aimNextEligibleSNILocked() {
 	for off := 1; off <= len(p.snis); off++ {
 		idx := (p.j + off) % len(p.snis)
-		if p.sniHealth.healthy(p.snis[idx].host) {
+		if p.sniHealth.eligible(p.snis[idx].host) {
 			p.j = idx
 			return
 		}
@@ -410,6 +488,7 @@ func (p *wsPool) aimNextHealthySNILocked() {
 // bump that lands on a suspect/dead one is passed over on the next dial.
 func (p *wsPool) advanceIP() {
 	p.mu.Lock()
+	p.chosen = ""
 	if len(p.ips) > 0 {
 		p.i = (p.i + 1) % len(p.ips)
 	}
@@ -425,6 +504,7 @@ func (p *wsPool) advanceIP() {
 // best-effort and hands back the edge the cursor just left.
 func (p *wsPool) advanceEdgeFreshRow() {
 	p.mu.Lock()
+	p.chosen = ""
 	if len(p.ips) > 0 {
 		p.i = (p.i + 1) % len(p.ips)
 	}
@@ -438,46 +518,43 @@ func (p *wsPool) advanceEdgeFreshRow() {
 
 func (p *wsPool) advanceSNI() {
 	p.mu.Lock()
+	p.chosen = ""
 	if len(p.snis) > 0 {
 		p.j = (p.j + 1) % len(p.snis)
 	}
 	p.mu.Unlock()
 }
 
-// markSuspect moves a HEALTHY entry into suspect (out of active rotation, scheduled for a
-// +30s retest). A no-op when autoBurn is off (a manual-only pool never auto-sidelines an
-// entry) or when the entry is already tracked — a fresh live failure must not reset an
-// in-progress backoff; the retest scheduler owns the entry's cadence from here.
-// eligibleSNIs is how many SNIs the rotation could actually try right now: the healthy ones, or the
-// whole list when none is tracked. Read BEFORE a burn to size one lap of the matrix — a condemned SNI
-// cannot be tried, so counting the raw list would call a lap complete that never happened and walk the
-// edge off an SNI that never varied.
-func (p *wsPool) eligibleSNIs() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := 0
-	for _, e := range p.snis {
-		if p.sniHealth.healthy(e.host) {
-			n++
-		}
-	}
-	return n
-}
-
-// snisCount is how many domains the pool holds. One means the SNI axis cannot vary at all, which changes
-// WHICH axis a verdict is allowed to blame -- see burnAdvanceWS.
+// snisCount is how many domains the pool holds. One means the SNI axis cannot vary, which changes WHICH
+// axis a verdict may blame -- see burnAdvanceWS.
 func (p *wsPool) snisCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.snis)
 }
 
+// eligibleSNIs is how many SNIs the rotation could actually try right now. Read BEFORE a burn to size one
+// lap of the matrix — a condemned SNI cannot be tried, so counting the raw list would call a lap complete
+// that never happened and walk the edge off an SNI that never varied.
+func (p *wsPool) eligibleSNIs() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	keys := make([]string, len(p.snis))
+	for i, e := range p.snis {
+		keys[i] = e.host
+	}
+	return p.sniHealth.countEligible(keys)
+}
+
+// markSuspect records a live verdict against one entry. A no-op when autoBurn is off — a manual-only pool
+// never auto-sidelines anything. Everything else is healthSet.burn's one rule: a fresh entry is
+// sidelined, one still waiting out its backoff is left alone, a DUE one pays a ladder step.
 func (p *wsPool) markSuspect(kind, key, reason string) {
 	if !p.autoBurn {
 		return
 	}
 	p.mu.Lock()
-	fresh := p.healthMap(kind).sideline(key)
+	fresh := p.healthMap(kind).burn(key)
 	p.mu.Unlock()
 	if fresh {
 		p.event("burn", reason, kind+":"+key) // only log the transition into suspect, not repeats
@@ -557,37 +634,22 @@ func (p *wsPool) reassessRotation() {
 		p.mu.Unlock()
 		return
 	}
-	healthy := 0
-	for _, ip := range p.ips {
-		if p.ipHealth.healthy(ip) {
-			healthy++
-		}
-	}
-	degraded := healthy < 2
+	// ELIGIBLE, not healthy, because that is the set advance() walks: a burned edge whose wait has elapsed
+	// is one the rotation can still reach. Counting only the healthy ones reported a pool as stuck on one
+	// edge while it was in fact still rotating over two.
+	reachable := p.ipHealth.countEligible(p.ips)
+	degraded := reachable < 2
 	if degraded == p.rotDegraded {
 		p.mu.Unlock()
 		return
 	}
 	p.rotDegraded = degraded
 	p.mu.Unlock()
-	detail := strconv.Itoa(healthy) + "/" + strconv.Itoa(len(p.ips))
+	detail := strconv.Itoa(reachable) + "/" + strconv.Itoa(len(p.ips))
 	if degraded {
-		p.event("pool", "degraded", detail) // only one healthy edge left — rotation is paused
+		p.event("pool", "degraded", detail) // only one edge left the rotation can reach
 	} else {
-		p.event("pool", "restored", detail) // a second edge recovered — rotation can resume
-	}
-}
-
-// succeeded clears the health records for a combo that just connected: a live success proves
-// both its IP and its SNI healthy right now. Only writes the status file if something changed.
-func (p *wsPool) succeeded(ip, host string) {
-	p.mu.Lock()
-	changed := p.ipHealth.clear(ip)
-	changed = p.sniHealth.clear(host) || changed
-	p.mu.Unlock()
-	if changed {
-		p.writeStatus()
-		p.reassessRotation()
+		p.event("pool", "restored", detail) // a second edge is reachable again
 	}
 }
 
@@ -602,18 +664,17 @@ func (p *wsPool) retestResult(kind, key string, success bool) {
 		return
 	}
 	if success {
-		m.clear(key)
+		// NOT a heal. The probe completes the control path -- TCP, TLS, the WebSocket upgrade -- and a
+		// path that passes all three can still carry nothing, which is the exact signal this pool spent
+		// its history mistaking for health. So a passing probe only says "worth a live try": the entry
+		// stays burned and DUE, currentLocked's pass 2 offers it real traffic, and the tun probe decides.
+		// Only cmdOK clears a burn now, on both pools.
+		r.nextRetest = p.now()
 	} else {
 		m.retestFailed(r)
 	}
 	p.mu.Unlock()
-	if success {
-		// A background probe recovered a sidelined edge/SNI (suspect|dead -> healthy). Emit a discrete
-		// heal event so the operator sees the self-heal in the log, not just a silent status-file flip.
-		p.event("heal", "retest", kind+":"+key) // event() also writes the status file
-	} else {
-		p.writeStatus()
-	}
+	p.writeStatus()
 	if kind == "ip" {
 		p.reassessRotation() // a recovered/dead ip may have crossed the "can still rotate" boundary
 	}
@@ -711,6 +772,7 @@ func (p *wsPool) probeAllNow() {
 // success and on a dead edge. It also clears any suspect/dead mark. False if the key is unknown.
 func (p *wsPool) selectEntry(kind, key string) bool {
 	p.mu.Lock()
+	p.chosen = ""
 	ok := false
 	if p.pinTook == nil {
 		p.pinTook = map[string]*healthRec{}
@@ -844,6 +906,12 @@ func (p *wsPool) clearBurn(kind, key string) bool {
 	p.mu.Unlock()
 	if had {
 		p.writeStatus()
+		// This is now the ONLY path that clears a burn (the tun probe's cmdOK, which announces the heal
+		// event itself), so it is the only moment an entry really recovered — reassess in case that
+		// crossed the "can the rotation still reach two edges?" line back up.
+		if kind == "ip" {
+			p.reassessRotation()
+		}
 	}
 	return had
 }

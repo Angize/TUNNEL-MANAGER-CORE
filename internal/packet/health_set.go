@@ -74,29 +74,38 @@ func (h healthSet) best(keys []string) string {
 	return best
 }
 
-// sideline puts a HEALTHY entry into suspect at the first backoff step, and does NOTHING to one that is
-// already tracked: from the first burn on, the retest scheduler owns that entry's cadence, and a second
-// live failure arriving while it waits must not push it further down a ladder it is already on.
+// burn is the live-failure verdict, and it is ONE rule for both pools, keyed on what the failure actually
+// measured:
+//
+//   - fresh entry -> sidelined at the first backoff step.
+//   - tracked and still WAITING out its backoff -> nothing. The scheduler owns its cadence, and a verdict
+//     arriving during the wait measured a combination the rotation was not even trying.
+//   - tracked and DUE -> a step. That entry had just been handed the live retry its ladder granted, and
+//     this failure is the result of it. Without the step it stays due forever, and every rotation tick
+//     walks straight back onto a dead entry.
+//
 // Reports whether the entry was fresh — the transition callers log, since repeats are not news.
-func (h healthSet) sideline(key string) (fresh bool) {
-	if h.recs[key] != nil {
-		return false
-	}
-	h.recs[key] = &healthRec{state: stateSuspect, nextRetest: h.now() + suspectBackoff[0]}
-	return true
-}
-
-// burn is sideline plus a LADDER STEP for an entry already tracked: each live failure on the same entry
-// costs it another step toward dead. The direct pool wants this — its burn comes from the carrier's own
-// rotation, one per failover round, so stepping is the ladder working as intended. Keep the two apart:
-// collapsing them makes repeated verdicts on one entry race it to dead, or leaves a genuinely dying
-// endpoint stuck one step from healthy forever.
 func (h healthSet) burn(key string) (fresh bool) {
-	if h.sideline(key) {
+	r := h.recs[key]
+	if r == nil {
+		h.recs[key] = &healthRec{state: stateSuspect, nextRetest: h.now() + suspectBackoff[0]}
 		return true
 	}
-	retestBackoff(h.recs[key], h.now())
+	if r.nextRetest <= h.now() {
+		retestBackoff(r, h.now())
+	}
 	return false
+}
+
+// markTried pulls a tracked entry's wait forward to now because the pool is handing it out ANYWAY — the
+// least-bad fallback, when nothing is healthy and nothing is due yet. It keeps `due` honest: an entry the
+// pool is about to spend a live connection on is one whose wait is over in fact, so the verdict that comes
+// back is allowed to walk its ladder. Without it every entry freezes at its first backoff step once the
+// whole pool is burned, and the carrier hammers the same two endpoints forever.
+func (h healthSet) markTried(key string) {
+	if r := h.recs[key]; r != nil && r.nextRetest > h.now() {
+		r.nextRetest = h.now()
+	}
 }
 
 // retestFailed reschedules a tracked entry after a failed retest. Same schedule as a live failure — the

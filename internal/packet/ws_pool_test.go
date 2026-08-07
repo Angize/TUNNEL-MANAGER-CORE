@@ -126,10 +126,9 @@ func TestPoolAdvanceReportsRealMove(t *testing.T) {
 		}
 	}
 
-	// A burned ws edge is re-admitted only when its health record is actually CLEARED — by a live
-	// success or a passing probe. Elapsed time alone never re-admits it here (unlike PeerPool, whose
-	// current() has an explicit "a DUE burned endpoint gets a live retry" pass), so the guard keeps
-	// holding until something really heals. Once b heals, rotation resumes.
+	// A burned ws edge is offered live traffic again once its wait elapses — current() has the same
+	// "a DUE burned entry gets a live retry" pass PeerPool does, because that live try is the only way
+	// the tun probe can ever judge it. A passing retest just brings that moment forward.
 	p2.retestResult("ip", "b", true)
 	if !p2.advance() {
 		t.Fatal("after edge b healed, advance() must report a move again")
@@ -279,52 +278,73 @@ func TestSuspectBackoffThenDead(t *testing.T) {
 	}
 }
 
-// A successful background retest that heals a sidelined edge must emit a discrete "heal"/"retest"
-// event (so the recovery is visible in the panel log), while a FAILED retest must not.
-func TestRetestHealEmitsEvent(t *testing.T) {
+// A background retest is no longer a verdict: it decides only WHEN an entry is next worth a live try. So a
+// passing one must not heal anything — the probe completes TCP, TLS and the WebSocket upgrade, and a path
+// that passes all three can still carry nothing, which is the exact signal this pool spent its history
+// mistaking for health. What it may do is make the entry DUE, so the rotation hands it real traffic and
+// the node's tun probe decides. The pool-level "the rotation can reach two edges again" transition is
+// still logged, because that is a fact about the POOL, not a claim about the edge.
+func TestARetestNeverHealsAnEdge(t *testing.T) {
 	p, _ := clockPool([]string{"a", "b"}, snis("x"), true, "")
-	p.markSuspect("ip", "a", "test") // emits a burn event
+	p.markSuspect("ip", "a", "test") // emits burn + pool/degraded
 	base := len(p.events)
-	p.retestResult("ip", "a", false) // failed retest — no heal event
+
+	p.retestResult("ip", "a", false) // failed retest — nothing to say
 	if len(p.events) != base {
 		t.Fatalf("a failed retest must not emit an event, got %+v", p.events[base:])
 	}
-	// Heals "a": emits heal/retest AND — because it restores the 2nd healthy IP of this 2-IP pool —
-	// a pool/restored event (rotation can resume). Order: the heal first, then the pool transition.
+
 	p.retestResult("ip", "a", true)
-	if len(p.events) != base+2 {
-		t.Fatalf("a successful retest that also un-degrades the pool must emit heal + pool/restored, got %+v", p.events[base:])
+	if p.ipHealth.rec("a") == nil {
+		t.Fatal("a passing retest CLEARED the burn — only the tun probe, which watches DATA cross, may " +
+			"readmit an edge")
 	}
-	if ev := p.events[base]; ev.Kind != "heal" || ev.Code != "retest" || ev.Detail != "ip:a" {
-		t.Fatalf("want heal/retest/ip:a, got %+v", ev)
+	if !p.ipHealth.due("a") {
+		t.Fatal("a passing retest must at least make the edge DUE, or the rotation never hands it live " +
+			"traffic and the tun probe never gets to judge it")
 	}
-	if ev := p.events[base+1]; ev.Kind != "pool" || ev.Code != "restored" {
-		t.Fatalf("want pool/restored once the recovery restored rotation, got %+v", ev)
+	for _, e := range p.events[base:] {
+		if e.Kind == "heal" {
+			t.Fatalf("a retest announced a heal: %+v", e)
+		}
 	}
-	// retestResult on a cleared (already-healthy) entry is a no-op — no duplicate heal.
+	if len(p.events) != base+1 || p.events[base].Kind != "pool" || p.events[base].Code != "restored" {
+		t.Fatalf("want exactly one pool/restored — the rotation can reach both edges again — got %+v",
+			p.events[base:])
+	}
+	// A repeat says nothing new: the entry was already due.
 	n := len(p.events)
 	p.retestResult("ip", "a", true)
 	if len(p.events) != n {
-		t.Fatalf("retest on an already-healthy entry must be silent, got %+v", p.events[n:])
+		t.Fatalf("a repeat retest must be silent, got %+v", p.events[n:])
 	}
 }
 
-// ANY successful retest clears the record back to healthy (in rotation again).
-func TestSuccessfulRetestHealsToHealthy(t *testing.T) {
-	p, _ := clockPool([]string{"a", "b"}, snis("x"), true, "")
+// A successful retest does NOT heal. The probe completes the control path -- TCP, TLS, the WebSocket
+// upgrade -- and a path that passes all three can still carry nothing, which is the exact signal this
+// pool spent its history mistaking for health. So it only says "worth a live try": the entry stays
+// tracked and becomes DUE, current()'s pass 2 offers it real traffic, and the tun probe decides.
+func TestASuccessfulRetestOffersALiveTryItDoesNotHeal(t *testing.T) {
+	p, now := clockPool([]string{"a", "b"}, snis("x"), true, "")
 	p.markSuspect("ip", "a", "test")
-	p.retestResult("ip", "a", false) // suspect, fails=1
-	p.retestResult("ip", "a", true)  // heals
+	p.retestResult("ip", "a", false) // suspect, fails=1 -> a longer wait
+	if p.ipHealth.due("a") {
+		t.Fatal("a FAILED retest must push the wait out, not leave it due")
+	}
+	p.retestResult("ip", "a", true)
+	if p.ipHealth.recs["a"] == nil {
+		t.Fatal("a passing probe healed the entry — only the tun probe may do that; a control handshake " +
+			"says nothing about whether DATA crosses")
+	}
+	if !p.ipHealth.due("a") {
+		t.Fatal("a passing probe must leave the entry DUE, so current()'s pass 2 can offer it live traffic")
+	}
+	// ...and the ONLY thing that heals it is the node's verdict.
+	p.clearBurn("ip", "a")
 	if p.ipHealth.recs["a"] != nil {
-		t.Fatalf("a should be healthy again, got %#v", p.ipHealth.recs["a"])
+		t.Fatal("clearBurn is the tun probe's cmdOK path and must clear outright")
 	}
-	// Also proven healthy via a live success on a dead entry.
-	p.markSuspect("sni", "x", "test")
-	p.ipHealth.recs["a"] = &healthRec{state: stateDead, nextRetest: 9999}
-	p.succeeded("a", "x")
-	if p.ipHealth.recs["a"] != nil || p.sniHealth.recs["x"] != nil {
-		t.Fatalf("succeeded must clear both axes; ip=%#v sni=%#v", p.ipHealth.recs["a"], p.sniHealth.recs["x"])
-	}
+	_ = now
 }
 
 // current() never dead-ends: with nothing fully healthy it returns the least-bad combo —

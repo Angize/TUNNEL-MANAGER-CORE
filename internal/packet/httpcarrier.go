@@ -529,11 +529,10 @@ func (b *TCP) establishHTTPC() (net.Conn, string, string, error) {
 			}
 		}
 	}
-	// A dial that came up proves the edge accepted us, so it clears both axes. A dial that FAILED
-	// burns nothing: the node's tun probe is the only judge here, exactly as it is for the direct pools.
-	if b.pool != nil && err == nil {
-		b.pool.succeeded(dialAddr, host)
-	}
+	// Neither outcome touches health. A dial that FAILED burns nothing and a dial that CAME UP clears
+	// nothing: an established carrier proves the control path, not that data crosses it, and this pool
+	// spent its history mistaking the first for the second. The node's tun probe is the only judge, on
+	// both pools and in both directions.
 	combo := ""
 	if err == nil {
 		combo = activeLabel(dialAddr, host)
