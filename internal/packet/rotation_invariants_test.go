@@ -268,7 +268,7 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 
 			var log []string
 			for step := 1; step <= 120; step++ {
-				switch rng.Intn(12) {
+				switch rng.Intn(11) {
 				case 0:
 					log = append(log, "advance")
 					p.advance()
@@ -282,34 +282,31 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 					log = append(log, "pin:"+k+":"+v)
 					p.selectEntry(k, v)
 				case 3:
-					log = append(log, "aimStandby")
-					p.aimStandby()
-				case 4:
 					k, v := axis()
 					log = append(log, "clearBurn:"+k+":"+v)
 					p.clearBurn(k, v)
-				case 5:
+				case 4:
 					k, v := axis()
 					log = append(log, "retestOK:"+k+":"+v)
 					p.retestResult(k, v, true)
-				case 6:
+				case 5:
 					k, v := axis()
 					log = append(log, "retestFail:"+k+":"+v)
 					p.retestResult(k, v, false)
-				case 7:
+				case 6:
 					clk += int64(rng.Intn(4000))
 					log = append(log, fmt.Sprintf("clock=%d", clk))
-				case 8:
+				case 7:
 					log = append(log, "advanceIP")
 					p.advanceIP()
-				case 9:
+				case 8:
 					log = append(log, "advanceEdgeFreshRow")
 					p.advanceEdgeFreshRow()
-				case 10:
+				case 9:
 					ip := ips[rng.Intn(len(ips))]
 					log = append(log, "pinApplied:"+ip)
 					p.pinApplied(ip, hosts[rng.Intn(len(hosts))])
-				case 11:
+				case 10:
 					ip := ips[rng.Intn(len(ips))]
 					log = append(log, "pinFailed:"+ip)
 					p.pinAttemptFailed(ip, hosts[rng.Intn(len(hosts))])

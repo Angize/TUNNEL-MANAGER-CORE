@@ -28,7 +28,7 @@ type WSPoolSNI struct {
 
 // DialWSPoolCfg decodes the config's clean IP/SNI lists into a pool and returns a ws
 // client that rotates over it. rotate is the proactive-rotation interval.
-func DialWSPoolCfg(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []WSPoolSNI, rotate time.Duration, autoBurn bool, statusPath string, httpc bool, httpcMode string, warmStandby bool) (*TCP, error) {
+func DialWSPoolCfg(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []WSPoolSNI, rotate time.Duration, autoBurn bool, statusPath string, httpc bool, httpcMode string) (*TCP, error) {
 	entries := make([]wsSNIEntry, 0, len(snis))
 	for _, s := range snis {
 		var ech []byte
@@ -41,7 +41,7 @@ func DialWSPoolCfg(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool
 	if pool == nil {
 		return nil, errors.New("ws pool: need at least one IP and one SNI")
 	}
-	return DialWSPool(dev, keepalive, obfs, cryptoOn, psk, cipher, pool, rotate, httpc, httpcMode, warmStandby)
+	return DialWSPool(dev, keepalive, obfs, cryptoOn, psk, cipher, pool, rotate, httpc, httpcMode)
 }
 
 // wsSNIEntry is one fronting domain in the pool with its own ECH config and path.
@@ -174,9 +174,8 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 		return "", wsSNIEntry{}, false
 	}
 	// A manual pin is a ONE-SHOT exact jump: while it is in force current() FORCES the chosen axis, so
-	// the jump — and any warm-standby promotion during it — lands on EXACTLY that edge, never a
-	// neighbour. It ends on EVIDENCE, never on a clock: pinApplied when the carrier lands, or the
-	// verdict path once enough proven-dead rounds say it cannot.
+	// the jump lands on EXACTLY that edge, never a neighbour. It ends on EVIDENCE, never on a clock:
+	// pinApplied when the carrier lands, or the verdict path once enough proven-dead rounds say it cannot.
 	if p.pinIP != "" || p.pinSNI != "" {
 		return p.resolvePinIPLocked(), p.resolvePinSNILocked(), true
 	}
@@ -225,8 +224,8 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 }
 
 // commitLocked records the combination at the cursor as a DELIBERATE choice, so currentLocked hands it
-// back instead of re-selecting past it. Only the two deliberate moves use it — the proactive rotate and
-// the warm-standby aim — because only they may spend a live connection on a DUE burned combination.
+// back instead of re-selecting past it. Only the proactive rotate uses it, because only a deliberate
+// move may spend a live connection on a DUE burned combination.
 // Refuses to commit to one the rotation could not pick at all; there the passes know better.
 func (p *wsPool) commitLocked() bool {
 	ip := p.ips[p.i%len(p.ips)]
@@ -239,8 +238,7 @@ func (p *wsPool) commitLocked() bool {
 }
 
 // stepToEligibleLocked walks the odometer to the next combination the rotation can actually pick and
-// commits to it, reporting whether it found one. Shared by the proactive rotate and the standby aim's
-// fallback, so both spend their live try on the same set of combinations.
+// commits to it, reporting whether it found one.
 func (p *wsPool) stepToEligibleLocked() bool {
 	n := len(p.ips) * len(p.snis)
 	for k := 0; k < n; k++ {
@@ -281,7 +279,7 @@ func activeLabel(ip, host string) string { return ip + activeSep + host }
 
 // setActive records the edge the client is ACTUALLY carrying data on right now, for the status file's
 // live "active edge" and the panel's auto-switch log. current() is deliberately NOT the place for it:
-// current() also picks a warm STANDBY's edge, so letting it write p.active would show the standby
+// current() is also asked before a dial lands, so letting it write p.active would show an edge
 // instead of the live carrier. An empty combo is ignored, so a not-yet-connected state blanks nothing.
 func (p *wsPool) setActive(combo string) {
 	if combo == "" {
@@ -417,72 +415,6 @@ func (p *wsPool) advance() bool {
 	return ip != beforeIP || sni.host != beforeSNI.host
 }
 
-// hasEligibleEdgeOtherThan reports whether the pool can currently produce an (ip · sni) combo that is not
-// `combo` and that the rotation could actually pick. Read-only — no cursor movement, no status write —
-// because the warm-standby manager asks it every rotation tick: its standby may sit on the active's own
-// edge, so has anything become reachable since? It must mirror advance()'s rule exactly, both in taking
-// DUE burned entries (a standby is how they are handed live traffic) and in counting an SNI-only move on
-// a single IP as a real rotation.
-func (p *wsPool) hasEligibleEdgeOtherThan(combo string) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, ip := range p.ips {
-		if !p.ipHealth.eligible(ip) {
-			continue
-		}
-		for _, sni := range p.snis {
-			if p.sniHealth.eligible(sni.host) && ip+activeSep+sni.host != combo {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// aimStandby positions the rotation cursor for the WARM STANDBY dial: onto an ELIGIBLE edge whose IP
-// differs from the LIVE ACTIVE edge's, so the standby can never collide with it. A blind advance() will
-// not do — the shared cursor is not anchored to the active edge, so a plain step can walk the standby
-// onto the active's own IP, and promoting that is no switch at all. Falls back to a plain step.
-func (p *wsPool) aimStandby() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.chosen = ""
-	if len(p.ips) == 0 || len(p.snis) == 0 {
-		return
-	}
-	activeIP := p.active // p.active is "ip · sni"; take the IP before the separator
-	if k := strings.Index(activeIP, activeSep); k >= 0 {
-		activeIP = activeIP[:k]
-	}
-	for off := 1; off <= len(p.ips); off++ {
-		idx := (p.i + off) % len(p.ips)
-		if ip := p.ips[idx]; ip != activeIP && p.ipHealth.eligible(ip) {
-			p.i = idx // a reachable edge on a DIFFERENT IP than the active — the standby's home
-			p.aimNextEligibleSNILocked()
-			p.commitLocked()
-			return
-		}
-	}
-	// No distinct reachable IP — degrade to a walk over the SNI axis, which on a single-IP pool is the
-	// only rotation there is. Committed like advance(), or current() re-selects straight back onto the
-	// active's own combination and the standby is a copy of what is already running.
-	p.stepToEligibleLocked()
-}
-
-// aimNextEligibleSNILocked advances the SNI cursor to the next domain the rotation can pick, wrapping.
-// Without it aimStandby's IP-anchoring path writes only p.i and rotation degrades to IP-only, so a
-// flagged domain is never rotated off and one permanently-reused SNI becomes a stable fingerprint.
-// Landing on a pickable SNI is deliberate: current() steps off a combination it would not select.
-func (p *wsPool) aimNextEligibleSNILocked() {
-	for off := 1; off <= len(p.snis); off++ {
-		idx := (p.j + off) % len(p.snis)
-		if p.sniHealth.eligible(p.snis[idx].host) {
-			p.j = idx
-			return
-		}
-	}
-}
-
 // advanceIP / advanceSNI rotate a single dimension (manual "rotate now, IP only" /
 // "rotate now, SNI only" from the panel). current() still skips unhealthy entries, so a
 // bump that lands on a suspect/dead one is passed over on the next dial.
@@ -605,8 +537,8 @@ func (p *wsPool) restorePinTookAxisLocked(kind, key string) {
 // the pin is released so normal rotation resumes; a landing resets the count (pinApplied clears the pin
 // outright, so only a not-yet-landed pin is ever counting).
 //
-// A no-op unless the pin actually targets what just failed — under warm standby a STANDBY dial to some
-// other edge is failing beside the pinned one, and that says nothing about the operator's pick.
+// A no-op unless the pin actually targets what just failed: a dial to some other edge says nothing
+// about the operator's pick.
 func (p *wsPool) pinAttemptFailed(ip, host string) {
 	p.mu.Lock()
 	counted := (p.pinIP != "" && p.pinIP == ip) || (p.pinSNI != "" && p.pinSNI == host)
@@ -854,11 +786,11 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 func (p *wsPool) pinApplied(ip, host string) {
 	p.mu.Lock()
 	changed := false
-	// PER AXIS, and only for an axis this landing actually satisfies. A landing elsewhere is the case
-	// pinMatches exists for -- a standby built before the pin, promoted beside it -- and settling the
-	// pin's memory for it wiped the burn the pin was holding and reset the count that is the pin's only
-	// way to end. Dropping the whole map on a one-axis landing was wrong too: the OTHER axis is still
-	// pinned, and its entry has proven nothing.
+	// PER AXIS, and only for an axis this landing actually satisfies. tcp can adopt a carrier the rotation
+	// timer pre-built, whose edge was resolved before the pin existed, and settling the pin's memory for
+	// that wiped the burn the pin was holding and reset the count that is the pin's only way to end.
+	// Dropping the whole map on a one-axis landing was wrong too: the OTHER axis is still pinned, and its
+	// entry has proven nothing.
 	if p.pinIP != "" && p.pinIP == ip {
 		delete(p.pinTook, "ip:"+ip) // it landed: this entry proved itself, so its clear stands
 		p.pinIP = ""
@@ -876,22 +808,6 @@ func (p *wsPool) pinApplied(ip, host string) {
 	if changed {
 		p.writeStatus()
 	}
-}
-
-// pinMatches reports whether a carrier that came up on (ip, host) satisfies EVERY axis of the live
-// pin — the read-only twin of pinApplied, for deciding whether a connection may become the active at
-// all. A dial that resolved its edge before the pin existed does not satisfy it, and adopting such a
-// connection lands the operator somewhere they did not pick. True when no pin is in force.
-func (p *wsPool) pinMatches(ip, host string) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.pinIP != "" && p.pinIP != ip {
-		return false
-	}
-	if p.pinSNI != "" && p.pinSNI != host {
-		return false
-	}
-	return true
 }
 
 // cmdPath is the sidecar file the node writes its commands into. Empty when the pool has no status

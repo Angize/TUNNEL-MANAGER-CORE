@@ -232,12 +232,6 @@ type Config struct {
 	// WSStatusPath instead, which is how the node tells a pool core apart from a plain datagram one.
 	StatusPath string `json:"status_path"`
 
-	// WSWarmStandby keeps a SECOND, fully-handshaked carrier to another pool edge warm in the background
-	// (make-before-break), so the active's failure or a proactive rotation promotes it instantly and the
-	// TUN never sees a gap. Client + ws edge pool only; default false. The server side — no connect-time
-	// eviction, downstream follows data — is always on and safe for a single connection.
-	WSWarmStandby bool `json:"ws_warm_standby"`
-
 	// FluxCarrier selects how "flux" frames ride the wire: "udp" (default) sends
 	// real UDP datagrams on protocol 17 whose ports rotate each epoch among common
 	// QUIC/STUN/WebRTC ports — internet-safe, since transit forwards UDP; "stun"

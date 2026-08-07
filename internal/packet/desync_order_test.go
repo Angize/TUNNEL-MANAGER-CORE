@@ -67,8 +67,8 @@ func (r *countingRelay) pipe(cli net.Conn, target string) {
 }
 
 // assertDecoysFirst drives the REAL dial sequence — dialCarrier then handshakeAndPrime, exactly as
-// dialLoop, warmEstablish and the single-edge retest dial do — and asserts the decoy injection
-// happened before a single byte of ours reached the wire.
+// dialLoop and the single-edge retest dial do — and asserts the decoy injection happened before a
+// single byte of ours reached the wire.
 func assertDecoysFirst(t *testing.T, b *TCP, relay *countingRelay) {
 	t.Helper()
 	var calls int

@@ -81,8 +81,8 @@ func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 	}
 }
 
-// TestEdgePoolUnderConcurrentDrivers is the same storm on the two-axis pool, where the verdict path and
-// the standby builder move the SAME cursor from different goroutines.
+// TestEdgePoolUnderConcurrentDrivers is the same storm on the two-axis pool, where the verdict path, the
+// rotation timer and the operator's pin move the SAME cursor from different goroutines.
 func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
 	p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1", "s2"), true, filepath.Join(t.TempDir(), "st.json"))
@@ -107,7 +107,7 @@ func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 
 	run(func() { p.current() })
 	run(func() { p.advance() })
-	run(func() { p.aimStandby() })
+	run(func() { p.advanceEdgeFreshRow() })
 	run(func() {
 		ip, sni := p.activeCombo()
 		if ip != "" {
@@ -124,7 +124,7 @@ func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 	run(func() { p.clearBurn("sni", "s2") })
 	run(func() { p.retestResult("ip", "e3", true) })
 	run(func() { _ = p.eligibleSNIs() })
-	run(func() { _ = p.hasEligibleEdgeOtherThan("e1 · s1") })
+	run(func() { _ = p.isPinned() })
 
 	time.Sleep(400 * time.Millisecond)
 	close(stop)
