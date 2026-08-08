@@ -7,7 +7,7 @@ import (
 )
 
 // keepaliveInterval must stay inside [0.6,1.3]×base so a live-but-idle client always pings well
-// within the server's idleMult×keepalive read deadline and pingLossThreshold dead-detection stays
+// within the server's deadMult×keepalive read deadline and pingLossThreshold dead-detection stays
 // bounded. A single out-of-band value could get a healthy tunnel reaped or slow self-heal.
 func TestKeepaliveIntervalBounds(t *testing.T) {
 	base := 15 * time.Second

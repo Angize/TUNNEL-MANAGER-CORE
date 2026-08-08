@@ -72,13 +72,16 @@ func TestTheServersDeadWindowReallyReapsASilentPeer(t *testing.T) {
 		t.Logf("reaped after %v", took.Round(100*time.Millisecond))
 	})
 
-	// ...and without it the default really is long, so the case above cannot pass by accident on a
-	// carrier that reaps everything quickly.
-	t.Run("without it, the default window is far longer", func(t *testing.T) {
-		took, err := run(t, func(b *TCP) {})
+	// ...and the same carrier with a LONG window keeps waiting, so the case above cannot pass by
+	// accident on a carrier that reaps everything quickly. The control sets the window explicitly
+	// rather than leaning on the default: with one multiplier the default is 3x keepalive, which at
+	// this test's 1s keepalive is the same 3s the case above configures -- it could no longer tell
+	// the two apart. Setting it isolates the one variable that is supposed to matter.
+	t.Run("with a long window the same carrier keeps waiting", func(t *testing.T) {
+		took, err := run(t, func(b *TCP) { b.SetDeadAfter(30) })
 		if err != nil {
-			t.Fatalf("the default window reaped a silent peer after only %v (%v): then the test above proves nothing", took, err)
+			t.Fatalf("a 30s window reaped a silent peer after only %v (%v): then the test above proves nothing", took, err)
 		}
-		t.Logf("still waiting after %v, as the ~60s default should", took)
+		t.Logf("still waiting after %v, as a 30s window should", took)
 	})
 }

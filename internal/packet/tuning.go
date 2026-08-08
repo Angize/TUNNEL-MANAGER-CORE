@@ -17,13 +17,15 @@ var (
 
 // Category 2 — dead-detection / self-heal windows (derived from the per-tunnel keepalive):
 var (
-	// idleFor (ws/tcp read deadline) = idleMult × keepalive, floored at idleMinSecs seconds.
-	idleMult    int64 = 4
-	idleMinSecs int64 = 60
-	// sessionStale (udp/raw/flux re-handshake) = sessionStaleMult × keepalive, floored at
-	// sessionStaleMinSecs seconds.
-	sessionStaleMult    int64 = 3
-	sessionStaleMinSecs int64 = 10
+	// Both windows are a MULTIPLE of the tunnel's own keepalive and nothing else, so raising or lowering
+	// keepalive moves them with it. They used to carry a seconds FLOOR as well, which meant the ws/tcp
+	// window sat at 60 s for every keepalive at or under 15 and the knob beside it did nothing.
+	//
+	// The multiplier may not go below 2. keepaliveInterval is clamped to [0.6,1.3]×keepalive, so the
+	// longest real gap between two pings is 1.3×; a window at 1× would expire BETWEEN pings and tear
+	// down a healthy idle carrier. 2× is the same floor deadWindow already applies to an explicit
+	// dead_after_secs.
+	deadMult int64 = 3
 	// pingLossThreshold closes a CLIENT connection after this many consecutive unanswered keepalives.
 	// int32 so it compares directly against the atomic.Int32 unanswered-ping counter.
 	pingLossThreshold int32 = 3
@@ -42,15 +44,12 @@ var (
 // TuningInput mirrors the config's `tuning` object but lives in this package (no import cycle). main
 // builds it from the loaded config and calls ApplyTuning ONCE at startup, before building carriers.
 type TuningInput struct {
-	SuspectBackoff      []int64
-	DeadRetestSecs      int64
-	IdleMult            int64
-	IdleMinSecs         int64
-	SessionStaleMult    int64
-	SessionStaleMinSecs int64
-	PingLossThreshold   int
-	MinLivenessSecs     int64
-	ProbeTimeoutSecs    int64
+	SuspectBackoff    []int64
+	DeadRetestSecs    int64
+	DeadMult          int64
+	PingLossThreshold int
+	MinLivenessSecs   int64
+	ProbeTimeoutSecs  int64
 }
 
 // ApplyTuning overrides each operational default with its non-zero, in-range config value. A zero
@@ -72,17 +71,8 @@ func ApplyTuning(t TuningInput) {
 	if t.DeadRetestSecs > 0 {
 		deadRetest = tclamp(t.DeadRetestSecs, 5, 86400)
 	}
-	if t.IdleMult > 0 {
-		idleMult = tclamp(t.IdleMult, 1, 100)
-	}
-	if t.IdleMinSecs > 0 {
-		idleMinSecs = tclamp(t.IdleMinSecs, 1, 86400)
-	}
-	if t.SessionStaleMult > 0 {
-		sessionStaleMult = tclamp(t.SessionStaleMult, 1, 100)
-	}
-	if t.SessionStaleMinSecs > 0 {
-		sessionStaleMinSecs = tclamp(t.SessionStaleMinSecs, 1, 86400)
+	if t.DeadMult > 0 {
+		deadMult = tclamp(t.DeadMult, 2, 100)
 	}
 	if t.PingLossThreshold > 0 {
 		pingLossThreshold = int32(tclamp(t.PingLossThreshold, 1, 100))
