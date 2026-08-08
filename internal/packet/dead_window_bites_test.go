@@ -8,10 +8,11 @@ import (
 	"time"
 )
 
-// The server's dead_after_secs must REACH the read deadline, not merely land in a field. Reading the
-// field back passes on a tree where the value never touches a socket, and the window only matters if a
-// silent peer is actually reaped on it: on tcp/ws that deadline IS the dead-detection window. So this
-// drives readLoop, on a real TCP connection, against a peer that connects and then says nothing.
+// The resolved dead window must REACH the read deadline, not merely land in a field. Reading the field
+// back passes on a tree where the value never touches a socket, and the window only matters if a silent
+// peer is actually reaped on it: on tcp/ws that deadline IS the dead-detection window. So this drives
+// readLoop, on a real TCP connection, against a peer that connects and then says nothing. It runs on the
+// SERVER end, which is where the window used to be left at a default while the client self-healed.
 func TestTheServersDeadWindowReallyReapsASilentPeer(t *testing.T) {
 	const keepalive = time.Second
 
@@ -44,7 +45,7 @@ func TestTheServersDeadWindowReallyReapsASilentPeer(t *testing.T) {
 		}
 		defer srv.Close()
 
-		b := &TCP{keepalive: keepalive, idle: idleFor(keepalive)}
+		b := &TCP{keepalive: keepalive, idle: deadWindow(keepalive)}
 		apply(b)
 
 		done := make(chan error, 1)
@@ -58,27 +59,27 @@ func TestTheServersDeadWindowReallyReapsASilentPeer(t *testing.T) {
 		}
 	}
 
-	t.Run("with dead_after_secs set, the silent peer is reaped on it", func(t *testing.T) {
-		took, err := run(t, func(b *TCP) { b.SetDeadAfter(3) })
+	want := deadWindow(keepalive)
+
+	t.Run("the resolved window reaps the silent peer", func(t *testing.T) {
+		took, err := run(t, func(*TCP) {}) // the window the constructor resolved, untouched
 		if err == nil {
-			t.Fatalf("the read loop was still waiting after %v: dead_after_secs never reached the socket, so this end keeps its ~60s default while the other self-heals in 3s", took)
+			t.Fatalf("the read loop was still waiting after %v: the resolved window never reached the socket, so this end waits out the kernel's own TCP keepalive while the other self-heals in %v", took, want)
 		}
 		if !errors.Is(err, os.ErrDeadlineExceeded) {
 			t.Fatalf("the loop ended with %v after %v; want a read deadline", err, took)
 		}
-		if took > 6*time.Second {
-			t.Errorf("the silent peer was reaped after %v, not the configured 3s — the window in force is not the one the operator set", took.Round(100*time.Millisecond))
+		if took > want+3*time.Second {
+			t.Errorf("the silent peer was reaped after %v, not the resolved %v — the window in force is not the one keepalive sizes", took.Round(100*time.Millisecond), want)
 		}
-		t.Logf("reaped after %v", took.Round(100*time.Millisecond))
+		t.Logf("reaped after %v (window %v)", took.Round(100*time.Millisecond), want)
 	})
 
 	// ...and the same carrier with a LONG window keeps waiting, so the case above cannot pass by
-	// accident on a carrier that reaps everything quickly. The control sets the window explicitly
-	// rather than leaning on the default: with one multiplier the default is 3x keepalive, which at
-	// this test's 1s keepalive is the same 3s the case above configures -- it could no longer tell
-	// the two apart. Setting it isolates the one variable that is supposed to matter.
+	// accident on a carrier that reaps everything quickly. It is set on the field rather than derived,
+	// because a keepalive high enough to derive 30s would put the case above out of the test's budget.
 	t.Run("with a long window the same carrier keeps waiting", func(t *testing.T) {
-		took, err := run(t, func(b *TCP) { b.SetDeadAfter(30) })
+		took, err := run(t, func(b *TCP) { b.idle = 30 * time.Second })
 		if err != nil {
 			t.Fatalf("a 30s window reaped a silent peer after only %v (%v): then the test above proves nothing", took, err)
 		}

@@ -34,15 +34,14 @@ import (
 // Flux carries L3 packets between a TUN device and a peer over a raw IPv4 carrier
 // whose protocol number rotates every epoch.
 type Flux struct {
-	dev           *tun.Device
-	keepalive     time.Duration
-	deadAfterSecs int // per-tunnel self-heal deadline override (0 = default 3×keepalive/10s floor)
-	rotate        time.Duration
-	obfs          bool
-	cryptoOn      bool
-	psk           string
-	cipher        string
-	isClient      bool
+	dev       *tun.Device
+	keepalive time.Duration
+	rotate    time.Duration
+	obfs      bool
+	cryptoOn  bool
+	psk       string
+	cipher    string
+	isClient  bool
 
 	carrier     string // "raw" (rotate IP protocol) | "udp" (proto 17, rotate ports) | "stun" (udp + STUN header, WebRTC-shaped)
 	shapeProf   string // statistical shape profile: "quic" | "video" | "webrtc" | "random"
@@ -98,19 +97,6 @@ type Flux struct {
 	pp      *PeerPool           // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
 	poolIPs map[string]struct{} // client-only: the destination pool's IPs (4-byte keys) — see provenFrom
 	sp      *PeerPool           // client-only: source-IP rotation pool (nil = single fixed source; swaps the crafted header src)
-}
-
-// SetDeadAfter (client) tightens the session-stale deadline to the per-tunnel dead_after_secs so the
-// tunnel re-handshakes faster than the default (3×keepalive). No-op for secs<=0. Call before Run.
-func (f *Flux) SetDeadAfter(secs int) bool {
-	if secs <= 0 {
-		return false
-	}
-	f.deadAfterSecs = secs
-	// The SERVER of a connectionless carrier holds no dead window at all — there is no connection to
-	// reap and clientLoop, the only reader of this value, never starts. Report that rather than let
-	// main print "self-heal deadline set to Ns" over a number nothing will ever consult.
-	return f.isClient
 }
 
 // SetStatusPath (client, optional) wires a status-file event ring so self-heal re-handshakes and
@@ -796,15 +782,14 @@ func (f *Flux) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	}
 }
 
-// deadWin is the session-stale window this carrier enforces: sessionStaleWindow over the
-// keepalive and the per-tunnel dead_after_secs. Published as `dw` in the status file so the
-// panel judges the dot by the same number the carrier acts on.
-func (f *Flux) deadWin() time.Duration { return sessionStaleWindow(f.keepalive, f.deadAfterSecs) }
+// deadWin is the session-stale window this carrier enforces, and the period the status heartbeat is
+// paced off so an idle tunnel republishes well inside it.
+func (f *Flux) deadWin() time.Duration { return deadWindow(f.keepalive) }
 
 // sessionStale mirrors Raw.sessionStale: if the client has heard nothing
-// authenticated for ~3×keepalive (min 10s) the server probably restarted, so the
-// client drops the dead session and re-handshakes rather than pinging forever
-// under a key the fresh server cannot open.
+// authenticated for deadWin() the server probably restarted, so the client drops
+// the dead session and re-handshakes rather than pinging forever under a key the
+// fresh server cannot open.
 func (f *Flux) sessionStale() bool { return staleSince(f.lastRx.Load(), f.deadWin()) }
 
 // markRx stamps a genuine inbound frame: both the failover clock (lastRx) and the liveness heartbeat

@@ -29,7 +29,7 @@ func newSoakClient(t *testing.T, rotate time.Duration) (*TCP, *wsPool, *os.File,
 	pool := newWSPool([]string{addr}, snis("front-a", "front-b"), true, "")
 	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, keepalive: ka, psk: psk,
 		ws: true, wsTLS: false, pool: pool, rotate: rotate,
-		idle: idleFor(ka), isClient: true, addr: "pool", closeCh: make(chan struct{})}
+		idle: deadWindow(ka), isClient: true, addr: "pool", closeCh: make(chan struct{})}
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
 	waitFor(t, 5*time.Second, "active up", func() bool { return cli.cur.Load() != nil })

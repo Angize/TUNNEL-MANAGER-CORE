@@ -49,11 +49,8 @@ func TestApplyTuning(t *testing.T) {
 	// ONE multiplier, and both windows follow keepalive with no floor of their own to pin them.
 	for _, ka := range []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second} {
 		want := 6 * ka
-		if got := idleFor(ka); got != want {
-			t.Errorf("idleFor(%v)=%v want %v", ka, got, want)
-		}
-		if got := sessionStaleWindow(ka, 0); got != want {
-			t.Errorf("sessionStaleWindow(%v)=%v want %v -- the datagram window must use the SAME multiplier", ka, got, want)
+		if got := deadWindow(ka); got != want {
+			t.Errorf("deadWindow(%v)=%v want %v", ka, got, want)
 		}
 	}
 

@@ -25,19 +25,18 @@ import (
 
 // Raw carries L3 packets between a TUN device and a peer over a raw IPv4 socket.
 type Raw struct {
-	conn          *net.IPConn
-	dev           *tun.Device
-	keepalive     time.Duration
-	deadAfterSecs int // per-tunnel self-heal deadline override (0 = default 3×keepalive/10s floor)
-	obfs          bool
-	cryptoOn      bool
-	psk           string
-	cipher        string
-	profile       string
-	isClient      bool
-	icmpID        uint16 // ICMP echo identifier; PSK-derived and shared by both ends on the icmp profile so replies match requests through a stateful ICMP filter (random elsewhere, ignored on receive)
-	spi           uint32 // per-session ESP Security Parameters Index (esp profile; constant like a real SA)
-	port          uint16 // tcp/udp profiles: the SERVER port stamped on the forged header (0 = the default 443)
+	conn      *net.IPConn
+	dev       *tun.Device
+	keepalive time.Duration
+	obfs      bool
+	cryptoOn  bool
+	psk       string
+	cipher    string
+	profile   string
+	isClient  bool
+	icmpID    uint16 // ICMP echo identifier; PSK-derived and shared by both ends on the icmp profile so replies match requests through a stateful ICMP filter (random elsewhere, ignored on receive)
+	spi       uint32 // per-session ESP Security Parameters Index (esp profile; constant like a real SA)
+	port      uint16 // tcp/udp profiles: the SERVER port stamped on the forged header (0 = the default 443)
 
 	proto int
 	// link is the addressing + admission layer: a directLink for the ordinary raw carrier,
@@ -118,19 +117,6 @@ type Raw struct {
 	pp      *PeerPool           // client-only: destination-IP rotation pool (nil = single fixed peer, no rotation)
 	poolIPs map[string]struct{} // client-only: the destination pool's IPs (4-byte keys) — see provenFrom
 	sp      *PeerPool           // client-only: source-IP rotation pool (nil = fixed source; ignored under spoofSrc)
-}
-
-// SetDeadAfter (client) tightens the session-stale deadline to the per-tunnel dead_after_secs so the
-// tunnel re-handshakes faster than the default (3×keepalive). No-op for secs<=0. Call before Run.
-func (r *Raw) SetDeadAfter(secs int) bool {
-	if secs <= 0 {
-		return false
-	}
-	r.deadAfterSecs = secs
-	// The SERVER of a connectionless carrier holds no dead window at all — there is no connection to
-	// reap and clientLoop, the only reader of this value, never starts. Report that rather than let
-	// main print "self-heal deadline set to Ns" over a number nothing will ever consult.
-	return r.isClient
 }
 
 // SetStatusPath (client, optional) wires a status-file event ring so self-heal re-handshakes and
@@ -1135,10 +1121,9 @@ func (r *Raw) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	}
 }
 
-// deadWin is the session-stale window this carrier enforces: sessionStaleWindow over the
-// keepalive and the per-tunnel dead_after_secs. Published as `dw` in the status file so the
-// panel judges the dot by the same number the carrier acts on.
-func (r *Raw) deadWin() time.Duration { return sessionStaleWindow(r.keepalive, r.deadAfterSecs) }
+// deadWin is the session-stale window this carrier enforces, and the period the status heartbeat is
+// paced off so an idle tunnel republishes well inside it.
+func (r *Raw) deadWin() time.Duration { return deadWindow(r.keepalive) }
 
 // sessionStale reports that the client has heard nothing authenticated from the server for long
 // enough that the peer most likely restarted with a fresh session, so the client should drop its

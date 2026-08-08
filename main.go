@@ -304,11 +304,6 @@ func main() {
 	case pinUnsupported:
 		log.Printf("core: WARNING carrier %s ignores bind_ip — it can pin neither a source IP nor a source pool, so this tunnel egresses from whatever source the kernel routes it out of", cfg.Transport)
 	}
-	// Per-tunnel self-heal deadline: when set, tighten the carrier's dead-detection window so this tunnel
-	// re-establishes or fails over faster than the default. Applied on BOTH roles, because on tcp/ws the
-	// window IS the connection's read deadline and the server has one of its own. On the connectionless
-	// carriers the server holds no such window at all, so it is inert there by shape, not by oversight.
-	applyDeadAfter(b, cfg.Transport, cfg.Keepalive, cfg.DeadAfterSecs)
 	// Wire the status file: a liveness heartbeat (hb) plus this carrier's resolved dead window (dw),
 	// and an event ring carrying the client's precise self-heal reasons into the node/panel system log.
 	// BOTH roles write it. The server's own lastRx is the only local proof that the CLIENT->SERVER
@@ -455,52 +450,6 @@ func pinSource(b any, cfg *Config) string {
 		return pinByPool
 	}
 	return pinUnsupported
-}
-
-// effectiveDeadAfter resolves the dead window a carrier will REALLY enforce for the operator's
-// dead_after_secs, plus a short note naming the floor that applied — so the startup log cannot promise
-// a number the carrier then overrides. Every carrier floors it, but not by the same rule: udp/tcp/raw/
-// flux clamp up to 2×keepalive, while dns applies its own ABSOLUTE floor, being a high-loss carrier.
-func effectiveDeadAfter(transport string, keepaliveSecs, deadAfterSecs int) (int, string) {
-	floor, note := 2*keepaliveSecs, "≥2×keepalive"
-	if transport == "dns" {
-		floor = packet.DNSDeadFloorSecs()
-		note = fmt.Sprintf("≥%ds, the dns carrier floor", floor)
-	}
-	if deadAfterSecs < floor {
-		return floor, note
-	}
-	return deadAfterSecs, note
-}
-
-// applyDeadAfter wires the per-tunnel self-heal deadline into the carrier and logs the EFFECTIVE value.
-// It deliberately takes NO role: dead_after_secs is written onto both ends by the panel and validated
-// on both, and on tcp/ws the window IS the connection's read deadline, which the server has too. Split
-// out of main so the decision is reachable from a test without opening a TUN.
-func applyDeadAfter(b any, transport string, keepaliveSecs, deadAfterSecs int) bool {
-	if deadAfterSecs <= 0 {
-		return false // leave each carrier's default formula in place
-	}
-	s, ok := b.(interface{ SetDeadAfter(int) bool })
-	if !ok {
-		// Say so. The comment here used to claim every carrier implements this, and *packet.DNS did
-		// not — so the assertion failed, the success log never printed, and a fleet-wide operator
-		// setting was silently inert on exactly one transport.
-		log.Printf("core: WARNING carrier %s ignores dead_after_secs — it implements no SetDeadAfter", transport)
-		return false
-	}
-	if !s.SetDeadAfter(deadAfterSecs) {
-		// The carrier took the value and will never read it. That happens on the SERVER of a connectionless
-		// carrier (udp/raw/flux/dns): there is no connection to reap, and the loop that consults the window
-		// only runs on a client. Printing "self-heal deadline set to Ns" there would be the same lie about a
-		// knob this function exists to stop telling.
-		log.Printf("core: dead_after_secs is stored but not enforced on this end (%s server): a "+
-			"connectionless server holds no dead window — the CLIENT end reaps the session", transport)
-		return false
-	}
-	effDead, floorNote := effectiveDeadAfter(transport, keepaliveSecs, deadAfterSecs)
-	log.Printf("tnl-core: self-heal deadline set to %ds (%s)", effDead, floorNote)
-	return true
 }
 
 // applySNISplit wires SNI fragmentation into the carrier and logs what really happened. *TCP has the

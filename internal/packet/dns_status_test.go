@@ -6,12 +6,14 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/dnstun"
 )
 
-// dns is the one client carrier whose status file the panel needs for both halves of its dot: with no
-// `dw` published, instant-red is gated off and a dead tunnel never turns red; with no `hb` there is
-// nothing but traffic flow to judge by, so a HEALTHY idle tunnel ages into yellow. Both are visible only
-// end to end, so this runs a real client against a real authoritative server and reads the node's file.
+// dns re-dials into a brand new session on every recovery, so its heartbeat has to be PULLED from
+// whichever session is live rather than stamped by the carrier's own read loop — a shape no other
+// carrier has, and one that silently publishes nothing if the pull breaks. Visible only end to end, so
+// this runs a real client against a real authoritative server and reads the file the node exposes.
 func TestDNSClientPublishesStatusAndHeartbeat(t *testing.T) {
 	const (
 		psk  = "e2e-shared-pre-shared-key-1234567890"
@@ -26,7 +28,8 @@ func TestDNSClientPublishesStatusAndHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListenDNS: %v", err)
 	}
-	cli, err := DialDNS(cliDev, []string{addr}, zone, psk, "aes-256-gcm", time.Second)
+	const keepalive = time.Second
+	cli, err := DialDNS(cliDev, []string{addr}, zone, psk, "aes-256-gcm", keepalive)
 	if err != nil {
 		t.Fatalf("DialDNS: %v", err)
 	}
@@ -65,8 +68,8 @@ func TestDNSClientPublishesStatusAndHeartbeat(t *testing.T) {
 	if dw <= 0 {
 		t.Fatalf("no dead window published at %s — the panel cannot age hb, so a dead dns tunnel never goes red", statusPath)
 	}
-	if want := int64(DNSDeadFloorSecs()); dw < want {
-		t.Errorf("published dw=%d is under the carrier's own floor %d — a reader would call the tunnel dead while the session is still healthy", dw, want)
+	if want := int64(dnstun.ResolveDeadWindow(keepalive) / time.Second); dw != want {
+		t.Errorf("published dw=%d, but the session re-dials at %d — a reader would call the tunnel dead while the session is still healthy", dw, want)
 	}
 
 	// Then hb. Nothing is written into either TUN, so this is the IDLE case on purpose: the heartbeat

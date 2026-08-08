@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+// hbKeepalive sizes both the ping rate and the dead window (deadMult x keepalive). dw is published in
+// whole SECONDS, so a sub-second window would round to 0 and this test's dw assertion would be asserting
+// nothing — the window has to stay at least a second wide.
+const hbKeepalive = time.Second
+
 // readHB pulls hb, dw and role out of a status file.
 func readHB(path string) (hb, dw int64, role string) {
 	b, err := os.ReadFile(path)
@@ -38,13 +43,11 @@ func TestServerPublishesItsOwnHeartbeat(t *testing.T) {
 	srvStatus := filepath.Join(dir, "srv.status")
 	cliStatus := filepath.Join(dir, "cli.status")
 
-	srv, err := Listen([]string{addr}, srvDev, 200*time.Millisecond, false, true, psk, "aes-256-gcm", false, 0, 0)
-	srv.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
+	srv, err := Listen([]string{addr}, srvDev, hbKeepalive, false, true, psk, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	cli, err := Dial(addr, cliDev, 200*time.Millisecond, false, true, psk, "aes-256-gcm", false, 0, 0)
-	cli.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
+	cli, err := Dial(addr, cliDev, hbKeepalive, false, true, psk, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -100,13 +103,11 @@ func TestServerHeartbeatAdvances(t *testing.T) {
 	addr := freeUDPPort(t)
 	status := filepath.Join(t.TempDir(), "srv.status")
 
-	srv, err := Listen([]string{addr}, srvDev, 200*time.Millisecond, false, true, psk, "aes-256-gcm", false, 0, 0)
-	srv.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
+	srv, err := Listen([]string{addr}, srvDev, hbKeepalive, false, true, psk, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	cli, err := Dial(addr, cliDev, 200*time.Millisecond, false, true, psk, "aes-256-gcm", false, 0, 0)
-	cli.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
+	cli, err := Dial(addr, cliDev, hbKeepalive, false, true, psk, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

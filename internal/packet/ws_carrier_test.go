@@ -185,7 +185,7 @@ func TestPinReleasesOnLanding(t *testing.T) {
 	pool := newWSPool([]string{addr}, snis("front-a", "front-b"), true, "")
 	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, keepalive: ka, psk: psk,
 		ws: true, wsTLS: false, pool: pool,
-		idle: idleFor(ka), isClient: true, addr: "pool", closeCh: make(chan struct{})}
+		idle: deadWindow(ka), isClient: true, addr: "pool", closeCh: make(chan struct{})}
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
 

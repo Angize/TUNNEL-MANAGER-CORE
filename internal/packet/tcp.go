@@ -738,33 +738,12 @@ func canBindSource(ip net.IP) bool {
 	return true
 }
 
-func idleFor(keepalive time.Duration) time.Duration {
+// deadWindow is how long a carrier tolerates silence before it calls the link dead: deadMult×keepalive,
+// the ONE rule for every carrier and both roles. On tcp/ws it becomes the connection's read deadline; on
+// the datagram carriers it is the session-stale window. Keepalive is therefore the single number that
+// sizes self-heal speed.
+func deadWindow(keepalive time.Duration) time.Duration {
 	return time.Duration(deadMult) * keepalive
-}
-
-// deadWindow resolves the per-tunnel dead-detection window: the operator's explicit dead_after_secs when
-// set (clamped to >=2×keepalive so a healthy pinging link is never mis-reaped between pongs), else def.
-// Shared by every carrier so one config knob tunes self-heal speed uniformly.
-func deadWindow(keepalive time.Duration, deadAfterSecs int, def time.Duration) time.Duration {
-	if deadAfterSecs <= 0 {
-		return def
-	}
-	d := time.Duration(deadAfterSecs) * time.Second
-	if floor := 2 * keepalive; d < floor {
-		d = floor
-	}
-	return d
-}
-
-// SetDeadAfter (client) tightens the carrier's dead-detection read-deadline to the per-tunnel
-// dead_after_secs, so the tunnel self-heals faster than the default (~3×keepalive ping-loss / 60s idle
-// backstop). No-op for secs<=0. Call before Run.
-func (b *TCP) SetDeadAfter(secs int) bool {
-	if secs <= 0 {
-		return false
-	}
-	b.idle = deadWindow(b.keepalive, secs, b.idle)
-	return true // both roles: b.idle IS the connection's read deadline on the server too
 }
 
 // DialTCP (client role) targets peerAddr and reconnects on drop. When cover is
@@ -773,7 +752,7 @@ func (b *TCP) SetDeadAfter(secs int) bool {
 func DialTCP(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string) (*TCP, error) {
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
 		cover: cover, coverSNI: coverSNI,
-		idle: idleFor(keepalive), isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
+		idle: deadWindow(keepalive), isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
 }
 
 // DialWS (client role) is DialTCP over a WebSocket carrier: it dials peerAddr (a
@@ -782,7 +761,7 @@ func DialTCP(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cr
 func DialWS(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte) (*TCP, error) {
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
 		ws: true, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH,
-		idle: idleFor(keepalive), isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
+		idle: deadWindow(keepalive), isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
 }
 
 // DialWSPool is DialWS over a rotating edge POOL: the client cycles (edge-IP × SNI) combinations, each
@@ -791,7 +770,7 @@ func DialWS(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cry
 func DialWSPool(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, pool *wsPool, rotate time.Duration, httpc bool, httpcMode string) (*TCP, error) {
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
 		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, pool: pool, rotate: rotate,
-		idle: idleFor(keepalive), isClient: true, addr: "pool", closeCh: make(chan struct{})}, nil
+		idle: deadWindow(keepalive), isClient: true, addr: "pool", closeCh: make(chan struct{})}, nil
 }
 
 // newWSPoolFromCfg builds a pool from the config's clean IP/SNI lists (decoding each
@@ -809,7 +788,7 @@ func newWSPoolFromCfg(ips []string, snis []wsSNIEntry, autoBurn bool, statusPath
 func DialHTTPC(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte, httpcMode string) (*TCP, error) {
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
 		ws: true, httpc: true, httpcMode: httpcMode, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH,
-		idle: idleFor(keepalive), isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
+		idle: deadWindow(keepalive), isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
 }
 
 // ListenHTTPC (server role) serves the HTTP-carrier endpoint over plain HTTP (a CDN in front
@@ -820,7 +799,7 @@ func ListenHTTPC(listenAddr string, dev *tun.Device, keepalive time.Duration, ob
 		return nil, err
 	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
-		ws: true, httpc: true, idle: idleFor(keepalive), addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
+		ws: true, httpc: true, idle: deadWindow(keepalive), addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns), httpcSessions: make(map[string]*httpcSession)}, nil
 }
 
@@ -833,7 +812,7 @@ func ListenWS(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs,
 		return nil, err
 	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
-		ws: true, wsPath: wsPath, idle: idleFor(keepalive), addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
+		ws: true, wsPath: wsPath, idle: deadWindow(keepalive), addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns)}, nil
 }
 
@@ -858,7 +837,7 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, keepalive time.Duration, o
 	}
 	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
 		cover: cover, coverSNI: coverSNI,
-		idle: idleFor(keepalive), addr: listenAddrs[0], ln: lns[0], lns: lns, closeCh: make(chan struct{}),
+		idle: deadWindow(keepalive), addr: listenAddrs[0], ln: lns[0], lns: lns, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns)}
 	if cover {
 		// coverSNI is required (validated in config); it is the real site the

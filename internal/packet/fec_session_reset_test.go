@@ -10,6 +10,10 @@ import (
 const (
 	fecResetPSK    = "e2e-shared-pre-shared-key-1234567890"
 	fecResetCipher = "aes-256-gcm"
+	// The dead window is deadMult x keepalive and nothing else, so keepalive is what sizes it here. It
+	// has to clear the handshake retransmit wait, which is jitterFrac(1s): under that, a client calls
+	// the session it just installed stale and re-handshakes forever without reaching the keepalive path.
+	fecResetKeepalive = time.Second
 )
 
 // waitUntil polls cond until it holds or the budget runs out, naming what was being waited for.
@@ -54,16 +58,14 @@ func TestUDPFecDecoderResetAfterClientRestart(t *testing.T) {
 	srvDev, srvCtrl := tunPair(t, "frsrv")
 	cli1Dev, cli1Ctrl := tunPair(t, "frcli1")
 	cli2Dev, cli2Ctrl := tunPair(t, "frcli2")
-	ka := 200 * time.Millisecond
+	ka := fecResetKeepalive
 	addr := freeUDPPort(t)
 
 	srv, err := Listen([]string{addr}, srvDev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
-	srv.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
 	cli1, err := Dial(addr, cli1Dev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
-	cli1.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -80,7 +82,6 @@ func TestUDPFecDecoderResetAfterClientRestart(t *testing.T) {
 	cli1.Close()
 
 	cli2, err := Dial(addr, cli2Dev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
-	cli2.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
 	if err != nil {
 		t.Fatalf("Dial (restarted client): %v", err)
 	}
@@ -110,7 +111,7 @@ func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
 	srv1Dev, srv1Ctrl := tunPair(t, "frsrv1")
 	srv2Dev, srv2Ctrl := tunPair(t, "frsrv2")
 	cliDev, cliCtrl := tunPair(t, "frcli")
-	ka := 200 * time.Millisecond
+	ka := fecResetKeepalive
 	addr := freeUDPPort(t)
 
 	srv1, err := Listen([]string{addr}, srv1Dev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
@@ -118,14 +119,9 @@ func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
 		t.Fatalf("Listen: %v", err)
 	}
 	cli, err := Dial(addr, cliDev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
-	cli.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	// Notice the dead server in ~2s instead of the 10s default floor. Not 1s: the handshake retransmit
-	// wait is jitterFrac(1s), so a 1s window can call the session it just installed stale and the client
-	// re-handshakes forever without ever reaching the keepalive path.
-	cli.SetDeadAfter(2)
 	go srv1.Run()
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })

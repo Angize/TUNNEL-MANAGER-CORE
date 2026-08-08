@@ -5,53 +5,81 @@ import (
 	"time"
 )
 
-// TestDeadWindow verifies the per-tunnel self-heal deadline resolution: 0 keeps the default, a set
-// value overrides it, and the >=2×keepalive clamp protects a healthy pinging link from mis-reaping.
-func TestDeadWindow(t *testing.T) {
-	ka := 15 * time.Second
-	def := 60 * time.Second
-	cases := []struct {
-		name     string
-		deadSecs int
-		want     time.Duration
-	}{
-		{"unset keeps default", 0, 60 * time.Second},
-		{"negative keeps default", -5, 60 * time.Second},
-		{"honored above clamp", 45, 45 * time.Second},
-		{"honored at clamp", 30, 30 * time.Second},
-		{"below clamp raised to 2xka", 10, 30 * time.Second}, // 10s < 2×15s → 30s
-		{"just below clamp raised", 20, 30 * time.Second},
-		{"max honored", 300, 300 * time.Second},
-	}
-	for _, c := range cases {
-		if got := deadWindow(ka, c.deadSecs, def); got != c.want {
-			t.Errorf("%s: deadWindow(%v, %d, %v) = %v, want %v", c.name, ka, c.deadSecs, def, got, c.want)
-		}
-	}
-}
+// TestEveryCarrierSharesOneDeadWindow pins the rule the whole self-heal story now rests on: ONE
+// multiplier over keepalive, the same number on every carrier and on BOTH roles.
+//
+// It walks EVERY real constructor rather than the helper, and that is the point — the failure worth
+// catching is a construction site that resolves its own window, or forgets one and leaves a zero window,
+// which calls every session stale on its first check. Two sites out of nine would have said nothing
+// about the other seven. dns is the deliberate exception: high-loss, so it floors at dnstun's own
+// absolute window; TestDNSPublishesTheWindowTheSessionEnforces owns that rule.
+func TestEveryCarrierSharesOneDeadWindow(t *testing.T) {
+	const psk = "e2e-shared-pre-shared-key-1234567890"
 
-// TestTCPSetDeadAfter proves the per-tunnel override tightens the TCP-family read deadline (b.idle)
-// below the derived default, and is a no-op when unset. The default is deadMult x keepalive and
-// nothing else -- it used to carry a 60s floor, which pinned it there for every keepalive at or
-// under 15 and made the multiplier beside it inert.
-func TestTCPSetDeadAfter(t *testing.T) {
-	mk := func() *TCP { return &TCP{keepalive: 15 * time.Second, idle: idleFor(15 * time.Second)} }
-	if b := mk(); b.idle != 45*time.Second { // 3x15s, and no floor rounding it up
-		t.Fatalf("default idle = %v, want 45s", b.idle)
-	}
-	b := mk()
-	b.SetDeadAfter(40)
-	if b.idle != 40*time.Second {
-		t.Errorf("after SetDeadAfter(40): idle = %v, want 40s", b.idle)
-	}
-	b2 := mk()
-	b2.SetDeadAfter(0) // no-op
-	if b2.idle != 45*time.Second {
-		t.Errorf("SetDeadAfter(0) changed idle to %v, want the derived 45s untouched", b2.idle)
-	}
-	b3 := mk()
-	b3.SetDeadAfter(10) // below 2×keepalive → clamped to 30s
-	if b3.idle != 30*time.Second {
-		t.Errorf("SetDeadAfter(10) with ka=15: idle = %v, want clamped 30s", b3.idle)
+	for _, ka := range []time.Duration{5 * time.Second, 15 * time.Second, 40 * time.Second} {
+		want := time.Duration(deadMult) * ka
+		if got := deadWindow(ka); got != want {
+			t.Fatalf("deadWindow(%v) = %v, want %v", ka, got, want)
+		}
+
+		// tcp/ws/http: the window IS the read deadline, and each end has one of its own. Every
+		// constructor, both roles — a new one that forgets `idle` fails here rather than in production.
+		streams := []struct {
+			name string
+			mk   func() (*TCP, error)
+		}{
+			{"DialTCP", func() (*TCP, error) {
+				return DialTCP("203.0.113.9:443", nil, ka, false, false, psk, "aes-256-gcm", false, "")
+			}},
+			{"DialWS", func() (*TCP, error) {
+				return DialWS("203.0.113.9:443", nil, ka, false, false, psk, "aes-256-gcm", "cdn.example.com", "/w", true, nil)
+			}},
+			{"DialWSPool", func() (*TCP, error) {
+				return DialWSPool(nil, ka, false, false, psk, "aes-256-gcm", nil, 0, false, "")
+			}},
+			{"DialHTTPC", func() (*TCP, error) {
+				return DialHTTPC("203.0.113.9:443", nil, ka, false, false, psk, "aes-256-gcm", "cdn.example.com", "/w", true, nil, "")
+			}},
+			{"ListenHTTPC", func() (*TCP, error) {
+				return ListenHTTPC("127.0.0.1:0", nil, ka, false, false, psk, "aes-256-gcm")
+			}},
+			{"ListenWS", func() (*TCP, error) {
+				return ListenWS("127.0.0.1:0", nil, ka, false, false, psk, "aes-256-gcm", "/w")
+			}},
+			{"ListenTCP", func() (*TCP, error) {
+				return ListenTCP([]string{"127.0.0.1:0"}, nil, ka, false, false, psk, "aes-256-gcm", false, "")
+			}},
+		}
+		for _, s := range streams {
+			b, err := s.mk()
+			if err != nil {
+				t.Fatalf("ka=%v: %s: %v", ka, s.name, err)
+			}
+			if b.idle != want {
+				t.Errorf("ka=%v: %s read deadline = %v, want %v — every end must reap on the same window",
+					ka, s.name, b.idle, want)
+			}
+			b.Close()
+		}
+
+		// udp: the same window, resolved as the session-stale deadline instead of a read deadline.
+		ucli, err := Dial("203.0.113.9:9000", nil, ka, false, false, psk, "aes-256-gcm", false, 0, 0)
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		usrv, err := Listen([]string{"127.0.0.1:0"}, nil, ka, false, false, psk, "aes-256-gcm", false, 0, 0)
+		if err != nil {
+			t.Fatalf("Listen: %v", err)
+		}
+		for _, c := range []struct {
+			role string
+			win  time.Duration
+		}{{"client", ucli.deadWin()}, {"server", usrv.deadWin()}} {
+			if c.win != want {
+				t.Errorf("ka=%v: udp %s dead window = %v, want %v", ka, c.role, c.win, want)
+			}
+		}
+		ucli.Close()
+		usrv.Close()
 	}
 }

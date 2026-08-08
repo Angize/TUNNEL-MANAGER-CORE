@@ -92,21 +92,6 @@ func ListenDNS(dev *tun.Device, listenAddr, zone, psk, cipher string) (*DNS, err
 // Run drives the carrier: one long-lived tun→net loop feeds whatever session is live, while the
 // main loop (re)establishes a session and pumps net→tun until it dies, then reconnects with backoff.
 
-// SetDeadAfter (client) applies the operator's dead_after_secs to the dnstun session's dead window, so
-// the fleet-wide setting reaches this carrier like every other one. main.go probes for this method with
-// a type assertion, so its absence would be silent. The session still floors the value, so a tiny
-// setting cannot reap a healthy session.
-func (d *DNS) SetDeadAfter(secs int) bool {
-	if secs <= 0 {
-		return false
-	}
-	d.cfg.DeadAfter = time.Duration(secs) * time.Second
-	// The SERVER of a connectionless carrier holds no dead window at all — there is no connection to
-	// reap and clientLoop, the only reader of this value, never starts. Report that rather than let
-	// main print "self-heal deadline set to Ns" over a number nothing will ever consult.
-	return d.isClient
-}
-
 // SetStatusPath (client, optional) wires the status file every OTHER carrier already writes: an events
 // ring plus the two numbers a reader needs to age a tunnel — hb (the last authenticated inbound frame)
 // and dw (the dead window this carrier really enforces). Without them the panel has only traffic flow to
@@ -152,14 +137,8 @@ func (d *DNS) heartbeat(dwSecs int64) {
 // window has to survive several dropped polls. Publishing the SAME number the session enforces is the
 // point, so it is resolved by ASKING dnstun rather than by restating the rule here.
 func (d *DNS) deadWin() time.Duration {
-	return dnstun.ResolveDeadWindow(d.cfg.Keepalive, d.cfg.DeadAfter)
+	return dnstun.ResolveDeadWindow(d.cfg.Keepalive)
 }
-
-// DNSDeadFloorSecs is the ABSOLUTE floor (seconds) the dns carrier applies to dead_after_secs — it does
-// NOT use the 2×keepalive floor the other carriers do. main.go needs this to log the deadline that will
-// really be in force; keeping the lookup here means main.go asks the carrier package rather than
-// re-deriving a number that lives in dnstun.
-func DNSDeadFloorSecs() int { return int(dnstun.DeadFloor() / time.Second) }
 
 func (d *DNS) Run() error {
 	go d.tunToNet()
