@@ -48,7 +48,6 @@ type Flux struct {
 	shapeProf   string // statistical shape profile: "quic" | "video" | "webrtc" | "random"
 	epochOffset int64  // manual epoch bump ("rotate now"): epoch = clock-epoch + offset (both ends set identically)
 
-	pc     pingClock                  // times the keepalive round trip (see coreStatus.roundTrip)
 	fecEnc *fecEncoder                // non-nil when FEC is on: buffers data frames into RS blocks on send
 	fecDec *fecDecoder                // non-nil when FEC is on: reassembles + reconstructs blocks on receive
 	rxSrc  atomic.Pointer[net.IPAddr] // src of the packet currently feeding fecDec (deliver reads it)
@@ -788,9 +787,8 @@ func (f *Flux) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	case typePing:
 		f.send(typePong, nil, addr)
 	case typePong:
-		// The answer to our own ping: the ONE locally observable fact that covers both
-		// directions at once — it got there, and the reply got back.
-		f.st.roundTrip(f.pc.rtt())
+		// Nothing to record. A pong proved the endpoint answers, and provenFrom already stamped
+		// that off the receive path; the rtt this used to time went to a status field nobody read.
 	case typeData:
 		if _, err := f.dev.Write(payload); err != nil {
 			log.Printf("flux: tun write error: %v", err)
@@ -1090,8 +1088,6 @@ func (f *Flux) clientLoop() {
 			rc.proactive(f.rotatePeerFlux, f.rotateSourceFlux, time.Now())
 			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the
 			// NEW destination sees, and it is what makes the server stamp its replies from that IP.
-			f.pc.mark()
-			f.st.keepaliveSent()
 			f.send(typePing, nil, f.peer.Load())
 			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session
 			// survives, no handshake failure will ever say so. Count unanswered ticks here — AFTER the
