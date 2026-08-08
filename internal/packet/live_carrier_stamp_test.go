@@ -6,12 +6,12 @@ import (
 	"time"
 )
 
-// Who may move the TUNNEL's heartbeat, when more than one connection is alive at once. That happens on
+// Who may move the TUNNEL's failover clock (lastRx), when more than one connection is alive at once. That happens on
 // every reconnect -- the server keeps the previous conn registered until it times out, and the client's
 // old reader has not exited yet -- so "the connection answered" and "the tunnel is carrying" are two
 // different facts and only the second may be published.
 //
-// Get it wrong and hb stays fresh off a connection that is NOT the live one, which reads GREEN on the
+// Get it wrong and lastRx stays fresh off a connection that is NOT the live one, so the carrier never
 // panel with an empty active slot: exactly the state an operator pin onto an edge that will not come up
 // produces. Driven at the readLoop level over net.Pipe.
 func TestOnlyTheLiveCarrierStampsHeartbeat(t *testing.T) {

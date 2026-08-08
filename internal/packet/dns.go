@@ -44,12 +44,7 @@ type DNS struct {
 	curT    dnstun.WireTransport
 	conn    atomic.Pointer[net.Conn] // the live session for the long-lived tun→net loop (nil between sessions)
 
-	// Client-only liveness, the same pair every other carrier publishes. hbRx is the unix-nano of the
-	// last packet that came OUT of the session — i.e. authenticated, since dnstun opens it under the
-	// AEAD sealer — and st republishes it into the status file the node/panel read. Both are nil/zero
-	// on the server and until SetStatusPath wires them; coreStatus is nil-safe throughout.
-	hbRx atomic.Int64
-	st   *coreStatus
+	st *coreStatus // client-only event ring; nil until SetStatusPath wires it, and nil-safe throughout
 
 	closeCh   chan struct{}
 	closeOnce sync.Once
@@ -92,61 +87,17 @@ func ListenDNS(dev *tun.Device, listenAddr, zone, psk, cipher string) (*DNS, err
 // Run drives the carrier: one long-lived tun→net loop feeds whatever session is live, while the
 // main loop (re)establishes a session and pumps net→tun until it dies, then reconnects with backoff.
 
-// SetStatusPath (client, optional) wires the status file every OTHER carrier already writes: an events
-// ring plus the two numbers a reader needs to age a tunnel — hb (the last authenticated inbound frame)
-// and dw (the dead window this carrier really enforces). Without them the panel has only traffic flow to
-// go on, so a healthy but IDLE dns tunnel ages to yellow and a dead one never goes red. Call before Run().
+// SetStatusPath (client, optional) wires the event ring every OTHER carrier already writes, so this
+// carrier's self-heal reasons reach the node/panel system log. Call before Run().
 func (d *DNS) SetStatusPath(path string) {
 	if path == "" {
 		return
 	}
-	d.st = newCoreStatus(path, "dns · "+d.zone, roleOf(d.isClient))
-}
-
-// heartbeat republishes the live session's liveness into the status file, paced off dw exactly as the
-// shared heartbeat() does. It is carrier-local only because the number has to be PULLED from whatever
-// session is live: dns re-dials into a brand new one on every recovery. The source is the SESSION's
-// lastRx, not the packets read — an idle dns tunnel's only proof of life is a pong dnstun consumes.
-func (d *DNS) heartbeat(dwSecs int64) {
-	if d.st == nil {
-		return
-	}
-	t := time.NewTicker(hbPeriod(dwSecs))
-	defer t.Stop()
-	for {
-		if cp := d.conn.Load(); cp != nil {
-			// Forward only. Between sessions there is nothing to read, and a fresh session's zero
-			// must never drag the published heartbeat backwards into a false death.
-			if lc, ok := (*cp).(interface{ LastRx() int64 }); ok {
-				if v := lc.LastRx(); v > d.hbRx.Load() {
-					d.hbRx.Store(v)
-				}
-			}
-		}
-		d.st.beat(d.hbRx.Load() / int64(time.Second))
-		select {
-		case <-d.closeCh:
-			return
-		case <-t.C:
-		}
-	}
-}
-
-// deadWin is the window after which a silent session counts as dead. dns does NOT use the shared
-// 2×keepalive floor — dnstun applies its own absolute floor, because this carrier is high-loss and its
-// window has to survive several dropped polls. Publishing the SAME number the session enforces is the
-// point, so it is resolved by ASKING dnstun rather than by restating the rule here.
-func (d *DNS) deadWin() time.Duration {
-	return dnstun.ResolveDeadWindow(d.cfg.Keepalive)
+	d.st = newCoreStatus(path, "dns · "+d.zone)
 }
 
 func (d *DNS) Run() error {
 	go d.tunToNet()
-	if d.isClient {
-		dw := int64(d.deadWin().Seconds())
-		d.st.setDW(dw) // publish the window a reader must age hb against...
-		go d.heartbeat(dw)
-	}
 	backoff := dnsBackoffMin
 	for {
 		select {

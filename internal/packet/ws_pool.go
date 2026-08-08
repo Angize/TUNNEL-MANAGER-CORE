@@ -86,8 +86,6 @@ type wsPool struct {
 	active      string
 	rotDegraded bool        // true once fewer than 2 edges are reachable; drives the degraded/restored event
 	chosen      string      // the combo a proactive rotate committed to, "" otherwise (see currentLocked pass 0)
-	hb          int64       // unix-seconds of the carrier's lastRx — periodic liveness heartbeat
-	dw          int64       // resolved dead-window in seconds — the single number a reader ages hb against
 	events      []coreEvent // rolling ring of core-observed events (down/burn) for the panel log
 	evSeq       int64       // monotonic sequence so the panel can consume each event exactly once
 	wasDown     bool        // a genuine carrier down is pending its matching "up" (down/reconnect pairing)
@@ -946,38 +944,11 @@ func (p *wsPool) writeStatus() {
 		Active string         `json:"active"`
 		Health []healthStatus `json:"health"`
 		Events []coreEvent    `json:"events"`
-		HB     int64          `json:"hb"`
-		DW     int64          `json:"dw"`
 		TS     int64          `json:"ts"`
-	}{Active: p.active, Health: health, Events: evs, HB: p.hb, DW: p.dw, TS: time.Now().Unix()}
+	}{Active: p.active, Health: health, Events: evs, TS: time.Now().Unix()}
 	p.mu.Unlock()
 	if data, err := json.Marshal(st); err == nil {
 		// writeMu already held across the snapshot above (serializes writers AND orders snapshot->write).
 		writeFileAtomic(p.statusPath, data, 0o644)
 	}
-}
-
-// beat records the carrier's lastRx (unix-seconds) into the pool status and flushes it, so a reader can
-// tell a live-but-idle pooled tunnel (hb advancing each keepalive) from a dead one (hb frozen) without
-// ICMP. Nil-safe and no-op without a status path.
-func (p *wsPool) beat(sec int64) {
-	if p == nil || p.statusPath == "" {
-		return
-	}
-	p.mu.Lock()
-	p.hb = sec
-	p.mu.Unlock()
-	p.writeStatus()
-}
-
-// setDW publishes the carrier's resolved dead-window (seconds), so a reader ages hb against the same
-// number the core uses. Called once at Run. Nil-safe and no-op without a status path.
-func (p *wsPool) setDW(secs int64) {
-	if p == nil || p.statusPath == "" {
-		return
-	}
-	p.mu.Lock()
-	p.dw = secs
-	p.mu.Unlock()
-	p.writeStatus()
 }

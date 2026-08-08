@@ -37,7 +37,7 @@ func coreStatusEvents(t *testing.T, path string) []coreEvent {
 func TestRotateSourceTCPProactiveDefersEvent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "src.status")
 	b := &TCP{isClient: true, stTag: "tcp", addr: "d0:443"}
-	b.st = newCoreStatus(path, "tcp · d0:443", "client")
+	b.st = newCoreStatus(path, "tcp · d0:443")
 	b.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, true, 0, ""))
 
 	addr, moved := b.rotateSourceTCP(true) // proactive beat

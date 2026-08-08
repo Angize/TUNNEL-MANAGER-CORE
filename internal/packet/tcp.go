@@ -665,7 +665,7 @@ func (b *TCP) SetStatusPath(path string) {
 	case b.cover:
 		carrier = "cover"
 	}
-	b.st = newCoreStatus(path, carrier+" · "+b.addr, roleOf(b.isClient))
+	b.st = newCoreStatus(path, carrier+" · "+b.addr)
 	b.stTag = carrier // reused by setActive when a direct dest pool rotates the active endpoint
 }
 
@@ -862,23 +862,9 @@ func (b *TCP) Run() error {
 	// tunnel. Buffered so neither sender can block once the other has won.
 	errc := make(chan error, 2)
 	go func() { errc <- b.tunLoop() }()
-	// BOTH ends publish. The server's own lastRx proves the CLIENT->SERVER direction — a fact only that
-	// end can see — and without it a server had no liveness signal at all and fell back to probing.
-	// Do NOT seed the heartbeat: lastRx stays 0 until a GENUINE inbound frame arrives, so the node can
-	// tell "connecting" (hb still 0) from "connected" (hb advancing), and a carrier that never comes up
-	// ages to red instead of looking alive from a startup seed.
-	if dw := int64(b.idle.Seconds()); b.st != nil { // b.idle IS the resolved stream dead-window
-		b.st.setDW(dw)
-		go heartbeat(b.st, &b.lastRx, b.closeCh, dw)
-	}
 	if b.isClient {
 		go b.keepaliveLoop()
 		go b.diagLoop() // low-rate goroutine-count heartbeat so a slow session leak is visible in the log
-		dw := int64(b.idle.Seconds())
-		if b.pool != nil {
-			b.pool.setDW(dw)
-			go heartbeatPool(b.pool, &b.lastRx, b.closeCh, dw) // ws/http edge pool uses its own status writer
-		}
 		if b.pool != nil {
 			go b.retestLoop() // background health retests with exponential backoff
 		} else if b.pp != nil || b.sp != nil {

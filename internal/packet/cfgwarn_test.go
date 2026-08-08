@@ -46,7 +46,7 @@ func TestAConfigWarningReachesTheStatusFile(t *testing.T) {
 		noteCfgWarn("sockbuf-clamped", "send 16777216 425984")
 
 		path := filepath.Join(t.TempDir(), "core.status")
-		_ = newCoreStatus(path, "udp · 203.0.113.5", "client")
+		_ = newCoreStatus(path, "udp · 203.0.113.5")
 
 		ev := statusEvents(t, path)
 		if len(ev) != 1 {
@@ -65,7 +65,7 @@ func TestAConfigWarningReachesTheStatusFile(t *testing.T) {
 	t.Run("raised after it exists", func(t *testing.T) {
 		resetCfgWarns(t)
 		path := filepath.Join(t.TempDir(), "core.status")
-		_ = newCoreStatus(path, "udp · 203.0.113.5", "client")
+		_ = newCoreStatus(path, "udp · 203.0.113.5")
 		noteCfgWarn("sockbuf-clamped", "receive 16777216 425984")
 
 		ev := statusEvents(t, path)

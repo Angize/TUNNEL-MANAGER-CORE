@@ -43,7 +43,7 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 	b := &TCP{cryptoOn: true, cipher: "aes-256-gcm", psk: "warm-src-burn-psk-abcdefghijklmn",
 		keepalive: time.Second, idle: deadWindow(time.Second), isClient: true, addr: addr,
 		stTag: "tcp", closeCh: make(chan struct{})}
-	b.st = newCoreStatus(path, active, "client")
+	b.st = newCoreStatus(path, active)
 	b.warmNext = make(chan *warmDial, 1) // dialLoop's job; this test drives buildWarm directly
 	b.SetPeerPool(NewPeerPool([]string{addr, second}, true, 0, ""))
 	// Both source IPs are real loopback addresses, so neither is dropped for being unbindable — the
