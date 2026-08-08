@@ -8,10 +8,10 @@ import (
 	"time"
 )
 
-// newWarmSoakClient spins up a real in-process ListenWS server and a warm-standby pooled client
-// (one edge IP, two SNIs fronting it) with a given proactive-rotation interval, so the make-before-
-// break machinery is exercised hard. Returns the client, the pool, and both TUN control ends.
-func newWarmSoakClient(t *testing.T, rotate time.Duration) (*TCP, *wsPool, *os.File, *os.File) {
+// newSoakClient spins up a real in-process ListenWS server and a pooled client (one edge IP, two SNIs
+// fronting it) with a given proactive-rotation interval, so the dial loop's rotation, pin and reconnect
+// paths are exercised hard. Returns the client, the pool, and both TUN control ends.
+func newSoakClient(t *testing.T, rotate time.Duration) (*TCP, *wsPool, *os.File, *os.File) {
 	t.Helper()
 	const psk = "rotation-soak-psk-abcdefghijklmnop"
 	const cipher = "aes-256-gcm"
@@ -28,7 +28,7 @@ func newWarmSoakClient(t *testing.T, rotate time.Duration) (*TCP, *wsPool, *os.F
 
 	pool := newWSPool([]string{addr}, snis("front-a", "front-b"), true, "")
 	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, keepalive: ka, psk: psk,
-		ws: true, wsTLS: false, pool: pool, warmStandby: true, rotate: rotate,
+		ws: true, wsTLS: false, pool: pool, rotate: rotate,
 		idle: idleFor(ka), isClient: true, addr: "pool", closeCh: make(chan struct{})}
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
@@ -55,10 +55,10 @@ func drainCounter(ctrl *os.File, n *int64) {
 }
 
 // TestRotationSoakRapidRotate proves proactive rotation KEEPS PROGRESSING under a fast rotate
-// interval — it never wedges on one edge — while the tunnel keeps carrying data. If the make-before-
-// break loop froze, the active would stay pinned to one combo and the distinct-active assertion fails.
+// interval — it never wedges on one edge — while the tunnel keeps carrying data. If the dial loop
+// froze, the active would stay pinned to one combo and the distinct-active assertion fails.
 func TestRotationSoakRapidRotate(t *testing.T) {
-	cli, pool, cliCtrl, srvCtrl := newWarmSoakClient(t, 150*time.Millisecond)
+	cli, pool, cliCtrl, srvCtrl := newSoakClient(t, 150*time.Millisecond)
 
 	var delivered int64
 	drainCounter(srvCtrl, &delivered)
@@ -111,11 +111,10 @@ func TestRotationSoakRapidRotate(t *testing.T) {
 }
 
 // TestRotationSoakPinStorm hammers the manual-pin path: it alternates the pinned SNI as fast as the
-// loop can service it. It proves a burst of operator pins never deadlocks the warm loop or strands
-// the tunnel — the manual-switch / re-dial / rebuild branch stays live, and data still flows.
+// loop can service it. It proves a burst of operator pins never deadlocks the dial loop or strands
+// the tunnel — the manual-switch / re-dial branch stays live, and data still flows.
 func TestRotationSoakPinStorm(t *testing.T) {
-	cli, _, cliCtrl, srvCtrl := newWarmSoakClient(t, 0) // rotation off: isolate the pin path
-	waitFor(t, 5*time.Second, "warm standby up", func() bool { return cli.standby.Load() != nil })
+	cli, _, cliCtrl, srvCtrl := newSoakClient(t, 0) // rotation off: isolate the pin path
 
 	var delivered int64
 	drainCounter(srvCtrl, &delivered)
@@ -155,12 +154,12 @@ func TestRotationSoakPinStorm(t *testing.T) {
 	t.Logf("pin-storm soak: survived, %d packets delivered through the storm", atomic.LoadInt64(&delivered))
 }
 
-// TestRotationSoakFailoverStorm repeatedly kills the active carrier and asserts the loop recovers
-// each time (a carrier comes back and data resumes), for many cycles. It stresses the promote ->
-// requestStandby -> dialActiveAsync recovery machinery under repeated failure — the path that, if it
-// leaked standbyBuilding or dropped the rebuild, would eventually stop recovering.
+// TestRotationSoakFailoverStorm repeatedly kills the active carrier and asserts the loop recovers each
+// time (a carrier comes back and data resumes), for many cycles. Failover is a COLD dial now, so this
+// stresses the reconnect ladder under repeated failure: the loop must re-dial, re-handshake and re-adopt
+// every cycle without stranding the tunnel or letting the backoff run away.
 func TestRotationSoakFailoverStorm(t *testing.T) {
-	cli, _, cliCtrl, srvCtrl := newWarmSoakClient(t, 0)
+	cli, _, cliCtrl, srvCtrl := newSoakClient(t, 0)
 
 	var delivered int64
 	drainCounter(srvCtrl, &delivered)
@@ -170,7 +169,7 @@ func TestRotationSoakFailoverStorm(t *testing.T) {
 		if a := cli.cur.Load(); a != nil {
 			a.conn.Close() // kill the active carrier
 		}
-		// The loop must bring a carrier back (promote the standby, or dial a fresh active)...
+		// The loop must dial a fresh carrier and bring it back...
 		waitFor(t, 6*time.Second, "carrier recovered after kill", func() bool { return cli.cur.Load() != nil })
 		// ...and data must resume over it. Write until the delivered counter advances.
 		before := atomic.LoadInt64(&delivered)

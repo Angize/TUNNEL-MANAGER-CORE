@@ -27,8 +27,8 @@ func TestServerReelectsDownstreamAfterLiveConnDies(t *testing.T) {
 	a := dialWSClient(t, addr, psk, cipher)
 	waitFor(t, 4*time.Second, "A published as downstream", func() bool { return srv.cur.Load() != nil })
 
-	// B connects and authenticates — the warm standby. It must NOT steal downstream by connecting,
-	// which is the invariant the re-election has to respect.
+	// B connects and authenticates — a second live conn, as a client re-dial leaves behind. It must NOT
+	// steal downstream by connecting, which is the invariant the re-election has to respect.
 	b := dialWSClient(t, addr, psk, cipher)
 	d1 := bytes.Repeat([]byte{0x41}, 200)
 	if _, err := srvCtrl.Write(d1); err != nil {

@@ -11,9 +11,8 @@ import (
 // pin itself -- and then wipe the memory and the fail counter before that comparison, unconditionally.
 
 // TestALandingElsewhereDoesNotSettleThePin is the case the comparison exists for. tcp can adopt a carrier
-// the rotation timer PRE-BUILT, whose endpoint was resolved before the pin existed; warm standby can
-// promote one for the same reason. The pin correctly survives that -- and loses everything that makes it
-// releasable and reversible.
+// the rotation timer PRE-BUILT, whose endpoint was resolved before the pin existed. The pin correctly
+// survives that -- and loses everything that makes it releasable and reversible.
 func TestALandingElsewhereDoesNotSettleThePin(t *testing.T) {
 	t.Run("direct pool keeps what the pin took", func(t *testing.T) {
 		p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
@@ -54,7 +53,7 @@ func TestALandingElsewhereDoesNotSettleThePin(t *testing.T) {
 		if !p.selectEntry("ip", "e2") {
 			t.Fatal("could not pin e2")
 		}
-		p.pinApplied("e1", "s1") // a standby that was built before the pin came up on e1
+		p.pinApplied("e1", "s1") // a carrier resolved before the pin came up on e1
 		if !p.isPinned() {
 			t.Fatal("a landing somewhere else released the pin")
 		}

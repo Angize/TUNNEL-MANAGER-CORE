@@ -86,35 +86,3 @@ func TestPinIsNotConsumedByAPreBuiltRotationCarrier(t *testing.T) {
 		t.Fatalf("tunnel is on %s after the pin was released, want the pinned %s", got, a2)
 	}
 }
-
-// TestWSPoolPinMatches covers the read-only pin check the warm-standby loop consults before letting a
-// freshly dialed carrier become the ACTIVE. A background active dial started before the pin resolves its
-// edge at dial time, so its result can be for the pre-pin edge; adopting it leaves the operator on an
-// edge they did not pick AND — because it does not match — pinApplied never clears the pin.
-func TestWSPoolPinMatches(t *testing.T) {
-	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, snis("front-a", "front-b"), true, "")
-
-	// No pin in force: every carrier is adoptable.
-	if !p.pinMatches("1.1.1.1", "front-a") || !p.pinMatches("2.2.2.2", "front-b") {
-		t.Fatal("with no pin in force every edge must be adoptable")
-	}
-
-	// An IP pin: only that IP matches, whatever the SNI.
-	p.selectEntry("ip", "2.2.2.2")
-	if p.pinMatches("1.1.1.1", "front-a") {
-		t.Fatal("a carrier on the pre-pin IP must NOT be adoptable while an IP pin is in force")
-	}
-	if !p.pinMatches("2.2.2.2", "front-a") {
-		t.Fatal("a carrier on the pinned IP must be adoptable")
-	}
-
-	// An SNI pin behaves the same on its own axis.
-	p2 := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, snis("front-a", "front-b"), true, "")
-	p2.selectEntry("sni", "front-b")
-	if p2.pinMatches("1.1.1.1", "front-a") {
-		t.Fatal("a carrier on the pre-pin SNI must NOT be adoptable while an SNI pin is in force")
-	}
-	if !p2.pinMatches("1.1.1.1", "front-b") {
-		t.Fatal("a carrier on the pinned SNI must be adoptable")
-	}
-}

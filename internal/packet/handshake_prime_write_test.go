@@ -9,8 +9,8 @@ import (
 
 // TestHandshakeAndPrimeFailsWhenThePrimeWriteFails pins that the client handshake path still has a
 // CHECKED write on it. sendSalt only fills saltPend now, so the prime ping is the only I/O left — and a
-// discarded error would return SUCCESS for a connection whose first byte never left, which buildWarm then
-// PARKS as the warm standby. crypto and obfs are off, so the ping is the only thing this function does.
+// discarded error would return SUCCESS for a connection whose first byte never left, which the caller
+// then adopts as the live carrier. crypto and obfs are off, so the ping is the only thing this does.
 func TestHandshakeAndPrimeFailsWhenThePrimeWriteFails(t *testing.T) {
 	b := &TCP{isClient: true, cryptoOn: false, obfs: false}
 
@@ -48,8 +48,8 @@ func TestHandshakeAndPrimeFailsWhenThePrimeWriteFails(t *testing.T) {
 		cf, err := b.handshakeAndPrime(cli)
 		if err == nil {
 			t.Fatal("handshakeAndPrime reported SUCCESS for a connection whose prime ping could not be " +
-				"written — the caller adopts that carrier, logs a connect, and a warm standby parks it " +
-				"as the replacement for a healthy one")
+				"written — the caller adopts that carrier, logs a connect, and the tunnel is green on a " +
+				"socket that has never carried a byte")
 		}
 		if err != io.ErrClosedPipe {
 			t.Logf("prime write failed with %v (any write error is fine; this only records which)", err)

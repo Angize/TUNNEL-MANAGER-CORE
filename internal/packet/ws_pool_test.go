@@ -24,72 +24,59 @@ func clockPool(ips []string, snis []wsSNIEntry, autoBurn bool, statusPath string
 	return p, &now
 }
 
-// TestWSPoolStandbyNeverCollidesWithActive checks the warm-standby edge selection: however many times the
-// standby is rebuilt — a CDN reaps the idle one, over and over — it is always aimed at a DIFFERENT IP
-// than the live active edge, so a proactive rotation always moves to a real, distinct edge instead of
-// silently promoting onto the active's own. Regression for "rotation stopped / both edges are the same".
-func TestWSPoolStandbyNeverCollidesWithActive(t *testing.T) {
+// TestARotationMovesOffTheLiveEdgeAndVariesBothAxes is what the proactive rotation owes the tunnel now
+// that there is no second carrier to aim: every tick must land on a combination that is not the one being
+// carried, and over a run it must vary the SNI axis as well as the IP axis — a rotation that only ever
+// steps the IP leaves a flagged domain in place forever and keeps one reused SNI as a stable fingerprint.
+func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
+	// Two IPs, one SNI: the IP must change on every single step.
 	p := newWSPool([]string{"a", "b"}, snis("x"), true, "")
-	standbyIP := func() string { // mimic warmEstablish(standby): aim, then read the edge via current()
-		p.aimStandby()
-		ip, _, ok := p.current()
+	for round := 0; round < 20; round++ {
+		before, _, ok := p.current()
 		if !ok {
 			t.Fatal("current() returned not-ok on a healthy 2-IP pool")
 		}
-		return ip
-	}
-	for _, active := range []string{"a", "b"} {
-		p.setActive(activeLabel(active, "x"))
-		for round := 0; round < 20; round++ { // the CDN keeps reaping + rebuilding the idle standby
-			if got := standbyIP(); got == active {
-				t.Fatalf("active=%s: standby collided with the active edge on rebuild %d", active, round)
-			}
+		p.setActive(activeLabel(before, "x")) // this is the edge actually carrying data
+		if !p.advance() {
+			t.Fatalf("round %d: a healthy 2-IP pool reported no move", round)
+		}
+		if got, _, _ := p.current(); got == before {
+			t.Fatalf("round %d: the rotation landed back on the live edge %q", round, got)
 		}
 	}
-	// Three IPs: the standby must still never be the active, and should still be a healthy edge.
-	p3 := newWSPool([]string{"a", "b", "c"}, snis("x"), true, "")
-	for _, active := range []string{"a", "b", "c"} {
-		p3.setActive(activeLabel(active, "x"))
-		for round := 0; round < 12; round++ {
-			p3.aimStandby()
-			ip, _, ok := p3.current()
-			if !ok || ip == active {
-				t.Fatalf("3-IP active=%s: standby landed on the active (%q) on rebuild %d", active, ip, round)
-			}
-		}
-	}
-}
 
-// TestWSPoolStandbyVariesSNI: with warm standby on a HEALTHY pool, successive standby builds must
-// exercise the SNI axis as well as the IP axis. aimStandby's IP-anchoring path used to write only the
-// IP cursor and return, so the domain never changed and rotation silently degraded to IP-only — a
-// flagged domain could never be rotated off, and the one reused SNI stayed a stable fingerprint.
-func TestWSPoolStandbyVariesSNI(t *testing.T) {
-	p := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
-	p.setActive(activeLabel("a", "x")) // live edge: IP a, domain x
-	seen := map[string]bool{}
-	for round := 0; round < 8; round++ { // the CDN keeps reaping + rebuilding the idle standby
-		p.aimStandby()
-		ip, sni, ok := p.current()
+	// Two IPs x two SNIs: both axes must be exercised, and no step may resolve to the live combo.
+	p2 := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	seenIP, seenSNI := map[string]bool{}, map[string]bool{}
+	for round := 0; round < 8; round++ {
+		beforeIP, beforeSNI, _ := p2.current()
+		p2.setActive(activeLabel(beforeIP, beforeSNI.host))
+		if !p2.advance() {
+			t.Fatalf("round %d: a healthy 2x2 pool reported no move", round)
+		}
+		ip, sni, ok := p2.current()
 		if !ok {
 			t.Fatal("current() returned not-ok on a healthy 2x2 pool")
 		}
-		if ip == "a" {
-			t.Fatalf("round %d: standby collided with the active IP", round)
+		if activeLabel(ip, sni.host) == activeLabel(beforeIP, beforeSNI.host) {
+			t.Fatalf("round %d: the rotation resolved back onto the live combo %q", round, p2.active)
 		}
-		seen[sni.host] = true
+		seenIP[ip] = true
+		seenSNI[sni.host] = true
 	}
-	if !seen["x"] || !seen["y"] {
-		t.Fatalf("standby never varied the SNI axis; saw %v", seen)
+	if !seenIP["a"] || !seenIP["b"] {
+		t.Fatalf("the rotation never varied the IP axis; saw %v", seenIP)
+	}
+	if !seenSNI["x"] || !seenSNI["y"] {
+		t.Fatalf("the rotation never varied the SNI axis; saw %v", seenSNI)
 	}
 
-	// A burned domain must be skipped, not parked on: with y suspect, every build stays on x.
-	p2 := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
-	p2.setActive(activeLabel("a", "x"))
-	p2.markSuspect("sni", "y", "test")
+	// A burned domain is skipped, not parked on: with y suspect, every step stays on x.
+	p3 := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	p3.markSuspect("sni", "y", "test")
 	for round := 0; round < 4; round++ {
-		p2.aimStandby()
-		if _, sni, _ := p2.current(); sni.host != "x" {
+		p3.advance()
+		if _, sni, _ := p3.current(); sni.host != "x" {
 			t.Fatalf("round %d: burned domain y was selected (%q)", round, sni.host)
 		}
 	}

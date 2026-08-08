@@ -15,8 +15,9 @@
 //	per frame: [0:2] uint16 length XOR ChaCha20-keystream(PSK,salt)
 //	           [2:]  AEAD-sealed [type][realLen][payload][random-pad]
 //
-// The server holds up to maxAuthConns authenticated connections at once (a warm-standby client keeps a
-// second live carrier); one TUN reader feeds whichever one is live via an atomic pointer.
+// The server holds up to maxAuthConns authenticated connections at once (a reconnecting client's
+// previous one is still registered until it times out); one TUN reader feeds whichever one is live via
+// an atomic pointer.
 package packet
 
 import (
@@ -86,9 +87,9 @@ const (
 	// probe budget) and minLiveness (shortest healthy session) are operator-tunable package vars now,
 	// defined with their defaults in tuning.go.
 
-	// maxAuthConns bounds concurrent AUTHENTICATED server connections. A new connection never evicts
-	// the previous one (a warm-standby client keeps a second live carrier); over the cap the oldest
-	// idle one is reaped. 3 leaves headroom for the active+standby+handoff overlap.
+	// maxAuthConns bounds concurrent AUTHENTICATED server connections. A new connection never evicts the
+	// previous one -- a client that re-dials is registered again while the old conn waits out its read
+	// deadline -- and over the cap the oldest idle one is reaped. 3 leaves headroom for that overlap.
 	maxAuthConns = 3
 )
 
@@ -137,7 +138,7 @@ type connFramer struct {
 	unanswered atomic.Int32
 
 	// rxAt is the unix-nano of the last authenticated inbound frame ON THIS CONNECTION — its own
-	// liveness, kept for every carrier including a warm standby that carries no traffic. The crypto
+	// liveness, kept per connection because the server holds several at once. The crypto
 	// handshake seeds it (the responder answering is inbound proof a CDN edge cannot fake) and readLoop
 	// advances it; adoptRx publishes it as the tunnel's b.lastRx when this carrier goes live.
 	rxAt atomic.Int64
@@ -376,22 +377,14 @@ type TCP struct {
 	probeFn func(ip string, sni wsSNIEntry) bool
 
 	// manualSwitch marks the NEXT carrier drop as operator-initiated (a pin / manual rotate via
-	// rotate1), so the dial loops (a) don't record it as a data-plane fault, and (b) in warm mode
-	// re-dial the ACTIVE from current() (which honors the just-set edge) instead of promoting the
-	// pre-built warm standby — which is on a different edge and would ignore the operator's choice.
+	// rotate1), so the dial loop does not record it as a data-plane fault and re-dials from current(),
+	// which honours the just-set edge.
 	manualSwitch atomic.Bool
 
 	// lastErr holds the most recent CAUSE of a client carrier death (as a string), so the pool can
 	// record a precise "down" reason for the panel log instead of a guess. "use of closed network
 	// connection" is a consequence (we closed it) and is deliberately never stored.
 	lastErr atomic.Value // string
-
-	// warmStandby (client + pool) keeps a SECOND, fully-handshaked carrier to another pool edge warm in
-	// the background, so the active's failure or a proactive rotation promotes it with an atomic b.cur
-	// swap instead of making the TUN wait on a cold dial.
-	warmStandby bool
-	standby     atomic.Pointer[connFramer] // client+warm: the warm standby framer (nil when none)
-	standbyConn atomic.Pointer[net.Conn]   // client+warm: the standby's live conn (for teardown)
 
 	// HTTP carrier (transport "ws" with ws_httpc): the stream rides an HTTP request pair (post: GET-down +
 	// seq-POSTs-up) or one full-duplex request (stream-one) instead of a WebSocket upgrade, so it passes a
@@ -451,9 +444,9 @@ type TCP struct {
 	closeCh chan struct{}
 	preAuth chan struct{} // permits: caps concurrent unauthenticated handlers
 
-	// authConns tracks the server's AUTHENTICATED connections (oldest first) so a warm-standby
-	// client can hold a second live conn without the newest evicting the previous. Bounded by
-	// maxAuthConns; over the cap the oldest non-downstream conn is reaped. Server-side only.
+	// authConns tracks the server's AUTHENTICATED connections (oldest first) so a client that re-dials
+	// does not have its previous conn evicted by the newest. Bounded by maxAuthConns; over the cap the
+	// oldest non-downstream conn is reaped. Server-side only.
 	authMu    sync.Mutex
 	authConns []*connFramer
 }
@@ -484,7 +477,7 @@ func (b *TCP) dialTarget() string {
 }
 
 // directPinInForce reports whether an operator pin is live on either DIRECT pool. The ws edge pool
-// keeps its own pin state and has its own guard in dialLoopWarm.
+// keeps its own pin state, and burnAdvanceWS guards it.
 func (b *TCP) directPinInForce() bool {
 	return (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned())
 }
@@ -799,10 +792,10 @@ func DialWS(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cry
 
 // DialWSPool is DialWS over a rotating edge POOL: the client cycles (edge-IP × SNI) combinations, each
 // SNI with its own ECH, moving before any single edge is fingerprinted and burning a blocked one.
-// rotate is the proactive interval (0 = failover only); warmStandby keeps a second edge handshaked.
-func DialWSPool(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, pool *wsPool, rotate time.Duration, httpc bool, httpcMode string, warmStandby bool) (*TCP, error) {
+// rotate is the proactive interval (0 = failover only).
+func DialWSPool(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, pool *wsPool, rotate time.Duration, httpc bool, httpcMode string) (*TCP, error) {
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
-		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, pool: pool, rotate: rotate, warmStandby: warmStandby,
+		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, pool: pool, rotate: rotate,
 		idle: idleFor(keepalive), isClient: true, addr: "pool", closeCh: make(chan struct{})}, nil
 }
 
@@ -921,11 +914,7 @@ func (b *TCP) Run() error {
 		// same channel — Run now returns for whichever reason comes first, the connection side ending
 		// or the TUN reader dying, instead of only ever the former.
 		go func() {
-			if b.warmStandby && b.pool != nil {
-				b.dialLoopWarm() // make-before-break: active + warm standby
-			} else {
-				b.dialLoop()
-			}
+			b.dialLoop()
 			errc <- nil // the dial loop only ends on Close
 		}()
 	} else if b.httpc {
@@ -954,9 +943,6 @@ func (b *TCP) Close() error {
 		l.Close()
 	}
 	if c := b.cur.Load(); c != nil {
-		c.conn.Close()
-	}
-	if c := b.standby.Load(); c != nil { // warm-standby carrier, if any
 		c.conn.Close()
 	}
 	return nil
@@ -1134,9 +1120,10 @@ func (b *TCP) handleServerConn(conn net.Conn) {
 }
 
 // publishServerConn (server) registers a freshly-authenticated connection. It does NOT evict the
-// previous one — a warm-standby client keeps a second live carrier, so a new connect must not tear down
-// the active tunnel. It becomes the downstream target only when there is none yet (CAS on nil); from
-// there downstream follows the connection the client last sent DATA on (see handleFrame).
+// previous one: a client re-dialling after a rotation is registered again while its old conn is still
+// waiting out the read deadline, and evicting would tear down the tunnel the client is still on. It
+// becomes the downstream target only when there is none yet (CAS on nil); from there downstream follows
+// the connection the client last sent DATA on (see handleFrame).
 func (b *TCP) publishServerConn(cf *connFramer) {
 	b.cur.CompareAndSwap(nil, cf)
 	b.authMu.Lock()
@@ -1847,7 +1834,7 @@ func (b *TCP) dialLoop() {
 			// Record the edge we ACTUALLY connected on as the live active and flush the status
 			// file, so a plain rotation reflects the new active immediately (the panel reads this
 			// field and logs the auto-switch off its change). setActive is the single writer of the
-			// active edge — current() no longer touches it, so a standby dial can't corrupt it.
+			// active edge — current() no longer touches it.
 			b.pool.setActive(combo)
 			// A pin that targeted this edge has now LANDED — release it so a healthy pin does not freeze
 			// rotation while the pin is in force (current() forces the pinned edge, and the rotation
@@ -2044,7 +2031,7 @@ func (b *TCP) dialLoop() {
 // dialCarrier opens the transport connection for ONE dial attempt: a pool/single ws or httpc edge, or a
 // plain/cover TCP dial. It returns the live
 // conn and a label for logging, and logs the transport-level failure itself so callers only decide retry
-// policy. It does NOT frame or handshake. attribute is false on the warm-standby build.
+// policy. It does NOT frame or handshake.
 func (b *TCP) dialCarrier() (net.Conn, string, string, error) {
 	if b.ws { // pool or single edge: dial + wss(+ECH) + upgrade, burning on failure
 		var c net.Conn
@@ -2127,8 +2114,7 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 	}
 	// The prime ping is the client's first real write on this connection, and the only one on this path:
 	// sendSalt above only fills saltPend, so it can fail on RNG/cipher errors alone. Discarding this error
-	// would report success for a connection whose very first byte never left the box — worst for a warm
-	// standby, which is then parked, already dead, waiting to replace a healthy carrier.
+	// would report success for a connection whose very first byte never left the box.
 	if err := cf.writeFrame(typePing, nil); err != nil { // prime + authenticate us to the server
 		return nil, err
 	}
@@ -2136,400 +2122,6 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 	// authenticated INBOUND frame". Crediting it lets a client whose dial always succeeds but which never
 	// receives a frame report "connected" forever. Only readLoop may stamp it.
 	return cf, nil
-}
-
-// warmEstablish makes ONE full dial+handshake+prime attempt for the warm-standby path. When
-// advance is true it rotates the pool first, so a standby lands on a different edge than the
-// active. On success the pool status file is flushed (as dialLoop does on connect). On a
-// transport failure the pool is advanced so the next attempt tries a different combo.
-func (b *TCP) warmEstablish(standby bool) (*connFramer, net.Conn, string, string, error) {
-	if standby && b.pool != nil {
-		// Aim the standby at a DIFFERENT edge than the LIVE active (never collide), instead of a blind
-		// advance() a standby reconnect could walk onto the active's own edge — which turns a proactive
-		// rotation into a silent no-op switch onto the same edge and loses edge diversity.
-		b.pool.aimStandby()
-	}
-	// A STANDBY build must NOT run the differential-probe attribution: it fires several full establishes
-	// and would block this single build goroutine with standbyBuilding still set, starving
-	// requestStandby() and silently freezing proactive rotation. It just retries; the retest loop
-	// attributes edge health independently. The warm ACTIVE dial still attributes.
-	conn, label, combo, err := b.dialCarrier()
-	if err != nil {
-		if b.pool != nil {
-			b.pool.advance() // move off the failing edge for the next attempt
-		}
-		return nil, nil, label, "", err
-	}
-	cf, err := b.handshakeAndPrime(conn)
-	if err != nil {
-		conn.Close()
-		return nil, nil, label, "", err
-	}
-	if b.pool != nil {
-		b.pool.writeStatus() // flush any health/burn state this dial discovered (NOT the active edge)
-	}
-	return cf, conn, label, combo, nil
-}
-
-// warmConn bundles a freshly-established carrier framer with its underlying conn (and the edge
-// label it dialed), handed from a background dial worker to the warm-standby manager.
-type warmConn struct {
-	cf    *connFramer
-	conn  net.Conn
-	label string // the edge IP (health accounting)
-	combo string // the full "ip · sni" for the status file's live active edge
-}
-
-// dialLoopWarm is the make-before-break client loop for a ws edge pool: it keeps the ACTIVE carrier and
-// a fully-handshaked warm STANDBY to another edge up at once, so a failure or a proactive rotation
-// promotes with one atomic swap instead of a cold dial. With no standby ready it dials in the
-// BACKGROUND, keeping the loop responsive to rotation and pins. All pointer transitions happen here.
-func (b *TCP) dialLoopWarm() {
-	exits := make(chan *connFramer, 8)    // a per-conn reader finished (its conn died)
-	ready := make(chan warmConn, 2)       // a background standby dial completed
-	activeReady := make(chan warmConn, 2) // a background ACTIVE (re)dial completed (outage/failover path)
-	// On exit, close any carrier that a dial worker managed to buffer just as Close fired (its own
-	// select preferred the send over closeCh) — otherwise that conn's fd would leak until process exit.
-	defer func() {
-		for {
-			select {
-			case wc := <-ready:
-				wc.conn.Close()
-			case wc := <-activeReady:
-				wc.conn.Close()
-			default:
-				return
-			}
-		}
-	}()
-	var active, standby *connFramer
-	// Track the active carrier's edge + when it started carrying data, so a promoted-then-quickly-
-	// dead edge is attributed to the right IP for data-plane throttle detection (C1).
-	var activeLabel, standbyLabel string
-	// The full "ip · sni" combo of each carrier, for the status file's live active edge. Kept
-	// separate from activeLabel (the IP, used for health accounting) and threaded per-dial so a
-	// standby build can never overwrite the live active — only setActive/promote publish it.
-	var activeCombo, standbyCombo string
-	var activeSince time.Time
-	standbyBuilding := false
-	activeBuilding := false // an async fresh-active dial is in flight (outage/failover) — keeps the select loop responsive
-
-	// startReader runs a connection's read loop; on exit it reports the framer so the manager
-	// can react (promote / rebuild). The report is abandoned if Close fired.
-	startReader := func(cf *connFramer) {
-		go func() {
-			b.setLastErr(b.readLoop(cf)) // capture the death cause for a precise pool "down" reason
-			cf.conn.Close()
-			select {
-			case exits <- cf:
-			case <-b.closeCh:
-			}
-		}()
-	}
-	setActive := func(cf *connFramer, conn net.Conn, label, combo string) {
-		active = cf
-		activeLabel = label
-		activeCombo = combo
-		activeSince = time.Now()
-		b.cur.Store(cf)
-		b.adoptRx(cf) // this carrier is the tunnel now: publish the heartbeat it already proved
-		cc := conn
-		b.curConn.Store(&cc)
-		if b.pool != nil {
-			b.pool.setActive(combo)                                          // publish the live active edge + flush the status file
-			b.pool.pinApplied(label, strings.TrimPrefix(combo, label+" · ")) // a pin that targeted this edge is now satisfied
-		}
-		startReader(cf)
-	}
-	// dialWorker runs one background dial-until-success loop, shared by requestStandby (wantStandby
-	// true — a DIFFERENT edge than the active) and dialActiveAsync (false — a fresh active). A failed
-	// establish retries with a short backoff until a conn comes up or Close fires; on success it
-	// delivers the warm conn on out, or closes it if Close won the race against the buffered send.
-	dialWorker := func(wantStandby bool, out chan warmConn) {
-		var backoff time.Duration // exponential+jittered retry; see the note in dialActiveBlocking
-		for {
-			if b.closed.Load() {
-				return
-			}
-			cf, conn, label, combo, err := b.warmEstablish(wantStandby)
-			if err != nil {
-				backoff = nextReconnectDelay(backoff)
-				if b.sleep(backoff) {
-					return
-				}
-				continue
-			}
-			backoff = 0 // a live connection resets the ladder, exactly as dialLoop does
-			select {
-			case out <- warmConn{cf, conn, label, combo}:
-				// The channel is buffered, so this send can succeed AFTER the manager has already
-				// exited and run its one-shot drain — leaking this conn's fd. Re-check: if Close has
-				// fired, nobody will drain us, so close it here.
-				if b.closed.Load() {
-					conn.Close()
-				}
-			case <-b.closeCh:
-				conn.Close()
-			}
-			return
-		}
-	}
-	// requestStandby dials a new standby in the background unless one is already up or building.
-	// The result arrives on `ready`; a persistent failure retries with a short backoff until a
-	// standby comes up or Close fires.
-	requestStandby := func() {
-		if standby != nil || standbyBuilding {
-			return
-		}
-		standbyBuilding = true
-		go dialWorker(true, ready)
-	}
-	// dropStandby retires the held standby so requestStandby can build a fresh one — it is a hard no-op
-	// while one is held, so anything that makes the held standby the WRONG one must clear it here first.
-	// standbyBuilding is cleared unconditionally, including the still-dialing case: leaving it set makes
-	// every later requestStandby() a permanent no-op, which stops proactive rotation for good.
-	dropStandby := func() {
-		if standby != nil {
-			standby.conn.Close()
-			standby = nil
-			standbyLabel = ""
-			standbyCombo = ""
-			b.standby.Store(nil)
-			b.standbyConn.Store(nil)
-		}
-		standbyBuilding = false
-	}
-	// promote swaps the warm standby into the active slot and retires the old active. Returns
-	// false when there is no standby ready to promote.
-	promote := func() bool {
-		if standby == nil {
-			return false
-		}
-		old := active
-		active = standby
-		activeLabel = standbyLabel
-		activeCombo = standbyCombo
-		activeSince = time.Now() // the standby starts carrying data now
-		standbyLabel = ""
-		standbyCombo = ""
-		b.cur.Store(standby) // instant failover; the next TUN packet flips the server downstream
-		b.adoptRx(standby)   // and the heartbeat adopts the pongs the standby has been answering all along
-		if sc := b.standbyConn.Load(); sc != nil {
-			b.curConn.Store(sc)
-		}
-		standby = nil
-		b.standby.Store(nil)
-		b.standbyConn.Store(nil)
-		if b.pool != nil {
-			b.pool.setActive(activeCombo) // the promoted standby is now the live edge — publish + flush
-			b.pool.pinApplied(activeLabel, strings.TrimPrefix(activeCombo, activeLabel+" · "))
-		}
-		if old != nil {
-			old.conn.Close() // retire the old edge; its reader reports an (ignored) exit
-		}
-		// A promotion supersedes any pending manual-switch intent (e.g. a RotateIP whose induced exit
-		// was swallowed as a retired conn because this promote ran first). Clear it so it can't later
-		// mask the promoted carrier's genuine death as a deliberate switch. No-op on the failover path
-		// (that branch already consumed the flag).
-		b.manualSwitch.Store(false)
-		return true
-	}
-	// dialActiveBlocking establishes a fresh active with a short retry backoff, used at startup
-	// and as the fallback when the active dies with no warm standby ready. Returns false if Close
-	// fired during the retry.
-	dialActiveBlocking := func() bool {
-		// Exponential + jittered, like dialLoop. A fixed 1s retry against a filtered edge is a perfectly
-		// periodic SYN/TLS train — a tunnel signature that confirms the endpoint to a censor, and one that
-		// only stops when the tun probe's verdict burns the edge, which is several sweeps away.
-		var backoff time.Duration
-		for {
-			if b.closed.Load() {
-				return false
-			}
-			cf, conn, label, combo, err := b.warmEstablish(false)
-			if err != nil {
-				backoff = nextReconnectDelay(backoff)
-				if b.sleep(backoff) {
-					return false
-				}
-				continue
-			}
-			log.Printf("core/tcp: connected to %s", label)
-			// Consume a stale manual-switch flag, exactly as every other setActive site does. RotateIP/SelectEdge
-			// set it unconditionally, so one issued DURING an outage has no death to consume it and would make
-			// this fresh active's NEXT genuine death read as an operator switch.
-			b.manualSwitch.Store(false)
-			setActive(cf, conn, label, combo)
-			return true
-		}
-	}
-	// dialActiveAsync (re)establishes a fresh active in the BACKGROUND, so the manager keeps servicing
-	// proactive rotation, standby reports and operator pins while every edge is unreachable: each retry
-	// re-reads current(), so a pin placed mid-outage is honored the moment its edge recovers.
-	dialActiveAsync := func() {
-		if activeBuilding || b.closed.Load() {
-			return
-		}
-		activeBuilding = true
-		go dialWorker(false, activeReady)
-	}
-
-	if !dialActiveBlocking() {
-		return
-	}
-	requestStandby()
-
-	var rotateC <-chan time.Time
-	if b.rotate > 0 {
-		rt := time.NewTicker(b.rotate)
-		defer rt.Stop()
-		rotateC = rt.C
-	}
-
-	for {
-		select {
-		case <-b.closeCh:
-			return
-		case ex := <-exits:
-			switch ex {
-			case active:
-				// Was this drop an operator pin / manual rotate (rotate1)? If so it is NOT a fault,
-				// and we must NOT promote the pre-built standby — that standby is on a DIFFERENT edge
-				// and would ignore the operator's choice (the reported "pick #3, #2 goes active" bug).
-				manual := b.manualSwitch.Swap(false)
-				cause := b.takeLastErr()
-				if !manual && activeLabel != "" {
-					// Genuine failure: log a precise core-observed "down" reason. Who is to BLAME is the
-					// tun probe's call, not ours.
-					b.pool.down(classifyErr(cause), activeLabel) // arms the paired "up" the next reconnect emits
-					if time.Since(activeSince) < minLiveness {
-						// MOVE OFF it, exactly as dialLoop does. Without this the cursor stays put and
-						// dialActiveAsync re-dials the SAME edge — and because that dial succeeds there is
-						// no sleep on the path, so the tunnel spins connect -> die -> reconnect.
-						b.pool.advance()
-					}
-				}
-				b.cur.CompareAndSwap(active, nil)
-				b.curConn.Store(nil)
-				active = nil
-				if manual {
-					// Re-dial the ACTIVE from current() so it lands on the exact edge the operator
-					// selected. Drop the stale standby (wrong edge) so it is rebuilt off the new one.
-					dropStandby()
-					log.Printf("core/tcp: manual pin/rotate — re-dialing active on the selected edge")
-					dialActiveAsync() // warmEstablish(false) -> current() -> the pinned edge; non-blocking, requestStandby fires on activeReady
-				} else if promote() {
-					log.Printf("core/tcp: active carrier failed — promoted warm standby")
-					requestStandby()
-				} else {
-					log.Printf("core/tcp: active carrier failed with no warm standby — dialing fresh (background)")
-					dialActiveAsync() // non-blocking so the loop keeps servicing rotation/pins during the outage
-				}
-			case standby:
-				// Standby died before promotion: drop and rebuild.
-				standby = nil
-				b.standby.CompareAndSwap(ex, nil)
-				b.standbyConn.Store(nil)
-				standbyBuilding = false
-				requestStandby()
-			default:
-				// A retired/old conn we already moved past — nothing to do.
-			}
-		case wc := <-ready:
-			standbyBuilding = false
-			if b.closed.Load() {
-				wc.conn.Close()
-				continue
-			}
-			if active == nil && (b.pool == nil || !b.pool.isPinned()) {
-				// Mid-outage this standby is already up while the async active dial is still retrying — adopt it as
-				// the ACTIVE now; the in-flight dial is dropped when it lands. EXCEPT under an operator pin: this
-				// carrier was dialed for the STANDBY slot, i.e. a DIFFERENT edge, while dialActiveAsync is already
-				// re-dialing the active onto the pinned one. Hold it as the standby and let the pinned active land.
-				b.manualSwitch.Store(false) // a mid-outage rotate can leave this pending with no death to consume it
-				log.Printf("core/tcp: adopting ready standby as active during outage")
-				setActive(wc.cf, wc.conn, wc.label, wc.combo)
-				requestStandby()
-				continue
-			}
-			if standby != nil {
-				wc.conn.Close() // no longer needed (promoted/replaced meanwhile)
-				continue
-			}
-			standby = wc.cf
-			standbyLabel = wc.label
-			standbyCombo = wc.combo
-			b.standby.Store(wc.cf)
-			sc := wc.conn
-			b.standbyConn.Store(&sc)
-			startReader(wc.cf)
-		case wc := <-activeReady:
-			// A background outage/failover active dial finished. Adopt it as the live active (unless we
-			// somehow already have one — e.g. a ready standby was adopted meanwhile — or we're closing)
-			// and start warming a standby again.
-			activeBuilding = false
-			if active != nil || b.closed.Load() {
-				wc.conn.Close()
-				continue
-			}
-			if b.pool != nil && !b.pool.pinMatches(wc.label, strings.TrimPrefix(wc.combo, wc.label+" · ")) {
-				// This dial resolved its edge BEFORE the pin. The outage-adopt arm above leaves an in-flight active
-				// dial to be dropped when it lands, but leaves activeBuilding set — so a pin arriving in that window
-				// starts nothing, and this stale result would be adopted on the pre-pin edge without clearing the
-				// pin, freezing rotation while it is in force. Discard it; warmEstablish reads current().
-				log.Printf("core/tcp: discarding a pre-pin active dial on %s — re-dialing on the pinned edge", wc.label)
-				wc.conn.Close()
-				dialActiveAsync()
-				continue
-			}
-			// Consume any stale manual-switch flag: a pin placed mid-outage (while active==nil) set it
-			// with no exit to consume it; the fresh active already honored that pin via current(), so
-			// clear it now or the NEXT genuine death would be mis-read as a manual switch.
-			b.manualSwitch.Store(false)
-			log.Printf("core/tcp: connected to %s", wc.label)
-			setActive(wc.cf, wc.conn, wc.label, wc.combo)
-			requestStandby()
-		case <-rotateC:
-			// Proactive make-before-break rotation: promote the warm standby and retire the old
-			// active, then build a fresh standby. If none is ready yet, skip this tick — the next
-			// one rotates once the standby has warmed (never drop the only live carrier). An operator
-			// pin freezes the edge, so proactive rotation is skipped entirely while pinned.
-			if b.pool != nil && b.pool.isPinned() {
-				// Pinned: rotation is intentionally frozen until the pin lands or lapses. Log it so a
-				// "rotation stopped" report can be told apart from a genuine stall.
-				log.Printf("core/tcp: proactive rotation skipped — edge is pinned")
-				continue
-			}
-			// The standby must actually be on a DIFFERENT edge, or this "rotation" is pure churn. Down to one
-			// healthy combo, aimStandby finds no distinct healthy IP, degrades to a plain step, and the standby
-			// lands on the active's own edge; promoting it would retire a healthy carrier and rebuild an
-			// identical one every interval, silently. Compared on the COMBO, since an SNI-only move is real.
-			if standby != nil && standbyCombo == activeCombo {
-				// Skipping alone would leave the stale standby held forever, and requestStandby() is a hard no-op
-				// while one is held — so once the pool healed there was no way to build a standby on the edge that
-				// came back. Retire it as soon as another edge is actually available and the NEXT tick rotates for
-				// real; while nothing else is healthy we still just skip, since rebuilding is a dial train of its own.
-				if b.pool != nil && b.pool.hasEligibleEdgeOtherThan(activeCombo) {
-					log.Printf("core/tcp: the pool healed — retiring the same-edge warm standby (%s) so the next rotation is real", activeCombo)
-					dropStandby()
-					requestStandby()
-					continue
-				}
-				log.Printf("core/tcp: proactive rotation skipped — the only warm standby is the same edge (%s)", activeCombo)
-				continue
-			}
-			if promote() {
-				log.Printf("core/tcp: proactive rotation — promoted warm standby")
-				requestStandby()
-			} else {
-				// No warm standby was ready to promote, so this tick is a no-op. Log the exact state, and make sure
-				// a build is actually in flight: requestStandby() self-guards, so this is a no-op when one is
-				// already building and self-heals a state that ever wedged with neither.
-				log.Printf("core/tcp: proactive rotation skipped — no warm standby ready (building=%v); ensuring a rebuild", standbyBuilding)
-				requestStandby()
-			}
-		}
-	}
 }
 
 // RotateIP / RotateSNI are the live "rotate now" controls for a ws edge pool: they advance
@@ -2754,10 +2346,10 @@ func (b *TCP) handleFrame(cf *connFramer, typ byte, payload []byte) {
 		b.st.roundTrip(b.pc.rtt())
 	case typeData:
 		b.lastRxData.Store(time.Now().UnixNano()) // real INBOUND data -> the keepalive ping is redundant this interval
-		// Downstream follows upstream DATA (server only): the connection the client most
-		// recently sent a real data frame on becomes the TUN->client target, so a warm standby
-		// (which only sends keepalive pings) never steals downstream, and a promotion flips the
-		// server within one frame with no explicit signaling. Ping/pong must NOT move it.
+		// Downstream follows upstream DATA (server only): the connection the client most recently sent a
+		// real data frame on becomes the TUN->client target, so a client that re-dialled flips the server
+		// within one frame with no explicit signalling while its old conn, which sends nothing, never
+		// steals it back. Ping/pong must NOT move it.
 		if !b.isClient {
 			b.cur.Store(cf)
 		}
@@ -2776,9 +2368,9 @@ func (b *TCP) serve(cf *connFramer) {
 }
 
 // adoptRx moves the TUNNEL's heartbeat onto the carrier that has just become live, taking that carrier's
-// OWN last authenticated inbound frame — its crypto handshake, or the keepalive pongs a promoted warm
-// standby has been answering all along. hb only ever moves FORWARD (a standby can hold an older rxAt
-// than the outgoing active's last frame), and the CAS settles the race with the carrier's own reader.
+// OWN last authenticated inbound frame — the crypto handshake the responder answered. hb only ever moves
+// FORWARD (a fresh carrier can hold an older rxAt than the outgoing one's last frame), and the CAS
+// settles the race with the carrier's own reader.
 func (b *TCP) adoptRx(cf *connFramer) {
 	if cf == nil {
 		return
@@ -2793,9 +2385,9 @@ func (b *TCP) adoptRx(cf *connFramer) {
 }
 
 // readLoop reads framed messages from one connection until it errors or closes, dispatching each to
-// handleFrame. It does NOT touch b.cur/authConns, so the warm-standby manager can run it per-connection
-// and own the pointer transitions itself; serve wraps it with onConnErr for the single-connection client
-// and every server connection. The read deadline is refreshed every frame in ALL modes.
+// handleFrame. It does NOT touch b.cur/authConns, so a caller may run it per-connection and own the
+// pointer transitions itself; serve wraps it with onConnErr for the client and every server connection.
+// The read deadline is refreshed every frame in ALL modes.
 func (b *TCP) readLoop(cf *connFramer) error {
 	for {
 		cf.conn.SetReadDeadline(time.Now().Add(b.idle))
@@ -2811,11 +2403,11 @@ func (b *TCP) readLoop(cf *connFramer) error {
 		}
 		cf.unanswered.Store(0) // a fresh inbound frame proves the peer is alive -> reset ping-loss
 		now := time.Now().UnixNano()
-		cf.rxAt.Store(now) // THIS connection's own liveness — true for a standby as much as for the active
-		// ...but only the LIVE carrier may stamp the TUNNEL's heartbeat. Under warm standby every carrier runs
-		// its own readLoop and keepaliveLoop pings the standby too, so an unguarded stamp lets the STANDBY's
-		// pongs keep hb fresh while b.cur is empty — green on the panel while every packet is dropped. b.cur is
-		// set before the reader starts on every client path, so the live carrier's own frames are never missed.
+		cf.rxAt.Store(now) // THIS connection's own liveness, per connection and not per carrier
+		// ...but only the LIVE carrier may stamp the TUNNEL's heartbeat. Every connection runs its own
+		// readLoop, so an unguarded stamp lets a conn that is NOT the live one keep hb fresh while b.cur is
+		// empty — green on the panel while every packet is dropped. b.cur is set before the reader starts on
+		// every client path, so the live carrier's own frames are never missed.
 		if cf == b.cur.Load() {
 			b.lastRx.Store(now)
 		}
@@ -2906,32 +2498,16 @@ func (b *TCP) keepaliveLoop() {
 		case <-b.closeCh:
 			return
 		case <-time.After(keepaliveInterval(b.keepalive, b.psk)):
-			// Opportunistic: skip the ACTIVE connection's keepalive when real data ARRIVED within the last
-			// period — that frame already proved the peer is alive and answering. Outbound data must not count
-			// (see recentData). The warm standby carries no data, so it is always pinged below.
+			// Opportunistic: skip the keepalive when real data ARRIVED within the last period — that frame
+			// already proved the peer is alive and answering. Outbound data must not count (see recentData).
+			// The node's tun probe is ordinary inbound data here, and it runs far more often than this
+			// timer, so on a tunnel whose agent is up this ping is almost always the one that is skipped.
 			if cf := b.cur.Load(); cf != nil && !b.recentData() {
 				if ok, err := b.pingOne(cf); !ok {
-					if b.warmStandby {
-						// Let the warm-standby manager react to the reader's exit (promote a
-						// standby) rather than tearing down b.cur out from under it here.
-						b.setLastErr(err) // record the cause before we close (startReader would only see "closed")
-						cf.conn.Close()
-					} else {
-						if err == errPingTimeout {
-							log.Printf("core/tcp: %d keepalive pings unanswered — dropping stale connection", pingLossThreshold)
-						}
-						b.onConnErr(cf, err)
+					if err == errPingTimeout {
+						log.Printf("core/tcp: %d keepalive pings unanswered — dropping stale connection", pingLossThreshold)
 					}
-				}
-			}
-			// Keepalive must cover the warm STANDBY too, so it is not idle-reaped by the server
-			// and per-connection ping-loss detection works on it. A failed standby is just
-			// closed; its reader exit tells the manager to rebuild it.
-			if b.warmStandby {
-				if sb := b.standby.Load(); sb != nil {
-					if ok, _ := b.pingOne(sb); !ok {
-						sb.conn.Close()
-					}
+					b.onConnErr(cf, err)
 				}
 			}
 		}
