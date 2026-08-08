@@ -782,8 +782,8 @@ func (f *Flux) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	}
 }
 
-// deadWin is the session-stale window this carrier enforces. Published as `dw` in the status file so
-// the panel judges the dot by the same number the carrier acts on.
+// deadWin is the session-stale window this carrier enforces, and the period the status heartbeat is
+// paced off so an idle tunnel republishes well inside it.
 func (f *Flux) deadWin() time.Duration { return deadWindow(f.keepalive) }
 
 // sessionStale mirrors Raw.sessionStale: if the client has heard nothing

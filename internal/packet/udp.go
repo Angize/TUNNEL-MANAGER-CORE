@@ -428,8 +428,8 @@ func (b *UDP) SetStatusPath(path string) {
 	b.st = newCoreStatus(path, "udp · "+peer, roleOf(b.isClient))
 }
 
-// deadWin is the session-stale window this carrier enforces. Published as `dw` in the status file so
-// the panel judges the dot by the same number the carrier acts on.
+// deadWin is the session-stale window this carrier enforces, and the period the status heartbeat is
+// paced off so an idle tunnel republishes well inside it.
 func (b *UDP) deadWin() time.Duration { return deadWindow(b.keepalive) }
 
 // sessionStale reports that the client has heard nothing it could authenticate for long enough that the

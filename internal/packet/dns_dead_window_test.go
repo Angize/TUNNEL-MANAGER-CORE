@@ -11,9 +11,9 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/dnstun"
 )
 
-// The dns carrier publishes `dw` into the status file and the panel calls a tunnel dead once hb is that
-// many seconds old, so the number must be the one the SESSION re-dials on. The values below are written
-// from the RULE, not from either implementation, so this stays a real assertion if the window is
+// The carrier publishes `dw` and paces its heartbeat off it, so that number must be the one the SESSION
+// really re-dials on — two derivations of one window is how they drift apart. The values below are
+// written from the RULE, not from either implementation, so this stays a real assertion if the window is
 // re-derived a third time. The e2e test cannot catch it: its keepalive is where both formulas coincide.
 func TestDNSPublishesTheWindowTheSessionEnforces(t *testing.T) {
 	for _, tc := range []struct {
@@ -35,7 +35,7 @@ func TestDNSPublishesTheWindowTheSessionEnforces(t *testing.T) {
 				t.Fatalf("DialDNS: %v", err)
 			}
 			if got := d.deadWin(); got != tc.want {
-				t.Errorf("published dead window %v, but the session re-dials at %v — the panel calls a live tunnel dead %v early",
+				t.Errorf("published dead window %v, but the session re-dials at %v — the carrier paces its heartbeat %v off the window it really enforces",
 					got, tc.want, tc.want-got)
 			}
 		})
@@ -109,7 +109,7 @@ func TestDNSPublishedWindowMatchesTheLiveSession(t *testing.T) {
 		t.Fatalf("no dead window published at %s", statusPath)
 	}
 	if want := int64(enforced / time.Second); published != want {
-		t.Errorf("status file says dw=%ds, the live session re-dials at %ds: the panel ages hb against a window nothing applies",
+		t.Errorf("status file says dw=%ds, the live session re-dials at %ds: the published window is not the one anything applies",
 			published, want)
 	}
 	// And the number itself, so a change that makes both sides agree on something absurd is still caught.

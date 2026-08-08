@@ -316,8 +316,8 @@ func resolveKeepalive(interval time.Duration) (time.Duration, time.Duration) {
 
 // ResolveDeadWindow is the window the client's keepalive goroutine really enforces before it reaps a
 // silent session: keepaliveDeadMult×keepalive, floored. Exported because the CARRIER publishes this
-// exact number as dw, which the node and the panel age hb against — one function, asked by both sides,
-// is the only shape that cannot drift.
+// exact number as dw and paces its heartbeat off it — one function, asked by the session and by the
+// carrier, is the only shape in which the two cannot drift.
 func ResolveDeadWindow(keepalive time.Duration) time.Duration {
 	if keepalive <= 0 {
 		keepalive = defaultKeepalive
