@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/dnstun"
 )
 
 // dns is the one client carrier whose status file the panel needs for both halves of its dot: with no
@@ -26,7 +28,8 @@ func TestDNSClientPublishesStatusAndHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListenDNS: %v", err)
 	}
-	cli, err := DialDNS(cliDev, []string{addr}, zone, psk, "aes-256-gcm", time.Second)
+	const keepalive = time.Second
+	cli, err := DialDNS(cliDev, []string{addr}, zone, psk, "aes-256-gcm", keepalive)
 	if err != nil {
 		t.Fatalf("DialDNS: %v", err)
 	}
@@ -65,8 +68,8 @@ func TestDNSClientPublishesStatusAndHeartbeat(t *testing.T) {
 	if dw <= 0 {
 		t.Fatalf("no dead window published at %s — the panel cannot age hb, so a dead dns tunnel never goes red", statusPath)
 	}
-	if want := int64(DNSDeadFloorSecs()); dw < want {
-		t.Errorf("published dw=%d is under the carrier's own floor %d — a reader would call the tunnel dead while the session is still healthy", dw, want)
+	if want := int64(dnstun.ResolveDeadWindow(keepalive) / time.Second); dw != want {
+		t.Errorf("published dw=%d, but the session re-dials at %d — a reader would call the tunnel dead while the session is still healthy", dw, want)
 	}
 
 	// Then hb. Nothing is written into either TUN, so this is the IDLE case on purpose: the heartbeat

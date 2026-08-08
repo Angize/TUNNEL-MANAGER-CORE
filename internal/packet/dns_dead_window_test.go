@@ -19,26 +19,20 @@ func TestDNSPublishesTheWindowTheSessionEnforces(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		keepalive time.Duration
-		deadAfter int
 		want      time.Duration
 	}{
-		{"shipped defaults: 3x15s", 15 * time.Second, 0, 45 * time.Second},
-		{"dnstun's own default keepalive", 0, 0, 30 * time.Second},
-		{"3xkeepalive under the floor", 5 * time.Second, 0, 20 * time.Second},
-		{"3xkeepalive exactly at the floor", 20 * time.Second / 3, 0, 20 * time.Second},
-		{"operator override below the floor is floored", 15 * time.Second, 10, 20 * time.Second},
-		{"operator override above the floor wins", 15 * time.Second, 90, 90 * time.Second},
-		{"operator override below 3xkeepalive still wins", 60 * time.Second, 30, 30 * time.Second},
+		{"shipped defaults: 3x15s", 15 * time.Second, 45 * time.Second},
+		{"dnstun's own default keepalive", 0, 30 * time.Second},
+		{"3xkeepalive under the floor", 5 * time.Second, 20 * time.Second},
+		{"3xkeepalive exactly at the floor", 20 * time.Second / 3, 20 * time.Second},
+		{"a long keepalive scales past the floor", 60 * time.Second, 180 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// Through the real constructor and the real knob setter, not by hand-filling cfg: the bug
-			// lived in what the carrier does with what those two store.
+			// Through the real constructor, not by hand-filling cfg: the bug lived in what the carrier
+			// does with what the constructor stores.
 			d, err := DialDNS(nil, []string{"127.0.0.1:53"}, "t.example.com", "psk-for-the-dead-window-test", "aes-256-gcm", tc.keepalive)
 			if err != nil {
 				t.Fatalf("DialDNS: %v", err)
-			}
-			if tc.deadAfter > 0 {
-				d.SetDeadAfter(tc.deadAfter)
 			}
 			if got := d.deadWin(); got != tc.want {
 				t.Errorf("published dead window %v, but the session re-dials at %v — the panel calls a live tunnel dead %v early",
@@ -119,7 +113,7 @@ func TestDNSPublishedWindowMatchesTheLiveSession(t *testing.T) {
 			published, want)
 	}
 	// And the number itself, so a change that makes both sides agree on something absurd is still caught.
-	if want := int64(dnstun.ResolveDeadWindow(15*time.Second, 0) / time.Second); published != want {
+	if want := int64(dnstun.ResolveDeadWindow(15*time.Second) / time.Second); published != want {
 		t.Errorf("dw=%ds at keepalive=15s, want %ds", published, want)
 	}
 }

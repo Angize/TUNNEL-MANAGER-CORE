@@ -147,13 +147,8 @@ type Config struct {
 	// SO_SNDBUFFORCE/SO_RCVBUFFORCE, which bypass net.core.{r,w}mem_max. It matters on high-latency links
 	// where the bandwidth-delay product exceeds the default and a burst overflows before the reader
 	// drains it. TCP/WS autotune and are left alone. 0 = 4 MiB; negative = kernel default. Max 64 MiB.
-	SockBuf int `json:"sock_buf"`
-	// DeadAfterSecs (client) is the per-tunnel self-heal deadline: the carrier is declared dead, and the
-	// client re-establishes or fails over, if no authenticated inbound frame arrives within this many
-	// seconds. It sets the read-deadline ceiling for tcp/ws/http and the stale window for udp/raw/flux.
-	// 0 = the default formula. Clamped to >=2×keepalive, so a very short window needs a lower Keepalive.
-	DeadAfterSecs int       `json:"dead_after_secs"`
-	Crypto        CryptoCfg `json:"crypto"`
+	SockBuf int       `json:"sock_buf"`
+	Crypto  CryptoCfg `json:"crypto"`
 
 	// Obfs turns on anti-DPI framing: the constant magic byte is dropped, the frame type is folded into
 	// the AEAD-sealed plaintext, random padding and keepalive jitter break size and timing fingerprints,
@@ -473,9 +468,6 @@ func (c *Config) validate() error {
 	}
 	if c.BindIP != "" && net.ParseIP(c.BindIP) == nil {
 		return errors.New("bind_ip must be a valid IP address")
-	}
-	if c.DeadAfterSecs != 0 && (c.DeadAfterSecs < 10 || c.DeadAfterSecs > 300) {
-		return errors.New("dead_after_secs must be 0 (default) or between 10 and 300")
 	}
 	switch c.Transport {
 	case "", "udp", "tcp":

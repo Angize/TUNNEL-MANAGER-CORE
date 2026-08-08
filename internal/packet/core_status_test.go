@@ -84,8 +84,8 @@ func TestCoreStatusEventPairing(t *testing.T) {
 
 // TestHBPeriodTracksDeadWindow pins the rule that keeps a healthy tunnel out of the red: hb is a
 // TIMESTAMP, so the publish period must stay a fraction of the window the reader ages it against. The
-// worst case is the tightest legal window (dead_after clamped to 2×keepalive), where a healthy carrier's
-// newest frame is already up to 1.3×keepalive old when it is read.
+// worst case is the tightest legal window (deadMult at its floor of 2×keepalive), where a healthy
+// carrier's newest frame is already up to 1.3×keepalive old when it is read.
 func TestHBPeriodTracksDeadWindow(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -94,7 +94,7 @@ func TestHBPeriodTracksDeadWindow(t *testing.T) {
 	}{
 		{"the default 30s window keeps the 5s ceiling", 30, 5 * time.Second},
 		{"a window of exactly 20s still keeps it", 20, 5 * time.Second},
-		{"the reported flicker case (keepalive 5 + dead_after 10)", 10, 2500 * time.Millisecond},
+		{"the reported flicker case (keepalive 5 at the multiplier's floor)", 10, 2500 * time.Millisecond},
 		{"a tight window floors at one second, not below", 3, time.Second},
 		{"no window resolved keeps the plain ceiling", 0, 5 * time.Second},
 	} {

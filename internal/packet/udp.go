@@ -86,18 +86,17 @@ type UDP struct {
 	// leaves from the SAME IP the client dialed. replyConn is the socket an AUTHENTICATED frame last
 	// arrived on — committed only where the peer is learned, so a stray or hostile datagram to another
 	// pool IP cannot hijack the reply source. rxMu funnels the N read loops into one receiver.
-	srvConns      []*net.UDPConn
-	replyConn     atomic.Pointer[net.UDPConn]
-	rxConn        atomic.Pointer[net.UDPConn]
-	rxMu          sync.Mutex
-	dev           *tun.Device
-	keepalive     time.Duration
-	deadAfterSecs int // per-tunnel self-heal deadline override (0 = default 3×keepalive/10s floor)
-	obfs          bool
-	cryptoOn      bool
-	psk           string
-	cipher        string
-	isClient      bool
+	srvConns  []*net.UDPConn
+	replyConn atomic.Pointer[net.UDPConn]
+	rxConn    atomic.Pointer[net.UDPConn]
+	rxMu      sync.Mutex
+	dev       *tun.Device
+	keepalive time.Duration
+	obfs      bool
+	cryptoOn  bool
+	psk       string
+	cipher    string
+	isClient  bool
 
 	peer    atomic.Pointer[net.UDPAddr]      // current known peer (server learns it)
 	session atomic.Pointer[sealerBox]        // negotiated session sealer (nil until handshake / clear mode)
@@ -416,19 +415,6 @@ func (b *UDP) pinPollLoop(rc *rotationController) {
 	runPinPoll(rc, b.closeCh, b.adoptPeerUDP, b.adoptSourceUDP, b.rotatePeerUDP, b.rotateSourceUDP, b.st.event)
 }
 
-// SetDeadAfter (client) tightens the session-stale deadline to the per-tunnel dead_after_secs so the
-// tunnel re-handshakes faster than the default (3×keepalive). No-op for secs<=0. Call before Run.
-func (b *UDP) SetDeadAfter(secs int) bool {
-	if secs <= 0 {
-		return false
-	}
-	b.deadAfterSecs = secs
-	// The SERVER of a connectionless carrier holds no dead window at all — there is no connection to
-	// reap and clientLoop, the only reader of this value, never starts. Report that rather than let
-	// main print "self-heal deadline set to Ns" over a number nothing will ever consult.
-	return b.isClient
-}
-
 // SetStatusPath (client, optional) wires a status-file event ring so self-heal re-handshakes and
 // recoveries surface in the panel's system log. Call before Run(). No-op path leaves it off.
 func (b *UDP) SetStatusPath(path string) {
@@ -442,10 +428,9 @@ func (b *UDP) SetStatusPath(path string) {
 	b.st = newCoreStatus(path, "udp · "+peer, roleOf(b.isClient))
 }
 
-// deadWin is the session-stale window this carrier enforces: sessionStaleWindow over the
-// keepalive and the per-tunnel dead_after_secs. Published as `dw` in the status file so the
-// panel judges the dot by the same number the carrier acts on.
-func (b *UDP) deadWin() time.Duration { return sessionStaleWindow(b.keepalive, b.deadAfterSecs) }
+// deadWin is the session-stale window this carrier enforces. Published as `dw` in the status file so
+// the panel judges the dot by the same number the carrier acts on.
+func (b *UDP) deadWin() time.Duration { return deadWindow(b.keepalive) }
 
 // sessionStale reports that the client has heard nothing it could authenticate for long enough that the
 // peer has most likely restarted with a fresh session, so the client drops its now-useless session and

@@ -41,7 +41,7 @@ func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "core-warm.status")
 	active := "tcp · " + addr
 	b := &TCP{cryptoOn: true, cipher: "aes-256-gcm", psk: "warm-rotate-psk-abcdefghijklmno",
-		keepalive: time.Second, idle: idleFor(time.Second), isClient: true, addr: addr,
+		keepalive: time.Second, idle: deadWindow(time.Second), isClient: true, addr: addr,
 		stTag: "tcp", closeCh: make(chan struct{})}
 	b.st = newCoreStatus(path, active, "client")
 	b.warmNext = make(chan *warmDial, 1) // dialLoop's job; this test drives buildWarm directly

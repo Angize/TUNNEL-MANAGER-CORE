@@ -2,7 +2,6 @@ package packet
 
 import (
 	"testing"
-	"time"
 )
 
 // TestFakeModeIgnoresSplitTTL pins that the fake decoy's TTL is not the disorder knob. The two modes
@@ -55,66 +54,5 @@ func TestSetSNISplitReportsWhetherItApplied(t *testing.T) {
 			t.Fatalf("%s: reported %v but stored sniSplit=%v — the report must match what was applied",
 				tc.name, tc.want, tc.b.sniSplit)
 		}
-	}
-}
-
-// TestServerHonoursDeadAfter is the carrier half of the dead_after_secs finding: the SERVER's
-// read deadline must move when the knob is set, because on tcp/ws that window IS the dead-detection
-// window and the panel writes the setting onto both ends of the tunnel.
-func TestServerHonoursDeadAfter(t *testing.T) {
-	const keepalive = 10 * time.Second
-	srv := &TCP{keepalive: keepalive, idle: idleFor(keepalive)}
-	def := srv.idle
-	srv.SetDeadAfter(40)
-	if srv.idle == def {
-		t.Fatalf("a server's dead window stayed at its default %v — half the tunnel would self-heal at "+
-			"the configured speed and half would not", def)
-	}
-	if srv.idle != 40*time.Second {
-		t.Fatalf("server dead window = %v, want 40s", srv.idle)
-	}
-	// The floor still applies on a server exactly as on a client: a value under 2×keepalive would
-	// reap a healthy link between pongs.
-	srv = &TCP{keepalive: keepalive, idle: idleFor(keepalive)}
-	srv.SetDeadAfter(5)
-	if srv.idle != 2*keepalive {
-		t.Fatalf("server dead window = %v, want the 2×keepalive floor %v", srv.idle, 2*keepalive)
-	}
-}
-
-// TestSetDeadAfterReportsWhetherItWillBeEnforced pins the seam main's startup line depends on.
-// dead_after_secs is applied on BOTH roles, which is right — on tcp/ws the window IS the connection's
-// read deadline and the server has one too. But the connectionless carriers reap only from a client
-// loop, so on their SERVER the value is stored and never read. The carrier is the only thing that knows.
-func TestSetDeadAfterReportsWhetherItWillBeEnforced(t *testing.T) {
-	const keepalive = 10 * time.Second
-
-	// tcp/ws: BOTH roles enforce it, because b.idle is the read deadline at each end.
-	for _, isClient := range []bool{true, false} {
-		b := &TCP{keepalive: keepalive, idle: idleFor(keepalive), isClient: isClient}
-		if !b.SetDeadAfter(40) {
-			t.Fatalf("tcp isClient=%v refused to enforce dead_after_secs, but b.idle is its read deadline", isClient)
-		}
-		if b.idle != 40*time.Second {
-			t.Fatalf("tcp isClient=%v: window = %v, want 40s", isClient, b.idle)
-		}
-	}
-
-	// udp: the client enforces it via sessionStale; the server has no such loop.
-	cli := &UDP{isClient: true}
-	if !cli.SetDeadAfter(40) || cli.deadAfterSecs != 40 {
-		t.Fatalf("udp client must enforce dead_after_secs (reported %v, stored %d)", cli.SetDeadAfter(40), cli.deadAfterSecs)
-	}
-	srv := &UDP{}
-	if srv.SetDeadAfter(40) {
-		t.Fatal("a udp SERVER reported it would enforce dead_after_secs — clientLoop, the only reader, never starts there")
-	}
-	if srv.deadAfterSecs != 40 {
-		t.Fatalf("the value must still be stored (got %d): only the CLAIM changes", srv.deadAfterSecs)
-	}
-
-	// 0 is not an application on any carrier.
-	if (&UDP{isClient: true}).SetDeadAfter(0) || (&TCP{keepalive: keepalive}).SetDeadAfter(0) {
-		t.Fatal("dead_after_secs=0 leaves the default formula alone and must not report an application")
 	}
 }

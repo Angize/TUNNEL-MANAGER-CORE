@@ -43,12 +43,6 @@ var (
 	keepaliveDeadFloor = 20 * time.Second
 )
 
-// DeadFloor reports the ABSOLUTE floor this carrier applies to its dead window, including to an
-// operator's dead_after_secs override. Exported so the startup log can report the deadline the carrier
-// will really use: every other carrier floors at 2×keepalive, and reporting that number for dns
-// misstated it in both directions.
-func DeadFloor() time.Duration { return keepaliveDeadFloor }
-
 // SessionConfig carries the crypto parameters both ends share (from the tunnel config), the KCP MTU the
 // transport can carry in one datagram (MTU<=0 falls back to kcpMTUDefault), and the client keepalive
 // interval (0 falls back to defaultKeepalive).
@@ -57,11 +51,6 @@ type SessionConfig struct {
 	Cipher    string
 	MTU       int
 	Keepalive time.Duration
-	// DeadAfter is the operator's dead_after_secs override. 0 = derive from Keepalive as before.
-	// Without it the fleet-wide setting was a silent no-op on exactly this transport: main.go probes
-	// for a SetDeadAfter method, *DNS did not have one, the assertion failed, and because the "self-heal
-	// deadline set" log line sits INSIDE the successful branch the operator got no line and no warning.
-	DeadAfter time.Duration
 }
 
 // peerKey is the single logical peer identity on both ends' QueuePacketConn. The tunnel is
@@ -318,30 +307,24 @@ func (sc *sessionConn) keepalive(interval, deadWindow time.Duration) {
 // resolveKeepalive turns the configured interval into (interval, deadWindow), applying the defaults and
 // the DNS-carrier floor. Called synchronously in DialSession so the keepalive goroutine holds only
 // local copies (no shared read of the package tunables).
-func resolveKeepalive(interval, deadAfter time.Duration) (time.Duration, time.Duration) {
+func resolveKeepalive(interval time.Duration) (time.Duration, time.Duration) {
 	if interval <= 0 {
 		interval = defaultKeepalive
 	}
-	return interval, ResolveDeadWindow(interval, deadAfter)
+	return interval, ResolveDeadWindow(interval)
 }
 
 // ResolveDeadWindow is the window the client's keepalive goroutine really enforces before it reaps a
-// silent session: keepaliveDeadMult×keepalive, floored, or the operator's dead_after_secs, floored too.
-// Exported because the CARRIER publishes this exact number as dw, which the node and the panel age hb
-// against — one function, asked by both sides, is the only shape that cannot drift.
-func ResolveDeadWindow(keepalive, deadAfter time.Duration) time.Duration {
+// silent session: keepaliveDeadMult×keepalive, floored. Exported because the CARRIER publishes this
+// exact number as dw, which the node and the panel age hb against — one function, asked by both sides,
+// is the only shape that cannot drift.
+func ResolveDeadWindow(keepalive time.Duration) time.Duration {
 	if keepalive <= 0 {
 		keepalive = defaultKeepalive
 	}
 	dw := time.Duration(keepaliveDeadMult) * keepalive
 	if dw < keepaliveDeadFloor {
 		dw = keepaliveDeadFloor
-	}
-	if deadAfter > 0 { // operator override; still floored so a tiny value cannot reap a healthy session
-		dw = deadAfter
-		if dw < keepaliveDeadFloor {
-			dw = keepaliveDeadFloor
-		}
 	}
 	return dw
 }
@@ -414,7 +397,7 @@ handshake:
 	sc := &sessionConn{UDPSession: conn, qpc: qpc, t: t, done: done}
 	sc.sealer.Store(sealer) // before the pumps start: sendPump's first Seal must not Load a nil sealer
 	sc.lastRx.Store(time.Now().UnixNano())
-	kaInterval, kaDeadWindow := resolveKeepalive(cfg.Keepalive, cfg.DeadAfter)
+	kaInterval, kaDeadWindow := resolveKeepalive(cfg.Keepalive)
 	sc.deadWindow = kaDeadWindow // before the goroutine starts, from the value it is started with
 	go sc.sendPump()
 	go sc.recvPump(inCh, nil)                 // client ignores any late handshake datagrams

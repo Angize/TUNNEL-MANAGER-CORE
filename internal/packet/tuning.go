@@ -23,8 +23,7 @@ var (
 	//
 	// The multiplier may not go below 2. keepaliveInterval is clamped to [0.6,1.3]×keepalive, so the
 	// longest real gap between two pings is 1.3×; a window at 1× would expire BETWEEN pings and tear
-	// down a healthy idle carrier. 2× is the same floor deadWindow already applies to an explicit
-	// dead_after_secs.
+	// down a healthy idle carrier.
 	deadMult int64 = 3
 	// pingLossThreshold closes a CLIENT connection after this many consecutive unanswered keepalives.
 	// int32 so it compares directly against the atomic.Int32 unanswered-ping counter.
