@@ -39,10 +39,12 @@ func TestServerPublishesItsOwnHeartbeat(t *testing.T) {
 	cliStatus := filepath.Join(dir, "cli.status")
 
 	srv, err := Listen([]string{addr}, srvDev, 200*time.Millisecond, false, true, psk, "aes-256-gcm", false, 0, 0)
+	srv.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
 	cli, err := Dial(addr, cliDev, 200*time.Millisecond, false, true, psk, "aes-256-gcm", false, 0, 0)
+	cli.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -99,10 +101,12 @@ func TestServerHeartbeatAdvances(t *testing.T) {
 	status := filepath.Join(t.TempDir(), "srv.status")
 
 	srv, err := Listen([]string{addr}, srvDev, 200*time.Millisecond, false, true, psk, "aes-256-gcm", false, 0, 0)
+	srv.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
 	cli, err := Dial(addr, cliDev, 200*time.Millisecond, false, true, psk, "aes-256-gcm", false, 0, 0)
+	cli.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

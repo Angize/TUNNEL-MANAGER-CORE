@@ -261,16 +261,12 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) {
 	}
 }
 
-// sessionStaleWindow is the datagram carriers' resolved dead-window: sessionStaleMult×keepalive, floored at
-// sessionStaleMinSecs, or the per-tunnel dead_after_secs override. Shared by every datagram carrier's
-// deadWin() so sessionStale() and the status heartbeat (setDW) age against the EXACT same window — no
-// re-derived multiplier can drift between the three carriers.
+// sessionStaleWindow is the datagram carriers' resolved dead-window: deadMult×keepalive, or the
+// per-tunnel dead_after_secs override. Shared by every datagram carrier's deadWin() so sessionStale()
+// and the status heartbeat (setDW) age against the EXACT same window — no re-derived multiplier can
+// drift between the three carriers.
 func sessionStaleWindow(keepalive time.Duration, deadAfterSecs int) time.Duration {
-	def := time.Duration(sessionStaleMult) * keepalive
-	if floor := time.Duration(sessionStaleMinSecs) * time.Second; def < floor {
-		def = floor
-	}
-	return deadWindow(keepalive, deadAfterSecs, def)
+	return deadWindow(keepalive, deadAfterSecs, time.Duration(deadMult)*keepalive)
 }
 
 // staleSince reports whether last (unix-nano of the last inbound frame) has aged past window. A zero last

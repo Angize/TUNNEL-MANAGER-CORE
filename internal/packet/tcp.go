@@ -739,11 +739,7 @@ func canBindSource(ip net.IP) bool {
 }
 
 func idleFor(keepalive time.Duration) time.Duration {
-	d := time.Duration(idleMult) * keepalive
-	if floor := time.Duration(idleMinSecs) * time.Second; d < floor {
-		d = floor
-	}
-	return d
+	return time.Duration(deadMult) * keepalive
 }
 
 // deadWindow resolves the per-tunnel dead-detection window: the operator's explicit dead_after_secs when

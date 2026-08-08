@@ -11,17 +11,13 @@ import (
 // rest of the package's tests keep seeing the real defaults.
 func TestApplyTuning(t *testing.T) {
 	save := struct {
-		sb                 []int64
-		dr                 int64
-		im, ims, ssm, ssmn int64
-		plt                int32
-		ml, pto            time.Duration
-	}{suspectBackoff, deadRetest,
-		idleMult, idleMinSecs, sessionStaleMult, sessionStaleMinSecs, pingLossThreshold,
-		minLiveness, probeTimeout}
+		sb      []int64
+		dr, dm  int64
+		plt     int32
+		ml, pto time.Duration
+	}{suspectBackoff, deadRetest, deadMult, pingLossThreshold, minLiveness, probeTimeout}
 	defer func() {
-		suspectBackoff, deadRetest = save.sb, save.dr
-		idleMult, idleMinSecs, sessionStaleMult, sessionStaleMinSecs = save.im, save.ims, save.ssm, save.ssmn
+		suspectBackoff, deadRetest, deadMult = save.sb, save.dr, save.dm
 		pingLossThreshold = save.plt
 		minLiveness, probeTimeout = save.ml, save.pto
 	}()
@@ -35,8 +31,7 @@ func TestApplyTuning(t *testing.T) {
 	// Real values apply.
 	ApplyTuning(TuningInput{
 		SuspectBackoff: []int64{5, 10, 20}, DeadRetestSecs: 900,
-		IdleMult: 6, IdleMinSecs: 30,
-		SessionStaleMult: 2, SessionStaleMinSecs: 8, PingLossThreshold: 5,
+		DeadMult: 6, PingLossThreshold: 5,
 		MinLivenessSecs: 12, ProbeTimeoutSecs: 7,
 	})
 	if !reflect.DeepEqual(suspectBackoff, []int64{5, 10, 20}) {
@@ -45,18 +40,28 @@ func TestApplyTuning(t *testing.T) {
 	if deadRetest != 900 {
 		t.Errorf("health FSM: deadRetest=%d", deadRetest)
 	}
-	if idleMult != 6 || idleMinSecs != 30 || sessionStaleMult != 2 || sessionStaleMinSecs != 8 || pingLossThreshold != 5 {
-		t.Errorf("dead-detect: im=%d ims=%d ssm=%d ssmn=%d plt=%d", idleMult, idleMinSecs, sessionStaleMult, sessionStaleMinSecs, pingLossThreshold)
+	if deadMult != 6 || pingLossThreshold != 5 {
+		t.Errorf("dead-detect: dm=%d plt=%d", deadMult, pingLossThreshold)
 	}
 	if minLiveness != 12*time.Second || probeTimeout != 7*time.Second {
 		t.Errorf("durations: minLiveness=%v probeTimeout=%v", minLiveness, probeTimeout)
 	}
-	// idleFor / the stale window now track the tuned multipliers.
-	if got := idleFor(10 * time.Second); got != 60*time.Second { // 6×10s=60s, above the 30s floor
-		t.Errorf("idleFor(10s)=%v want 60s", got)
+	// ONE multiplier, and both windows follow keepalive with no floor of their own to pin them.
+	for _, ka := range []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second} {
+		want := 6 * ka
+		if got := idleFor(ka); got != want {
+			t.Errorf("idleFor(%v)=%v want %v", ka, got, want)
+		}
+		if got := sessionStaleWindow(ka, 0); got != want {
+			t.Errorf("sessionStaleWindow(%v)=%v want %v -- the datagram window must use the SAME multiplier", ka, got, want)
+		}
 	}
-	if got := idleFor(2 * time.Second); got != 30*time.Second { // 6×2s=12s -> floored to 30s
-		t.Errorf("idleFor(2s)=%v want 30s (floor)", got)
+
+	// The multiplier floors at 2: keepaliveInterval stretches to 1.3×keepalive, so a 1× window would
+	// expire between two pings and kill a healthy idle carrier.
+	ApplyTuning(TuningInput{DeadMult: 1})
+	if deadMult != 2 {
+		t.Errorf("DeadMult=1 must clamp to 2, got %d", deadMult)
 	}
 
 	// Out-of-range values clamp instead of taking effect verbatim.

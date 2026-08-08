@@ -31,11 +31,13 @@ func TestDeadWindow(t *testing.T) {
 }
 
 // TestTCPSetDeadAfter proves the per-tunnel override tightens the TCP-family read deadline (b.idle)
-// below the default 60s floor, and is a no-op when unset.
+// below the derived default, and is a no-op when unset. The default is deadMult x keepalive and
+// nothing else -- it used to carry a 60s floor, which pinned it there for every keepalive at or
+// under 15 and made the multiplier beside it inert.
 func TestTCPSetDeadAfter(t *testing.T) {
 	mk := func() *TCP { return &TCP{keepalive: 15 * time.Second, idle: idleFor(15 * time.Second)} }
-	if b := mk(); b.idle != 60*time.Second {
-		t.Fatalf("default idle = %v, want 60s", b.idle)
+	if b := mk(); b.idle != 45*time.Second { // 3x15s, and no floor rounding it up
+		t.Fatalf("default idle = %v, want 45s", b.idle)
 	}
 	b := mk()
 	b.SetDeadAfter(40)
@@ -44,8 +46,8 @@ func TestTCPSetDeadAfter(t *testing.T) {
 	}
 	b2 := mk()
 	b2.SetDeadAfter(0) // no-op
-	if b2.idle != 60*time.Second {
-		t.Errorf("SetDeadAfter(0) changed idle to %v, want unchanged 60s", b2.idle)
+	if b2.idle != 45*time.Second {
+		t.Errorf("SetDeadAfter(0) changed idle to %v, want the derived 45s untouched", b2.idle)
 	}
 	b3 := mk()
 	b3.SetDeadAfter(10) // below 2×keepalive → clamped to 30s

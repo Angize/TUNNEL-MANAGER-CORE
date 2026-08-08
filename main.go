@@ -81,8 +81,7 @@ func main() {
 	if t := cfg.Tuning; t != nil {
 		packet.ApplyTuning(packet.TuningInput{
 			SuspectBackoff: t.SuspectBackoff, DeadRetestSecs: t.DeadRetestSecs,
-			IdleMult: t.IdleMult, IdleMinSecs: t.IdleMinSecs,
-			SessionStaleMult: t.SessionStaleMult, SessionStaleMinSecs: t.SessionStaleMinSecs,
+			DeadMult:          t.DeadMult,
 			PingLossThreshold: t.PingLossThreshold, MinLivenessSecs: t.MinLivenessSecs,
 			ProbeTimeoutSecs: t.ProbeTimeoutSecs,
 		})

@@ -58,10 +58,12 @@ func TestUDPFecDecoderResetAfterClientRestart(t *testing.T) {
 	addr := freeUDPPort(t)
 
 	srv, err := Listen([]string{addr}, srvDev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
+	srv.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
 	cli1, err := Dial(addr, cli1Dev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
+	cli1.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -78,6 +80,7 @@ func TestUDPFecDecoderResetAfterClientRestart(t *testing.T) {
 	cli1.Close()
 
 	cli2, err := Dial(addr, cli2Dev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
+	cli2.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
 	if err != nil {
 		t.Fatalf("Dial (restarted client): %v", err)
 	}
@@ -115,6 +118,7 @@ func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
 		t.Fatalf("Listen: %v", err)
 	}
 	cli, err := Dial(addr, cliDev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
+	cli.SetDeadAfter(10) // the stale window is deadMult x keepalive; at 200ms that is 0.6s, so state the 10s this test needs
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

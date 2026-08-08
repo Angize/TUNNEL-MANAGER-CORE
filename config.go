@@ -300,15 +300,12 @@ type Config struct {
 // TuningCfg is the JSON shape of the config's `tuning` object. Every field is optional (zero/empty =
 // keep default); the packet layer clamps each to a sane range before applying it.
 type TuningCfg struct {
-	SuspectBackoff      []int64 `json:"suspect_backoff"`        // retest schedule (secs) for a suspect pool entry
-	DeadRetestSecs      int64   `json:"dead_retest_secs"`       // slow retest interval (secs) for a dead entry
-	IdleMult            int64   `json:"idle_mult"`              // ws/tcp read deadline = mult × keepalive
-	IdleMinSecs         int64   `json:"idle_min_secs"`          // …floored at this many seconds
-	SessionStaleMult    int64   `json:"session_stale_mult"`     // udp/raw/flux stale window = mult × keepalive
-	SessionStaleMinSecs int64   `json:"session_stale_min_secs"` // …floored at this many seconds
-	PingLossThreshold   int     `json:"ping_loss_threshold"`    // unanswered keepalives before a client closes
-	MinLivenessSecs     int64   `json:"min_liveness_secs"`      // shortest session that still counts as healthy
-	ProbeTimeoutSecs    int64   `json:"probe_timeout_secs"`     // per-edge reachability probe timeout
+	SuspectBackoff    []int64 `json:"suspect_backoff"`     // retest schedule (secs) for a suspect pool entry
+	DeadRetestSecs    int64   `json:"dead_retest_secs"`    // slow retest interval (secs) for a dead entry
+	DeadMult          int64   `json:"dead_mult"`           // dead window = mult × keepalive, EVERY carrier (min 2)
+	PingLossThreshold int     `json:"ping_loss_threshold"` // unanswered keepalives before a client closes
+	MinLivenessSecs   int64   `json:"min_liveness_secs"`   // shortest session that still counts as healthy
+	ProbeTimeoutSecs  int64   `json:"probe_timeout_secs"`  // per-edge reachability probe timeout
 }
 
 func loadConfig(path string) (*Config, error) {
