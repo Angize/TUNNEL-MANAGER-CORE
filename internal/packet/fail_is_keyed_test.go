@@ -163,7 +163,7 @@ func TestAFailIsNeverReadAsAPin(t *testing.T) {
 // file in its own loop rather than through pollPins — so the datagram fix says nothing about it.
 func TestTCPStaleFailBurnsWhatItMeasured(t *testing.T) {
 	dir := t.TempDir()
-	st := newCoreStatus(filepath.Join(dir, "core.json"), "tcp · lab", roleOf(true))
+	st := newCoreStatus(filepath.Join(dir, "core.json"), "tcp · lab")
 	p := NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, true, 0, filepath.Join(dir, "pool.json"))
 	b := &TCP{pp: p, st: st, isClient: true, closeCh: make(chan struct{})}
 	defer close(b.closeCh)

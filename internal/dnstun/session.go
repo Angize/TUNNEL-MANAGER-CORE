@@ -103,26 +103,10 @@ type sessionConn struct {
 	staged []stagedSession
 	// lastRx is the unix-nano of the last authentic inbound frame (data, ping, or pong). The client's
 	// keepalive goroutine ages it against deadWindow to detect a dead/mismatched session and re-dial.
-	lastRx atomic.Int64
-	// deadWindow is the window the keepalive goroutine below ages lastRx against. Set from the same
-	// value that goroutine is started with, before it starts, and never written again — so DeadWindow()
-	// reports what is REALLY enforced rather than a second derivation of it.
-	deadWindow time.Duration
-	done       chan struct{}
-	closeOnce  sync.Once
+	lastRx    atomic.Int64
+	done      chan struct{}
+	closeOnce sync.Once
 }
-
-// LastRx exposes the last-authenticated stamp (unix-nano, 0 until the peer first answers) so the carrier
-// can publish the SAME liveness number this session self-heals on. It has to come from here: an idle dns
-// tunnel carries no data at all and its proof of life is the keepalive pong, which is consumed in here
-// and never surfaces as a packet. Discovered through this interface, since both entry points return net.Conn.
-func (sc *sessionConn) LastRx() int64 { return sc.lastRx.Load() }
-
-// DeadWindow exposes the window this session self-heals on, so the carrier publishes the number that is
-// really enforced instead of deriving a second one. Zero on the server, which holds no window at all —
-// there is no connection to reap, and the client end reaps the session. Discovered through an interface
-// by the packet carrier, like LastRx.
-func (sc *sessionConn) DeadWindow() time.Duration { return sc.deadWindow }
 
 // stagedSession is one server-side staged candidate: the client's init ephemeral (so a retransmit of
 // the SAME init is re-answered from resp without re-deriving), its derived sealer, and that cached
@@ -311,14 +295,12 @@ func resolveKeepalive(interval time.Duration) (time.Duration, time.Duration) {
 	if interval <= 0 {
 		interval = defaultKeepalive
 	}
-	return interval, ResolveDeadWindow(interval)
+	return interval, resolveDeadWindow(interval)
 }
 
-// ResolveDeadWindow is the window the client's keepalive goroutine really enforces before it reaps a
-// silent session: keepaliveDeadMult×keepalive, floored. Exported because the CARRIER publishes this
-// exact number as dw and paces its heartbeat off it — one function, asked by the session and by the
-// carrier, is the only shape in which the two cannot drift.
-func ResolveDeadWindow(keepalive time.Duration) time.Duration {
+// resolveDeadWindow is the window the client's keepalive goroutine enforces before it reaps a silent
+// session: keepaliveDeadMult×keepalive, floored generously because this carrier is high-loss.
+func resolveDeadWindow(keepalive time.Duration) time.Duration {
 	if keepalive <= 0 {
 		keepalive = defaultKeepalive
 	}
@@ -398,7 +380,6 @@ handshake:
 	sc.sealer.Store(sealer) // before the pumps start: sendPump's first Seal must not Load a nil sealer
 	sc.lastRx.Store(time.Now().UnixNano())
 	kaInterval, kaDeadWindow := resolveKeepalive(cfg.Keepalive)
-	sc.deadWindow = kaDeadWindow // before the goroutine starts, from the value it is started with
 	go sc.sendPump()
 	go sc.recvPump(inCh, nil)                 // client ignores any late handshake datagrams
 	go sc.keepalive(kaInterval, kaDeadWindow) // detect a dead/mismatched server and re-dial (client only)

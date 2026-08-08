@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 // TestTCPSingleEdgeECHSelfHeal verifies a single fixed-edge ws client (no pool) persists the fresh
@@ -14,7 +13,7 @@ import (
 // so a single-edge in-band self-heal reaches the panel without spamming on every reconnect.
 func TestTCPSingleEdgeECHSelfHeal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "core-x.status")
-	b := &TCP{st: newCoreStatus(path, "ws · edge:443", "client"), wsECH: []byte{0x01}}
+	b := &TCP{st: newCoreStatus(path, "ws · edge:443"), wsECH: []byte{0x01}}
 
 	b.noteECHSelfHeal("h.example", []byte{0x02, 0x03}) // first heal: key differs -> persist + emit
 	if !bytes.Equal(b.wsECH, []byte{0x02, 0x03}) {
@@ -44,7 +43,7 @@ func TestTCPSingleEdgeECHSelfHeal(t *testing.T) {
 // emit a "reconnect" — and the status file is written with a monotonic seq the panel consumes once.
 func TestCoreStatusEventPairing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "core-x.status")
-	s := newCoreStatus(path, "udp · 1.2.3.4:443", "client")
+	s := newCoreStatus(path, "udp · 1.2.3.4:443")
 
 	// First connect at startup must NOT be logged as a self-heal.
 	s.reconnected("udp")
@@ -80,40 +79,6 @@ func TestCoreStatusEventPairing(t *testing.T) {
 	off.down("stale", "udp")
 	off.reconnected("udp")
 	off.event("down", "stale", "udp")
-}
-
-// TestHBPeriodTracksDeadWindow pins the rule that keeps a healthy tunnel out of the red: hb is a
-// TIMESTAMP, so the publish period must stay a fraction of the window the reader ages it against. The
-// worst case is the tightest legal window (deadMult at its floor of 2×keepalive), where a healthy
-// carrier's newest frame is already up to 1.3×keepalive old when it is read.
-func TestHBPeriodTracksDeadWindow(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		dw   int64
-		want time.Duration
-	}{
-		{"the default 30s window keeps the 5s ceiling", 30, 5 * time.Second},
-		{"a window of exactly 20s still keeps it", 20, 5 * time.Second},
-		{"the reported flicker case (keepalive 5 at the multiplier's floor)", 10, 2500 * time.Millisecond},
-		{"a tight window floors at one second, not below", 3, time.Second},
-		{"no window resolved keeps the plain ceiling", 0, 5 * time.Second},
-	} {
-		if got := hbPeriod(c.dw); got != c.want {
-			t.Errorf("%s: hbPeriod(%d) = %v, want %v", c.name, c.dw, got, c.want)
-		}
-	}
-
-	// The property the numbers exist for: publish lag plus the oldest a healthy keepalive can be must stay
-	// inside the window, for every window a carrier can resolve to. dw==2×keepalive is the tightest legal
-	// pairing. Below dw=3 the jitter ceiling alone all but fills the window, and the smallest window the
-	// shipped knobs can produce is far above that.
-	for dw := int64(3); dw <= 600; dw++ {
-		keepalive := float64(dw) / 2
-		oldest := 1.3*keepalive + hbPeriod(dw).Seconds()
-		if oldest >= float64(dw) {
-			t.Fatalf("dw=%ds: a healthy carrier publishes an age of %.2fs against a %ds window — it reads dead", dw, oldest, dw)
-		}
-	}
 }
 
 func readEvents(t *testing.T, path string) []coreEvent {

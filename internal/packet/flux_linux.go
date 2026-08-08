@@ -72,7 +72,6 @@ type Flux struct {
 	hsCache  initCache    // server: recent inits -> responses (compute-DoS replay cache; receive-goroutine-only)
 	ci       atomic.Pointer[crypto.Ephemeral]
 	lastRx   atomic.Int64 // unix-nano of the last authenticated frame (client staleness)
-	hbRx     atomic.Int64 // unix-nano of the last REAL inbound frame — feeds the status heartbeat; 0 until the peer answers (v2.48.7)
 	// peerAnswered gates the clear-mode heal: set when the CURRENT endpoint replies, cleared on
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
 	peerAnswered atomic.Bool
@@ -109,7 +108,7 @@ func (f *Flux) SetStatusPath(path string) {
 	if p := f.peer.Load(); p != nil {
 		peer = p.String()
 	}
-	f.st = newCoreStatus(path, "flux:"+f.carrier+" · "+peer, roleOf(f.isClient))
+	f.st = newCoreStatus(path, "flux:"+f.carrier+" · "+peer)
 }
 
 // SetDesync (client, optional) turns on fake-packet desync: `count` decoy packets go out
@@ -277,11 +276,6 @@ func (f *Flux) Run() error {
 	go func() { errc <- f.tunToNet() }()
 	go func() { errc <- f.netToTun() }()
 	go f.rotateWatcher()
-	// BOTH ends publish. The server's own lastRx proves the CLIENT->SERVER direction — a fact only that
-	// end can see — and without it a server had no liveness signal at all and fell back to probing.
-	dw := int64(f.deadWin().Seconds())
-	f.st.setDW(dw)                             // publish it so the reader ages hb against it...
-	go heartbeat(f.st, &f.hbRx, f.closeCh, dw) // ...and pace the republish off it, so an idle tunnel reads live, not half-open
 	if f.isClient {
 		go f.clientLoop()
 	}
@@ -782,8 +776,7 @@ func (f *Flux) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	}
 }
 
-// deadWin is the session-stale window this carrier enforces, and the period the status heartbeat is
-// paced off so an idle tunnel republishes well inside it.
+// deadWin is the session-stale window this carrier enforces.
 func (f *Flux) deadWin() time.Duration { return deadWindow(f.keepalive) }
 
 // sessionStale mirrors Raw.sessionStale: if the client has heard nothing
@@ -792,13 +785,10 @@ func (f *Flux) deadWin() time.Duration { return deadWindow(f.keepalive) }
 // fresh server cannot open.
 func (f *Flux) sessionStale() bool { return staleSince(f.lastRx.Load(), f.deadWin()) }
 
-// markRx stamps a genuine inbound frame: both the failover clock (lastRx) and the liveness heartbeat
-// (hbRx). hbRx is set ONLY here (proven inbound), so hb stays 0 until the peer answers — a connecting
-// tunnel reads yellow, not a false green. Failover-clock seeds (connect / rotation) must NOT call this.
+// markRx stamps a genuine inbound frame onto the failover clock. Failover-clock seeds
+// (connect / rotation) call lastRx.Store directly, so this stays the one PROVEN-inbound stamp.
 func (f *Flux) markRx() {
-	now := time.Now().UnixNano()
-	f.lastRx.Store(now)
-	f.hbRx.Store(now)
+	f.lastRx.Store(time.Now().UnixNano())
 }
 
 // provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for

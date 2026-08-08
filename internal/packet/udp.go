@@ -106,7 +106,6 @@ type UDP struct {
 	hsCache initCache                        // server: recent inits -> responses (compute-DoS replay cache; receive-goroutine-only)
 	ci      atomic.Pointer[crypto.Ephemeral] // client's current handshake ephemeral
 	lastRx  atomic.Int64                     // unix-nano of the last authenticated frame (client staleness)
-	hbRx    atomic.Int64                     // unix-nano of the last REAL inbound frame — feeds the status heartbeat; 0 until the peer answers
 	// peerAnswered gates the clear-mode heal: it is set when the CURRENT peer replies and cleared on
 	// every peer rotation, so success() only clears a burn on an endpoint that has actually replied
 	// SINCE we (re)pointed at it — never a false heal on a just-jumped-to (unproven) endpoint.
@@ -425,11 +424,10 @@ func (b *UDP) SetStatusPath(path string) {
 	if p := b.peer.Load(); p != nil {
 		peer = p.String()
 	}
-	b.st = newCoreStatus(path, "udp · "+peer, roleOf(b.isClient))
+	b.st = newCoreStatus(path, "udp · "+peer)
 }
 
-// deadWin is the session-stale window this carrier enforces, and the period the status heartbeat is
-// paced off so an idle tunnel republishes well inside it.
+// deadWin is the session-stale window this carrier enforces.
 func (b *UDP) deadWin() time.Duration { return deadWindow(b.keepalive) }
 
 // sessionStale reports that the client has heard nothing it could authenticate for long enough that the
@@ -438,14 +436,10 @@ func (b *UDP) deadWin() time.Duration { return deadWindow(b.keepalive) }
 // fresh server cannot open. A false positive costs one harmless re-handshake. Crypto only.
 func (b *UDP) sessionStale() bool { return staleSince(b.lastRx.Load(), b.deadWin()) }
 
-// markRx stamps a genuine inbound frame, advancing BOTH the failover clock (lastRx) and the liveness
-// heartbeat (hbRx). hbRx is set ONLY here — on proven inbound — so hb reads 0 until the peer actually
-// answers, which keeps a still-connecting tunnel yellow instead of a false green. Seeds that only
-// re-baseline the failover clock (connect, rotation) call lastRx.Store directly and must not come here.
+// markRx stamps a genuine inbound frame onto the failover clock. Seeds that only re-baseline that clock
+// (connect, rotation) call lastRx.Store directly, so this stays the one PROVEN-inbound stamp.
 func (b *UDP) markRx() {
-	now := time.Now().UnixNano()
-	b.lastRx.Store(now)
-	b.hbRx.Store(now)
+	b.lastRx.Store(time.Now().UnixNano())
 }
 
 // provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for
@@ -657,11 +651,6 @@ func (b *UDP) initFec(fec bool, fecData, fecParity int) {
 func (b *UDP) Run() error {
 	errc := make(chan error, 2+len(b.srvConns))
 	go func() { errc <- b.tunToNet() }()
-	// BOTH ends publish. The server's own lastRx proves the CLIENT->SERVER direction — a fact only that
-	// end can see — and without it a server had no liveness signal at all and fell back to probing.
-	dw := int64(b.deadWin().Seconds())
-	b.st.setDW(dw)                             // publish it so the reader ages hb against it...
-	go heartbeat(b.st, &b.hbRx, b.closeCh, dw) // ...and pace the republish off it, so an idle tunnel reads live, not half-open
 	if b.isClient {
 		go func() { errc <- b.netToTun() }()
 		go b.clientLoop()

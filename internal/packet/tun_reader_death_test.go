@@ -29,7 +29,7 @@ func tunPairFD(t *testing.T, name string) (*tun.Device, *os.File, int) {
 
 // TestTunReaderDeathStopsTheCarrier guards against the worst failure this carrier has: a green dot on a
 // tunnel that cannot move a single byte. tunLoop is the ONLY reader of the TUN device, so a
-// fire-and-forget reader that dies leaves the keepalive loop pinging and the heartbeat the panel reads
+// fire-and-forget reader that dies leaves the keepalive loop pinging and the failover clock
 // fresh. The assertion is that Run RETURNS, with an error — what turns a dead tunnel into a restart.
 func TestTunReaderDeathStopsTheCarrier(t *testing.T) {
 	const psk = "tun-reader-death-psk-abcdefghijkl"

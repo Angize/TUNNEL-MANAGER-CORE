@@ -70,7 +70,6 @@ type Raw struct {
 	tcpAck   uint32
 	tcpBytes atomic.Uint32 // cumulative tcp-profile payload bytes; drives the realistic seq advance
 	lastRx   atomic.Int64  // unix-nano of the last authenticated frame (client staleness)
-	hbRx     atomic.Int64  // unix-nano of the last REAL inbound frame — feeds the status heartbeat; 0 until the peer answers
 	// peerAnswered gates the clear-mode heal: set when the CURRENT endpoint replies, cleared on
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
 	peerAnswered atomic.Bool
@@ -129,7 +128,7 @@ func (r *Raw) SetStatusPath(path string) {
 	if p := r.peer.Load(); p != nil {
 		peer = p.String()
 	}
-	r.st = newCoreStatus(path, "raw:"+r.profile+" · "+peer, roleOf(r.isClient))
+	r.st = newCoreStatus(path, "raw:"+r.profile+" · "+peer)
 }
 
 // SetDesync (client, optional) turns on fake-packet desync: `count` decoy packets go out just before
@@ -376,11 +375,6 @@ func (r *Raw) Run() error {
 	errc := make(chan error, 2)
 	go func() { errc <- r.tunToNet() }()
 	go func() { errc <- r.link.recvLoop() }() // conn (netToTun) or, for a decoy server, AF_PACKET
-	// BOTH ends publish. The server's own lastRx proves the CLIENT->SERVER direction — a fact only that
-	// end can see — and without it a server had no liveness signal at all and fell back to probing.
-	dw := int64(r.deadWin().Seconds())
-	r.st.setDW(dw)                             // publish it so the reader ages hb against it...
-	go heartbeat(r.st, &r.hbRx, r.closeCh, dw) // ...and pace the republish off it, so an idle tunnel reads live, not half-open
 	if r.isClient {
 		go r.clientLoop()
 		if r.sportRandom {
@@ -1121,8 +1115,7 @@ func (r *Raw) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	}
 }
 
-// deadWin is the session-stale window this carrier enforces, and the period the status heartbeat is
-// paced off so an idle tunnel republishes well inside it.
+// deadWin is the session-stale window this carrier enforces.
 func (r *Raw) deadWin() time.Duration { return deadWindow(r.keepalive) }
 
 // sessionStale reports that the client has heard nothing authenticated from the server for long
@@ -1131,13 +1124,10 @@ func (r *Raw) deadWin() time.Duration { return deadWindow(r.keepalive) }
 // pinging under a key the fresh server can't open and never re-initiates. See UDP.sessionStale.
 func (r *Raw) sessionStale() bool { return staleSince(r.lastRx.Load(), r.deadWin()) }
 
-// markRx stamps a genuine inbound frame: both the failover clock (lastRx) and the liveness heartbeat
-// (hbRx). hbRx is set ONLY here (proven inbound), so hb stays 0 until the peer answers — a connecting
-// tunnel reads yellow, not a false green. Failover-clock seeds (connect / rotation) must NOT call this.
+// markRx stamps a genuine inbound frame onto the failover clock. Failover-clock seeds
+// (connect / rotation) call lastRx.Store directly, so this stays the one PROVEN-inbound stamp.
 func (r *Raw) markRx() {
-	now := time.Now().UnixNano()
-	r.lastRx.Store(now)
-	r.hbRx.Store(now)
+	r.lastRx.Store(time.Now().UnixNano())
 }
 
 // provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for
