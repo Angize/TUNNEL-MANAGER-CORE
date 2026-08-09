@@ -2478,12 +2478,16 @@ func (b *TCP) keepaliveLoop() {
 // pings (errPingTimeout). A silently black-holed connection trips the latter well before the idle
 // deadline. readLoop resets the counter on any inbound frame.
 func (b *TCP) pingOne(cf *connFramer) (ok bool, err error) {
+	// Test the count BEFORE this send. Testing it after drops the connection on the ping just written,
+	// which has had no time at all to be answered — so a threshold of N gave N-1 real chances, and N=1
+	// closed a healthy connection the instant its first ping left.
+	if cf.unanswered.Load() >= pingLossThreshold {
+		return false, errPingTimeout
+	}
 	if err := cf.writeFrame(typePing, nil); err != nil {
 		return false, err
 	}
-	if cf.unanswered.Add(1) >= pingLossThreshold {
-		return false, errPingTimeout
-	}
+	cf.unanswered.Add(1)
 	return true, nil
 }
 
