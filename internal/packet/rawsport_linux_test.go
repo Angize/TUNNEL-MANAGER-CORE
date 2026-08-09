@@ -251,6 +251,58 @@ func TestTheHandshakeReplyGoesToTheRolledPort(t *testing.T) {
 	if srv.cport() != rolled {
 		t.Errorf("a replayed init moved the learned port to %d", srv.cport())
 	}
+	// ...but it must still be ANSWERED where it came from. A client whose port rolls mid-handshake
+	// retransmits the identical init (sendInit reuses the ephemeral, so the bytes do not change), which
+	// means every retransmit lands on this same cached branch. Answering it at the learned port sends
+	// the reply to a port the client has left; a stateful box drops that, the client never completes,
+	// and it retransmits forever — measured live at 9h48m of a tunnel that could not recover on its own.
+	if len(cap.sent) != 2 {
+		t.Fatalf("expected the cached reply to be sent too, got %d frame(s)", len(cap.sent))
+	}
+	if dport := binary.BigEndian.Uint16(cap.sent[1][2:4]); dport != 40000 {
+		t.Errorf("the cached handshake reply is stamped for port %d, but this init came from 40000 — "+
+			"a client that rolled its port can never be answered, so the tunnel never recovers", dport)
+	}
+}
+
+// The same property, stated on its own so it cannot be lost when the test above is edited: a handshake
+// answer is addressed at the sender, whatever the data path currently points at. The udp profile is the
+// one this was found on (a fake-WireGuard carrier), and it exercises a different header layout.
+func TestAHandshakeAnswerGoesToTheSenderNotTheDataPath(t *testing.T) {
+	const psk = "tVYafNLrHaId1AaEM80YebyPzXThOEr2adA27E6mbRc="
+
+	for _, profile := range []string{"udp", "tcp"} {
+		srv := &Raw{profile: profile, isClient: false, psk: psk, cipher: "chacha20-poly1305", port: 51820}
+		srv.setSportMode(true)
+		cap := &capturingLink{r: srv}
+		srv.link = cap
+		srv.peer.Store(&net.IPAddr{IP: testSrc})
+		srv.localIP.Store(&net.IPAddr{IP: testDst})
+
+		ci, err := crypto.GenerateEphemeral()
+		if err != nil {
+			t.Fatal(err)
+		}
+		init := crypto.InitMsg(psk, ci)
+		// Three retransmits of the IDENTICAL init from three different rolled ports, exactly what a
+		// client does while its handshake is unanswered.
+		ports := []uint16{33016, 46649, 52384}
+		for _, p := range ports {
+			srv.tryHandshake(init, &net.IPAddr{IP: testSrc}, p)
+		}
+		if len(cap.sent) != len(ports) {
+			t.Fatalf("%s: %d replies for %d inits", profile, len(cap.sent), len(ports))
+		}
+		for i, want := range ports {
+			if got := binary.BigEndian.Uint16(cap.sent[i][2:4]); got != want {
+				t.Errorf("%s: reply %d went to port %d, want %d", profile, i+1, got, want)
+			}
+		}
+		// The data path stays where the FIRST authenticated init put it: only that one proved anything.
+		if srv.cport() != ports[0] {
+			t.Errorf("%s: a retransmit steered the data path to %d, want %d", profile, srv.cport(), ports[0])
+		}
+	}
 }
 
 // capturingLink is a directLink that records what would go on the wire instead of opening a socket.
