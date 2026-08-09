@@ -434,7 +434,11 @@ func (r *Raw) body(typ byte, payload []byte) ([]byte, error) {
 }
 
 // wire wraps a framed body in the profile carrier header, ready for the socket.
-func (r *Raw) wire(body []byte, dst net.IP) []byte {
+func (r *Raw) wire(body []byte, dst net.IP) []byte { return r.wireTo(body, dst, r.cport()) }
+
+// wireTo is wire with the client's carrier port given explicitly. A handshake reply has to go back to
+// the port that message arrived from, which is not necessarily where the data path is aimed.
+func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
 	var seq, ack uint32
 	if r.proto == protoTCP {
 		// advance the sequence by this segment's payload length (a real byte stream) and
@@ -447,7 +451,7 @@ func (r *Raw) wire(body []byte, dst net.IP) []byte {
 	} else {
 		seq = r.seq.Add(1)
 	}
-	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, r.port, r.cport(), seq, ack, r.spi)
+	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, r.port, cport, seq, ack, r.spi)
 }
 
 // writeOut sends one wrapped packet toward the real peer `to`, delegating the mechanism to the
@@ -745,6 +749,19 @@ func (r *Raw) learnClientPort(sport uint16) {
 		return
 	}
 	r.cliPort.Store(uint32(sport))
+}
+
+// replyPort is where a handshake answer is addressed: back at the port the message arrived from, which
+// is NOT always the learned one. A client that rolls its source port keeps retransmitting the identical
+// init (same ephemeral, so the same bytes), and a retransmit that hits the cached-response path above
+// answers without learning — so the reply has to carry the sender's own port or it lands on a port the
+// client left, which a stateful box drops as unsolicited. Falls back to the learned port for a client,
+// for a carrier that forges none, and for a message that carried no port.
+func (r *Raw) replyPort(sport uint16) uint16 {
+	if r.isClient || sport == 0 || !RawProfileHasPorts(r.profile) {
+		return r.cport()
+	}
+	return sport
 }
 
 // sportLoop re-rolls the client's carrier source port for the life of the tunnel. There is nothing to
@@ -1053,7 +1070,11 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 	// Receive-goroutine-only, like staged, so no locking is needed.
 	if len(r.staged) > 0 {
 		if resp, ok := r.hsCache.get(body); ok {
-			r.writeCtrl(resp, r.replyAddr(addr))
+			// Answer where it came from, but do NOT learn: re-serving a cached response proves nothing
+			// new, so a replayed init must not steer the data path. Both halves matter — without the
+			// reply port a rolling client is answered on a port it has left, and since its retransmits
+			// are byte-identical it hits this branch forever and the tunnel never recovers.
+			r.writeCtrlTo(resp, r.replyAddr(addr), r.replyPort(hsSport))
 			return
 		}
 	}
@@ -1086,7 +1107,7 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 		// is still current) is served without recomputing the crypto above. put copies body
 		// (it aliases the receive buffer); msg2 is a fresh slice, safe to keep.
 		r.hsCache.put(body, msg2)
-		r.writeCtrl(msg2, r.replyAddr(addr))
+		r.writeCtrlTo(msg2, r.replyAddr(addr), r.replyPort(hsSport))
 	}
 }
 
@@ -1094,11 +1115,14 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 // under FEC so the peer's decoder forwards it straight through instead of parsing it as
 // a shard. to may differ from the learned peer (a server's handshake reply, or a
 // forged-source client's fixed reply address).
-func (r *Raw) writeCtrl(body []byte, to *net.IPAddr) {
+func (r *Raw) writeCtrl(body []byte, to *net.IPAddr) { r.writeCtrlTo(body, to, r.cport()) }
+
+// writeCtrlTo is writeCtrl addressed at an explicit client port — see wireTo.
+func (r *Raw) writeCtrlTo(body []byte, to *net.IPAddr, cport uint16) {
 	if to == nil {
 		return
 	}
-	r.writeOut(r.wire(fecTag(r.fecEnc, body), to.IP), to)
+	r.writeOut(r.wireTo(fecTag(r.fecEnc, body), to.IP, cport), to)
 }
 
 func (r *Raw) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
