@@ -751,12 +751,9 @@ func (r *Raw) learnClientPort(sport uint16) {
 	r.cliPort.Store(uint32(sport))
 }
 
-// replyPort is where a handshake answer is addressed: back at the port the message arrived from, which
-// is NOT always the learned one. A client that rolls its source port keeps retransmitting the identical
-// init (same ephemeral, so the same bytes), and a retransmit that hits the cached-response path above
-// answers without learning — so the reply has to carry the sender's own port or it lands on a port the
-// client left, which a stateful box drops as unsolicited. Falls back to the learned port for a client,
-// for a carrier that forges none, and for a message that carried no port.
+// replyPort is where a handshake answer is addressed: back at the port it arrived from, which is not
+// always the learned one — tryHandshake's cached branch answers without learning. Falls back to the
+// learned port for a client, for a carrier that forges none, and for a message that carried no port.
 func (r *Raw) replyPort(sport uint16) uint16 {
 	if r.isClient || sport == 0 || !RawProfileHasPorts(r.profile) {
 		return r.cport()
@@ -1070,10 +1067,10 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 	// Receive-goroutine-only, like staged, so no locking is needed.
 	if len(r.staged) > 0 {
 		if resp, ok := r.hsCache.get(body); ok {
-			// Answer where it came from, but do NOT learn: re-serving a cached response proves nothing
-			// new, so a replayed init must not steer the data path. Both halves matter — without the
-			// reply port a rolling client is answered on a port it has left, and since its retransmits
-			// are byte-identical it hits this branch forever and the tunnel never recovers.
+			// Answer where it came from, but do NOT learn: a re-served response proves nothing new, so
+			// a replayed init must not steer the data path. A rolling client's retransmits are
+			// byte-identical, so they hit this branch forever — answered at the learned port they reach
+			// one the client has left, and the tunnel never recovers.
 			r.writeCtrlTo(resp, r.replyAddr(addr), r.replyPort(hsSport))
 			return
 		}
