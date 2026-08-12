@@ -16,12 +16,12 @@ type scopeRecorder struct {
 	ips []string
 }
 
-func (s *scopeRecorder) installer() func(net.IP) func() {
-	return func(peer net.IP) func() {
+func (s *scopeRecorder) installer() func(net.IP) (func(), bool) {
+	return func(peer net.IP) (func(), bool) {
 		s.mu.Lock()
 		s.ips = append(s.ips, peer.String())
 		s.mu.Unlock()
-		return func() {}
+		return func() {}, true
 	}
 }
 
