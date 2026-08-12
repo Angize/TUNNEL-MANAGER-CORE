@@ -149,11 +149,22 @@ func (s *coreStatus) write() {
 // status file. The single durability primitive shared by all three status writers (coreStatus / peerPool
 // / wsPool); each passes its own perm.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) {
+	// Both errors are REPORTED. Swallowing them made a full or read-only filesystem look like a dead
+	// tunnel: the status file freezes at its last good contents, the node's reader keeps parsing it, and
+	// the dashboard goes red pointing at the peer. Throttled, because a full disk fails every write.
 	tmp := path + ".tmp"
-	if os.WriteFile(tmp, data, perm) == nil {
-		_ = os.Rename(tmp, path)
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		statusWriteLog.note("core/status: writing "+tmp, err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		statusWriteLog.note("core/status: replacing "+path, err)
 	}
 }
+
+// statusWriteLog throttles the status-file write errors: one line per sendErrEvery, shared by all three
+// writers, so a filesystem that fails every write names itself once instead of per snapshot.
+var statusWriteLog sendErrLog
 
 // staleSince reports whether last (unix-nano of the last inbound frame) has aged past window. A zero last
 // means "no baseline yet" -> not stale.

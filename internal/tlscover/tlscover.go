@@ -23,10 +23,13 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -142,10 +145,39 @@ type Server struct {
 
 	mu   sync.Mutex
 	seen map[[32]byte]int64 // session-id token -> expiry (anti-replay)
+
+	// A dest we cannot reach makes the cover a LIE: every probe gets a bare close where a real site would
+	// have answered, which is the distinguisher the whole mechanism exists to remove. It used to fail
+	// silently, and on an Iran-side server an unreachable foreign cover domain is the normal case.
+	dialFail atomic.Int64 // unix nanos of the last line emitted
+	dialN    atomic.Int64 // failures accumulated since then
+}
+
+const dialFailEvery = 60 * time.Second // one line per minute, however fast the probes arrive
+
+// noteDialFail throttles the "cover unreachable" line: a censor scanning the port makes this fail at probe
+// rate, and one line per failure would bury the journal that has to carry it.
+func (sv *Server) noteDialFail(err error) {
+	sv.dialN.Add(1)
+	now := time.Now().UnixNano()
+	prev := sv.dialFail.Load()
+	if prev != 0 && now-prev < int64(dialFailEvery) {
+		return
+	}
+	if !sv.dialFail.CompareAndSwap(prev, now) {
+		return // another goroutine is emitting this round
+	}
+	n := sv.dialN.Swap(0)
+	more := ""
+	if n > 1 {
+		more = fmt.Sprintf(" (+%d more in the last %s)", n-1, dialFailEvery)
+	}
+	log.Printf("core/cover: cover site %s is UNREACHABLE from this server (%v)%s — every probe now gets a "+
+		"bare close instead of that site's real answer, so the cover proves nothing", sv.dest, err, more)
 }
 
 // NewServer builds a cover server that borrows destHost (its :443 is proxied to
-// for any non-authenticated connection).
+// for any non-authenticated connection). It does no I/O: see WarnIfDestUnreachable.
 func NewServer(psk, destHost string) (*Server, error) {
 	cert, err := SelfSignedCert(destHost)
 	if err != nil {
@@ -154,6 +186,29 @@ func NewServer(psk, destHost string) (*Server, error) {
 	return &Server{cert: cert, psk: psk, dest: net.JoinHostPort(destHost, "443"),
 		relay: make(chan struct{}, maxRelays), queue: make(chan struct{}, maxWaiting),
 		idle: relayIdle, seen: map[[32]byte]int64{}}, nil
+}
+
+// WarnIfDestUnreachable probes dest once, in the background, and warns if it cannot be reached — so the
+// operator learns while they are still watching the tunnel come up instead of never.
+//
+// It is the CALLER's call and not part of NewServer, because only the caller knows dest is final: the
+// constructor doing it read sv.dest from a goroutine while a caller was still replacing that field, which
+// is a real data race (the tests inject a local dest exactly that way).
+//
+// A failure is NOT fatal. The carrier still carries real traffic; what is gone is the probe resistance, and
+// a cover site that is merely slow at boot must not stop a tunnel from starting.
+func (sv *Server) WarnIfDestUnreachable() {
+	dest := sv.dest // read on the CALLER's goroutine, before the probe one exists
+	go func() {
+		c, err := net.DialTimeout("tcp", dest, 8*time.Second)
+		if err != nil {
+			log.Printf("core/cover: cover site %s did not answer at startup (%v) — while it stays "+
+				"unreachable a prober gets a bare close, not that site's real TLS answer. Pick a cover "+
+				"domain this server can actually reach.", dest, err)
+			return
+		}
+		_ = c.Close()
+	}()
 }
 
 // Handle reads the ClientHello and either returns a TLS conn (authenticated
@@ -250,6 +305,7 @@ func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 		defer func() { <-sv.relay }()
 		dst, err := net.DialTimeout("tcp", sv.dest, 8*time.Second)
 		if err != nil {
+			sv.noteDialFail(err) // the cover is only a cover while dest answers; say so instead of dying quiet
 			raw.Close()
 			return
 		}

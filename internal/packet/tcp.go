@@ -849,6 +849,10 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, keepalive time.Duration, o
 			}
 			return nil, err
 		}
+		// A cover site this server cannot reach makes the cover a lie: every probe gets a bare close where
+		// the real site would have answered. Say so at startup instead of never — on an Iran-side server an
+		// unreachable foreign cover domain is the normal case.
+		cs.WarnIfDestUnreachable()
 		b.coverSrv = cs
 	}
 	return b, nil
@@ -1817,7 +1821,17 @@ func (b *TCP) dialLoop() {
 		// keeps the same edge — the timer is stopped before that path runs.
 		var rot *time.Timer
 		var rotated atomic.Bool
-		// timerLive gates the rotation callback's SELF re-arm. A pinned/no-move beat re-arms via rot.Reset,
+		// rotp publishes the timer TO ITS OWN callback. `rot = time.AfterFunc(...)` leaves the callback
+		// reading the very variable the setup goroutine is still assigning -- a data race, even though a
+		// positive interval means it cannot be observed in practice. A fire before the Store simply does
+		// not re-arm and returns without advancing, which is benign.
+		var rotp atomic.Pointer[time.Timer]
+		rearm := func(d time.Duration) {
+			if t := rotp.Load(); t != nil {
+				t.Reset(d)
+			}
+		}
+		// timerLive gates the rotation callback's SELF re-arm. A pinned/no-move beat re-arms via rearm,
 		// which races the rot.Stop() below; clearing timerLive BEFORE Stop makes any post-teardown fire
 		// return at once without advancing or re-arming, so a leaked beat self-terminates.
 		var timerLive atomic.Bool
@@ -1833,7 +1847,7 @@ func (b *TCP) dialLoop() {
 					return // this connection is being torn down — do not advance or re-arm
 				}
 				if b.pool.isPinned() {
-					rot.Reset(b.rotate) // still pinned — hold rotation off, but keep checking (never freeze)
+					rearm(b.rotate) // still pinned — hold rotation off, but keep checking (never freeze)
 					return
 				}
 				// Only drop the live connection when the pool can actually reach a DIFFERENT edge. With every other
@@ -1841,12 +1855,13 @@ func (b *TCP) dialLoop() {
 				// re-dial + handshake + traffic gap every interval for nothing. `rotated` is set only once the
 				// close is really happening, so a skipped beat is never mistaken for a deliberate rotation.
 				if !b.pool.advance() {
-					rot.Reset(b.rotate) // re-arm so rotation resumes as soon as another edge heals
+					rearm(b.rotate) // re-arm so rotation resumes as soon as another edge heals
 					return
 				}
 				rotated.Store(true)
 				c.Close()
 			})
+			rotp.Store(rot)
 		} else if (b.pp != nil && b.pp.rotate > 0) || (b.sp != nil && b.sp.rotate > 0) {
 			c := conn
 			iv := time.Duration(0) // fire on whichever pool has the (longer) rotate interval set
@@ -1864,7 +1879,7 @@ func (b *TCP) dialLoop() {
 					return // this connection is being torn down — do not advance or re-arm
 				}
 				if (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned()) {
-					rot.Reset(iv) // an operator pin freezes rotation for its window — re-arm, never freeze for the life of the conn
+					rearm(iv) // an operator pin freezes rotation for its window — re-arm, never freeze for the life of the conn
 					return
 				}
 				// dstMoved is carried to the adoption site, not just folded into `moved`: a beat fires
@@ -1897,7 +1912,7 @@ func (b *TCP) dialLoop() {
 					}
 				}
 				if !moved {
-					rot.Reset(iv) // every other endpoint burned this beat — re-arm so rotation resumes once one heals
+					rearm(iv) // every other endpoint burned this beat — re-arm so rotation resumes once one heals
 					return
 				}
 				// MAKE BEFORE BREAK. A connection-oriented carrier cannot carry its session across a destination
@@ -1908,7 +1923,7 @@ func (b *TCP) dialLoop() {
 					// trading it for a dead one is exactly what make-before-break exists to prevent —
 					// and re-arm. Nothing is burned: a warm build that failed is not the tun probe
 					// speaking. buildWarm has already put the cursor back on dstPrev.
-					rot.Reset(iv)
+					rearm(iv)
 					return
 				}
 				if !timerLive.Load() || b.closed.Load() {
@@ -1927,6 +1942,7 @@ func (b *TCP) dialLoop() {
 				// made, left "active" naming an endpoint the tunnel was not on, and armed a down() the
 				// next connect paired as a phantom self-heal.
 			})
+			rotp.Store(rot)
 		}
 		b.serve(cf)            // blocks until this connection dies
 		timerLive.Store(false) // disable the callback's re-arm before stopping, so a racing beat can't re-arm
