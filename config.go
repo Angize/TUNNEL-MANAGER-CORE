@@ -319,15 +319,28 @@ func loadConfig(path string) (*Config, error) {
 	return &c, nil
 }
 
+// defaultKeepaliveSecs is the client ping interval when the operator sets none. Named because validate()
+// runs BEFORE applyDefaults() and has to reason about the EFFECTIVE value, and two copies of 15 in two
+// functions is how a check goes quietly inert.
+const defaultKeepaliveSecs = 15
+
 func (c *Config) applyDefaults() {
 	if c.MTU <= 0 { // <=0 (not just ==0): a negative MTU would reach `ip link set … mtu N` and fail
 		c.MTU = 1400
 	}
 	if c.Keepalive <= 0 { // <=0: a negative keepalive makes jitter() fire immediately -> ping busy-loop
-		c.Keepalive = 15
+		c.Keepalive = defaultKeepaliveSecs
 	}
 	if c.SockBuf == 0 { // 0 = pick the default; a negative value means "leave the kernel default" (off)
 		c.SockBuf = 4 << 20 // 4 MiB
+	}
+	if c.SockBuf > 0 && c.SockBuf < 64<<10 {
+		// A pin BELOW the kernel's own default is worse than not pinning: SO_SNDBUF/SO_RCVBUF override
+		// autotuning, so a stray small value (a byte count someone meant as MiB) caps the carrier's
+		// window at that size for the connection's whole life. Negative still means "leave the kernel
+		// alone"; only a positive-but-tiny value is a mistake, and the floor is the smallest pin that
+		// can still hold a full datagram burst.
+		c.SockBuf = 64 << 10
 	}
 	if c.SockBuf > 64<<20 { // cap the pin so a typo can't reserve absurd kernel memory
 		c.SockBuf = 64 << 20
@@ -756,6 +769,30 @@ func (c *Config) validate() error {
 			if err := validatePoolEndpoint("peer_src_ips", e, false); err != nil {
 				return err
 			}
+		}
+	}
+	// A proactive ENDPOINT rotation shorter than the keepalive moves on before the endpoint it just
+	// selected can answer: a stream carrier re-dials every interval and a datagram one changes destination
+	// before a single ping could be returned, so no endpoint ever earns a verdict and the tunnel reads as
+	// flapping while the interval is the cause.
+	//
+	// flux_rotate_secs is deliberately NOT here: it is the SHAPE epoch, not an endpoint rotation. Both ends
+	// derive the shape from HKDF(PSK, epoch) off their own clocks and no packet moves, so a flux epoch
+	// shorter than the keepalive is perfectly valid and rejecting it would refuse working configs.
+	//
+	// The EFFECTIVE keepalive, because validate() runs BEFORE applyDefaults(): reading the raw field made
+	// this check inert for every config that leaves keepalive unset, which is the common case.
+	ka := c.Keepalive
+	if ka <= 0 {
+		ka = defaultKeepaliveSecs
+	}
+	for _, r := range []struct {
+		name string
+		secs int
+	}{{"peer_rotate_secs", c.PeerRotateSecs}, {"ws_rotate_secs", c.WSRotateSecs}} {
+		if r.secs > 0 && r.secs < ka {
+			return fmt.Errorf("%s (%ds) must be >= keepalive (%ds): the endpoint it selects never gets to "+
+				"answer one keepalive before the next rotation moves on", r.name, r.secs, ka)
 		}
 	}
 	if c.PeerRotateSecs < 0 {
