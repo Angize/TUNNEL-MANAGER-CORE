@@ -157,6 +157,9 @@ const dialFailEvery = 60 * time.Second // one line per minute, however fast the 
 
 // noteDialFail throttles the "cover unreachable" line: a censor scanning the port makes this fail at probe
 // rate, and one line per failure would bury the journal that has to carry it.
+//
+// It re-implements internal/packet's sendErrLog on purpose: packet imports THIS package, so importing it
+// back would be an import cycle. Do not "de-duplicate" these two.
 func (sv *Server) noteDialFail(err error) {
 	sv.dialN.Add(1)
 	now := time.Now().UnixNano()

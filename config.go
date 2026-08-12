@@ -771,10 +771,15 @@ func (c *Config) validate() error {
 			}
 		}
 	}
-	// A proactive rotation SHORTER than the keepalive tears each connection down before its first
-	// liveness proof: the carrier spends its whole life re-dialing, the peer's endpoint never gets a
-	// verdict, and the tunnel reads as flapping when the interval is the cause. Checked for all three
-	// rotation knobs together, since Keepalive is already defaulted above.
+	// A proactive ENDPOINT rotation shorter than the keepalive moves on before the endpoint it just
+	// selected can answer: a stream carrier re-dials every interval and a datagram one changes destination
+	// before a single ping could be returned, so no endpoint ever earns a verdict and the tunnel reads as
+	// flapping while the interval is the cause.
+	//
+	// flux_rotate_secs is deliberately NOT here: it is the SHAPE epoch, not an endpoint rotation. Both ends
+	// derive the shape from HKDF(PSK, epoch) off their own clocks and no packet moves, so a flux epoch
+	// shorter than the keepalive is perfectly valid and rejecting it would refuse working configs.
+	//
 	// The EFFECTIVE keepalive, because validate() runs BEFORE applyDefaults(): reading the raw field made
 	// this check inert for every config that leaves keepalive unset, which is the common case.
 	ka := c.Keepalive
@@ -784,12 +789,10 @@ func (c *Config) validate() error {
 	for _, r := range []struct {
 		name string
 		secs int
-	}{{"peer_rotate_secs", c.PeerRotateSecs}, {"ws_rotate_secs", c.WSRotateSecs},
-		{"flux_rotate_secs", c.FluxRotateSecs}} {
+	}{{"peer_rotate_secs", c.PeerRotateSecs}, {"ws_rotate_secs", c.WSRotateSecs}} {
 		if r.secs > 0 && r.secs < ka {
-			return fmt.Errorf("%s (%ds) must be >= keepalive (%ds): a rotation that fires before the first "+
-				"keepalive drops every connection before it can prove the endpoint works",
-				r.name, r.secs, ka)
+			return fmt.Errorf("%s (%ds) must be >= keepalive (%ds): the endpoint it selects never gets to "+
+				"answer one keepalive before the next rotation moves on", r.name, r.secs, ka)
 		}
 	}
 	if c.PeerRotateSecs < 0 {

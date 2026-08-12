@@ -16,7 +16,6 @@ func TestRotationMayNotFireBeforeTheFirstKeepalive(t *testing.T) {
 	}{
 		{"peer_rotate_secs", func(c *Config, v int) { c.PeerRotateSecs = v }},
 		{"ws_rotate_secs", func(c *Config, v int) { c.WSRotateSecs = v }},
-		{"flux_rotate_secs", func(c *Config, v int) { c.FluxRotateSecs = v }},
 	} {
 		c := validRaw()
 		c.Keepalive = 30
@@ -45,6 +44,29 @@ func TestRotationMayNotFireBeforeTheFirstKeepalive(t *testing.T) {
 		if err := c.validate(); err != nil {
 			t.Errorf("%s=0 (failover-only) must stay allowed: %v", tc.name, err)
 		}
+	}
+}
+
+// flux_rotate_secs is the SHAPE epoch, not an endpoint rotation: both ends derive the shape from
+// HKDF(PSK, epoch) off their own clocks and no packet moves, so nothing is torn down and an epoch shorter
+// than the keepalive is legitimate. The first version of the floor lumped it in with the endpoint knobs and
+// would have refused working configs -- pin the distinction so it cannot be re-conflated.
+func TestFluxEpochIsNotAnEndpointRotation(t *testing.T) {
+	c := validRaw()
+	c.Transport = "flux"
+	c.Keepalive = 60
+	c.FluxRotateSecs = 5 // twelve shape changes per keepalive: fine, no connection is dropped
+	if err := c.validate(); err != nil {
+		t.Fatalf("a flux epoch shorter than the keepalive must be allowed -- it rotates the SHAPE off the "+
+			"clock and drops nothing: %v", err)
+	}
+	// ...while an endpoint rotation on the SAME config is still floored.
+	c = validRaw()
+	c.Transport = "flux"
+	c.Keepalive = 60
+	c.PeerRotateSecs = 5
+	if err := c.validate(); err == nil {
+		t.Error("peer_rotate_secs=5 with keepalive=60 must still be refused; only the shape epoch is exempt")
 	}
 }
 

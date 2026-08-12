@@ -155,10 +155,14 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, perm); err != nil {
 		statusWriteLog.note("core/status: writing "+tmp, err)
+		_ = os.Remove(tmp) // a partial temp file is of no use to anyone
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {
+		// The target still holds the last good snapshot, which is what readers use, so the temp carries
+		// nothing they need -- drop it instead of leaving one stale file per failed write.
 		statusWriteLog.note("core/status: replacing "+path, err)
+		_ = os.Remove(tmp)
 	}
 }
 
