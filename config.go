@@ -231,10 +231,7 @@ type Config struct {
 	// real UDP datagrams on protocol 17 whose ports rotate each epoch among common
 	// QUIC/STUN/WebRTC ports — internet-safe, since transit forwards UDP; "stun"
 	// additionally wraps every frame in a real STUN Binding header on STUN/TURN
-	// ports, so the flow parses as WebRTC signalling; "raw" rotates the IP protocol
-	// number itself among an experimental pool, which is stealthier but only survives
-	// where those protocols reach the peer (same-segment / L2-adjacent / a cooperative
-	// datacenter), not across the open internet. Empty defaults to "udp".
+	// ports, so the flow parses as WebRTC signalling. Empty defaults to "udp".
 	FluxCarrier string `json:"flux_carrier"`
 
 	// FluxShape is the statistical size profile the carrier mimics: "random"
@@ -583,9 +580,9 @@ func (c *Config) validate() error {
 			return errors.New("flux_rotate_secs must be >= 0 (0 defaults to 600)")
 		}
 		switch c.FluxCarrier {
-		case "", "udp", "raw", "stun":
+		case "", "udp", "stun":
 		default:
-			return errors.New("flux_carrier must be \"udp\", \"stun\", or \"raw\"")
+			return errors.New("flux_carrier must be \"udp\" or \"stun\"")
 		}
 		switch c.FluxShape {
 		case "", "random", "quic", "video", "webrtc":

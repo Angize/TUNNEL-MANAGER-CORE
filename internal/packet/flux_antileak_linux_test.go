@@ -71,7 +71,7 @@ func TestFluxRotationPreScopesAntiLeak(t *testing.T) {
 func TestFluxLearnPeerNeverBlocksOnIptables(t *testing.T) {
 	installing := make(chan struct{})
 	rec := &leakRecorder{delay: 750 * time.Millisecond, tookTo: installing}
-	f := &Flux{carrier: "raw", closeCh: make(chan struct{})}
+	f := &Flux{carrier: "stun", closeCh: make(chan struct{})}
 	f.leak.init(f.closeCh, rec.install)
 	f.localIP.Store(&net.IPAddr{IP: net.ParseIP("10.9.9.9")})
 

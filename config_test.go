@@ -422,6 +422,35 @@ func TestWSRotateSecsNonNegative(t *testing.T) {
 	}
 }
 
+// The flux carrier set is exactly {udp, stun} (empty = udp). Both ride protocol 17, which is what makes
+// the carrier's anti-leak DROP rules narrow enough to be safe: they match UDP on flux's own port pool,
+// a shape nothing else on the host receives. A carrier that rode a bare IP protocol number instead
+// would have those rules black-hole every co-located tunnel on that number, silently.
+func TestFluxCarrierSetIsUDPOnly(t *testing.T) {
+	base := func(carrier string) *Config {
+		return &Config{
+			Role: "client", Mode: "packet", Profile: "core", Transport: "flux", FluxCarrier: carrier,
+			Peer: "203.0.113.9:9000", TunAddr: "10.200.0.2/24",
+			Crypto: CryptoCfg{Enabled: true, PSK: "a-sufficiently-long-preshared-key"},
+		}
+	}
+	for _, ok := range []string{"", "udp", "stun"} {
+		if err := base(ok).validate(); err != nil {
+			t.Fatalf("flux_carrier %q must be accepted: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"raw", "RAW", "icmp", "bare", "tcp"} {
+		if err := base(bad).validate(); err == nil {
+			t.Fatalf("flux_carrier %q was accepted", bad)
+		}
+	}
+	c := base("")
+	c.applyDefaults()
+	if c.FluxCarrier != "udp" {
+		t.Fatalf("an unset flux_carrier must resolve to udp, got %q", c.FluxCarrier)
+	}
+}
+
 // TestFluxRotateHonoursTunedDefault checks that a flux tunnel with no explicit epoch length resolves
 // FluxRotateSecs from the tuned global default (bounded), and falls back to 600 when the knob is unset.
 func TestFluxRotateHonoursTunedDefault(t *testing.T) {

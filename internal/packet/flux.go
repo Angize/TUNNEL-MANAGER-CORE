@@ -11,14 +11,14 @@
 // only how packets look, never how they are opened, so no re-handshake is needed.
 //
 // This file derives, for a given epoch:
-//   - proto:  the IP protocol number the raw carrier rides this epoch
-//   - padMax: the per-frame random padding budget (coarse size shaping)
+//   - sport/dport: the UDP 4-tuple the carrier rides this epoch
+//   - padMax:      the per-frame random padding budget (coarse size shaping)
 //
-// The receiver cannot bind a single-protocol socket (the protocol moves), so
-// flux_linux.go sends via IP_HDRINCL (any protocol from one socket) and receives
-// via AF_PACKET (every protocol), filtering to the small set of protocols that
-// the current, previous, and next epochs derive (the grace window that absorbs
-// clock skew and in-flight packets across a rotation boundary).
+// The receiver cannot bind a single UDP port (the destination port moves), so
+// flux_linux.go sends via IP_HDRINCL (which also lets it rotate the source port
+// without rebinding) and receives via AF_PACKET, filtering to the small set of
+// ports that the current, previous, and next epochs derive (the grace window
+// that absorbs clock skew and in-flight packets across a rotation boundary).
 package packet
 
 import (
@@ -29,22 +29,6 @@ import (
 
 	"golang.org/x/crypto/hkdf"
 )
-
-// fluxProtoPool is the set of IP protocol numbers the "raw" flux carrier rotates
-// through. Every entry sits in the unassigned/experimental range, so the kernel
-// attaches no L4 semantics to them (it emits no RST/port-unreachable and does not
-// try to parse a transport header) — the inner AEAD tag is the only real check.
-// Keep this list stable: it is part of the wire contract both ends derive against.
-//
-// The raw carrier only survives where these exotic protocols reach the peer
-// (same-segment / L2-adjacent / a cooperative datacenter). Across the open
-// internet most transit drops anything that is not TCP/UDP/ICMP, so the "udp"
-// carrier below is the internet-safe default.
-// Note: 253 (protoBare) is deliberately EXCLUDED — flux's raw carrier installs a per-peer PREROUTING
-// DROP for every pool proto, which would silently black-hole a co-located raw/"bare" tunnel to the
-// same peer (bare rides proto 253). 246 takes its slot; both ends derive from this list so they stay
-// in sync (a breaking change is fine — no on-wire backward-compat is kept).
-var fluxProtoPool = []int{254, 252, 251, 250, 249, 248, 247, 246}
 
 // fluxDportPool is the set of UDP destination ports the "udp" flux carrier rotates
 // through. Every entry is a universally-passed QUIC/STUN/WebRTC media port, so the
@@ -68,12 +52,10 @@ const defaultFluxRotate = 600 * time.Second
 
 // fluxShape is the per-epoch carrier descriptor. It is a pure function of
 // (PSK, epoch, shapeProfile): both ends derive the same one from the clock alone.
-// Which fields are used on the wire depends on the configured carrier — "raw" rides
-// proto, "udp"/"stun" ride sport + a carrier-specific destination port.
+// Both carriers ride sport plus a carrier-specific destination port.
 type fluxShape struct {
 	epoch     int64
-	proto     int    // raw carrier: rotating IP protocol number this epoch
-	sport     uint16 // udp/stun carrier: rotating source port (ephemeral range)
+	sport     uint16 // rotating source port (ephemeral range)
 	dport     uint16 // udp carrier: rotating destination port (from fluxDportPool)
 	dportSTUN uint16 // stun carrier: rotating destination port (STUN/TURN ports only)
 	ctrlPad   int    // control-frame (ping/pong) padding budget — the shape profile's size signature
@@ -127,7 +109,6 @@ func deriveFluxShape(psk string, epoch int64, shape string) fluxShape {
 	_, _ = io.ReadFull(kdf, b[:])
 	return fluxShape{
 		epoch:     epoch,
-		proto:     fluxProtoPool[int(b[0])%len(fluxProtoPool)],
 		dport:     fluxDportPool[int(b[1])%len(fluxDportPool)],
 		dportSTUN: fluxStunDports[int(b[1])%len(fluxStunDports)],
 		sport:     uint16(20000 + int(binary.BigEndian.Uint16(b[2:4]))%40000), // 20000..59999
@@ -150,17 +131,8 @@ func graceShapes(psk string, epoch int64, shape string) []fluxShape {
 	}
 }
 
-// graceProtos is the raw-carrier view of graceShapes: the acceptable IP protocols.
-func graceProtos(psk string, epoch int64, shape string) map[int]bool {
-	set := make(map[int]bool, 3)
-	for _, sh := range graceShapes(psk, epoch, shape) {
-		set[sh.proto] = true
-	}
-	return set
-}
-
-// graceDports is the udp/stun-carrier view of graceShapes: the acceptable UDP
-// destination ports for the given carrier.
+// graceDports is the wire view of graceShapes: the acceptable UDP destination
+// ports for the given carrier.
 func graceDports(psk string, epoch int64, shape, carrier string) map[uint16]bool {
 	set := make(map[uint16]bool, 3)
 	for _, sh := range graceShapes(psk, epoch, shape) {
