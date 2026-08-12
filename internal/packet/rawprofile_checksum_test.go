@@ -18,8 +18,8 @@ func TestRawChecksumBindsSourceMatchesTheEncapsulation(t *testing.T) {
 
 	for profile := range rawProfiles {
 		for _, isClient := range []bool{true, false} {
-			a := rawEncap(profile, body, srcA, dst, isClient, 0xBEEF, 0, 0, 7, 9, 0x11223344)
-			b := rawEncap(profile, body, srcB, dst, isClient, 0xBEEF, 0, 0, 7, 9, 0x11223344)
+			a := rawEncap(profile, body, srcA, dst, isClient, 0xBEEF, 0, 0, 7, 9, 0x11223344, 0, 0, tcpPshAck)
+			b := rawEncap(profile, body, srcB, dst, isClient, 0xBEEF, 0, 0, 7, 9, 0x11223344, 0, 0, tcpPshAck)
 			differs := !bytes.Equal(a, b)
 			if want := rawChecksumBindsSource(profile); differs != want {
 				t.Fatalf("raw/%s (isClient=%v): the encapsulation %s the source, but rawChecksumBindsSource says %v — sendViaConn's fallback decides on this",

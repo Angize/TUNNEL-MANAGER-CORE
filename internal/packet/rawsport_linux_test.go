@@ -129,7 +129,7 @@ func TestDecapReadsTheSourcePortTheEncapWrote(t *testing.T) {
 	const cport, srv = 45678, 8443
 	for _, profile := range []string{"tcp", "udp"} {
 		proto := rawProfiles[profile]
-		l4 := rawEncap(profile, []byte("payload"), testSrc, testDst, true, 0, srv, cport, 7, 9, 0)
+		l4 := rawEncap(profile, []byte("payload"), testSrc, testDst, true, 0, srv, cport, 7, 9, 0, 0, 0, tcpPshAck)
 		for _, v := range []struct {
 			name string
 			pkt  []byte
@@ -137,7 +137,7 @@ func TestDecapReadsTheSourcePortTheEncapWrote(t *testing.T) {
 			{"bare L4", l4},
 			{"with an IPv4 header", prependIP4(testSrc, testDst, proto, l4)},
 		} {
-			body, sport, ok := rawDecap(profile, proto, v.pkt)
+			body, sport, _, ok := rawDecap(profile, proto, v.pkt)
 			if !ok {
 				t.Fatalf("%s/%s: decap failed", profile, v.name)
 			}
@@ -155,8 +155,8 @@ func TestDecapReadsTheSourcePortTheEncapWrote(t *testing.T) {
 			continue
 		}
 		proto := rawProfiles[profile]
-		pkt := rawEncap(profile, []byte("payload"), testSrc, testDst, true, 0, 0, 0, 7, 9, 0)
-		if _, sport, ok := rawDecap(profile, proto, pkt); ok && sport != 0 {
+		pkt := rawEncap(profile, []byte("payload"), testSrc, testDst, true, 0, 0, 0, 7, 9, 0, 0, 0, tcpPshAck)
+		if _, sport, _, ok := rawDecap(profile, proto, pkt); ok && sport != 0 {
 			t.Errorf("%s: reported source port %d from a header that has none", profile, sport)
 		}
 	}
