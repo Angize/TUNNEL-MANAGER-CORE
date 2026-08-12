@@ -1,17 +1,17 @@
 //go:build linux
 
-// flux transport: the same sealed core frames as the other carriers, but the raw
-// IPv4 carrier PROTOCOL rotates every epoch on a schedule both ends derive from
-// the wall clock (see flux.go) — a signal-free moving target. Because the
-// protocol moves, flux cannot bind a fixed-protocol socket the way the raw
-// profiles do: it SENDS through one IP_HDRINCL socket (which lets us stamp any
-// protocol number per packet) and RECEIVES through an AF_PACKET socket (which
-// sees every protocol), accepting the small grace-window set of protocols the
-// current/adjacent epochs derive and then authenticating with the AEAD.
+// flux transport: the same sealed core frames as the other carriers, but the UDP
+// 4-TUPLE rotates every epoch on a schedule both ends derive from the wall clock
+// (see flux.go) — a signal-free moving target. Because both ports move, flux
+// cannot bind a fixed UDP socket: it SENDS through one IP_HDRINCL socket (which
+// stamps any source port per packet, with no rebind) and RECEIVES through an
+// AF_PACKET socket (which sees every port), accepting the small grace-window set
+// of destination ports the current/adjacent epochs derive and then
+// authenticating with the AEAD.
 //
 // Session establishment (ephemeral X25519 handshake), replay guard, obfs framing
-// and clear/crypto modes are identical to the raw carrier — only the socket plumbing
-// and the per-epoch protocol differ. The session sealer is independent of the epoch,
+// and clear/crypto modes are identical to the raw transport — only the socket plumbing
+// and the per-epoch ports differ. The session sealer is independent of the epoch,
 // so a rotation changes how packets LOOK without touching how they OPEN: no
 // re-handshake is needed when the shape rotates.
 package packet
@@ -31,8 +31,8 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
 
-// Flux carries L3 packets between a TUN device and a peer over a raw IPv4 carrier
-// whose protocol number rotates every epoch.
+// Flux carries L3 packets between a TUN device and a peer over a crafted UDP
+// carrier whose ports rotate every epoch.
 type Flux struct {
 	dev       *tun.Device
 	keepalive time.Duration
@@ -43,7 +43,7 @@ type Flux struct {
 	cipher    string
 	isClient  bool
 
-	carrier     string // "raw" (rotate IP protocol) | "udp" (proto 17, rotate ports) | "stun" (udp + STUN header, WebRTC-shaped)
+	carrier     string // "udp" (proto 17, rotate ports) | "stun" (udp + STUN header, WebRTC-shaped)
 	shapeProf   string // statistical shape profile: "quic" | "video" | "webrtc" | "random"
 	epochOffset int64  // manual epoch bump ("rotate now"): epoch = clock-epoch + offset (both ends set identically)
 
@@ -62,7 +62,7 @@ type Flux struct {
 	// (AF_PACKET exposes the dst at pkt[16:20]) BEFORE handleCrypto, so even the handshake RESP answers
 	// from the dialed IP. Tracks destination rotation. Committed pre-AEAD (post source-filter): the
 	// synchronous replies are always correct; only the async download source could be briefly steered by
-	// a source-spoofing attacker (availability-only, self-correcting) — see the raw carrier's note.
+	// a source-spoofing attacker (availability-only, self-correcting) — see the raw transport's note.
 	replySrc atomic.Pointer[net.IP]
 	srcAllow map[string]struct{} // admitted peer IPs (4-byte keys): the client's source pool on a server, the destination pool on a client; set once before Run, then read-only
 	session  atomic.Pointer[sealerBox]
@@ -138,7 +138,7 @@ func (f *Flux) SetDesync(on bool, ttl, count int, mode string) {
 }
 
 // sendFakes emits the configured decoy packets to the peer just before a real handshake,
-// each shaped like this epoch's carrier (raw proto / udp+ports / stun) with a per-decoy
+// each shaped like this epoch's carrier (udp+ports / stun) with a per-decoy
 // TTL/checksum and random payload, so a DPI sees them as the same flow. Reuses the
 // IP_HDRINCL send socket and the same sendMu/sendDown guard as carrierOut. flux never
 // forges addresses, so src/dst are the real ones.
@@ -155,8 +155,8 @@ func (f *Flux) sendFakes(to *net.IPAddr) {
 	copy(sa.Addr[:], to.IP.To4())
 	for _, sp := range f.desync.specs() {
 		body := fakePayload()
-		proto, seg := f.carrierSeg(body, sh, src, to.IP)
-		out := buildIP4Ext(src, to.IP, proto, sp.ttl, sp.badSum, seg)
+		seg := f.carrierSeg(body, sh, src, to.IP)
+		out := buildIP4Ext(src, to.IP, protoUDP, sp.ttl, sp.badSum, seg)
 		if out == nil {
 			continue
 		}
@@ -237,7 +237,7 @@ func openFluxSockets() (send, pkt int, err error) {
 }
 
 // DialFlux (client role) targets peerIP. peerIP may be a plain IPv4 or "ip:port"
-// (the port is ignored — the raw carrier has no ports of its own).
+// (the port is ignored — flux derives its own ports from the epoch).
 func DialFlux(peerIP string, dev *tun.Device, ka, rotate time.Duration, obfs, cryptoOn bool, psk, cipher, carrier, shape string, epochOffset int64, fec bool, fecData, fecParity int) (*Flux, error) {
 	ip := parseIP4(hostOnly(peerIP))
 	if ip == nil {
@@ -340,33 +340,29 @@ func (f *Flux) fluxPadMax(typ byte) int {
 	return obfsCtrlPadMax
 }
 
-// body builds the framed (magic/type/sealed or obfs) bytes — identical to the UDP
-// and raw carriers — before the IPv4 header is prepended.
+// body builds the framed (magic/type/sealed or obfs) bytes — identical to the udp
+// and raw transports — before the IPv4 header is prepended.
 func (f *Flux) body(typ byte, payload []byte) ([]byte, error) {
 	return sealBody(f.sealer(), f.obfs, typ, payload, f.fluxPadMax(typ))
 }
 
-// carrierSeg maps the configured carrier to the (IP proto, L4 payload) that frames body under shape
-// sh: raw tunnels body directly under the epoch's rotating IP protocol; udp/stun wrap it in a UDP
-// segment (stun prepends a STUN Binding header so the flow reads as WebRTC signalling). Shared by the
-// real send path (carrierOut) and the decoy path (sendFakes) so the two can never drift on how a
-// carrier frames a packet — a DPI must see the decoys shaped exactly like the real traffic.
-func (f *Flux) carrierSeg(body []byte, sh *fluxShape, src, dst net.IP) (proto int, payload []byte) {
-	switch f.carrier {
-	case "raw":
-		return sh.proto, body
-	case "stun":
-		return protoUDP, buildUDPSeg(src, dst, sh.sport, sh.dportSTUN, buildSTUN(body))
-	default: // udp
-		return protoUDP, buildUDPSeg(src, dst, sh.sport, sh.dport, body)
+// carrierSeg wraps body in the UDP segment that frames it under shape sh: both carriers ride
+// protocol 17 on the epoch's ports, and stun prepends a STUN Binding header so the flow reads as
+// WebRTC signalling. Shared by the real send path (carrierOut) and the decoy path (sendFakes) so the
+// two can never drift on how a carrier frames a packet — a DPI must see the decoys shaped exactly
+// like the real traffic.
+func (f *Flux) carrierSeg(body []byte, sh *fluxShape, src, dst net.IP) []byte {
+	if f.carrier == "stun" {
+		return buildUDPSeg(src, dst, sh.sport, sh.dportSTUN, buildSTUN(body))
 	}
+	return buildUDPSeg(src, dst, sh.sport, sh.dport, body)
 }
 
 // carrierOut builds the full IPv4 packet in this epoch's shape around body and sends
 // it to the peer via the IP_HDRINCL socket. The header source is our real IP and
 // the destination is the real peer — flux rotates the carrier, it does not forge
-// addresses. The "raw" carrier stamps the epoch's rotating IP protocol; the "udp"
-// carrier stamps protocol 17 and wraps the frame in a UDP header whose ports rotate.
+// addresses. Both carriers stamp protocol 17 and wrap the frame in a UDP header
+// whose ports rotate each epoch.
 // When FEC is on, body already carries the 1-byte FEC type tag (data/parity/pass).
 func (f *Flux) carrierOut(body []byte, to *net.IPAddr) {
 	if to == nil || f.sendFd < 0 {
@@ -374,8 +370,7 @@ func (f *Flux) carrierOut(body []byte, to *net.IPAddr) {
 	}
 	sh := f.curShape.Load()
 	src := f.srcIP()
-	proto, seg := f.carrierSeg(body, sh, src, to.IP)
-	out := buildIP4(src, to.IP, proto, seg)
+	out := buildIP4(src, to.IP, protoUDP, f.carrierSeg(body, sh, src, to.IP))
 	if out == nil {
 		return // buildIP4 refused an oversize packet (16-bit IPv4 length); not reachable under normal MTUs
 	}
@@ -462,33 +457,26 @@ func buildUDPSeg(src, dst net.IP, sport, dport uint16, payload []byte) []byte {
 
 // fluxDropMatches returns the iptables match fragments (one per rule) that select
 // exactly this carrier's inbound traffic from peer — scoped to the carrier's own
-// protocol/ports so it never drops another tunnel's packets to the same peer:
-//   - raw:  one rule per experimental protocol in the pool (-p <proto>)
+// destination ports, so it never drops another tunnel's packets to the same peer:
 //   - stun: one rule per STUN destination port (-p udp --dport <p>)
 //   - udp:  one rule per QUIC/STUN/WebRTC destination port (-p udp --dport <p>)
 func fluxDropMatches(peer net.IP, carrier string) [][]string {
 	s := peer.String()
-	var out [][]string
-	switch carrier {
-	case "raw":
-		for _, p := range fluxProtoPool {
-			out = append(out, []string{"-s", s, "-p", strconv.Itoa(p)})
-		}
-	case "stun":
-		for _, dp := range fluxStunDports {
-			out = append(out, []string{"-s", s, "-p", "udp", "--dport", strconv.Itoa(int(dp))})
-		}
-	default: // udp
-		for _, dp := range fluxDportPool {
-			out = append(out, []string{"-s", s, "-p", "udp", "--dport", strconv.Itoa(int(dp))})
-		}
+	ports := fluxDportPool
+	if carrier == "stun" {
+		ports = fluxStunDports
+	}
+	out := make([][]string, 0, len(ports))
+	for _, dp := range ports {
+		out = append(out, []string{"-s", s, "-p", "udp", "--dport", strconv.Itoa(int(dp))})
 	}
 	return out
 }
 
 // addFluxDrop installs best-effort raw-PREROUTING DROP rules for exactly this
-// carrier's traffic from peer, so the kernel never ICMP-rejects our frames while a
-// co-located tunnel (e.g. raw/bare on proto 253) to the same peer keeps working.
+// carrier's traffic from peer, so the kernel never ICMP-port-unreachables our frames
+// while a co-located tunnel to the same peer keeps working — the rules match only
+// UDP on the carrier's own port pool, which no other transport receives on.
 // AF_PACKET taps before this chain, so flux's receive is unaffected. Returns a
 // cleanup func that removes every rule it managed to install (nil if none).
 // tunName is the tunnel this carrier belongs to, and so the owner stamped on its firewall rules.
@@ -524,43 +512,33 @@ func addFluxDrop(peer net.IP, carrier, tun string) func() {
 }
 
 // netToTun receives every IPv4 frame via AF_PACKET, keeps those that match the
-// current carrier's grace window (raw: IP protocol ∈ prev/current/next epoch; udp:
-// protocol 17 with a destination port ∈ the epochs' ports) and — once the peer is
+// current carrier's grace window (protocol 17 with a destination port ∈ the
+// prev/current/next epochs' ports) and — once the peer is
 // known — whose source is the peer, strips the carrier header, then authenticates
 // and dispatches. SOCK_DGRAM strips the link header, so each frame starts at the IPv4 header.
 func (f *Flux) netToTun() error {
-	// grace* persist ACROSS frames (the closure captures them by reference, exactly like the old loop
-	// vars): the live per-epoch carrier protocol/port sets, refreshed only when the epoch ticks over.
+	// graceD persists ACROSS frames (the closure captures it by reference, exactly like the old loop
+	// vars): the live per-epoch carrier port set, refreshed only when the epoch ticks over.
 	var graceEpoch int64 = -1
-	var graceP map[int]bool
 	var graceD map[uint16]bool
 	return afpacketLoop(f.pktFd, f.closeCh, func(pkt []byte, ihl int) {
 		if e := f.epochNow(); e != graceEpoch {
-			graceP = graceProtos(f.psk, e, f.shapeProf)
 			graceD = graceDports(f.psk, e, f.shapeProf, f.carrier)
 			graceEpoch = e
 		}
-		var body []byte
-		if f.carrier == "raw" {
-			if !graceP[int(pkt[9])] {
-				return // not a flux carrier protocol for any live epoch
+		if int(pkt[9]) != protoUDP || len(pkt) < ihl+8 {
+			return
+		}
+		if !graceD[binary.BigEndian.Uint16(pkt[ihl+2:ihl+4])] {
+			return // not a flux carrier destination port for any live epoch
+		}
+		body := pkt[ihl+8:] // strip the UDP header
+		if f.carrier == "stun" {
+			inner, ok := parseSTUN(body)
+			if !ok {
+				return // not a STUN datagram
 			}
-			body = pkt[ihl:]
-		} else { // udp or stun carrier — both ride protocol 17
-			if int(pkt[9]) != protoUDP || len(pkt) < ihl+8 {
-				return
-			}
-			if !graceD[binary.BigEndian.Uint16(pkt[ihl+2:ihl+4])] {
-				return // not a flux carrier destination port for any live epoch
-			}
-			body = pkt[ihl+8:] // strip the UDP header
-			if f.carrier == "stun" {
-				inner, ok := parseSTUN(body)
-				if !ok {
-					return // not a STUN datagram
-				}
-				body = inner
-			}
+			body = inner
 		}
 		src := &net.IPAddr{IP: append(net.IP(nil), pkt[12:16]...)}
 		if peer := f.peer.Load(); peer != nil && !src.IP.Equal(peer.IP) && !f.srcAllowed(src.IP) {
@@ -1160,12 +1138,9 @@ func (f *Flux) rotateWatcher() {
 			sh := deriveFluxShape(f.psk, f.epochNow(), f.shapeProf)
 			f.curShape.Store(&sh)
 			if prev := f.logEp.Swap(sh.epoch); prev != sh.epoch && prev != 0 {
-				switch f.carrier {
-				case "raw":
-					log.Printf("flux: rotated to epoch %d (raw carrier proto %d)", sh.epoch, sh.proto)
-				case "stun":
+				if f.carrier == "stun" {
 					log.Printf("flux: rotated to epoch %d (stun carrier :%d)", sh.epoch, sh.dportSTUN)
-				default:
+				} else {
 					log.Printf("flux: rotated to epoch %d (udp carrier :%d)", sh.epoch, sh.dport)
 				}
 			}
