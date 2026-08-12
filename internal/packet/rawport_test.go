@@ -20,7 +20,7 @@ func TestRawPortReachesBothTheWireAndTheAntiLeakRule(t *testing.T) {
 
 	for _, profile := range []string{"udp", "tcp"} {
 		for _, isClient := range []bool{true, false} {
-			pkt := rawEncap(profile, []byte("payload"), testSrc, testDst, isClient, 0xBEEF, custom, 0, 7, 9, 0x11223344)
+			pkt := rawEncap(profile, []byte("payload"), testSrc, testDst, isClient, 0xBEEF, custom, 0, 7, 9, 0x11223344, 0, 0, tcpPshAck)
 			sport := binary.BigEndian.Uint16(pkt[0:2])
 			dport := binary.BigEndian.Uint16(pkt[2:4])
 			wantS, wantD := rawPorts(isClient, custom, 0)

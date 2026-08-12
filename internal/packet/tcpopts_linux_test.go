@@ -3,6 +3,7 @@
 package packet
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net"
 	"syscall"
@@ -203,17 +204,30 @@ func TestTCPDecoyShapeIsPerConnection(t *testing.T) {
 	}
 }
 
-// TestRawTCPProfileKeepsItsWireFormat is the no-wire-change guard for the shared builder: the raw
-// carrier's own protoTCP frames must stay a bare 20-byte header. They are not camouflage beside a kernel
-// TCP flow — they ARE the flow — so options there would change the wire for every raw/tcp tunnel.
-func TestRawTCPProfileKeepsItsWireFormat(t *testing.T) {
+// TestRawTCPProfileCarriesLiveFlowShape pins the wire shape the raw carrier now presents: a real
+// timestamped flow and a SYN opener, instead of the old optionless 20-byte data segment with no
+// handshake. A regression toward that bare header should turn THIS red.
+func TestRawTCPProfileCarriesLiveFlowShape(t *testing.T) {
 	src, dst := net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 1, 2)
-	seg := rawEncap("tcp", []byte("payload-bytes"), src, dst, true, 0x1111, 0, 0, 7, 9, 0x2222)
-	if off := int(seg[12]>>4) * 4; off != 20 {
-		t.Fatalf("raw tcp profile header is %d bytes, want 20 — this is a WIRE CHANGE", off)
+	const tsval, tsecr = 0x01020304, 0x0a0b0c0d
+	seg := rawEncap("tcp", []byte("payload-bytes"), src, dst, true, 0x1111, 0, 0, 7, 9, 0x2222, tsval, tsecr, tcpPshAck)
+
+	if off := int(seg[12]>>4) * 4; off != 32 {
+		t.Fatalf("raw tcp header is %d bytes, want 32 (20 + NOP,NOP,Timestamp)", off)
 	}
-	if len(seg) != 20+len("payload-bytes") {
-		t.Fatalf("raw tcp segment len %d, want %d", len(seg), 20+len("payload-bytes"))
+	if len(seg) != 32+len("payload-bytes") {
+		t.Fatalf("raw tcp segment len %d, want %d", len(seg), 32+len("payload-bytes"))
+	}
+	wantOpt := []byte{tcpOptNOPKind, tcpOptNOPKind, tcpOptTSKind, tcpOptTSBytes,
+		0x01, 0x02, 0x03, 0x04, 0x0a, 0x0b, 0x0c, 0x0d}
+	if got := seg[20:32]; !bytes.Equal(got, wantOpt) {
+		t.Fatalf("tcp options = % x, want % x", got, wantOpt)
+	}
+	if pts := peerTSVal(seg); pts != tsval {
+		t.Fatalf("peerTSVal read %#x, want %#x", pts, tsval)
+	}
+	if seg[13] != tcpPshAck {
+		t.Fatalf("data segment flags = %#x, want PSH|ACK %#x", seg[13], tcpPshAck)
 	}
 }
 

@@ -97,7 +97,7 @@ func ruleMatches(t *testing.T, m []string, p nfPacket) bool {
 func ourFrame(profile string, isClient, marked bool) nfPacket {
 	body := []byte("sealed-frame-bytes-0123456789abcdef")
 	src, dst := net.IPv4(10, 9, 0, 1), net.IPv4(10, 9, 0, 2)
-	pkt := rawEncap(profile, body, src, dst, isClient, 0xBEEF, 0, 0, 7, 9, 0x11223344)
+	pkt := rawEncap(profile, body, src, dst, isClient, 0xBEEF, 0, 0, 7, 9, 0x11223344, 0, 0, tcpPshAck)
 	role := "server"
 	if isClient {
 		role = "client"

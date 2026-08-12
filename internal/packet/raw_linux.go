@@ -69,7 +69,14 @@ type Raw struct {
 	tcpISN   uint32
 	tcpAck   uint32
 	tcpBytes atomic.Uint32 // cumulative tcp-profile payload bytes; drives the realistic seq advance
-	lastRx   atomic.Int64  // unix-nano of the last authenticated frame (client staleness)
+	// RFC 7323 timestamps, the option a real timestamped flow stamps on EVERY data segment. tsBase is
+	// this session's random offset (a real TSval is a host clock plus an unguessable per-connection
+	// offset, never a small number), tsStart anchors the millisecond clock, and tsEcr is the peer's last
+	// TSval to echo back — what makes the two directions read as one conversation.
+	tsBase  uint32
+	tsStart time.Time
+	tsEcr   atomic.Uint32
+	lastRx  atomic.Int64 // unix-nano of the last authenticated frame (client staleness)
 	// peerAnswered gates the clear-mode heal: set when the CURRENT endpoint replies, cleared on
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
 	peerAnswered atomic.Bool
@@ -219,7 +226,8 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 		if r.proto == protoTCP {
 			dack = r.tcpAck
 		}
-		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, r.port, r.cport(), dseq, dack, r.spi)
+		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, r.port, r.cport(),
+			dseq, dack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
 		if out == nil {
 			continue
@@ -246,7 +254,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 }
 
 func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, isClient bool) *Raw {
-	var idb [14]byte
+	var idb [18]byte
 	_, _ = rand.Read(idb[:])
 	spi := binary.BigEndian.Uint32(idb[10:14])
 	if spi < 256 {
@@ -265,7 +273,18 @@ func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs, cryptoOn 
 		psk: psk, cipher: cipher, profile: profile, isClient: isClient, fakeFd: -1,
 		icmpID: icmpID, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 		tcpISN: binary.BigEndian.Uint32(idb[2:6]), tcpAck: binary.BigEndian.Uint32(idb[6:10]), spi: spi,
+		tsBase: binary.BigEndian.Uint32(idb[14:18]), tsStart: time.Now(),
 	}
+}
+
+// tsNow is this session's TCP timestamp: a millisecond clock plus the session's random base, which is
+// what a real TSval is. Monotonic and always non-zero, because a real timestamped flow never sends 0.
+func (r *Raw) tsNow() uint32 {
+	v := r.tsBase + uint32(time.Since(r.tsStart)/time.Millisecond)
+	if v == 0 {
+		v = 1
+	}
+	return v
 }
 
 // dialRawBase opens the client-side raw socket for profile+rawProto and targets peerIP, returning a Raw
@@ -451,7 +470,8 @@ func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
 	} else {
 		seq = r.seq.Add(1)
 	}
-	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, r.port, cport, seq, ack, r.spi)
+	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, r.port, cport,
+		seq, ack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 }
 
 // writeOut sends one wrapped packet toward the real peer `to`, delegating the mechanism to the
@@ -932,9 +952,14 @@ func afpacketLoop(fd int, closeCh <-chan struct{}, handle func(pkt []byte, ihl i
 // the common tail of both receive paths (AF_INET and AF_PACKET). Frames that do not
 // open as data are tried as handshake messages.
 func (r *Raw) handleRaw(raw []byte, addr *net.IPAddr) {
-	body, sport, ok := rawDecap(r.profile, r.proto, raw)
+	body, sport, pts, ok := rawDecap(r.profile, r.proto, raw)
 	if !ok {
 		return
+	}
+	if pts != 0 {
+		// Echo the peer's TSval back as our TSecr. Unauthenticated on purpose: it is a header field a DPI
+		// reads and nothing else depends on, so a forged one costs a wrong echo and nothing more.
+		r.tsEcr.Store(pts)
 	}
 	if r.fecDec != nil {
 		// The two receive loops are the only readers, so rxAddr is stable for the

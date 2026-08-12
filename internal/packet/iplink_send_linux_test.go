@@ -44,7 +44,7 @@ func TestDegradedSendDropsOnlyTheSourceBoundProfiles(t *testing.T) {
 			r.replySrc.Store(&src) // pinnedSrc() -> an address IP_PKTINFO cannot select
 
 			marker := bytes.Repeat([]byte{0xC8}, 40)
-			pkt := rawEncap(tc.profile, marker, unbindable, lo, false, 0xBEEF, 0, 0, 7, 9, 0x11223344)
+			pkt := rawEncap(tc.profile, marker, unbindable, lo, false, 0xBEEF, 0, 0, 7, 9, 0x11223344, 0, 0, tcpPshAck)
 			sendViaConn(r, pkt, &net.IPAddr{IP: lo})
 
 			buf := make([]byte, 2048)

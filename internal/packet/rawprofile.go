@@ -43,6 +43,15 @@ const (
 	protoBare    = 253 // private/experimental range: our native no-L4-header profile
 )
 
+// TCP option kinds the carrier writes and reads. Named here, in the portable file, because
+// tcpopts_linux.go's copies are behind a linux build tag and rawEncap is not.
+const (
+	tcpOptEOL     = 0
+	tcpOptNOPKind = 1
+	tcpOptTSKind  = 8
+	tcpOptTSBytes = 10
+)
+
 // rawProfiles maps a profile name to its IP protocol number. It is also the
 // authoritative set of valid profile names.
 var rawProfiles = map[string]int{
@@ -72,7 +81,7 @@ var rawHeaderLens = map[string]int{
 	"udp":     8,
 	"esp":     8,
 	"l2tpv3":  8,
-	"tcp":     20,
+	"tcp":     32, // 20 + NOP,NOP,Timestamp(10): every data segment of a timestamped flow carries it
 	"ah":      24,
 }
 
@@ -223,7 +232,44 @@ func rawEffProto(profile string, rawProto int) (int, bool) {
 // endpoint IPs, needed for the TCP checksum; isClient selects the direction-dependent fields; id/seq make
 // the ICMP/TCP headers look like a live flow; spi is the per-session ESP SPI; port is the configured
 // tcp/udp server port (0 = the default 443).
-func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi uint32) []byte {
+// tcpTSOption is the option block Linux stamps on a timestamped flow's data segments: two NOPs so the
+// 10-byte option lands 4-byte aligned, then TSval/TSecr. Kept here rather than inline so the raw carrier
+// and any future caller cannot disagree about the padding, which is what a DPI reads.
+func tcpTSOption(tsval, tsecr uint32) []byte {
+	o := []byte{tcpOptNOPKind, tcpOptNOPKind, tcpOptTSKind, tcpOptTSBytes, 0, 0, 0, 0, 0, 0, 0, 0}
+	binary.BigEndian.PutUint32(o[4:8], tsval)
+	binary.BigEndian.PutUint32(o[8:12], tsecr)
+	return o
+}
+
+// peerTSVal reads the TSval out of a carrier TCP header's option block, 0 when the peer sent none. The
+// value is UNAUTHENTICATED (anyone can put bytes in a header), and it is used for one thing only: to echo
+// back as TSecr, so a forged one costs nothing but a wrong echo.
+func peerTSVal(tcp []byte) uint32 {
+	off := int(tcp[12]>>4) * 4
+	if off <= 20 || off > len(tcp) {
+		return 0
+	}
+	for i := 20; i < off; {
+		switch tcp[i] {
+		case tcpOptEOL:
+			return 0
+		case tcpOptNOPKind:
+			i++
+		default:
+			if i+1 >= off || int(tcp[i+1]) < 2 || i+int(tcp[i+1]) > off {
+				return 0 // a malformed length would walk off the block
+			}
+			if tcp[i] == tcpOptTSKind && tcp[i+1] == tcpOptTSBytes {
+				return binary.BigEndian.Uint32(tcp[i+2 : i+6])
+			}
+			i += int(tcp[i+1])
+		}
+	}
+	return 0
+}
+
+func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte) []byte {
 	switch rawProfiles[profile] {
 	case protoBare, protoIPIP:
 		return payload // native / IP-in-IP: the sealed frame is the whole payload
@@ -263,14 +309,17 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoTCP:
-		// A PSH|ACK data segment on the raw carrier's fixed ports, in this end's direction (seq
-		// advances by payload bytes like a real stream; ack is a non-zero peer ISN, not the
-		// tell-tale 0). Identical byte layout to the desync injector, so both share buildTCPSeg
-		// (tcpseg.go).
-		// No options: these are the carrier's OWN frames, with no kernel TCP beside them to be
-		// told apart from, and adding any would change the wire format.
+		// A data segment on the raw carrier's fixed ports, in this end's direction (seq advances by
+		// payload bytes like a real stream; ack is a non-zero peer ISN, not the tell-tale 0). Identical
+		// byte layout to the desync injector, so both share buildTCPSeg (tcpseg.go).
+		//
+		// It carries NOP,NOP,Timestamp, because a real Linux flow that negotiated RFC 7323 stamps that
+		// option on EVERY data segment — a 20-byte optionless header beside the host's own timestamped
+		// connections is separable on header shape alone, with no flow tracking at all. TSval advances
+		// with a millisecond clock and TSecr echoes the peer's last value, which is what makes the pair
+		// look like two ends of one conversation rather than two independent senders.
 		sp, dp := rawPorts(isClient, port, cport)
-		return buildTCPSeg(src, dst, sp, dp, seq, ack, tcpPshAck, rawTCPWindow, nil, payload)
+		return buildTCPSeg(src, dst, sp, dp, seq, ack, flags, rawTCPWindow, tcpTSOption(tsval, tsecr), payload)
 
 	case protoESP:
 		// IPsec ESP (RFC 4303): [SPI 4B][seq 4B] then the sealed frame as the "encrypted
@@ -354,7 +403,10 @@ func splitmix64(x uint64) uint64 {
 // and a second copy of that decision is a second thing to get wrong. It is UNAUTHENTICATED at this
 // point -- anyone can send bytes with any port in them -- so a caller may only commit it after the
 // inner AEAD tag has verified, exactly like the peer address.
-func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16, ok bool) {
+// tsval is the peer's TCP timestamp off the carrier header (tcp profile only, 0 otherwise), returned for
+// the same reason as sport: only this function knows whether the read included an IPv4 header, and a
+// second copy of that decision is a second thing to get wrong.
+func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16, tsval uint32, ok bool) {
 	framing := rawProfiles[profile]
 	if len(pkt) >= 20 && pkt[0]>>4 == 4 {
 		ihl := int(pkt[0]&0x0f) * 4
@@ -368,27 +420,27 @@ func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16,
 	}
 	switch framing {
 	case protoBare, protoIPIP:
-		return pkt, 0, true
+		return pkt, 0, 0, true
 	case protoTCP:
-		// The only VARIABLE header: read its own data offset rather than the table, so a peer that
-		// ever adds an option still decodes.
+		// The only VARIABLE header: read its own data offset rather than the table, so a peer on an
+		// older build (20 bytes, no options) still decodes against a newer one.
 		if len(pkt) < 20 {
-			return nil, 0, false
+			return nil, 0, 0, false
 		}
 		off := int(pkt[12]>>4) * 4 // data offset word count -> bytes
 		b, ok := skip(pkt, off)
-		return b, binary.BigEndian.Uint16(pkt[0:2]), ok
+		return b, binary.BigEndian.Uint16(pkt[0:2]), peerTSVal(pkt), ok
 	case protoUDP:
 		if len(pkt) < rawHeaderLen(profile) {
-			return nil, 0, false
+			return nil, 0, 0, false
 		}
 		b, ok := skip(pkt, rawHeaderLen(profile))
-		return b, binary.BigEndian.Uint16(pkt[0:2]), ok
+		return b, binary.BigEndian.Uint16(pkt[0:2]), 0, ok
 	case protoGRE, protoICMP, protoESP, protoAH, protoEtherIP, protoIPComp, protoL2TPv3:
 		b, ok := skip(pkt, rawHeaderLen(profile))
-		return b, 0, ok
+		return b, 0, 0, ok
 	}
-	return nil, 0, false
+	return nil, 0, 0, false
 }
 
 func skip(pkt []byte, n int) ([]byte, bool) {
