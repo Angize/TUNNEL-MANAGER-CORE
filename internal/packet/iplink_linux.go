@@ -171,7 +171,7 @@ func (l *forgedLink) close() {
 // Used by directLink and by a forgedLink that forges no header (a spoof-src-only server).
 func sendViaConn(r *Raw, pkt []byte, to *net.IPAddr) {
 	if src := r.pinnedSrc(); src != nil {
-		if _, _, err := r.conn.WriteMsgIP(pkt, pktinfoOOB(src), to); err == nil {
+		if _, _, err := r.conn.WriteMsgIP(pkt, r.srcOOB(src), to); err == nil {
 			return
 		} else {
 			// Degrade to a default-source send rather than dropping — but say so. The pinned source is normally

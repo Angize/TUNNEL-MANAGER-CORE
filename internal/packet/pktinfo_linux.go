@@ -51,6 +51,24 @@ func pktinfoOOB(src net.IP) []byte {
 	return b
 }
 
+// cachedOOB is the control message pktinfoOOB built for one source. Every outbound packet of a
+// pinned-source carrier needs it and it is 32 bytes of identical work each time; the source itself
+// changes only on a rotation.
+type cachedOOB struct {
+	ip  net.IP
+	oob []byte
+}
+
+// srcOOB is pktinfoOOB with the last answer kept. Concurrent senders only read the slice.
+func (r *Raw) srcOOB(src net.IP) []byte {
+	if c := r.oobSrc.Load(); c != nil && c.ip.Equal(src) {
+		return c.oob
+	}
+	c := &cachedOOB{ip: append(net.IP(nil), src...), oob: pktinfoOOB(src)}
+	r.oobSrc.Store(c)
+	return c.oob
+}
+
 // pktinfoDst extracts the received datagram's DESTINATION IP from an IP_PKTINFO oob (nil if absent).
 // The result ALIASES oob, which the receive loop reuses per packet — copy it to retain it.
 // Inet4Pktinfo layout: ifindex(4) | spec_dst(4) | addr(4); addr (bytes 8:12) is ipi_addr, the header

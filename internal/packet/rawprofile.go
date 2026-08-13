@@ -453,15 +453,32 @@ func skip(pkt []byte, n int) ([]byte, bool) {
 // sumBytes accumulates the 16-bit big-endian words of b into a running RFC-1071 sum, padding a final
 // odd byte with a zero low byte. Fold + complement with foldComplement to finish. Splitting the sum
 // out lets a caller add several buffers' partial sums without concatenating them (see l4Checksum).
+// Eight bytes per iteration, folded once at the end: the sum is over 16-bit words in a 64-bit
+// accumulator, so carries cannot escape until well past a packet's worth of them, and RFC 1071's
+// "the sum is the same however the bytes are grouped" is what makes the wide read legal. Whole MTUs
+// of it run per packet on the udp and tcp profiles, on both the send and the receive side.
 func sumBytes(b []byte) uint32 {
-	var sum uint32
-	for i := 0; i+1 < len(b); i += 2 {
-		sum += uint32(b[i])<<8 | uint32(b[i+1])
+	var sum uint64
+	for len(b) >= 8 {
+		v := binary.BigEndian.Uint64(b)
+		sum += v >> 48
+		sum += (v >> 32) & 0xffff
+		sum += (v >> 16) & 0xffff
+		sum += v & 0xffff
+		b = b[8:]
 	}
-	if len(b)%2 == 1 {
-		sum += uint32(b[len(b)-1]) << 8
+	for len(b) >= 2 {
+		sum += uint64(binary.BigEndian.Uint16(b))
+		b = b[2:]
 	}
-	return sum
+	if len(b) == 1 {
+		sum += uint64(b[0]) << 8
+	}
+	// Back into 32 bits without losing a carry; foldComplement finishes the job.
+	for sum>>32 != 0 {
+		sum = (sum & 0xffffffff) + (sum >> 32)
+	}
+	return uint32(sum)
 }
 
 // foldComplement folds a running RFC-1071 sum's carries into 16 bits and returns its one's-complement.
