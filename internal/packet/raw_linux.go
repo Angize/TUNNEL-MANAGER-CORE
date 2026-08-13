@@ -51,6 +51,8 @@ type Raw struct {
 	// per received frame in recvConnLoop BEFORE the frame is handled, so even the handshake RESP answers
 	// from the dialed IP. Committed pre-AEAD, so only the ASYNC download source could be briefly steered.
 	replySrc  atomic.Pointer[net.IP]
+	ours      ourIPs              // is a reported destination an address this host actually holds (see pktinfo_linux.go)
+	notOurDst sync.Once           // one-shot warning: a frame was addressed to something we do not own
 	noPktinfo sync.Once           // one-shot warning: server frames arrived without IP_PKTINFO, so replySrc stays unset
 	srcWarned sync.Map            // source string -> struct{}: sources already reported as unusable, one line each (see adoptableSource)
 	sendErr   sendErrLog          // throttled data-plane send-failure logging (see sendlog.go)
@@ -896,22 +898,43 @@ func (r *Raw) recvConnLoop() error {
 			}
 		}
 		if !r.isClient { // server: answer THIS frame (and its handshake RESP) from the IP the client dialed
-			var d net.IP
-			if oobn > 0 {
-				d = pktinfoDst(oob[:oobn])
-			}
-			if d != nil {
-				r.replySrc.Store(&d)
-			} else {
-				// setsockopt reported success but the kernel delivers no (or an unparseable) cmsg —
-				// replies fall back to the default source. Warn ONCE, because silently is the worst way
-				// for this to break.
-				r.noPktinfo.Do(func() {
-					log.Printf("raw: WARNING inbound frames carry no IP_PKTINFO — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one")
-				})
-			}
+			r.learnReplySrc(oob[:oobn])
 		}
 		r.handleRaw(buf[:n], addr)
+	}
+}
+
+// learnReplySrc records which of OUR addresses this frame was aimed at, so the answer leaves from the
+// same one and a destination-rotation pool does not burn every IP but the primary. Server-side, called
+// per received frame before the frame is handled, so even the handshake RESP is stamped right.
+//
+// ipi_addr is the destination the SENDER chose, and a raw socket bound to 0.0.0.0 is handed
+// broadcast-addressed packets of its protocol too — so it is checked against the addresses this host
+// really holds. It is committed before the AEAD: without that check a same-segment sender can point
+// our reply source at an address we do not own, and iplink's IP_PKTINFO send then fails outright, so
+// the udp and tcp profiles answer nothing at all until the next inbound frame corrects it.
+func (r *Raw) learnReplySrc(oob []byte) {
+	var d net.IP
+	if len(oob) > 0 {
+		d = pktinfoDst(oob) // aliases oob; only the store below keeps a copy
+	}
+	switch {
+	case d == nil:
+		// setsockopt reported success but the kernel delivers no (or an unparseable) cmsg — replies fall
+		// back to the default source. Warn ONCE, because silently is the worst way for this to break.
+		r.noPktinfo.Do(func() {
+			log.Printf("raw: WARNING inbound frames carry no IP_PKTINFO — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one")
+		})
+	case sameIP4(r.replySrc.Load(), d):
+		// The steady state, every packet: the client is still dialing the same address of ours. Nothing
+		// to store and nothing to look up, so no allocation and no interface scan on the data path.
+	case r.ours.has(d):
+		cp := append(net.IP(nil), d...)
+		r.replySrc.Store(&cp)
+	default:
+		r.notOurDst.Do(func() {
+			log.Printf("raw: a frame was addressed to %s, which is not an address this host holds — not answering from it", d)
+		})
 	}
 }
 
