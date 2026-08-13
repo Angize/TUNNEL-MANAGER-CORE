@@ -4,14 +4,16 @@
 // When FEC is on, EVERY packet carries a 1-byte type tag so the receiver can route it:
 //
 //	type 0  passthrough : [0][frame]                          (ping/pong/handshake — not blocked)
-//	type 1  data shard  : [1][hdr][shard]  shard = [len:2][sealed] zero-padded to shardLen
+//	type 1  data shard  : [1][hdr][shard]  shard = [len:2][sealed], its own length (<= shardLen)
 //	type 2  parity shard: [2][hdr][shard]  shard = RS parity bytes
 //	hdr = [block:4][idx:1][n:1][k:1][count:1][shardLen:2]     (count = real data shards in the block)
 //
-// A block is flushed when it fills or a short timer fires; a partial block is zero-padded to n for the
-// RS math but only its `count` real shards are sent. The code is SYSTEMATIC, so a data shard already
-// carries its own payload: the receiver delivers each one on arrival and uses parity only to fill gaps.
-// Nothing a receiver physically got is ever held hostage to the rest of its block.
+// A block is flushed when it fills or a short timer fires. Padding -- a partial block out to n, and every
+// shard out to the block's largest -- is an input to the RS math only: just the `count` real shards are
+// sent, each at its own length, and the receiver re-pads from the shardLen in the header. The code is
+// SYSTEMATIC, so a data shard already carries its own payload: the receiver delivers each one on arrival
+// and uses parity only to fill gaps. Nothing a receiver physically got is held hostage to the rest of
+// its block.
 package packet
 
 import (
