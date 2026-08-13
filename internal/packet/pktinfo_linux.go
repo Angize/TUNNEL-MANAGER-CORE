@@ -4,6 +4,8 @@ package packet
 
 import (
 	"net"
+	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -50,17 +52,75 @@ func pktinfoOOB(src net.IP) []byte {
 }
 
 // pktinfoDst extracts the received datagram's DESTINATION IP from an IP_PKTINFO oob (nil if absent).
-// It returns a fresh copy, safe to retain. Inet4Pktinfo layout: ifindex(4) | spec_dst(4) | addr(4);
-// addr (bytes 8:12) is ipi_addr, the header destination the sender aimed at.
+// The result ALIASES oob, which the receive loop reuses per packet — copy it to retain it.
+// Inet4Pktinfo layout: ifindex(4) | spec_dst(4) | addr(4); addr (bytes 8:12) is ipi_addr, the header
+// destination the SENDER aimed at, so it is attacker-chosen and says nothing about what we own.
+// One message at a time, because the slice-returning parser allocates and this runs on every packet
+// a server receives.
 func pktinfoDst(oob []byte) net.IP {
-	msgs, err := unix.ParseSocketControlMessage(oob)
-	if err != nil {
-		return nil
-	}
-	for _, m := range msgs {
-		if m.Header.Level == unix.IPPROTO_IP && m.Header.Type == unix.IP_PKTINFO && len(m.Data) >= 12 {
-			return net.IP(append([]byte(nil), m.Data[8:12]...))
+	for len(oob) > 0 {
+		h, data, rest, err := unix.ParseOneSocketControlMessage(oob)
+		if err != nil {
+			return nil
 		}
+		if h.Level == unix.IPPROTO_IP && h.Type == unix.IP_PKTINFO && len(data) >= 12 {
+			return net.IP(data[8:12])
+		}
+		oob = rest
 	}
 	return nil
+}
+
+// sameIP4 reports whether an already-stored address is this one, without unwrapping either.
+func sameIP4(cur *net.IP, ip net.IP) bool { return cur != nil && cur.Equal(ip) }
+
+// localIPRescan bounds how often a miss re-reads the interface list. A pool IP the node adds at
+// runtime has to be picked up, but a sender spraying unknown destinations must not be able to spin
+// the scan on the receive path.
+var localIPRescan = 5 * time.Second
+
+// ourIPs answers the one question the receive path asks of ipi_addr: is that destination an address
+// this host actually holds. Cached, because it is asked per packet.
+type ourIPs struct {
+	mu      sync.Mutex
+	set     map[string]struct{}
+	scanned time.Time
+}
+
+func (o *ourIPs) has(ip net.IP) bool {
+	v4 := ip.To4()
+	if v4 == nil {
+		return false
+	}
+	key := string(v4)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if _, ok := o.set[key]; ok {
+		return true
+	}
+	if o.set != nil && time.Since(o.scanned) < localIPRescan {
+		return false
+	}
+	o.set, o.scanned = scanLocalIP4(), time.Now()
+	_, ok := o.set[key]
+	return ok
+}
+
+// scanLocalIP4 is every IPv4 address currently configured on this host, keyed by its 4 bytes.
+func scanLocalIP4() map[string]struct{} {
+	out := map[string]struct{}{}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return out
+	}
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		if v4 := n.IP.To4(); v4 != nil {
+			out[string(v4)] = struct{}{}
+		}
+	}
+	return out
 }
