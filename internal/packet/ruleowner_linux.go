@@ -89,25 +89,45 @@ func delRule(args []string, what string) {
 	}
 }
 
-// runRule executes one iptables rule, retrying WITHOUT the owner comment if the comment match itself is
-// what failed. A host with no xt_comment module must still get its anti-leak rule: an untagged rule is
-// a cleanup problem, a missing one is a leak.
+// commentRefused reports whether iptables turned the rule down because of the comment match. The two
+// argv runRule can send differ by nothing else, so retrying without the comment is only defensible
+// when that is what failed: on any other error the retry sends a command that already failed for a
+// reason still present, and if it wins the race the second time the rule goes in UNTAGGED — invisible
+// to the node's tnl:<tun> sweep, and reported as "no xt_comment on this host", which was never true.
+func commentRefused(out []byte) bool {
+	s := strings.ToLower(string(out))
+	for _, m := range []string{"comment", "no chain/target/match by that name", "couldn't load match"} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// runRule executes one iptables rule. A host with no xt_comment module must still get its anti-leak
+// rule -- an untagged rule is a cleanup problem, a missing one is a leak -- so the comment is dropped
+// and the rule retried, but only when the comment is what iptables objected to. Every failure is
+// logged with what iptables actually said; the first attempt's output used to be thrown away, so the
+// real cause was never visible.
 func runRule(args, owner []string, what string) ([]string, bool) {
 	if own, ok := alreadyIn(args, owner); ok {
 		return own, true // a removal that failed earlier left it there; do not add a twin
 	}
 	full := append(append([]string(nil), args...), owner...)
-	if out, err := iptablesRun(full); err == nil {
+	out, err := iptablesRun(full)
+	if err == nil {
 		return owner, true
-	} else if len(owner) == 0 {
-		log.Printf("%s: rule not installed: %v: %s", what, err, strings.TrimSpace(string(out)))
+	}
+	first := strings.TrimSpace(string(out))
+	log.Printf("%s: rule not installed: %v: %s", what, err, first)
+	if len(owner) == 0 || !commentRefused(out) {
 		return nil, false
 	}
 	if out, err := iptablesRun(args); err != nil {
-		log.Printf("%s: rule not installed: %v: %s", what, err, strings.TrimSpace(string(out)))
+		log.Printf("%s: nor without its owner comment: %v: %s", what, err, strings.TrimSpace(string(out)))
 		return nil, false
 	}
-	log.Printf("%s: installed WITHOUT an owner comment (no xt_comment on this host) — an orphan here "+
-		"cannot be swept by name", what)
+	log.Printf("%s: installed WITHOUT an owner comment, because iptables refused the comment match (%s) — "+
+		"an orphan here cannot be swept by name", what, first)
 	return nil, true
 }
