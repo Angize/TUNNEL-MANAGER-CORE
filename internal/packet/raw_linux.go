@@ -53,12 +53,13 @@ type Raw struct {
 	// per received frame in recvConnLoop BEFORE the frame is handled, so even the handshake RESP answers
 	// from the dialed IP. Committed pre-AEAD, so only the ASYNC download source could be briefly steered.
 	replySrc  atomic.Pointer[net.IP]
-	ours      ourIPs              // is a reported destination an address this host actually holds (see pktinfo_linux.go)
-	notOurDst sync.Once           // one-shot warning: a frame was addressed to something we do not own
-	noPktinfo sync.Once           // one-shot warning: server frames arrived without IP_PKTINFO, so replySrc stays unset
-	srcWarned sync.Map            // source string -> struct{}: sources already reported as unusable, one line each (see adoptableSource)
-	sendErr   sendErrLog          // throttled data-plane send-failure logging (see sendlog.go)
-	srcAllow  map[string]struct{} // admitted peer IPs (4-byte keys): the client's source pool on a server, the destination pool on a client; set once before Run, then read-only
+	ours      ourIPs                    // is a reported destination an address this host actually holds (see pktinfo_linux.go)
+	notOurDst sync.Once                 // one-shot warning: a frame was addressed to something we do not own
+	noPktinfo sync.Once                 // one-shot warning: server frames arrived without IP_PKTINFO, so replySrc stays unset
+	srcWarned sync.Map                  // source string -> struct{}: sources already reported as unusable, one line each (see adoptableSource)
+	sendErr   sendErrLog                // throttled data-plane send-failure logging (see sendlog.go)
+	oobSrc    atomic.Pointer[cachedOOB] // the IP_PKTINFO cmsg for the current pinned source (see srcOOB)
+	srcAllow  map[string]struct{}       // admitted peer IPs (4-byte keys): the client's source pool on a server, the destination pool on a client; set once before Run, then read-only
 	session   atomic.Pointer[sealerBox]
 	rp        replayGuard
 	staged    []*stagedBox // server: bounded set of sessions staged by recent inits, each promoted only once a frame opens under it
