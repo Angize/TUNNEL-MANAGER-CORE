@@ -47,10 +47,55 @@ func ownerLabel(used []string, tun string) string {
 	return ruleOwnerPrefix + tun
 }
 
+// checkArgs turns an install argv into the -C query that asks whether that exact rule is already in
+// the chain. nil when the argv installs nothing (so the caller skips the question).
+func checkArgs(args []string) []string {
+	c := append([]string(nil), args...)
+	for i, a := range c {
+		if a == "-I" || a == "-A" {
+			c[i] = "-C"
+			return c
+		}
+	}
+	return nil
+}
+
+// alreadyIn reports whether this exact rule is in the chain already, and with which owner. Installs go
+// in blind, so without this a re-scope onto a destination whose earlier rule was never removed adds a
+// SECOND identical rule beside it — and the removal we hand back deletes one, forever leaving one more.
+// Both spellings are asked because runRule may have had to drop the comment when it went in.
+func alreadyIn(args, owner []string) ([]string, bool) {
+	chk := checkArgs(args)
+	if chk == nil {
+		return nil, false
+	}
+	if _, err := iptablesRun(append(append([]string(nil), chk...), owner...)); err == nil {
+		return owner, true
+	}
+	if len(owner) > 0 {
+		if _, err := iptablesRun(chk); err == nil {
+			return nil, true
+		}
+	}
+	return nil, false
+}
+
+// delRule removes one rule, and says so when it does not go. Installs log and removals did not, so a
+// rule that survived its own teardown was invisible — right up until the duplicate it caused.
+func delRule(args []string, what string) {
+	if out, err := iptablesRun(args); err != nil {
+		log.Printf("%s: rule NOT removed (%v: %s) — it stays on the host until the node's %s sweep",
+			what, err, strings.TrimSpace(string(out)), ruleOwnerPrefix+"<tun>")
+	}
+}
+
 // runRule executes one iptables rule, retrying WITHOUT the owner comment if the comment match itself is
 // what failed. A host with no xt_comment module must still get its anti-leak rule: an untagged rule is
 // a cleanup problem, a missing one is a leak.
 func runRule(args, owner []string, what string) ([]string, bool) {
+	if own, ok := alreadyIn(args, owner); ok {
+		return own, true // a removal that failed earlier left it there; do not add a twin
+	}
 	full := append(append([]string(nil), args...), owner...)
 	if out, err := iptablesRun(full); err == nil {
 		return owner, true
