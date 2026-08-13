@@ -636,3 +636,27 @@ func TestDNSTransportValidation(t *testing.T) {
 		}
 	}
 }
+
+// The raw and spoof carriers have no unauthenticated receive path at all: deliver() hands every frame
+// straight to the AEAD. That is only safe because validate() refuses them without crypto, so this is
+// the premise the whole carrier rests on — relax it and a tunnel comes up that can never decode a
+// frame, silently. flux and dns are in the same position and are pinned beside them.
+func TestTheCarriersWithNoClearModeRefuseCryptoOff(t *testing.T) {
+	flux := validRaw()
+	flux.Transport = "flux"
+	for name, c := range map[string]*Config{
+		"raw":   validRaw(),
+		"spoof": validSpoof(),
+		"flux":  flux,
+		"dns":   validDNSClient(),
+	} {
+		if err := c.validate(); err != nil {
+			t.Fatalf("%s: the baseline config is already invalid (%v) — the case below would prove nothing", name, err)
+		}
+		c.Crypto.Enabled = false
+		if err := c.validate(); err == nil {
+			t.Errorf("%s: accepted with crypto off; its carrier has no clear-mode path, so the tunnel would "+
+				"come up and drop every frame", name)
+		}
+	}
+}

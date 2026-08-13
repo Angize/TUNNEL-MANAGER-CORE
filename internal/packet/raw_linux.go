@@ -29,7 +29,6 @@ type Raw struct {
 	dev       *tun.Device
 	keepalive time.Duration
 	obfs      bool
-	cryptoOn  bool
 	psk       string
 	cipher    string
 	profile   string
@@ -253,7 +252,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 	}
 }
 
-func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, isClient bool) *Raw {
+func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, isClient bool) *Raw {
 	var idb [18]byte
 	_, _ = rand.Read(idb[:])
 	spi := binary.BigEndian.Uint32(idb[10:14])
@@ -269,7 +268,7 @@ func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs, cryptoOn 
 		icmpID = binary.BigEndian.Uint16(h[0:2])
 	}
 	return &Raw{
-		conn: conn, dev: dev, keepalive: ka, obfs: obfs, cryptoOn: cryptoOn,
+		conn: conn, dev: dev, keepalive: ka, obfs: obfs,
 		psk: psk, cipher: cipher, profile: profile, isClient: isClient, fakeFd: -1,
 		icmpID: icmpID, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 		tcpISN: binary.BigEndian.Uint32(idb[2:6]), tcpAck: binary.BigEndian.Uint32(idb[6:10]), spi: spi,
@@ -291,7 +290,7 @@ func (r *Raw) tsNow() uint32 {
 // with everything wired EXCEPT the ipLink (the caller sets it) and FEC. Shared by DialRaw (directLink)
 // and DialSpoof (forgedLink): the datapath is identical, only the addressing layer differs. peerIP may
 // carry a port, which is ignored — raw IP has none of its own.
-func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, rawProto, rawPort int) (*Raw, error) {
+func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, rawProto, rawPort int) (*Raw, error) {
 	proto, ok := rawEffProto(profile, rawProto)
 	if !ok {
 		return nil, fmt.Errorf("raw: unknown profile %q", profile)
@@ -305,7 +304,7 @@ func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoO
 		return nil, err
 	}
 	applyConnSockBuf(conn) // this IPConn is the normal raw RX/TX socket
-	r := newRaw(conn, dev, ka, obfs, cryptoOn, psk, cipher, profile, true)
+	r := newRaw(conn, dev, ka, obfs, psk, cipher, profile, true)
 	r.proto, r.port = proto, rawPortOr(rawPort)
 	r.peer.Store(&net.IPAddr{IP: ip})
 	if lip := routeLocalIP(ip); lip != nil {
@@ -317,7 +316,7 @@ func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoO
 // listenRawBase binds the server-side raw socket for profile+rawProto, returning a Raw with the
 // receive socket wired EXCEPT the ipLink and FEC (the caller sets them). Shared by ListenRaw and
 // ListenSpoof. listenIP may be empty, "0.0.0.0", a plain IPv4, or an "ip:port" (the port is ignored).
-func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, rawProto, rawPort int) (*Raw, error) {
+func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, rawProto, rawPort int) (*Raw, error) {
 	proto, ok := rawEffProto(profile, rawProto)
 	if !ok {
 		return nil, fmt.Errorf("raw: unknown profile %q", profile)
@@ -339,15 +338,15 @@ func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs, cry
 	if err := enablePktinfoDst(conn); err != nil {
 		log.Printf("raw: WARNING IP_PKTINFO could not be enabled (%v) — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one", err)
 	}
-	r := newRaw(conn, dev, ka, obfs, cryptoOn, psk, cipher, profile, false)
+	r := newRaw(conn, dev, ka, obfs, psk, cipher, profile, false)
 	r.proto, r.port = proto, rawPortOr(rawPort)
 	return r, nil
 }
 
 // DialRaw (client role) opens a raw carrier of the profile's protocol toward peerIP. No IP spoofing —
 // that is the separate "spoof" transport (DialSpoof); a raw carrier always uses an unforged directLink.
-func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool) (*Raw, error) {
-	r, err := dialRawBase(peerIP, dev, ka, obfs, cryptoOn, psk, cipher, profile, rawProto, rawPort)
+func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool) (*Raw, error) {
+	r, err := dialRawBase(peerIP, dev, ka, obfs, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
 	}
@@ -363,8 +362,8 @@ func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bo
 // ListenRaw (server role) binds a raw carrier of the profile's protocol and learns the peer from the
 // first authenticated frame. No IP spoofing — see ListenSpoof; a raw server always uses a directLink,
 // so its IPConn IS the data path in both directions and gets the configured socket buffers.
-func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool) (*Raw, error) {
-	r, err := listenRawBase(listenIP, dev, ka, obfs, cryptoOn, psk, cipher, profile, rawProto, rawPort)
+func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool) (*Raw, error) {
+	r, err := listenRawBase(listenIP, dev, ka, obfs, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
 	}
@@ -863,7 +862,7 @@ func (r *Raw) tunToNet() error {
 		if peer == nil {
 			continue // server has not learned the client yet
 		}
-		if r.cryptoOn && r.sealer() == nil {
+		if r.sealer() == nil {
 			continue // handshake not finished yet; drop (L4 retransmits)
 		}
 		body, err := r.body(typeData, buf[:n])
@@ -974,24 +973,13 @@ func (r *Raw) handleRaw(raw []byte, addr *net.IPAddr) {
 	r.deliver(body, addr, sport)
 }
 
-// deliver dispatches one received frame (already de-FEC'd and de-encap'd):
-// authenticated data in crypto mode, or unauthenticated legacy framing in clear mode.
+// deliver dispatches one received frame (already de-FEC'd and de-encap'd). The AEAD is the only way
+// in: config.go refuses a raw or spoof carrier without crypto, so there is no unauthenticated framing.
 func (r *Raw) deliver(body []byte, addr *net.IPAddr, sport uint16) {
 	if addr == nil {
 		return
 	}
-	if r.cryptoOn {
-		r.handleCrypto(body, addr, sport)
-		return
-	}
-	if len(body) < 2 || body[0] != magic {
-		return
-	}
-	r.markRx()            // the peer is answering (clear mode has no session to prove it)
-	r.provenFrom(addr.IP) // ...and, unless it came from an endpoint we left, the current one is alive
-	r.learnPeer(addr)
-	r.learnClientPort(sport)
-	r.dispatch(body[1], iff(body[1] == typeData, body[2:], nil), addr)
+	r.handleCrypto(body, addr, sport)
 }
 
 // openWith tries to open one datagram under a specific session sealer, touching no
@@ -1428,25 +1416,17 @@ func (r *Raw) clientLoop() {
 	if rc.active() {
 		go r.pinPollLoop(rc)
 	}
-	// Seed the staleness baseline NOW (clear mode). Without it, sessionStale() returns false while
-	// lastRx==0, so a clear-mode failover-only pool whose first endpoint is dead never fires. Mirrors UDP.
+	// Seed the staleness baseline NOW: sessionStale() reads false while lastRx==0, and the first thing
+	// the loop below does is ask it.
 	r.lastRx.Store(time.Now().UnixNano())
 	for {
-		if r.cryptoOn && r.sealer() != nil && r.sessionStale() {
+		if r.sealer() != nil && r.sessionStale() {
 			r.session.Store(nil) // server likely restarted — drop the dead session so we re-handshake
 			r.ci.Store(nil)
 			log.Print("raw: no reply from the peer's session — re-handshaking (peer likely restarted)")
 			r.st.down("stale", "raw") // precise reason for the panel log (nil-safe when off)
 		}
-		// Clear mode has no handshake whose failure would drive failover, so a dead pool endpoint would
-		// otherwise strand the tunnel forever. Use receive-staleness: the peer pongs our pings, so once it
-		// stops answering (lastRx ages past the dead window) burn and advance the pool. Mirrors UDP.
-		if !r.cryptoOn && r.sessionStale() {
-			r.lastRx.Store(time.Now().UnixNano()) // fresh window even if the pool couldn't move (single endpoint / source-only)
-			r.peerAnswered.Store(false)           // stale -> the current endpoint is no longer proven answering
-			r.st.down("stale", "raw")
-		}
-		if r.cryptoOn && r.sealer() == nil {
+		if r.sealer() == nil {
 			unproven = false // keep re-initing this endpoint; moving off it is the node's call, not ours
 			r.sendInit()
 		} else {
@@ -1472,7 +1452,7 @@ func (r *Raw) clientLoop() {
 			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session survives,
 			// no handshake failure will ever say so. Count unanswered ticks here — AFTER the jump, so the very
 			// next wait is already the 1s probe interval — on the same threshold the handshake path uses.
-			if unproven = r.cryptoOn && rc.active() && !r.peerAnswered.Load(); unproven {
+			if unproven = rc.active() && !r.peerAnswered.Load(); unproven {
 				if failN++; failN >= peerFailThreshold {
 					r.session.Store(nil) // not answering: drop back to the handshake path and re-init there
 					r.ci.Store(nil)
@@ -1482,7 +1462,7 @@ func (r *Raw) clientLoop() {
 			} else {
 				failN = 0
 			}
-			if r.cryptoOn && r.sealer() == nil {
+			if r.sealer() == nil {
 				// A FAILOVER rotation just cleared the crypto session — loop back NOW to send the
 				// re-handshake init immediately, instead of first sleeping the 1s retransmit interval
 				// below, so recovery is ~1 RTT rather than ~1s (matters for live streams). Clear mode has
@@ -1491,7 +1471,7 @@ func (r *Raw) clientLoop() {
 			}
 		}
 		wait := keepaliveInterval(r.keepalive, r.psk)
-		if (r.cryptoOn && r.sealer() == nil) || unproven {
+		if r.sealer() == nil || unproven {
 			wait = handshakeRetransmitWait() // retransmit the handshake, or re-probe an unproven endpoint, faster than keepalive
 		}
 		select {
@@ -1529,7 +1509,7 @@ func (r *Raw) send(typ byte, payload []byte, to *net.IPAddr) {
 	if to == nil {
 		return
 	}
-	if r.cryptoOn && r.sealer() == nil {
+	if r.sealer() == nil {
 		return
 	}
 	body, err := r.body(typ, payload)

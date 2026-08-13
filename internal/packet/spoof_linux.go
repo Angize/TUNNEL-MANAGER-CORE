@@ -27,8 +27,8 @@ import (
 // destination. At least one of spoofSrc / spoofDst must be set (a carrier that forges nothing is
 // just raw bare — config validation enforces this, and so does the guard below). rawProto (1..255,
 // 0 = bare's native 253) overrides the outer IP protocol number to slip past a protocol whitelist.
-func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, spoofSrc, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
-	r, err := dialRawBase(peerIP, dev, ka, obfs, cryptoOn, psk, cipher, "bare", rawProto, 0)
+func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, spoofSrc, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
+	r, err := dialRawBase(peerIP, dev, ka, obfs, psk, cipher, "bare", rawProto, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -63,8 +63,8 @@ func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn 
 // forged source hides it from the wire, so the server can never learn it). When spoofDst is set the
 // clients aim at that decoy: the server receives those frames via AF_PACKET (the decoy is not a local
 // address) and answers AS the decoy. realPeer is required in both cases (config validation enforces it).
-func ListenSpoof(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoOn bool, psk, cipher, realPeer, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
-	r, err := listenRawBase(listenIP, dev, ka, obfs, cryptoOn, psk, cipher, "bare", rawProto, 0)
+func ListenSpoof(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, realPeer, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
+	r, err := listenRawBase(listenIP, dev, ka, obfs, psk, cipher, "bare", rawProto, 0)
 	if err != nil {
 		return nil, err
 	}
