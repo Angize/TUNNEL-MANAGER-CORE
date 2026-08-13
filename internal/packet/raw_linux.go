@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
@@ -593,7 +595,7 @@ func ProbeSpoof() SpoofProbe {
 	} else {
 		p.Reason = "raw sockets not permitted (needs CAP_NET_RAW / root): " + err.Error()
 	}
-	if fd, err := openAfpacket(); err == nil {
+	if fd, err := openAfpacket(bpfDropAll(), "spoof probe"); err == nil {
 		p.AFPacket = true
 		syscall.Close(fd)
 	} else if p.Reason == "" {
@@ -621,9 +623,12 @@ func openHdrincl(proto int) (int, error) {
 	return fd, nil
 }
 
-// openAfpacket opens an AF_PACKET SOCK_DGRAM socket for IPv4 frames, used to receive
-// packets addressed to the decoy destination (which the IP stack would otherwise drop).
-func openAfpacket() (int, error) {
+// openAfpacket opens an AF_PACKET SOCK_DGRAM socket for IPv4 frames, used to receive packets
+// addressed to the decoy destination (which the IP stack would otherwise drop). prog is the socket
+// filter that decides which frames the kernel bothers to copy up; it is a required argument because
+// the socket sees EVERY IPv4 frame on the host and forgetting it costs a copy per packet of
+// somebody else's traffic.
+func openAfpacket(prog []unix.SockFilter, what string) (int, error) {
 	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_DGRAM, int(htons(ethPIP)))
 	if err != nil {
 		return -1, err
@@ -637,6 +642,7 @@ func openAfpacket() (int, error) {
 		syscall.Close(fd)
 		return -1, err
 	}
+	attachFilter(fd, prog, what)
 	applyFdRcvBuf(fd, wantSockBuf()) // RECEIVE buffer only — this AF_PACKET socket is the raw-decoy/flux RX path
 	return fd, nil
 }
