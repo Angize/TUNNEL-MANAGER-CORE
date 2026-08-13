@@ -92,7 +92,7 @@ func TestTheRemovalMatchesTheInstallOnTheRealPath(t *testing.T) {
 				if a == b {
 					continue
 				}
-				if a != "-A" || b != "-D" { // the ONLY difference allowed anywhere in the argv
+				if a != "-I" || b != "-D" { // the ONLY difference allowed anywhere in the argv
 					t.Errorf("%s[%d]: arg %d differs (%q install, %q removal) -- the rule survives its own teardown",
 						tc.name, i, j, a, b)
 				}
@@ -110,7 +110,7 @@ func TestRuleBuildersStayInStep(t *testing.T) {
 		{"tcp RST drop", rawDropMatches(testDst, "tcp", 0, true, false, false)[0]},
 		{"icmp reply drop", rawDropMatches(testDst, "icmp", 0, false, true, false)[0]},
 	} {
-		add := append(append([]string{"-A", "OUTPUT"}, append(append([]string{}, tc.match...), "-j", "DROP")...), owner...)
+		add := append(append([]string{"-I", "OUTPUT"}, append(append([]string{}, tc.match...), "-j", "DROP")...), owner...)
 		del := append(append([]string{"-D", "OUTPUT"}, append(append([]string{}, tc.match...), "-j", "DROP")...), owner...)
 		if len(add) != len(del) {
 			t.Fatalf("%s: install has %d args and removal %d -- -D matches by full spec, so it would delete nothing",
