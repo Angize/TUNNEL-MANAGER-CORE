@@ -103,15 +103,17 @@ const (
 	// source port looks like, and any narrower or shifted range is MORE distinctive, not less.
 	rawSportLo = 32768
 	rawSportHi = 60999
-	// rawSportEvery is the middle of the re-roll interval; each wait is jittered around it (jitterFrac),
-	// because a port that changes on an exact clock is itself the period a DPI would lock onto.
-	rawSportEvery = 60 * time.Second
 	// rawTCPWindow is the advertised window on the synthetic tcp profile. A fixed 0xffff
 	// paired with a zero ACK reads as a forged segment to a stateful DPI; a realistic,
 	// steady-state window plus a non-zero ACK (set in wire()) make it look like a live
 	// established flow instead. 64240 is a very common Linux advertised window.
 	rawTCPWindow = 0xFAF0 // 64240
 )
+
+// rawSportEvery is the middle of the re-roll interval; each wait is jittered around it (jitterFrac),
+// because a port that changes on an exact clock is itself the period a DPI would lock onto. A var so a
+// test can drive the real sportLoop instead of imitating it.
+var rawSportEvery = 60 * time.Second
 
 // rawPorts returns the (source, destination) port pair THIS end stamps on a tcp/udp carrier packet. A
 // conversation reverses — client ephemeral->server, server->ephemeral — and two ends both sending

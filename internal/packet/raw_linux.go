@@ -70,15 +70,15 @@ type Raw struct {
 	// ISN and a constant peer-ISN we "acknowledge", so the forged segments carry an advancing
 	// sequence and a non-zero ACK — a live-established-flow look — instead of the tell-tale
 	// seq+1 / ack=0 that a stateful DPI flags as forged.
-	tcpISN   uint32
-	tcpAck   uint32
+	tcpISN   atomic.Uint32
+	tcpAck   atomic.Uint32
 	tcpBytes atomic.Uint32 // cumulative tcp-profile payload bytes; drives the realistic seq advance
 	// RFC 7323 timestamps, the option a real timestamped flow stamps on EVERY data segment. tsBase is
 	// this session's random offset (a real TSval is a host clock plus an unguessable per-connection
 	// offset, never a small number), tsStart anchors the millisecond clock, and tsEcr is the peer's last
 	// TSval to echo back — what makes the two directions read as one conversation.
-	tsBase  uint32
-	tsStart time.Time
+	tsBase  atomic.Uint32
+	tsStart atomic.Int64 // unix nanos; both are re-drawn with the flow, so both must be atomic
 	tsEcr   atomic.Uint32
 	lastRx  atomic.Int64 // unix-nano of the last authenticated frame (client staleness)
 	// peerAnswered gates the clear-mode heal: set when the CURRENT endpoint replies, cleared on
@@ -200,7 +200,7 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 // Pure over (proto, seq/tcpBytes, i) so its distinctness is unit-testable without a socket.
 func (r *Raw) decoySeq(i int) uint32 {
 	if r.proto == protoTCP {
-		return r.tcpISN + r.tcpBytes.Load() + fakeSeqGap + uint32(i)
+		return r.tcpISN.Load() + r.tcpBytes.Load() + fakeSeqGap + uint32(i)
 	}
 	return r.seq.Load() + fakeSeqGap + uint32(i)
 }
@@ -228,7 +228,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 		dseq := r.decoySeq(i)
 		var dack uint32
 		if r.proto == protoTCP {
-			dack = r.tcpAck
+			dack = r.tcpAck.Load()
 		}
 		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, r.port, r.cport(),
 			dseq, dack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
@@ -272,19 +272,35 @@ func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs bool, psk,
 		h := sha256.Sum256([]byte("tnl-core|v2|icmp-id|" + psk))
 		icmpID = binary.BigEndian.Uint16(h[0:2])
 	}
-	return &Raw{
+	r := &Raw{
 		conn: conn, dev: dev, keepalive: ka, obfs: obfs,
 		psk: psk, cipher: cipher, profile: profile, isClient: isClient, fakeFd: -1,
-		icmpID: icmpID, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
-		tcpISN: binary.BigEndian.Uint32(idb[2:6]), tcpAck: binary.BigEndian.Uint32(idb[6:10]), spi: spi,
-		tsBase: binary.BigEndian.Uint32(idb[14:18]), tsStart: time.Now(),
+		icmpID: icmpID, closeCh: make(chan struct{}), wake: make(chan struct{}, 1), spi: spi,
 	}
+	r.newTCPFlow()
+	return r
+}
+
+// newTCPFlow draws the synthetic tcp profile's per-FLOW state: the ISN, the peer ISN we acknowledge,
+// the timestamp base and the clock it counts from, and a zero byte counter. A real 4-tuple carries
+// exactly one of each, from its first segment to its last -- so this is re-drawn whenever the source
+// port rolls, which is what makes the new tuple a new flow rather than the old one wearing a new port.
+func (r *Raw) newTCPFlow() {
+	var b [18]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return // keep the current flow rather than a predictable one
+	}
+	r.tcpISN.Store(binary.BigEndian.Uint32(b[0:4]))
+	r.tcpAck.Store(binary.BigEndian.Uint32(b[4:8]))
+	r.tsBase.Store(binary.BigEndian.Uint32(b[8:12]))
+	r.tsStart.Store(time.Now().UnixNano())
+	r.tcpBytes.Store(0)
 }
 
 // tsNow is this session's TCP timestamp: a millisecond clock plus the session's random base, which is
 // what a real TSval is. Monotonic and always non-zero, because a real timestamped flow never sends 0.
 func (r *Raw) tsNow() uint32 {
-	v := r.tsBase + uint32(time.Since(r.tsStart)/time.Millisecond)
+	v := r.tsBase.Load() + uint32(time.Since(time.Unix(0, r.tsStart.Load()))/time.Millisecond)
 	if v == 0 {
 		v = 1
 	}
@@ -469,8 +485,8 @@ func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
 		// ACK number would stay put. tcpBytes.Add returns the post-add total; minus n yields
 		// the pre-segment offset, so concurrent sends get non-overlapping sequence ranges.
 		n := uint32(len(body))
-		seq = r.tcpISN + r.tcpBytes.Add(n) - n
-		ack = r.tcpAck
+		seq = r.tcpISN.Load() + r.tcpBytes.Add(n) - n
+		ack = r.tcpAck.Load()
 	} else {
 		seq = r.seq.Add(1)
 	}
@@ -807,6 +823,11 @@ func (r *Raw) sportLoop() {
 			continue
 		}
 		r.cliPort.Store(uint32(p))
+		// A new 4-tuple is a new flow, so it starts a new flow's numbers. Rolling only the port left the
+		// first segment of the new tuple a PSH|ACK carrying a sequence mid-stream and a TSval continuing
+		// the old series — which links it straight back to the tuple it replaced, and undoes what the
+		// roll is for. Nothing downstream depends on these: the peer skips the carrier header.
+		r.newTCPFlow()
 		// ...and say so at once. Until a packet carrying the new port reaches the server, its downstream
 		// is still stamped for the old one, and on a path with a stateful box those are dropped. Waiting
 		// for whatever the client happens to send next makes that window a whole keepalive interval on a
