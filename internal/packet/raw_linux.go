@@ -712,7 +712,7 @@ func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked,
 	var added []installed
 	want := rawDropMatches(peer, profile, port, isClient, marked, sportRandom)
 	for _, m := range want {
-		args := append([]string{"-A", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
+		args := append([]string{"-I", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
 		own, ok := runRule(args, ownerMatch(tun), "raw: anti-leak")
 		if !ok {
 			continue
@@ -845,7 +845,7 @@ func (r *Raw) wireAntiLeak() {
 // or answer them. AF_PACKET taps the frame before this chain runs, so our receive path
 // is unaffected. Returns a cleanup func (nil if the rule could not be installed).
 func addAntiLeak(proto int, decoy net.IP, tun string) func() {
-	args := []string{"-t", "raw", "-A", "PREROUTING", "-p", strconv.Itoa(proto), "-d", decoy.String(), "-j", "DROP"}
+	args := []string{"-t", "raw", "-I", "PREROUTING", "-p", strconv.Itoa(proto), "-d", decoy.String(), "-j", "DROP"}
 	own, ok := runRule(args, ownerMatch(tun), "raw: decoy anti-leak")
 	if !ok {
 		return nil

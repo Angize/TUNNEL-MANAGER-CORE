@@ -495,7 +495,7 @@ func addFluxDrop(peer net.IP, carrier, tun string) (func(), bool) {
 	var added []installed
 	want := fluxDropMatches(peer, carrier)
 	for _, m := range want {
-		args := append([]string{"-t", "raw", "-A", "PREROUTING"}, append(append([]string{}, m...), "-j", "DROP")...)
+		args := append([]string{"-t", "raw", "-I", "PREROUTING"}, append(append([]string{}, m...), "-j", "DROP")...)
 		own, ok := runRule(args, ownerMatch(tun), "flux: anti-leak")
 		if !ok {
 			continue
