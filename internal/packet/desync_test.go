@@ -311,7 +311,7 @@ func TestDecoySeqNeverAliasesTheLiveStream(t *testing.T) {
 	// The tcp profile uses the full uint32, so the gap must still be large there.
 	rt := &Raw{proto: protoTCP}
 	rt.tcpBytes.Store(9000)
-	if d := rt.decoySeq(0) - (rt.tcpISN + rt.tcpBytes.Load()); d < 1<<16 {
+	if d := rt.decoySeq(0) - (rt.tcpISN.Load() + rt.tcpBytes.Load()); d < 1<<16 {
 		t.Fatalf("tcp decoy offset %d is too small to stay clear of the live byte stream", d)
 	}
 }
