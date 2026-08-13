@@ -24,7 +24,7 @@ func TestTheServerScopesItsAntiLeakRuleForTheHandshake(t *testing.T) {
 	for _, profile := range []string{"udp", "tcp", "icmp"} {
 		t.Run("raw/"+profile, func(t *testing.T) {
 			rec := &scopeRecorder{}
-			srv := &Raw{profile: profile, isClient: false, cryptoOn: true, psk: hsScopePSK,
+			srv := &Raw{profile: profile, isClient: false, psk: hsScopePSK,
 				cipher: "chacha20-poly1305", port: 51820, closeCh: make(chan struct{})}
 			srv.link = &capturingLink{r: srv}
 			srv.localIP.Store(&net.IPAddr{IP: testDst})
@@ -66,7 +66,7 @@ func TestTheServerScopesItsAntiLeakRuleForTheHandshake(t *testing.T) {
 	t.Run("an init from a stranger does not move a scope that is already on the peer", func(t *testing.T) {
 		const stranger = "198.51.100.9"
 		rec := &scopeRecorder{}
-		srv := &Raw{profile: "udp", isClient: false, cryptoOn: true, psk: hsScopePSK,
+		srv := &Raw{profile: "udp", isClient: false, psk: hsScopePSK,
 			cipher: "chacha20-poly1305", port: 51820, closeCh: make(chan struct{})}
 		srv.link = &capturingLink{r: srv}
 		srv.localIP.Store(&net.IPAddr{IP: testDst})
@@ -90,7 +90,7 @@ func TestTheServerScopesItsAntiLeakRuleForTheHandshake(t *testing.T) {
 // clientInit builds the bytes a client puts on the wire for a fresh handshake init of this profile.
 func clientInit(t *testing.T, profile string) []byte {
 	t.Helper()
-	cli := &Raw{profile: profile, isClient: true, cryptoOn: true, psk: hsScopePSK,
+	cli := &Raw{profile: profile, isClient: true, psk: hsScopePSK,
 		cipher: "chacha20-poly1305", port: 51820}
 	cli.link = &capturingLink{r: cli}
 	cli.localIP.Store(&net.IPAddr{IP: testSrc})
