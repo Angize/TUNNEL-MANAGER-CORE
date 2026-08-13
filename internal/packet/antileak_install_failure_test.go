@@ -17,8 +17,11 @@ import (
 // back (our own ciphertext, twice on the wire), on udp/tcp it answers each with a port-unreachable or
 // a RST. One contended iptables call is enough to get there, so the failure path is the whole test.
 func TestAntiLeakSurvivesAFailedInstall(t *testing.T) {
-	defer func(mn, mx time.Duration) { antiLeakRetryMin, antiLeakRetryMax = mn, mx }(antiLeakRetryMin, antiLeakRetryMax)
+	defer func(mn, mx, lg time.Duration) {
+		antiLeakRetryMin, antiLeakRetryMax, antiLeakLinger = mn, mx, lg
+	}(antiLeakRetryMin, antiLeakRetryMax, antiLeakLinger)
 	antiLeakRetryMin, antiLeakRetryMax = 20*time.Millisecond, 40*time.Millisecond
+	antiLeakLinger = 20 * time.Millisecond // the displaced rule is removed on its own timer now
 
 	const prev, next = "203.0.113.10", "203.0.113.20"
 
@@ -54,11 +57,11 @@ func TestAntiLeakSurvivesAFailedInstall(t *testing.T) {
 		waitFor(t, 5*time.Second, "the carrier retried the install by itself", func() bool {
 			return evIndex(rec.events(), "add "+next) >= 0
 		})
+		waitFor(t, 5*time.Second, "the displaced rule was removed after its linger", func() bool {
+			return evIndex(rec.events(), "del "+prev) >= 0
+		})
 		ev = rec.events()
 		add, del := evIndex(ev, "add "+next), evIndex(ev, "del "+prev)
-		if del < 0 {
-			t.Fatalf("the retry installed %s but never removed %s, so the old rule is an orphan: %v", next, prev, ev)
-		}
 		if add > del {
 			t.Fatalf("the retry removed the old scope before installing the new one — the gap the install-before-remove order exists to close: %v", ev)
 		}
