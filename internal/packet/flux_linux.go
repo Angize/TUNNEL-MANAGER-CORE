@@ -190,7 +190,7 @@ func newFlux(dev *tun.Device, ka, rotate time.Duration, obfs, cryptoOn bool, psk
 		psk: psk, cipher: cipher, carrier: carrier, shapeProf: shape, epochOffset: epochOffset,
 		isClient: isClient, sendFd: -1, pktFd: -1, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 	}
-	f.leak.init(f.closeCh, func(peer net.IP) func() { return addFluxDrop(peer, carrier, f.tunName()) })
+	f.leak.init(f.closeCh, func(peer net.IP) (func(), bool) { return addFluxDrop(peer, carrier, f.tunName()) })
 	sh := deriveFluxShape(psk, f.epochNow(), shape)
 	f.curShape.Store(&sh)
 	// Seed logEp to the startup epoch so rotateWatcher logs the FIRST genuine rotation — even one that
@@ -487,12 +487,13 @@ func (f *Flux) tunName() string {
 	return f.dev.Name
 }
 
-func addFluxDrop(peer net.IP, carrier, tun string) func() {
+func addFluxDrop(peer net.IP, carrier, tun string) (func(), bool) {
 	type installed struct {
 		match, owner []string
 	}
 	var added []installed
-	for _, m := range fluxDropMatches(peer, carrier) {
+	want := fluxDropMatches(peer, carrier)
+	for _, m := range want {
 		args := append([]string{"-t", "raw", "-A", "PREROUTING"}, append(append([]string{}, m...), "-j", "DROP")...)
 		own, ok := runRule(args, ownerMatch(tun), "flux: anti-leak")
 		if !ok {
@@ -501,14 +502,14 @@ func addFluxDrop(peer net.IP, carrier, tun string) func() {
 		added = append(added, installed{m, own})
 	}
 	if len(added) == 0 {
-		return nil
+		return nil, len(want) == 0
 	}
 	return func() {
 		for _, in := range added {
 			del := append([]string{"-t", "raw", "-D", "PREROUTING"}, append(append([]string{}, in.match...), "-j", "DROP")...)
 			_, _ = iptablesRun(append(del, in.owner...))
 		}
-	}
+	}, len(added) == len(want)
 }
 
 // netToTun receives every IPv4 frame via AF_PACKET, keeps those that match the

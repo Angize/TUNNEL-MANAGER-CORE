@@ -695,14 +695,16 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked, 
 	return nil
 }
 
-// addRawDrop installs rawDropMatches for peer, best-effort, and returns a func that removes
-// exactly the rules that went in (nil if none did).
-func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked, sportRandom bool) func() {
+// addRawDrop installs rawDropMatches for peer, best-effort. It returns a func that removes exactly the
+// rules that went in (nil if none did) and whether the profile's whole set is now in place — a profile
+// no kernel answers wants no rule at all, and that is a success, not a failure to install one.
+func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked, sportRandom bool) (func(), bool) {
 	type installed struct {
 		match, owner []string
 	}
 	var added []installed
-	for _, m := range rawDropMatches(peer, profile, port, isClient, marked, sportRandom) {
+	want := rawDropMatches(peer, profile, port, isClient, marked, sportRandom)
+	for _, m := range want {
 		args := append([]string{"-A", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
 		own, ok := runRule(args, ownerMatch(tun), "raw: anti-leak")
 		if !ok {
@@ -711,7 +713,7 @@ func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked,
 		added = append(added, installed{m, own})
 	}
 	if len(added) == 0 {
-		return nil
+		return nil, len(want) == 0
 	}
 	log.Printf("raw: anti-leak scoped to %s (%d OUTPUT rule(s), profile %s, owner %s)", peer, len(added), profile, ownerLabel(added[0].owner, tun))
 	return func() {
@@ -719,7 +721,7 @@ func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked,
 			del := append([]string{"-D", "OUTPUT"}, append(append([]string{}, in.match...), "-j", "DROP")...)
 			_, _ = iptablesRun(append(del, in.owner...))
 		}
-	}
+	}, len(added) == len(want)
 }
 
 // setSendMark stamps rawSendMark on everything this socket sends, so the icmp anti-leak rule can
@@ -823,7 +825,7 @@ func (r *Raw) wireAntiLeak() {
 			marked = true
 		}
 	}
-	r.leak.init(r.closeCh, func(peer net.IP) func() {
+	r.leak.init(r.closeCh, func(peer net.IP) (func(), bool) {
 		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked, r.sportRandom)
 	})
 	if p := r.peer.Load(); p != nil { // client: the peer is known at dial, so scope it now
