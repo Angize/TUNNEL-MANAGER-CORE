@@ -17,7 +17,14 @@ import (
 var (
 	antiLeakRetryMin = 2 * time.Second
 	antiLeakRetryMax = time.Minute
+
+	// antiLeakLinger is how long the rules for the address a rotation just left stay in. Also a var so
+	// a test can watch the real timer.
+	antiLeakLinger = 5 * time.Second
 )
+
+// antiLeakMaxLinger bounds how many left-behind rule sets may wait at once.
+const antiLeakMaxLinger = 4
 
 // antiLeaker owns the firewall rules a carrier installs so the peer's — or our own — kernel does not
 // answer its carrier packets. flux taps at AF_PACKET before netfilter and drops the inbound frame; raw
@@ -36,6 +43,16 @@ type antiLeaker struct {
 	want  atomic.Pointer[net.IP] // the IP they SHOULD be scoped to; apply re-reads it under mu
 	retry *time.Timer            // the pending re-attempt after a failed install (guarded by mu); nil = none owed
 	wait  time.Duration          // its delay, doubled per consecutive failure and cleared on success (guarded by mu)
+	// pending holds the rule sets for addresses the scope has MOVED OFF but which are still installed
+	// for a moment longer (guarded by mu). See lingerLocked.
+	pending []*lingering
+}
+
+// lingering is one left-behind rule set and the timer that will remove it.
+type lingering struct {
+	ip     net.IP
+	remove func()
+	timer  *time.Timer
 }
 
 // init wires the installer and the carrier's close channel. Call once, from the constructor,
@@ -102,7 +119,12 @@ func (a *antiLeaker) apply() {
 	// all, and a destination rotation lands squarely in it: SetPeerPool deliberately keeps admitting
 	// the endpoint we just left for the frames still in flight from it, and in that gap the kernel
 	// answered each of them — the exact leak these rules exist to stop.
-	fn, ok := a.install(v4)
+	// ...and if we are rotating BACK onto an address whose rules are still lingering, take those rather
+	// than installing a second copy beside them.
+	fn, ok := a.takeLingeringLocked(v4)
+	if fn == nil && !ok {
+		fn, ok = a.install(v4)
+	}
 	if !ok {
 		// The rules are NOT in place for v4. Recording it anyway would make every later scope
 		// short-circuit on curIP, and removing the old set would take protection off the peer it
@@ -116,10 +138,59 @@ func (a *antiLeaker) apply() {
 	}
 	a.wait = 0
 	old := a.cur.Swap(&fn)
+	oldIP := a.curIP
 	a.curIP = append(net.IP(nil), v4...)
 	if old != nil && *old != nil {
-		(*old)()
+		a.lingerLocked(oldIP, *old)
 	}
+}
+
+// lingerLocked keeps the rules for the address we just left installed a moment longer. Removing them
+// the instant the scope moves is a hole exactly where the traffic still is: SetPeerPool deliberately
+// keeps admitting the endpoint a rotation left, for the frames already in flight from it, and the
+// kernel answers precisely those. One RTT of the leak the rules exist to stop, once per rotation.
+// Caller holds mu.
+func (a *antiLeaker) lingerLocked(ip net.IP, remove func()) {
+	if ip == nil {
+		remove() // nothing to keep it for
+		return
+	}
+	for len(a.pending) >= antiLeakMaxLinger {
+		a.dropLingeringLocked(0) // a carrier rotating faster than the linger must not pile up the chain
+	}
+	l := &lingering{ip: append(net.IP(nil), ip...), remove: remove}
+	l.timer = time.AfterFunc(antiLeakLinger, func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		for i, p := range a.pending {
+			if p == l {
+				a.dropLingeringLocked(i)
+				return
+			}
+		}
+	})
+	a.pending = append(a.pending, l)
+}
+
+// takeLingeringLocked hands back the rules already installed for ip, if the scope only just left it.
+// Caller holds mu.
+func (a *antiLeaker) takeLingeringLocked(ip net.IP) (func(), bool) {
+	for i, p := range a.pending {
+		if p.ip.Equal(ip) {
+			p.timer.Stop()
+			a.pending = append(a.pending[:i:i], a.pending[i+1:]...)
+			return p.remove, true
+		}
+	}
+	return nil, false
+}
+
+// dropLingeringLocked removes one left-behind rule set NOW. Caller holds mu.
+func (a *antiLeaker) dropLingeringLocked(i int) {
+	p := a.pending[i]
+	p.timer.Stop()
+	a.pending = append(a.pending[:i:i], a.pending[i+1:]...)
+	p.remove()
 }
 
 // armRetryLocked schedules one more apply after a failed install. Caller holds mu. A fire after Close
@@ -160,6 +231,9 @@ func (a *antiLeaker) teardown() {
 	if a.retry != nil {
 		a.retry.Stop()
 		a.retry = nil
+	}
+	for len(a.pending) > 0 { // nothing lingers past Close: teardown owes the host an empty chain
+		a.dropLingeringLocked(0)
 	}
 	if p := a.cur.Load(); p != nil && *p != nil {
 		(*p)()
