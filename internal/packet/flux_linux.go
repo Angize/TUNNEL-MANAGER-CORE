@@ -506,7 +506,7 @@ func addFluxDrop(peer net.IP, carrier, tun string) func() {
 	return func() {
 		for _, in := range added {
 			del := append([]string{"-t", "raw", "-D", "PREROUTING"}, append(append([]string{}, in.match...), "-j", "DROP")...)
-			_, _ = iptablesRun(append(del, in.owner...))
+			delRule(append(del, in.owner...), "flux: anti-leak")
 		}
 	}
 }

@@ -717,7 +717,7 @@ func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked,
 	return func() {
 		for _, in := range added {
 			del := append([]string{"-D", "OUTPUT"}, append(append([]string{}, in.match...), "-j", "DROP")...)
-			_, _ = iptablesRun(append(del, in.owner...))
+			delRule(append(del, in.owner...), "raw: anti-leak")
 		}
 	}
 }
@@ -845,7 +845,7 @@ func addAntiLeak(proto int, decoy net.IP, tun string) func() {
 	return func() {
 		del := append([]string(nil), args...)
 		del[2] = "-D"
-		_, _ = iptablesRun(append(del, own...))
+		delRule(append(del, own...), "raw: decoy anti-leak")
 	}
 }
 

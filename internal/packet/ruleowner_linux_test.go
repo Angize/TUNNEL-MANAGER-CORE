@@ -3,6 +3,7 @@
 package packet
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -37,6 +38,11 @@ func TestTheRemovalMatchesTheInstallOnTheRealPath(t *testing.T) {
 	var argv [][]string
 	old := iptablesRun
 	iptablesRun = func(a []string) ([]byte, error) {
+		if v, _ := verbOf(a); v == "-C" {
+			// Nothing is installed in this stub host, so the "is it already there" probe must say no —
+			// answering yes would make every installer correctly skip, and the argv below would be empty.
+			return nil, errors.New("no such rule")
+		}
 		argv = append(argv, append([]string(nil), a...))
 		return nil, nil
 	}
