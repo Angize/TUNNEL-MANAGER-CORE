@@ -4,14 +4,16 @@
 // When FEC is on, EVERY packet carries a 1-byte type tag so the receiver can route it:
 //
 //	type 0  passthrough : [0][frame]                          (ping/pong/handshake — not blocked)
-//	type 1  data shard  : [1][hdr][shard]  shard = [len:2][sealed] zero-padded to shardLen
+//	type 1  data shard  : [1][hdr][shard]  shard = [len:2][sealed], its own length (<= shardLen)
 //	type 2  parity shard: [2][hdr][shard]  shard = RS parity bytes
 //	hdr = [block:4][idx:1][n:1][k:1][count:1][shardLen:2]     (count = real data shards in the block)
 //
-// A block is flushed when it fills or a short timer fires; a partial block is zero-padded to n for the
-// RS math but only its `count` real shards are sent. The code is SYSTEMATIC, so a data shard already
-// carries its own payload: the receiver delivers each one on arrival and uses parity only to fill gaps.
-// Nothing a receiver physically got is ever held hostage to the rest of its block.
+// A block is flushed when it fills or a short timer fires. Padding -- a partial block out to n, and every
+// shard out to the block's largest -- is an input to the RS math only: just the `count` real shards are
+// sent, each at its own length, and the receiver re-pads from the shardLen in the header. The code is
+// SYSTEMATIC, so a data shard already carries its own payload: the receiver delivers each one on arrival
+// and uses parity only to fill gaps. Nothing a receiver physically got is held hostage to the rest of
+// its block.
 package packet
 
 import (
@@ -151,6 +153,7 @@ func (e *fecEncoder) flushLocked() {
 	parity, err := e.codec.Encode(data)
 	blk := e.block
 	e.block++
+	queued := e.shards // the shards at their real lengths; data[] holds the padded copies the codec needed
 	e.shards = nil
 	if err != nil {
 		return
@@ -166,8 +169,12 @@ func (e *fecEncoder) flushLocked() {
 		binary.BigEndian.PutUint16(h[9:11], uint16(shardLen))
 		return h
 	}
+	// The shard as it was queued, NOT the zero-padded copy the codec needs. Padding is only an input to
+	// the Reed-Solomon math: the header carries shardLen, so the receiver re-pads. Sending it instead
+	// costs the difference on every packet of a mixed block AND makes every packet in that block exactly
+	// the same size, which is a shape nothing else on the wire has.
 	for i := 0; i < count; i++ { // only the real data shards go on the wire
-		e.emit(append(hdr(fecTypeData, i), data[i]...))
+		e.emit(append(hdr(fecTypeData, i), queued[i]...))
 	}
 	// Parity scales with the real data shards, not n: kEff = ceil(k*count/n) is the smallest count
 	// holding the configured erasure ratio, and equals k on a full block. Not a wire change — the
@@ -302,7 +309,17 @@ func (d *fecDecoder) input(pkt []byte) {
 	n, k, count := int(pkt[6]), int(pkt[7]), int(pkt[8])
 	shardLen := int(binary.BigEndian.Uint16(pkt[9:11]))
 	shard := pkt[fecHdrLen:]
-	if n < 1 || k < 1 || n+k > 256 || count < 1 || count > n || shardLen < 2 || shardLen > fecMaxShardLen || len(shard) != shardLen {
+	if n < 1 || k < 1 || n+k > 256 || count < 1 || count > n || shardLen < 2 || shardLen > fecMaxShardLen {
+		return
+	}
+	// A DATA shard arrives at its own length -- shardLen is the block's maximum, and only the codec
+	// needs every shard that long, so the padding is re-applied here instead of being carried. Parity
+	// is an output of that math and is always exactly shardLen.
+	if typ == fecTypeData {
+		if len(shard) < 2 || len(shard) > shardLen {
+			return
+		}
+	} else if len(shard) != shardLen {
 		return
 	}
 	slot := idx
@@ -375,7 +392,9 @@ func (d *fecDecoder) input(pkt []byte) {
 		}
 		return
 	}
-	b.shards[slot] = append([]byte(nil), shard...)
+	kept := make([]byte, shardLen) // re-pad: Reconstruct needs every shard the same length
+	copy(kept, shard)
+	b.shards[slot] = kept
 	b.present++
 	b.bytes += shardLen
 	d.bytes += shardLen
