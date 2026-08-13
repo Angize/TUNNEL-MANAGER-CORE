@@ -228,7 +228,8 @@ func openFluxSockets() (send, pkt int, err error) {
 	if err != nil {
 		return -1, -1, err
 	}
-	pkt, err = openAfpacket()
+	// Both surviving carriers ride UDP, so the kernel can drop everything else before it is copied.
+	pkt, err = openAfpacket(bpfIPProto(protoUDP), "flux: receive")
 	if err != nil {
 		syscall.Close(send)
 		return -1, -1, err

@@ -90,7 +90,7 @@ func ListenSpoof(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, 
 			r.conn.Close()
 			return nil, fmt.Errorf("spoof: IP_HDRINCL socket: %w", err)
 		}
-		pfd, err := openAfpacket()
+		pfd, err := openAfpacket(bpfIPProtoDst(r.proto, dip), "spoof: decoy receive")
 		if err != nil {
 			syscall.Close(fd)
 			r.conn.Close()
