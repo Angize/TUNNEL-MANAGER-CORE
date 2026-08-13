@@ -151,6 +151,7 @@ func (e *fecEncoder) flushLocked() {
 	parity, err := e.codec.Encode(data)
 	blk := e.block
 	e.block++
+	queued := e.shards // the shards at their real lengths; data[] holds the padded copies the codec needed
 	e.shards = nil
 	if err != nil {
 		return
@@ -166,8 +167,12 @@ func (e *fecEncoder) flushLocked() {
 		binary.BigEndian.PutUint16(h[9:11], uint16(shardLen))
 		return h
 	}
+	// The shard as it was queued, NOT the zero-padded copy the codec needs. Padding is only an input to
+	// the Reed-Solomon math: the header carries shardLen, so the receiver re-pads. Sending it instead
+	// costs the difference on every packet of a mixed block AND makes every packet in that block exactly
+	// the same size, which is a shape nothing else on the wire has.
 	for i := 0; i < count; i++ { // only the real data shards go on the wire
-		e.emit(append(hdr(fecTypeData, i), data[i]...))
+		e.emit(append(hdr(fecTypeData, i), queued[i]...))
 	}
 	// Parity scales with the real data shards, not n: kEff = ceil(k*count/n) is the smallest count
 	// holding the configured erasure ratio, and equals k on a full block. Not a wire change — the
@@ -302,7 +307,17 @@ func (d *fecDecoder) input(pkt []byte) {
 	n, k, count := int(pkt[6]), int(pkt[7]), int(pkt[8])
 	shardLen := int(binary.BigEndian.Uint16(pkt[9:11]))
 	shard := pkt[fecHdrLen:]
-	if n < 1 || k < 1 || n+k > 256 || count < 1 || count > n || shardLen < 2 || shardLen > fecMaxShardLen || len(shard) != shardLen {
+	if n < 1 || k < 1 || n+k > 256 || count < 1 || count > n || shardLen < 2 || shardLen > fecMaxShardLen {
+		return
+	}
+	// A DATA shard arrives at its own length -- shardLen is the block's maximum, and only the codec
+	// needs every shard that long, so the padding is re-applied here instead of being carried. Parity
+	// is an output of that math and is always exactly shardLen.
+	if typ == fecTypeData {
+		if len(shard) < 2 || len(shard) > shardLen {
+			return
+		}
+	} else if len(shard) != shardLen {
 		return
 	}
 	slot := idx
@@ -375,7 +390,9 @@ func (d *fecDecoder) input(pkt []byte) {
 		}
 		return
 	}
-	b.shards[slot] = append([]byte(nil), shard...)
+	kept := make([]byte, shardLen) // re-pad: Reconstruct needs every shard the same length
+	copy(kept, shard)
+	b.shards[slot] = kept
 	b.present++
 	b.bytes += shardLen
 	d.bytes += shardLen
