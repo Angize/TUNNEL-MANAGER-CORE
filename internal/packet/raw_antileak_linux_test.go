@@ -256,6 +256,8 @@ func TestRawAntiLeakLeavesQuietProfilesAlone(t *testing.T) {
 // discover. It also pins the install-before-remove order: the endpoint we just left stays admitted for
 // the frames still in flight, so a gap with no rule at all is exactly when the kernel leaks.
 func TestRawRotationPreScopesAntiLeak(t *testing.T) {
+	defer func(d time.Duration) { antiLeakLinger = d }(antiLeakLinger)
+	antiLeakLinger = 20 * time.Millisecond // the displaced rule goes on its own timer; see the linger test
 	rec := &leakRecorder{}
 	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, false, 0, "")
 	r := &Raw{profile: "udp", isClient: true, pp: pool, closeCh: make(chan struct{})}
@@ -282,6 +284,9 @@ func TestRawRotationPreScopesAntiLeak(t *testing.T) {
 
 	r.rotatePeerRaw(true)
 	third := hostOnly(pool.current())
+	waitFor(t, 5*time.Second, "the rule for the endpoint we left was removed after its linger", func() bool {
+		return evIndex(rec.events(), "del "+second) >= 0
+	})
 	ev := rec.events()
 	addNew, delOld := evIndex(ev, "add "+third), evIndex(ev, "del "+second)
 	if addNew < 0 || delOld < 0 {

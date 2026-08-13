@@ -12,6 +12,8 @@ import (
 // into the receive loop. It also pins the install-before-remove order. A rule still scoped to the
 // endpoint we left lets our kernel answer the new one's first frames with the leak it exists to prevent.
 func TestFluxRotationPreScopesAntiLeak(t *testing.T) {
+	defer func(d time.Duration) { antiLeakLinger = d }(antiLeakLinger)
+	antiLeakLinger = 20 * time.Millisecond // the displaced rule goes on its own timer; see the linger test
 	rec := &leakRecorder{}
 	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, false, 0, "")
 	f := &Flux{carrier: "udp", pp: pool, closeCh: make(chan struct{})}
@@ -41,6 +43,9 @@ func TestFluxRotationPreScopesAntiLeak(t *testing.T) {
 	// frames in flight from it — so that gap is when the kernel leaks.
 	f.rotatePeerFlux(true)
 	third := hostOnly(pool.current())
+	waitFor(t, 5*time.Second, "the rule for the endpoint we left was removed after its linger", func() bool {
+		return evIndex(rec.events(), "del "+second) >= 0
+	})
 	ev := rec.events()
 	addNew, delOld := evIndex(ev, "add "+third), evIndex(ev, "del "+second)
 	if addNew < 0 || delOld < 0 {
