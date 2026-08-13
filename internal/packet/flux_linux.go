@@ -731,6 +731,12 @@ func (f *Flux) tryHandshake(body []byte, addr *net.IPAddr) {
 	// cannot wedge the tunnel. Peer rebinding is likewise deferred to that first frame.
 	f.staged = stageSession(f.staged, s)
 	f.learnLocalIP(addr.IP)
+	// ParseInit above is the authentication: the sender proved the PSK. The DROP rules are per-peer and a
+	// server has no peer until a frame OPENS under a session, so for the whole handshake our own kernel
+	// ICMP-port-unreachables every frame the client sends. Only while no peer is known — see the raw twin.
+	if f.peer.Load() == nil {
+		f.leak.scopeAsync(addr.IP)
+	}
 	if msg2 := crypto.RespMsg(f.psk, eInit, sr); msg2 != nil {
 		// Cache this init and its response so a replay of the same init (while a staged session
 		// is still current) is served without recomputing the crypto above. put copies body

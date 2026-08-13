@@ -372,7 +372,7 @@ func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs, cryptoO
 	r.setSportMode(sportRandom) // server: no rolling, but the anti-leak rule must still take the range
 	applyConnSockBuf(r.conn)    // a directLink server sends AND receives on this conn
 	r.initFec(fec, fecData, fecParity)
-	r.wireAntiLeak() // no peer yet — learnPeer scopes it on the first authenticated frame
+	r.wireAntiLeak() // no peer yet — tryHandshake scopes it on the authenticated init, learnPeer follows it after
 	return r, nil
 }
 
@@ -1124,6 +1124,15 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 	// the sender proved the PSK. The replayed-init fast path further up deliberately does NOT learn --
 	// it re-serves a cached response without proving anything new, so it must not steer where we send.
 	r.learnClientPort(hsSport)
+	// Same authentication, same reason, for the anti-leak rule. The OUTPUT rule is per-peer, and a server
+	// has no peer until a frame OPENS under a session — so for the whole handshake its kernel answers the
+	// client's frames itself: an echo-reply on icmp (our own ciphertext, mirrored), an ICMP
+	// port-unreachable on udp, a RST on tcp. Only while no peer is known: once one is, learnPeer owns the
+	// scope, and the single rule set must not be dragged off the endpoint carrying the tunnel by an init
+	// replayed from somewhere else.
+	if r.peer.Load() == nil {
+		r.leak.scopeAsync(addr.IP)
+	}
 	if msg2 := crypto.RespMsg(r.psk, eInit, sr); msg2 != nil {
 		// Cache this init and its response so a replay of the same init (while a staged session
 		// is still current) is served without recomputing the crypto above. put copies body
