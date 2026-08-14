@@ -81,6 +81,10 @@ type Raw struct {
 	tsStart atomic.Int64 // unix nanos; both are re-drawn with the flow, so both must be atomic
 	tsEcr   atomic.Uint32
 	lastRx  atomic.Int64 // unix-nano of the last authenticated frame (client staleness)
+	// lastAsk: unix-nano of the last frame this client sent that the peer OWES an answer to -- a
+	// keepalive ping, or a handshake init. Older than lastRx means everything asked has been answered.
+	// Stamped only where those are sent, never on the data path.
+	lastAsk atomic.Int64
 	// peerAnswered gates the clear-mode heal: set when the CURRENT endpoint replies, cleared on
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
 	peerAnswered atomic.Bool
@@ -807,17 +811,67 @@ func (r *Raw) replyPort(sport uint16) uint16 {
 	return sport
 }
 
+// portSilence is how long an unanswered ask condemns the current source port: half a keepalive, but
+// never under the largest inbound gap a normally-carrying tunnel was measured to have, and always well
+// inside the dead window, so a blackholed 4-tuple is discarded long before the session is declared
+// stale over it.
+//
+// ZERO when those cannot both hold. At a short enough keepalive the gap floor runs past the dead window
+// itself, and a window that condemns a tuple no earlier than the session is given up on buys nothing
+// while still rolling the port on ordinary jitter. The scheduled roll then owns it alone, as before.
+func portSilence(keepalive time.Duration) time.Duration {
+	ps := keepalive / 2
+	if ps < 3*time.Second {
+		ps = 3 * time.Second
+	}
+	if ps >= deadWindow(keepalive)/2 {
+		return 0
+	}
+	return ps
+}
+
+// portDead reports that the CURRENT 4-tuple is not carrying: something we sent that the peer owes an
+// answer to has gone unanswered for longer than any legitimate gap.
+//
+// Keyed on the ASK rather than on lastRx alone, because an idle tunnel between keepalives looks exactly
+// as silent as a dead one -- and the whole point is to tell them apart.
+func (r *Raw) portDead(now time.Time) bool {
+	ps := portSilence(r.keepalive)
+	if ps <= 0 {
+		return false // no window fits inside this dead window: the scheduled roll owns the port alone
+	}
+	ask := r.lastAsk.Load()
+	if ask == 0 || ask <= r.lastRx.Load() {
+		return false // nothing outstanding: the last thing we asked for came back
+	}
+	return now.Sub(time.Unix(0, ask)) > ps
+}
+
 // sportLoop re-rolls the client's carrier source port for the life of the tunnel. There is nothing to
 // tear down or re-handshake: the port lives only in the forged header, no socket binds it (the carrier
 // socket is opened on a PROTOCOL NUMBER), and the peer picks the new one up from the next authenticated
 // frame. A roll that fails to draw simply keeps the current port.
 func (r *Raw) sportLoop() {
+	next := time.Now().Add(jitterFrac(rawSportEvery))
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-r.closeCh:
 			return
-		case <-time.After(jitterFrac(rawSportEvery)):
+		case <-tick.C:
 		}
+		now := time.Now()
+		// Two reasons to roll. The scheduled one keeps the tuple moving; the reactive one gets off a
+		// tuple whose RETURN direction has gone. Measured on the live fleet: about one rolled port in
+		// eight has its downstream blackholed while every packet the client sends still arrives, so the
+		// peer answers into a hole and the client hears nothing at all. Waiting out the schedule leaves
+		// the tunnel one-way dead for the rest of the interval, which is what carries it past the dead
+		// window and into a re-handshake -- on the same dead tuple, which cannot recover either.
+		if !now.After(next) && !r.portDead(now) {
+			continue
+		}
+		next = now.Add(jitterFrac(rawSportEvery))
 		p := rawRollSport()
 		if p == 0 {
 			continue
@@ -828,6 +882,10 @@ func (r *Raw) sportLoop() {
 		// the old series — which links it straight back to the tuple it replaced, and undoes what the
 		// roll is for. Nothing downstream depends on these: the peer skips the carrier header.
 		r.newTCPFlow()
+		// A new tuple asks its own question. Without this the old tuple's unanswered ask keeps dating
+		// the silence, and every following tick condemns the fresh port on the previous one's evidence
+		// -- a roll a second for as long as the path stays down.
+		r.lastAsk.Store(0)
 		// ...and say so at once. Until a packet carrying the new port reaches the server, its downstream
 		// is still stamped for the old one, and on a path with a stateful box those are dropped. Waiting
 		// for whatever the client happens to send next makes that window a whole keepalive interval on a
@@ -1554,6 +1612,22 @@ func (r *Raw) sendInit() {
 		r.sendFakes(peer)
 	}
 	r.writeCtrl(crypto.InitMsg(r.psk, ci), peer)
+	r.ask()
+}
+
+// ask stamps that we just sent something the peer owes an answer to. Only meaningful with a peer to
+// answer us, so a send that went nowhere does not condemn the port.
+//
+// The FIRST unanswered ask is the one that dates the silence, so a stamp already outstanding is left
+// alone. A handshake retransmits about once a second; overwriting would reset the clock every time and
+// the tuple could never be condemned, however dead it was.
+func (r *Raw) ask() {
+	if !r.isClient || r.peer.Load() == nil {
+		return
+	}
+	if r.lastAsk.Load() <= r.lastRx.Load() {
+		r.lastAsk.Store(time.Now().UnixNano())
+	}
 }
 
 func (r *Raw) send(typ byte, payload []byte, to *net.IPAddr) {
@@ -1568,6 +1642,9 @@ func (r *Raw) send(typ byte, payload []byte, to *net.IPAddr) {
 		return
 	}
 	r.writeCtrl(body, to)
+	if typ == typePing {
+		r.ask() // the ping really left: from here the peer owes us a pong
+	}
 }
 
 // routeLocalIP asks the kernel which local IPv4 it would use to reach peer, by
