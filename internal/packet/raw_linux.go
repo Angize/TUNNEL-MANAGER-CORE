@@ -84,6 +84,10 @@ type Raw struct {
 	// probed: a liveness handshake is already outstanding for THIS silent spell. Cleared by markRx, so
 	// one silence earns one probe however long it lasts.
 	probed atomic.Bool
+	// lastAsk: unix-nano of the last frame this client sent that the peer OWES an answer to -- a
+	// keepalive ping, or a handshake init. Older than lastRx means everything asked has been answered.
+	// Stamped only where those are sent, never on the data path.
+	lastAsk atomic.Int64
 	// peerAnswered gates the clear-mode heal: set when the CURRENT endpoint replies, cleared on
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
 	peerAnswered atomic.Bool
@@ -814,13 +818,50 @@ func (r *Raw) replyPort(sport uint16) uint16 {
 // tear down or re-handshake: the port lives only in the forged header, no socket binds it (the carrier
 // socket is opened on a PROTOCOL NUMBER), and the peer picks the new one up from the next authenticated
 // frame. A roll that fails to draw simply keeps the current port.
+// portSilence is how long an unanswered ask condemns the current source port. Half a keepalive, floored
+// well above any legitimate inbound gap, and far below the dead window on purpose: the point is to
+// discard a blackholed 4-tuple long before the session is declared stale over it.
+func portSilence(keepalive time.Duration) time.Duration {
+	if s := keepalive / 2; s > 3*time.Second {
+		return s
+	}
+	return 3 * time.Second
+}
+
+// portDead reports that the CURRENT 4-tuple is not carrying: something we sent that the peer owes an
+// answer to has gone unanswered for longer than any legitimate gap.
+//
+// Keyed on the ASK rather than on lastRx alone, because an idle tunnel between keepalives looks exactly
+// as silent as a dead one -- and the whole point is to tell them apart.
+func (r *Raw) portDead(now time.Time) bool {
+	ask := r.lastAsk.Load()
+	if ask == 0 || ask <= r.lastRx.Load() {
+		return false // nothing outstanding: the last thing we asked for came back
+	}
+	return now.Sub(time.Unix(0, ask)) > portSilence(r.keepalive)
+}
+
 func (r *Raw) sportLoop() {
+	next := time.Now().Add(jitterFrac(rawSportEvery))
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
 	for {
 		select {
 		case <-r.closeCh:
 			return
-		case <-time.After(jitterFrac(rawSportEvery)):
+		case <-tick.C:
 		}
+		now := time.Now()
+		// Two reasons to roll. The scheduled one keeps the tuple moving; the reactive one gets off a
+		// tuple whose RETURN direction has gone. Measured on the live fleet: about one rolled port in
+		// eight has its downstream blackholed while every packet the client sends still arrives, so the
+		// peer answers into a hole and the client hears nothing at all. Waiting out the schedule leaves
+		// the tunnel one-way dead for the rest of the interval, which is what carries it past the dead
+		// window and into a re-handshake -- on the same dead tuple, which cannot recover either.
+		if !now.After(next) && !r.portDead(now) {
+			continue
+		}
+		next = now.Add(jitterFrac(rawSportEvery))
 		p := rawRollSport()
 		if p == 0 {
 			continue
@@ -837,6 +878,7 @@ func (r *Raw) sportLoop() {
 		// download-only flow; one ping makes it half a round trip.
 		if peer := r.peer.Load(); peer != nil {
 			r.send(typePing, nil, peer)
+			r.ask()
 		}
 	}
 }
@@ -1245,6 +1287,14 @@ func (r *Raw) markRx() {
 // probeWin is how long this client stays silent before probing whether the peer is alive.
 func (r *Raw) probeWin() time.Duration { return probeWindow(r.keepalive) }
 
+// ask stamps that we just sent something the peer owes an answer to. Only meaningful with a peer to
+// answer us, so a send that went nowhere does not condemn the port.
+func (r *Raw) ask() {
+	if r.isClient && r.peer.Load() != nil {
+		r.lastAsk.Store(time.Now().UnixNano())
+	}
+}
+
 // provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for
 // about one RTT after a jump the endpoint we LEFT is still answering; those frames are ours and are
 // delivered, but counting them as proof is what lets a blocked IP hide behind the one it replaced. A
@@ -1519,6 +1569,7 @@ func (r *Raw) clientLoop() {
 			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the
 			// NEW destination sees, and it is what makes the server stamp its replies from that IP.
 			r.send(typePing, nil, r.peer.Load())
+			r.ask()
 			// Silent past the probe window but not yet the dead one: ask whether the PEER is alive,
 			// without touching the live session. ci is nil while a session is live, so this makes a
 			// FRESH ephemeral rather than the byte-identical retransmit a peer answers from its init
@@ -1580,6 +1631,7 @@ func (r *Raw) sendInit() {
 		r.sendFakes(peer)
 	}
 	r.writeCtrl(crypto.InitMsg(r.psk, ci), peer)
+	r.ask()
 }
 
 func (r *Raw) send(typ byte, payload []byte, to *net.IPAddr) {
