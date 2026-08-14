@@ -746,6 +746,25 @@ func deadWindow(keepalive time.Duration) time.Duration {
 	return time.Duration(deadMult) * keepalive
 }
 
+// probeWindow is how long a DATAGRAM client tolerates silence before asking whether the peer is still
+// there, with a handshake that leaves the live session untouched.
+//
+// Silence alone cannot tell a restarted peer from a broken path, so the dead window has to be long
+// enough to be sure — and a client that guesses wrong throws away a working session. A handshake the
+// peer ANSWERS separates the two: the peer is up, and it is not holding our keys. tcp needs none of
+// this; a restarted peer resets the connection and says so.
+//
+// Half the dead window, floored at two keepalives so a single lost ping cannot trigger it, and always
+// strictly inside the dead window (deadMult at its floor of 2 makes those two rules collide).
+func probeWindow(keepalive time.Duration) time.Duration {
+	dw := deadWindow(keepalive)
+	pw := dw / 2
+	if floor := 2 * keepalive; pw < floor && floor < dw {
+		pw = floor
+	}
+	return pw
+}
+
 // DialTCP (client role) targets peerAddr and reconnects on drop. When cover is
 // set the connection is wrapped in a Chrome-fingerprinted TLS session presenting
 // coverSNI, so it looks like HTTPS on the wire.

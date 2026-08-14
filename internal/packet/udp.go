@@ -106,6 +106,9 @@ type UDP struct {
 	hsCache initCache                        // server: recent inits -> responses (compute-DoS replay cache; receive-goroutine-only)
 	ci      atomic.Pointer[crypto.Ephemeral] // client's current handshake ephemeral
 	lastRx  atomic.Int64                     // unix-nano of the last authenticated frame (client staleness)
+	// probed: a liveness handshake is already outstanding for THIS silent spell. Cleared by markRx, so
+	// one silence earns one probe however long it lasts.
+	probed atomic.Bool
 	// peerAnswered gates the clear-mode heal: it is set when the CURRENT peer replies and cleared on
 	// every peer rotation, so success() only clears a burn on an endpoint that has actually replied
 	// SINCE we (re)pointed at it — never a false heal on a just-jumped-to (unproven) endpoint.
@@ -440,7 +443,11 @@ func (b *UDP) sessionStale() bool { return staleSince(b.lastRx.Load(), b.deadWin
 // (connect, rotation) call lastRx.Store directly, so this stays the one PROVEN-inbound stamp.
 func (b *UDP) markRx() {
 	b.lastRx.Store(time.Now().UnixNano())
+	b.probed.Store(false) // the session is answering: the next silent spell gets its own probe
 }
+
+// probeWin is how long this client stays silent before probing whether the peer is alive.
+func (b *UDP) probeWin() time.Duration { return probeWindow(b.keepalive) }
 
 // provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for
 // about one RTT after a jump the endpoint we LEFT is still answering; those frames are ours and are
@@ -884,6 +891,18 @@ func (b *UDP) tryHandshake(pkt []byte, addr *net.UDPAddr) {
 		if err != nil {
 			return
 		}
+		// A RESP arriving while a session is still LIVE answers the liveness probe, not a handshake, so
+		// what it settles is which of two indistinguishable silences we are in. Read the SESSION's own
+		// clock before markRx below stamps it away: still being answered means the probe was a false
+		// alarm and these keys are thrown away rather than re-keying a working tunnel. Unanswered while
+		// the peer plainly answers THIS is the one thing silence could never prove -- it restarted.
+		if b.sealer() != nil {
+			b.ci.Store(nil)
+			if !staleSince(b.lastRx.Load(), b.probeWin()) {
+				return
+			}
+			b.st.down("stale", "udp") // the pair the panel renders: dropped, then self-healed
+		}
 		b.rp = replayGuard{}
 		b.session.Store(&sealerBox{s: s})
 		b.fecDec.reset() // a fresh session: the peer may have restarted its block numbering
@@ -1034,6 +1053,13 @@ func (b *UDP) clientLoop() {
 			// source. Sending it first meant the ping went to the endpoint we were leaving and the
 			// server did not follow until the next data frame.
 			b.send(typePing, nil, b.peer.Load())
+			// Silent past the probe window but not yet the dead one: ask whether the PEER is alive,
+			// without touching the live session. ci is nil while a session is live, so this makes a
+			// FRESH ephemeral rather than a byte-identical retransmit the peer answers from its init
+			// cache. Crypto only: clear mode has no handshake to ask the question with.
+			if b.cryptoOn && staleSince(b.lastRx.Load(), b.probeWin()) && !b.probed.Swap(true) {
+				b.sendInit()
+			}
 			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session survives,
 			// no handshake failure will ever say so. Count unanswered ticks here — AFTER the jump, so the very
 			// next wait is already the 1s probe interval — on the same threshold the handshake path uses.

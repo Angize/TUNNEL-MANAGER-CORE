@@ -81,6 +81,9 @@ type Raw struct {
 	tsStart atomic.Int64 // unix nanos; both are re-drawn with the flow, so both must be atomic
 	tsEcr   atomic.Uint32
 	lastRx  atomic.Int64 // unix-nano of the last authenticated frame (client staleness)
+	// probed: a liveness handshake is already outstanding for THIS silent spell. Cleared by markRx, so
+	// one silence earns one probe however long it lasts.
+	probed atomic.Bool
 	// peerAnswered gates the clear-mode heal: set when the CURRENT endpoint replies, cleared on
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
 	peerAnswered atomic.Bool
@@ -1115,6 +1118,18 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 		if err != nil {
 			return
 		}
+		// A RESP arriving while a session is still LIVE answers the liveness probe, not a handshake, so
+		// what it settles is which of two indistinguishable silences we are in. Read the SESSION's own
+		// clock before markRx below stamps it away: still being answered means the probe was a false
+		// alarm and these keys are thrown away rather than re-keying a working tunnel. Unanswered while
+		// the peer plainly answers THIS is the one thing silence could never prove — it restarted.
+		if r.sealer() != nil {
+			r.ci.Store(nil)
+			if !staleSince(r.lastRx.Load(), r.probeWin()) {
+				return
+			}
+			r.st.down("stale", "raw") // the pair the panel renders: dropped, then self-healed
+		}
 		r.rp = replayGuard{}
 		r.session.Store(&sealerBox{s: s})
 		r.fecDec.reset() // a fresh session: the peer may have restarted its block numbering
@@ -1224,7 +1239,11 @@ func (r *Raw) sessionStale() bool { return staleSince(r.lastRx.Load(), r.deadWin
 // (connect / rotation) call lastRx.Store directly, so this stays the one PROVEN-inbound stamp.
 func (r *Raw) markRx() {
 	r.lastRx.Store(time.Now().UnixNano())
+	r.probed.Store(false) // the session is answering: the next silent spell gets its own probe
 }
+
+// probeWin is how long this client stays silent before probing whether the peer is alive.
+func (r *Raw) probeWin() time.Duration { return probeWindow(r.keepalive) }
 
 // provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for
 // about one RTT after a jump the endpoint we LEFT is still answering; those frames are ours and are
@@ -1500,6 +1519,13 @@ func (r *Raw) clientLoop() {
 			// Ping AFTER the rotation, not before: on a rotating tick this frame is the first thing the
 			// NEW destination sees, and it is what makes the server stamp its replies from that IP.
 			r.send(typePing, nil, r.peer.Load())
+			// Silent past the probe window but not yet the dead one: ask whether the PEER is alive,
+			// without touching the live session. ci is nil while a session is live, so this makes a
+			// FRESH ephemeral rather than the byte-identical retransmit a peer answers from its init
+			// cache at a port a rolling client has left.
+			if staleSince(r.lastRx.Load(), r.probeWin()) && !r.probed.Swap(true) {
+				r.sendInit()
+			}
 			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session survives,
 			// no handshake failure will ever say so. Count unanswered ticks here — AFTER the jump, so the very
 			// next wait is already the 1s probe interval — on the same threshold the handshake path uses.
