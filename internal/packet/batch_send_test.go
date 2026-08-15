@@ -57,7 +57,7 @@ func TestTheBatchDrainNeverWaits(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := string(b)
-	i := strings.Index(src, "for len(ms) < maxBatch {")
+	i := strings.Index(src, "for n < maxBatch {")
 	if i < 0 {
 		t.Fatal("the drain loop is not the expected shape; check what bounds it now")
 	}
@@ -106,3 +106,34 @@ type fakeFDLink struct {
 }
 
 func (f *fakeFDLink) fakeFD() int { return f.fd }
+
+// Every slot of the batch must be pointed at ITS OWN packet. The array and its one-element Buffers
+// slices are reused across batches now, so writing through a fixed index -- ms[0] instead of ms[n] --
+// would send N copies of one packet and drop the rest, with the right count and the right length going
+// out and nothing logged. Only the far end would see it, as a stream that stops making sense.
+func TestEachBatchSlotCarriesItsOwnPacket(t *testing.T) {
+	src := string(mustRead(t, "raw_linux.go"))
+	i := strings.Index(src, "for n < maxBatch {")
+	if i < 0 {
+		t.Fatal("the drain loop is not the expected shape")
+	}
+	body := src[i:]
+	if end := strings.Index(body, "\n\t\t\t}"); end > 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "ms[n].Buffers[0]") {
+		t.Fatal("the drain does not fill ms[n]: a fixed index would send one packet many times")
+	}
+	if strings.Contains(body, "ms[0].Buffers[0]") {
+		t.Fatal("the drain writes through ms[0] inside the loop, overwriting every earlier packet")
+	}
+}
+
+func mustRead(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}

@@ -180,19 +180,23 @@ func mask(key, salt, buf []byte) error {
 // Seal returns salt || mask(nonce||ciphertext||tag). aad is authenticated but not
 // transmitted (callers pass the cleartext frame header so it cannot be flipped).
 func (s *Sealer) Seal(plaintext, aad []byte) ([]byte, error) {
+	// ONE buffer, sized for the whole frame, built in place. The obvious spelling -- allocate a nonce,
+	// let Seal append to it, then allocate the output and copy -- is three allocations and a full-frame
+	// copy on a path that runs per packet.
 	ns := s.sendAEAD.NonceSize()
-	nonce := make([]byte, ns)
-	copy(nonce, s.prefix)
-	binary.BigEndian.PutUint64(nonce[ns-8:], s.ctr.Add(1))
-	sealed := s.sendAEAD.Seal(nonce, nonce, plaintext, aad) // nonce||ct||tag
-
-	out := make([]byte, maskSaltLen+len(sealed))
+	out := make([]byte, maskSaltLen+ns, maskSaltLen+ns+len(plaintext)+s.sendAEAD.Overhead())
 	// Buffered, not weakened: RandRead hands out crypto/rand's own bytes a block at a time, because
 	// reading them one salt at a time is a syscall per packet. See randpool.go.
 	if err := RandRead(out[:maskSaltLen]); err != nil {
 		return nil, err
 	}
-	copy(out[maskSaltLen:], sealed)
+	nonce := out[maskSaltLen:]
+	copy(nonce, s.prefix)
+	binary.BigEndian.PutUint64(nonce[ns-8:], s.ctr.Add(1))
+	// The nonce lives INSIDE out, and Seal appends past out's length -- so it writes only after the
+	// nonce it is reading. The round-trip tests cover every cipher precisely because that is an
+	// assumption about the AEAD implementations rather than something the signature promises.
+	out = s.sendAEAD.Seal(out, nonce, plaintext, aad) // salt||nonce||ct||tag
 	if err := mask(s.sendMask, out[:maskSaltLen], out[maskSaltLen:]); err != nil {
 		return nil, err
 	}
@@ -213,7 +217,9 @@ func (s *Sealer) Open(wire, aad []byte) (session uint64, seq uint64, pt []byte, 
 		return 0, 0, nil, err
 	}
 	nonce := body[:ns]
-	pt, err = s.recvAEAD.Open(nil, nonce, body[ns:], aad)
+	// Decrypt into the ciphertext's own storage. Passing nil makes the AEAD allocate a second buffer
+	// the size of the packet, every packet; ciphertext[:0] as dst is the documented way to avoid it.
+	pt, err = s.recvAEAD.Open(body[ns:][:0], nonce, body[ns:], aad)
 	if err != nil {
 		return 0, 0, nil, err
 	}
