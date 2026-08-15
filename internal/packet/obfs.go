@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/chacha20"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
 const (
@@ -54,7 +56,9 @@ func randUint(max int) (int, error) {
 	limit := (0xFFFFFFFF/n)*n - 1 // largest multiple of n that fits in uint32, minus 1
 	var b [4]byte
 	for {
-		if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
+		// Buffered crypto/rand: this runs on every obfs frame, and unbuffered it is a syscall each
+		// time. See internal/crypto/randpool.go.
+		if err := crypto.RandRead(b[:]); err != nil {
 			return 0, err
 		}
 		v := binary.BigEndian.Uint32(b[:])
