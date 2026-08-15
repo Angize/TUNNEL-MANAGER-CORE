@@ -32,7 +32,9 @@ func Open(name string, mtu int, addr string, gso bool) (*Device, error) { return
 // linux, so a data-plane test driven over a socketpair still compiles for another GOOS.
 func FromFile(f *os.File, name string) *Device { return &Device{Name: name, f: f} }
 
-func (d *Device) Queued() int                   { return 0 } // no GSO split here: one read, one packet
-func (d *Device) Read(buf []byte) (int, error)  { return d.f.Read(buf) }
-func (d *Device) Write(pkt []byte) (int, error) { return d.f.Write(pkt) }
-func (d *Device) Close() error                  { return d.f.Close() }
+// TryRead never reports a packet waiting off linux: there is no non-blocking read here, so a caller
+// draining a burst simply gets one packet per batch.
+func (d *Device) TryRead(buf []byte) (int, bool, error) { return 0, false, nil }
+func (d *Device) Read(buf []byte) (int, error)          { return d.f.Read(buf) }
+func (d *Device) Write(pkt []byte) (int, error)         { return d.f.Write(pkt) }
+func (d *Device) Close() error                          { return d.f.Close() }

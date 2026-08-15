@@ -969,17 +969,18 @@ func (r *Raw) tunToNet() error {
 			continue
 		}
 		pkt := r.wire(body, peer.IP)
-		// One kernel read already split a super-packet into segments waiting in userspace. Take them
-		// with this one and send the lot in a single syscall -- no wait, so no added latency, and
-		// nothing is held back when there is only one packet to send.
-		// Queued() FIRST: it is a slice length, while canBatch reaches an atomic and an interface
-		// method. With the two the other way round the expensive half ran on every packet even where
-		// no batch is possible -- MEASURED at -7% on a tunnel with GSO off, which never batches at all.
-		if r.dev.Queued() > 0 && r.canBatch() {
+		// Take everything ALREADY waiting behind this packet and send the lot in one syscall. TryRead
+		// never waits, so nothing is held back for a second packet that may not come, and a tunnel with
+		// one packet in flight behaves exactly as it did.
+		//
+		// This used to ask the GSO queue instead, which meant it batched only when the kernel coalesced
+		// -- and on a real host it barely does: one super-packet in a ten-second transfer, on both of
+		// the machines this was measured on. Asking the fd does not depend on that.
+		if r.canBatch() {
 			ms = append(ms[:0], ipv4.Message{Buffers: [][]byte{pkt}, Addr: peer})
-			for len(ms) < maxBatch && r.dev.Queued() > 0 {
-				m, err := r.dev.Read(buf)
-				if err != nil {
+			for len(ms) < maxBatch {
+				m, ok, err := r.dev.TryRead(buf)
+				if err != nil || !ok {
 					break
 				}
 				b, err := r.body(typeData, buf[:m])
@@ -988,14 +989,17 @@ func (r *Raw) tunToNet() error {
 				}
 				ms = append(ms, ipv4.Message{Buffers: [][]byte{r.wire(b, peer.IP)}, Addr: peer})
 			}
-			if sent := sendBatch(r.batch, ms); sent == len(ms) {
-				continue
-			} else {
-				// Whatever the kernel would not take is dropped, exactly as a single send would drop
-				// it; the tunnelled L4 retransmits. Re-sending the accepted ones would duplicate them.
-				r.sendErr.note("raw/batch", errShortBatch)
+			if len(ms) > 1 {
+				// A short write is the kernel saying how many it took; the rest are dropped exactly as a
+				// single send would drop them and the tunnelled L4 retransmits. Re-sending the accepted
+				// ones would duplicate packets that already left.
+				if sent := sendBatch(r.batch, ms); sent != len(ms) {
+					r.sendErr.note("raw/batch", errShortBatch)
+				}
 				continue
 			}
+			// Nothing was waiting. One packet through sendmmsg costs more than the plain send, so fall
+			// through to it rather than paying for a batch of one.
 		}
 		r.writeOut(pkt, peer)
 	}
