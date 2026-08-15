@@ -167,7 +167,8 @@ func sessionID(prefix []byte) uint64 {
 	return binary.BigEndian.Uint64(b[:])
 }
 
-// mask XORs buf in place with the ChaCha20 keystream keyed by (key, salt).
+// mask XORs buf in place with the ChaCha20 keystream keyed by (key, salt). It covers the frame's
+// nonce only: see Seal for why the rest needs no cover.
 func mask(key, salt, buf []byte) error {
 	c, err := chacha20.NewUnauthenticatedCipher(key, salt)
 	if err != nil {
@@ -177,7 +178,7 @@ func mask(key, salt, buf []byte) error {
 	return nil
 }
 
-// Seal returns salt || mask(nonce||ciphertext||tag). aad is authenticated but not
+// Seal returns salt || mask(nonce) || ciphertext || tag. aad is authenticated but not
 // transmitted (callers pass the cleartext frame header so it cannot be flipped).
 func (s *Sealer) Seal(plaintext, aad []byte) ([]byte, error) {
 	// ONE buffer, sized for the whole frame, built in place. The obvious spelling -- allocate a nonce,
@@ -197,7 +198,11 @@ func (s *Sealer) Seal(plaintext, aad []byte) ([]byte, error) {
 	// nonce it is reading. The round-trip tests cover every cipher precisely because that is an
 	// assumption about the AEAD implementations rather than something the signature promises.
 	out = s.sendAEAD.Seal(out, nonce, plaintext, aad) // salt||nonce||ct||tag
-	if err := mask(s.sendMask, out[:maskSaltLen], out[maskSaltLen:]); err != nil {
+	// Mask the NONCE and nothing else. The nonce is the only part of this frame with structure a
+	// watcher could lock onto: a per-session constant prefix followed by a counter that steps by one.
+	// Everything after it is AEAD output, which is already indistinguishable from random without the
+	// key, so masking it again buys no concealment and costs a keystream over the whole packet.
+	if err := mask(s.sendMask, out[:maskSaltLen], out[maskSaltLen:maskSaltLen+ns]); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -213,7 +218,9 @@ func (s *Sealer) Open(wire, aad []byte) (session uint64, seq uint64, pt []byte, 
 	}
 	body := make([]byte, len(wire)-maskSaltLen)
 	copy(body, wire[maskSaltLen:])
-	if err := mask(s.recvMask, wire[:maskSaltLen], body); err != nil {
+	// Only the nonce is masked; see Seal. The copy stays because Open runs against more than one
+	// session before a frame is accepted, so the caller's wire buffer must come back untouched.
+	if err := mask(s.recvMask, wire[:maskSaltLen], body[:ns]); err != nil {
 		return 0, 0, nil, err
 	}
 	nonce := body[:ns]
