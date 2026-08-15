@@ -40,7 +40,8 @@ func TestOnlyAPlainSendPathBatches(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &Raw{batch: pc, link: &fakeFDLink{fd: -1}}
 			tc.set(r)
-			if got := r.canBatch(); got != tc.want {
+			q := &txQueue{batch: r.batch}
+			if got := r.canBatch(q); got != tc.want {
 				t.Fatalf("canBatch() = %v, want %v", got, tc.want)
 			}
 		})

@@ -24,9 +24,11 @@ type Device struct {
 	f    *os.File
 }
 
-// Open always fails off linux. It is the single honest failure point: there is no /dev/net/tun to
+// OpenN always fails off linux. It is the single honest failure point: there is no /dev/net/tun to
 // open and no ioctl to run, so failing here beats pretending anywhere later.
-func Open(name string, mtu int, addr string, gso bool) (*Device, error) { return nil, errNotLinux }
+func OpenN(name string, mtu int, addr string, gso bool, n int) ([]*Device, error) {
+	return nil, errNotLinux
+}
 
 // FromFile wraps an already-open fd as a Device WITHOUT any `ip` configuration, exactly as on
 // linux, so a data-plane test driven over a socketpair still compiles for another GOOS.

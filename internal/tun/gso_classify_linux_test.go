@@ -54,7 +54,7 @@ func TestOnlyTheGSOSpecificIoctlsAreMarkedGSOUnsupported(t *testing.T) {
 				return 0
 			}
 
-			_, err := Open("tnlgsoclassify", 1380, "10.201.0.1/24", c.gso)
+			_, err := OpenN("tnlgsoclassify", 1380, "10.201.0.1/24", c.gso, 1)
 			if err == nil {
 				t.Fatal("want an error")
 			}

@@ -35,6 +35,11 @@ type WSSNI struct {
 // for both "http" and "grpc", since both ride ordinary requests through the CDN.
 func (c *Config) cdnIsHTTP() bool { return c.CDNCarrier == "http" || c.CDNCarrier == "grpc" }
 
+// maxWorkers caps the queues one tunnel may take. Past a few, the send and receive paths stop being
+// what limits it, and every queue costs a read buffer and a share of a host cpu that this tunnel's
+// siblings on the same node also want.
+const maxWorkers = 4
+
 // cdnMode is the upstream style the data plane is told: "grpc", else "post".
 func (c *Config) cdnMode() string {
 	if c.CDNCarrier == "grpc" {
@@ -147,7 +152,14 @@ type Config struct {
 	// SO_SNDBUFFORCE/SO_RCVBUFFORCE, which bypass net.core.{r,w}mem_max. It matters on high-latency links
 	// where the bandwidth-delay product exceeds the default and a burst overflows before the reader
 	// drains it. TCP/WS autotune and are left alone. 0 = 4 MiB; negative = kernel default. Max 64 MiB.
-	SockBuf int       `json:"sock_buf"`
+	SockBuf int `json:"sock_buf"`
+
+	// Workers is how many TUN queues this tunnel gets, which is how many goroutines can write received
+	// packets without queueing behind one file's lock. 0 or 1 keeps the single-queue path exactly as it
+	// was. It is per TUNNEL rather than per host because a node carries several tunnels and only the
+	// operator knows which one is the heavy one -- the sum across a node's tunnels is what has to stay
+	// within its cpu count, and nothing inside one core process can see its siblings.
+	Workers int       `json:"workers"`
 	Crypto  CryptoCfg `json:"crypto"`
 
 	// Obfs turns on anti-DPI framing: the constant magic byte is dropped, the frame type is folded into
@@ -327,6 +339,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Keepalive <= 0 { // <=0: a negative keepalive makes jitter() fire immediately -> ping busy-loop
 		c.Keepalive = defaultKeepaliveSecs
+	}
+	if c.Workers < 1 {
+		c.Workers = 1 // one queue: the path this had before workers existed
+	}
+	if c.Workers > maxWorkers {
+		c.Workers = maxWorkers
 	}
 	if c.SockBuf == 0 { // 0 = pick the default; a negative value means "leave the kernel default" (off)
 		c.SockBuf = 4 << 20 // 4 MiB
