@@ -240,6 +240,13 @@ func (d *Device) Read(buf []byte) (int, error) {
 	}
 }
 
+// Queued reports how many segments the last kernel read already split out and Read has not served yet.
+//
+// It exists so a sender can take a BATCH without ever waiting for one: these bytes are in userspace
+// already, so draining them costs nothing and adds no latency, while asking the kernel for "more, if
+// any" would. Always 0 without GSO, where every read is one packet.
+func (d *Device) Queued() int { return len(d.q) }
+
 // readGSO reads one virtio super-packet and returns its L3 segments (one element
 // for a non-GSO packet). A runt read returns no segments so Read retries.
 func (d *Device) readGSO() ([][]byte, error) {
