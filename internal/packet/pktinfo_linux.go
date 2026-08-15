@@ -16,6 +16,12 @@ import (
 // source — so a client dialing a NON-primary pool IP gets an answer from the primary, its source filter
 // drops it, and that pool IP burns. IP_PKTINFO reports the datagram's target and pins the reply to it.
 
+// pktinfoOOBLen is the control-message room one received datagram gets. An IP_PKTINFO cmsg is 32
+// bytes; the rest is slack for anything else the kernel attaches, because a short buffer truncates the
+// cmsg silently and the reply source then falls back to the kernel's pick — the exact failure this
+// plumbing exists to prevent.
+const pktinfoOOBLen = 128
+
 // enablePktinfoDst turns on IP_PKTINFO so ReadMsgIP reports each datagram's destination address. It
 // RETURNS the failure instead of swallowing it: without IP_PKTINFO the server silently reverts to the
 // kernel-default reply source, which is exactly the bug this plumbing exists to prevent. The caller logs
