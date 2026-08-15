@@ -32,8 +32,14 @@ type Raw struct {
 	conn *net.IPConn
 	// batch is the SAME socket as conn, wrapped so a burst can leave in one sendmmsg instead of one
 	// sendto each. nil when the wrap failed; every send then takes the single-packet path.
-	batch     *ipv4.PacketConn
-	dev       *tun.Device
+	batch *ipv4.PacketConn
+	dev   *tun.Device
+	// rxw writes received packets into the TUN, spread across its queues by flow. Always present; with
+	// a single queue it is the same inline write this path always did. See rxwriter_linux.go.
+	rxw *tunWriters
+	// txq is one send pipeline per queue, each with its own socket. Always at least one, whose device
+	// and socket are dev and batch above. See txqueue_linux.go.
+	txq       []txQueue
 	keepalive time.Duration
 	obfs      bool
 	psk       string
@@ -286,6 +292,10 @@ func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs bool, psk,
 		psk: psk, cipher: cipher, profile: profile, isClient: isClient, fakeFd: -1,
 		icmpID: icmpID, closeCh: make(chan struct{}), wake: make(chan struct{}, 1), spi: spi,
 	}
+	// One queue from the start, so every construction path -- spoof included -- has somewhere to write.
+	// The carriers that were given extra queues replace this before returning.
+	r.rxw = newTunWriters([]*tun.Device{dev})
+	r.txq = []txQueue{{dev: dev, batch: r.batch}}
 	r.newTCPFlow()
 	return r
 }
@@ -375,7 +385,7 @@ func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs bool
 
 // DialRaw (client role) opens a raw carrier of the profile's protocol toward peerIP. No IP spoofing —
 // that is the separate "spoof" transport (DialSpoof); a raw carrier always uses an unforged directLink.
-func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool) (*Raw, error) {
+func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool, extraQ ...*tun.Device) (*Raw, error) {
 	r, err := dialRawBase(peerIP, dev, ka, obfs, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
@@ -386,13 +396,19 @@ func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, c
 	r.setSportMode(sportRandom)
 	r.initFec(fec, fecData, fecParity)
 	r.wireAntiLeak()
+	r.rxw = newTunWriters(append([]*tun.Device{dev}, extraQ...))
+	if err := r.buildTxQueues(extraQ, r.proto); err != nil {
+		r.Close()
+		return nil, err
+	}
+	r.logTxQueues()
 	return r, nil
 }
 
 // ListenRaw (server role) binds a raw carrier of the profile's protocol and learns the peer from the
 // first authenticated frame. No IP spoofing — see ListenSpoof; a raw server always uses a directLink,
 // so its IPConn IS the data path in both directions and gets the configured socket buffers.
-func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool) (*Raw, error) {
+func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool, extraQ ...*tun.Device) (*Raw, error) {
 	r, err := listenRawBase(listenIP, dev, ka, obfs, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
@@ -402,6 +418,12 @@ func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, ps
 	applyConnSockBuf(r.conn)    // a directLink server sends AND receives on this conn
 	r.initFec(fec, fecData, fecParity)
 	r.wireAntiLeak() // no peer yet — tryHandshake scopes it on the authenticated init, learnPeer follows it after
+	r.rxw = newTunWriters(append([]*tun.Device{dev}, extraQ...))
+	if err := r.buildTxQueues(extraQ, r.proto); err != nil {
+		r.Close()
+		return nil, err
+	}
+	r.logTxQueues()
 	return r, nil
 }
 
@@ -420,8 +442,14 @@ func (r *Raw) initFec(fec bool, fecData, fecParity int) {
 
 // Run blocks until one of the loops fails (e.g. the socket or device closes).
 func (r *Raw) Run() error {
-	errc := make(chan error, 2)
-	go func() { errc <- r.tunToNet() }()
+	errc := make(chan error, len(r.txq)+1)
+	// One send loop per queue. Every queue MUST have one: the kernel steers packets onto all of them,
+	// so a queue nobody reads swallows whatever lands there -- the handshake included, which is how a
+	// half-wired multi-queue tunnel fails to come up at all rather than merely running slow.
+	for i := range r.txq {
+		q := &r.txq[i]
+		go func() { errc <- r.tunToNet(q) }()
+	}
 	go func() { errc <- r.link.recvLoop() }() // conn (netToTun) or, for a decoy server, AF_PACKET
 	if r.isClient {
 		go r.clientLoop()
@@ -455,6 +483,8 @@ func (r *Raw) Close() error {
 	if r.inj != nil { // AF_PACKET bad-checksum injector (its own fd guard makes this Close-safe)
 		r.inj.close()
 	}
+	r.rxw.close()     // stop the extra TUN writers; the devices belong to whoever opened them
+	r.closeTxQueues() // and the sockets those extra send pipelines opened
 	return r.conn.Close()
 }
 
@@ -944,7 +974,7 @@ func addAntiLeak(proto int, decoy net.IP, tun string) func() {
 }
 
 // tunToNet reads L3 packets from TUN, seals+wraps them, and sends to the peer.
-func (r *Raw) tunToNet() error {
+func (r *Raw) tunToNet(q *txQueue) error {
 	buf := make([]byte, maxDatagram)
 	// The message array AND its one-element Buffers slices are built once. Writing
 	// `ipv4.Message{Buffers: [][]byte{pkt}}` per packet allocates that inner slice every time, on the
@@ -954,7 +984,7 @@ func (r *Raw) tunToNet() error {
 		ms[i].Buffers = make([][]byte, 1)
 	}
 	for {
-		n, err := r.dev.Read(buf)
+		n, err := q.dev.Read(buf)
 		if err != nil {
 			return err
 		}
@@ -982,11 +1012,11 @@ func (r *Raw) tunToNet() error {
 		// This used to ask the GSO queue instead, which meant it batched only when the kernel coalesced
 		// -- and on a real host it barely does: one super-packet in a ten-second transfer, on both of
 		// the machines this was measured on. Asking the fd does not depend on that.
-		if r.canBatch() {
+		if r.canBatch(q) {
 			ms[0].Buffers[0], ms[0].Addr = pkt, peer
 			n := 1
 			for n < maxBatch {
-				m, ok, err := r.dev.TryRead(buf)
+				m, ok, err := q.dev.TryRead(buf)
 				if err != nil || !ok {
 					break
 				}
@@ -1001,7 +1031,7 @@ func (r *Raw) tunToNet() error {
 				// A short write is the kernel saying how many it took; the rest are dropped exactly as a
 				// single send would drop them and the tunnelled L4 retransmits. Re-sending the accepted
 				// ones would duplicate packets that already left.
-				if sent := sendBatch(r.batch, ms[:n]); sent != n {
+				if sent := sendBatch(q.batch, ms[:n]); sent != n {
 					r.sendErr.note("raw/batch", errShortBatch)
 				}
 				continue
@@ -1017,8 +1047,8 @@ func (r *Raw) tunToNet() error {
 // can go in one call. Everything that needs per-packet work at the socket -- a pinned source (its own
 // control message), a forged link (its own AF_PACKET/HDRINCL socket), FEC (shards leave on a callback,
 // not from here) -- keeps the single-packet path, which is also the only one those have ever used.
-func (r *Raw) canBatch() bool {
-	return r.batch != nil && r.fecEnc == nil && r.pinnedSrc() == nil && r.link.fakeFD() < 0
+func (r *Raw) canBatch(q *txQueue) bool {
+	return q.batch != nil && r.fecEnc == nil && r.pinnedSrc() == nil && r.link.fakeFD() < 0
 }
 
 // recvConnLoop receives raw packets on the AF_INET socket, strips the profile header, authenticates, and
@@ -1329,9 +1359,7 @@ func (r *Raw) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 		// Nothing to record. A pong proved the endpoint answers, and provenFrom already stamped
 		// that off the receive path; the rtt this used to time went to a status field nobody read.
 	case typeData:
-		if _, err := r.dev.Write(payload); err != nil {
-			log.Printf("raw: tun write error: %v", err)
-		}
+		r.rxw.write(payload)
 	}
 }
 

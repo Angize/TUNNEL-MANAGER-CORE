@@ -22,13 +22,14 @@ type openCall struct {
 	mtu  int
 	addr string
 	gso  bool
+	n    int // queues asked for
 }
 
 // scriptedOpener stands in for tun.Open: it records each call and answers from fn.
 func scriptedOpener(t *testing.T, calls *[]openCall, fn func(gso bool) error) tunOpener {
 	t.Helper()
-	return func(name string, mtu int, addr string, gso bool) (*tun.Device, error) {
-		*calls = append(*calls, openCall{name, mtu, addr, gso})
+	return func(name string, mtu int, addr string, gso bool, n int) ([]*tun.Device, error) {
+		*calls = append(*calls, openCall{name, mtu, addr, gso, n})
 		if err := fn(gso); err != nil {
 			return nil, err
 		}
@@ -37,7 +38,7 @@ func scriptedOpener(t *testing.T, calls *[]openCall, fn func(gso bool) error) tu
 			t.Fatalf("pipe: %v", err)
 		}
 		t.Cleanup(func() { r.Close(); w.Close() })
-		return tun.FromFile(r, name), nil
+		return []*tun.Device{tun.FromFile(r, name)}, nil
 	}
 }
 
@@ -62,11 +63,11 @@ func TestAKernelWithoutVnetHdrGetsAWorkingTunnelWithoutGSO(t *testing.T) {
 		return nil
 	})
 
-	dev, gsoOn, err := openTUN(open, "tnl7", 1380, "10.200.0.1/24", true)
+	devs, gsoOn, err := openTUN(open, "tnl7", 1380, "10.200.0.1/24", true, 1)
 	if err != nil {
 		t.Fatalf("a missing vnet-hdr must not be fatal, got %v", err)
 	}
-	if dev == nil {
+	if len(devs) == 0 || devs[0] == nil {
 		t.Fatal("no device returned")
 	}
 	if gsoOn {
@@ -96,7 +97,7 @@ func TestAFailureThatIsNotAboutGSOIsNotRetried(t *testing.T) {
 		return fmt.Errorf("ip addr add: %w", syscall.EEXIST)
 	})
 
-	if _, _, err := openTUN(open, "tnl7", 1380, "10.200.0.1/24", true); !errors.Is(err, syscall.EEXIST) {
+	if _, _, err := openTUN(open, "tnl7", 1380, "10.200.0.1/24", true, 1); !errors.Is(err, syscall.EEXIST) {
 		t.Fatalf("want the original error, got %v", err)
 	}
 	if len(calls) != 1 {
@@ -117,7 +118,7 @@ func TestWhenThePlainOpenFailsTooTheRealCauseIsReported(t *testing.T) {
 		return fmt.Errorf("TUNSETIFF: %w", syscall.EPERM)
 	})
 
-	_, gsoOn, err := openTUN(open, "tnl7", 1380, "10.200.0.1/24", true)
+	_, gsoOn, err := openTUN(open, "tnl7", 1380, "10.200.0.1/24", true, 1)
 	if err == nil {
 		t.Fatal("want the real cause, got nil")
 	}
@@ -144,8 +145,8 @@ func TestAKernelWithGSOOpensOnceAndKeepsIt(t *testing.T) {
 	var calls []openCall
 	open := scriptedOpener(t, &calls, func(bool) error { return nil })
 
-	dev, gsoOn, err := openTUN(open, "tnl7", 1380, "10.200.0.1/24", true)
-	if err != nil || dev == nil {
+	devs, gsoOn, err := openTUN(open, "tnl7", 1380, "10.200.0.1/24", true, 1)
+	if err != nil || len(devs) == 0 || devs[0] == nil {
 		t.Fatalf("open failed: %v", err)
 	}
 	if !gsoOn {
@@ -164,7 +165,7 @@ func TestGSOOffIsPassedThroughUntouched(t *testing.T) {
 	var calls []openCall
 	open := scriptedOpener(t, &calls, func(bool) error { return nil })
 
-	if _, gsoOn, err := openTUN(open, "tnl7", 1380, "10.200.0.1/24", false); err != nil || gsoOn {
+	if _, gsoOn, err := openTUN(open, "tnl7", 1380, "10.200.0.1/24", false, 1); err != nil || gsoOn {
 		t.Fatalf("gso=false must stay off: gsoOn=%v err=%v", gsoOn, err)
 	}
 	if len(calls) != 1 || calls[0].gso {

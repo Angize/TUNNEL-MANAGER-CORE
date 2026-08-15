@@ -42,10 +42,14 @@ var setOffload = func(f *os.File, flags uintptr) syscall.Errno {
 }
 
 const (
-	iffTun    = 0x0001
-	iffNoPI   = 0x1000
-	tunSetIff = 0x400454ca
-	ifReqSize = 40
+	iffTun  = 0x0001
+	iffNoPI = 0x1000
+	// iffMultiQueue makes ONE interface out of several open fds. The device keeps its single name, IP
+	// and MTU -- `ip addr` still shows one card -- and the queues exist only inside this process, so
+	// several goroutines can read and write it without queueing behind one file's lock.
+	iffMultiQueue = 0x0100
+	tunSetIff     = 0x400454ca
+	ifReqSize     = 40
 )
 
 // Device is an open TUN interface. When gso is set it was opened with a
@@ -118,17 +122,61 @@ func (d *Device) reportGSO() {
 		d.Name, cur[0], cur[1], cur[2], oversizeNote(cur[3]))
 }
 
-// Open creates the TUN interface, assigns addr (CIDR, e.g. "10.200.0.1/24"),
-// sets mtu and brings it up. name is a hint; the kernel-assigned name is
-// returned in Device.Name. When gso is true the device is opened with a
-// virtio-net header and TCP/UDP segmentation offload for higher bulk throughput.
-func Open(name string, mtu int, addr string, gso bool) (*Device, error) {
+// OpenN creates the TUN interface, assigns addr (CIDR, e.g. "10.200.0.1/24"), sets mtu and brings it
+// up. name is a hint; the kernel-assigned name is returned in Device.Name. When gso is true the device
+// is opened with a virtio-net header and TCP/UDP segmentation offload for higher bulk throughput.
+// n is how many QUEUES the one interface gets, so n goroutines can drive it without queueing behind a
+// single file's lock. Every queue is a full Device with its own buffers; only the first configures the
+// interface, because there is only ever one interface.
+//
+// Every queue opened MUST be used: the kernel spreads packets across all of them, so a queue nobody
+// reads is a blackhole for whatever lands on it.
+func OpenN(name string, mtu int, addr string, gso bool, n int) ([]*Device, error) {
+	if n < 1 {
+		n = 1
+	}
+	var ds []*Device
+	closeAll := func() {
+		for _, d := range ds {
+			d.Close()
+		}
+	}
+	for i := 0; i < n; i++ {
+		hint := name
+		if i > 0 {
+			hint = ds[0].Name // later queues must name the interface the first one actually got
+		}
+		d, err := openQueue(hint, gso, n > 1)
+		if err != nil {
+			closeAll()
+			return nil, err
+		}
+		ds = append(ds, d)
+	}
+	for _, args := range [][]string{
+		{"link", "set", "dev", ds[0].Name, "mtu", strconv.Itoa(mtu)},
+		{"addr", "add", addr, "dev", ds[0].Name},
+		{"link", "set", "dev", ds[0].Name, "up"},
+	} {
+		if err := ipCmd(args...); err != nil {
+			closeAll()
+			return nil, err
+		}
+	}
+	return ds, nil
+}
+
+// openQueue opens one fd and attaches it to name, returning it as a Device.
+func openQueue(name string, gso, multi bool) (*Device, error) {
 	f, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open /dev/net/tun: %w", err)
 	}
 
 	flags := uint16(iffTun | iffNoPI)
+	if multi {
+		flags |= iffMultiQueue
+	}
 	if gso {
 		flags |= iffVnetHdr
 	}
@@ -165,18 +213,6 @@ func Open(name string, mtu int, addr string, gso bool) (*Device, error) {
 	if err := syscall.SetNonblock(d.fd, true); err != nil {
 		d.Close()
 		return nil, fmt.Errorf("making the tun fd non-blocking: %w", err)
-	}
-	if err := ipCmd("link", "set", "dev", real, "mtu", strconv.Itoa(mtu)); err != nil {
-		d.Close()
-		return nil, err
-	}
-	if err := ipCmd("addr", "add", addr, "dev", real); err != nil {
-		d.Close()
-		return nil, err
-	}
-	if err := ipCmd("link", "set", "dev", real, "up"); err != nil {
-		d.Close()
-		return nil, err
 	}
 	return d, nil
 }

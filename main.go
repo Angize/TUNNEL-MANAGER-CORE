@@ -30,21 +30,21 @@ const version = "0.1.0-core"
 
 // tunOpener is tun.Open. It exists so openTUN's fallback can be tested without a
 // TUN device, a kernel that lacks IFF_VNET_HDR, or root.
-type tunOpener func(name string, mtu int, addr string, gso bool) (*tun.Device, error)
+type tunOpener func(name string, mtu int, addr string, gso bool, n int) ([]*tun.Device, error)
 
 // openTUN opens the TUN and returns the gso setting the device ACTUALLY got. A failed gso ioctl falls
 // back to a plain device — gso is a throughput knob, not a requirement. The retry is also what makes
 // the log honest: ErrGSOUnsupported cannot tell "no vnet-hdr here" from "no CAP_NET_ADMIN", so the
 // message is written only when the plain open succeeded; if that fails too, the SECOND error is real.
-func openTUN(open tunOpener, name string, mtu int, addr string, gso bool) (*tun.Device, bool, error) {
-	dev, err := open(name, mtu, addr, gso)
+func openTUN(open tunOpener, name string, mtu int, addr string, gso bool, n int) ([]*tun.Device, bool, error) {
+	devs, err := open(name, mtu, addr, gso, n)
 	if err == nil {
-		return dev, gso, nil
+		return devs, gso, nil
 	}
 	if !errors.Is(err, tun.ErrGSOUnsupported) {
 		return nil, false, err
 	}
-	plain, plainErr := open(name, mtu, addr, false)
+	plain, plainErr := open(name, mtu, addr, false, n)
 	if plainErr != nil {
 		return nil, false, plainErr
 	}
@@ -94,11 +94,23 @@ func main() {
 	// on hosts without getrandom(2) that opens /dev/urandom and registers it with the runtime netpoller,
 	// which can leave a subsequently opened TUN fd in a half-pollable state — reads fail with "not
 	// pollable" and the reader loop dies.
-	dev, gsoOn, err := openTUN(tun.Open, cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO)
+	// Extra queues only where a carrier drains them: the raw receive path does, and FEC does not --
+	// its decoder rebuilds a block out of consecutive frames. A queue nobody reads is a blackhole,
+	// because the kernel keeps steering flows onto it.
+	nq := 1
+	if cfg.Transport == "raw" && !cfg.Fec {
+		nq = cfg.Workers
+	}
+	devs, gsoOn, err := openTUN(tun.OpenN, cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO, nq)
 	if err != nil {
 		log.Fatalf("tnl-core: tun: %v", err)
 	}
-	defer dev.Close()
+	dev := devs[0]
+	defer func() {
+		for _, d := range devs {
+			d.Close()
+		}
+	}()
 
 	cipherName := "off"
 	if cfg.Crypto.Enabled {
@@ -165,12 +177,12 @@ func main() {
 	case "raw":
 		switch cfg.Role {
 		case "server":
-			b, err = packet.ListenRaw(cfg.Listen, dev, ka, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSportRandom)
+			b, err = packet.ListenRaw(cfg.Listen, dev, ka, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSportRandom, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/raw:%s%s%s) on %s", cfg.RawProfile, obfsTag, fecTag, cfg.Listen)
 			}
 		case "client":
-			b, err = packet.DialRaw(cfg.Peer, dev, ka, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSportRandom)
+			b, err = packet.DialRaw(cfg.Peer, dev, ka, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSportRandom, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/raw:%s%s%s) %s", cfg.RawProfile, obfsTag, fecTag, cfg.Peer)
 			}
