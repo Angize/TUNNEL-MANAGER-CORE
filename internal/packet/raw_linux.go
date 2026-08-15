@@ -1012,24 +1012,35 @@ func (r *Raw) canBatch() bool {
 // recvConnLoop receives raw packets on the AF_INET socket, strips the profile header, authenticates, and
 // writes data frames into the TUN. It is the receive path for every configuration except a decoy server,
 // which reads off the wire through the forgedLink's AF_PACKET loop instead.
+// A whole burst is taken in ONE recvmmsg. At the tunnel's ceiling a CPU profile of this end put HALF
+// the core in the syscall boundary itself, one crossing per packet, while the AEAD was under 3% -- and
+// when this loop is what limits the tunnel, packets are already queued, so the batches come out full.
+// rawDecap strips an included IPv4 header when it sees one, so it does not matter that a raw socket
+// hands recvmmsg the header ReadMsgIP did not.
 func (r *Raw) recvConnLoop() error {
-	buf := make([]byte, maxDatagram)
-	oob := make([]byte, 128) // room for the IP_PKTINFO control message (server dst capture)
+	b := newRecvBatcher(maxRecvBatch)
 	for {
-		n, oobn, _, addr, err := r.conn.ReadMsgIP(buf, oob) // ReadMsgIP == ReadFromIP for buf, plus the oob
+		ms, err := b.recv(r.batch)
 		if err != nil {
 			return err
 		}
-		if r.link.filterSrc() { // a forged/pinned source can't be filtered by — the AEAD authenticates
-			if peer := r.peer.Load(); peer != nil && !addr.IP.Equal(peer.IP) && !r.srcAllowed(addr.IP) {
-				continue // only the peer's packets are ours (raw sockets see all); a pooled server also
-				// admits the client's other known source IPs so a source rotation reaches crypto and re-binds
+		for i := range ms {
+			m := &ms[i]
+			addr, _ := m.Addr.(*net.IPAddr)
+			if addr == nil {
+				continue
 			}
+			if r.link.filterSrc() { // a forged/pinned source can't be filtered by — the AEAD authenticates
+				if peer := r.peer.Load(); peer != nil && !addr.IP.Equal(peer.IP) && !r.srcAllowed(addr.IP) {
+					continue // only the peer's packets are ours (raw sockets see all); a pooled server also
+					// admits the client's other known source IPs so a source rotation reaches crypto and re-binds
+				}
+			}
+			if !r.isClient { // server: answer THIS frame (and its handshake RESP) from the IP the client dialed
+				r.learnReplySrc(m.OOB[:m.NN])
+			}
+			r.handleRaw(m.Buffers[0][:m.N], addr)
 		}
-		if !r.isClient { // server: answer THIS frame (and its handshake RESP) from the IP the client dialed
-			r.learnReplySrc(oob[:oobn])
-		}
-		r.handleRaw(buf[:n], addr)
 	}
 }
 
