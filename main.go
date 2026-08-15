@@ -94,11 +94,11 @@ func main() {
 	// on hosts without getrandom(2) that opens /dev/urandom and registers it with the runtime netpoller,
 	// which can leave a subsequently opened TUN fd in a half-pollable state — reads fail with "not
 	// pollable" and the reader loop dies.
-	// Extra queues only where a carrier drains them: the raw receive path does, and FEC does not --
-	// its decoder rebuilds a block out of consecutive frames. A queue nobody reads is a blackhole,
-	// because the kernel keeps steering flows onto it.
+	// Extra queues only where a carrier drains them -- a queue nobody reads is a blackhole, because the
+	// kernel keeps steering flows onto it. FEC is excluded everywhere: its decoder rebuilds a block out
+	// of consecutive frames, so a second queue has nothing to give it.
 	nq := 1
-	if cfg.Transport == "raw" && !cfg.Fec {
+	if !cfg.Fec && queueingCarrier(cfg.Transport) {
 		nq = cfg.Workers
 	}
 	devs, gsoOn, err := openTUN(tun.OpenN, cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO, nq)
@@ -294,12 +294,12 @@ func main() {
 			if len(la) == 0 {
 				la = []string{cfg.Listen}
 			}
-			b, err = packet.Listen(la, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Fec, cfg.FecData, cfg.FecParity)
+			b, err = packet.Listen(la, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Fec, cfg.FecData, cfg.FecParity, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/udp%s%s) on %v", obfsTag, fecTag, la)
 			}
 		case "client":
-			b, err = packet.Dial(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Fec, cfg.FecData, cfg.FecParity)
+			b, err = packet.Dial(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Fec, cfg.FecData, cfg.FecParity, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/udp%s%s) %s", obfsTag, fecTag, cfg.Peer)
 			}
