@@ -745,6 +745,10 @@ func (b *UDP) frame(typ byte, payload []byte) ([]byte, error) {
 // dropped; the peer retransmits at L4.
 func (b *UDP) tunToNet(dev *tun.Device) error {
 	buf := make([]byte, maxDatagram)
+	// Rebuilt whenever the send socket is swapped (a source rotation, or a server learning which pool IP
+	// to reply from). Per rotation is nothing; per packet would cost more than the syscall it saves.
+	var tx *udpTx
+	var txFor *net.UDPConn
 	for {
 		n, err := dev.Read(buf)
 		if err != nil {
@@ -766,12 +770,41 @@ func (b *UDP) tunToNet(dev *tun.Device) error {
 			b.fecEnc.addData(frame) // buffered into an RS block; shards go out via the emit callback
 			continue
 		}
-		if c := b.sendConn(); c != nil {
-			if _, err := c.WriteToUDP(frame, peer); err != nil {
-				// Throttled: a failing socket fails at packet rate, and an unthrottled line here writes
-				// thousands a second into the journal, which hides the fault as effectively as silence.
-				b.sendErr.note("udp", err)
+		c := b.sendConn()
+		if c == nil {
+			continue
+		}
+		if txFor != c {
+			tx, txFor = newUDPTx(c), c
+		}
+		if tx != nil {
+			// Take everything ALREADY waiting behind this packet and send the lot in one syscall.
+			// TryRead never waits, so nothing is held back for a second packet that may not come, and a
+			// tunnel with one packet in flight behaves exactly as it did.
+			tx.reset()
+			tx.add(frame, peer)
+			for !tx.full() {
+				m, ok, err := dev.TryRead(buf)
+				if err != nil || !ok {
+					break
+				}
+				f, err := b.frame(typeData, buf[:m])
+				if err != nil {
+					continue
+				}
+				tx.add(f, peer)
 			}
+			if tx.count() > 1 {
+				tx.flush(&b.sendErr)
+				continue
+			}
+			// Nothing was waiting. One packet through sendmmsg costs more than the plain send, so fall
+			// through to it rather than paying for a batch of one.
+		}
+		if _, err := c.WriteToUDP(frame, peer); err != nil {
+			// Throttled: a failing socket fails at packet rate, and an unthrottled line here writes
+			// thousands a second into the journal, which hides the fault as effectively as silence.
+			b.sendErr.note("udp", err)
 		}
 	}
 }
