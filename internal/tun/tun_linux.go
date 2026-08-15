@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 // ErrGSOUnsupported wraps a failure of one of the two ioctls Open runs ONLY when gso was asked for:
@@ -156,6 +158,14 @@ func Open(name string, mtu int, addr string, gso bool) (*Device, error) {
 	if gso {
 		d.rbuf = make([]byte, vnetHdrLen+65535)
 	}
+	// Non-blocking, so a read that finds nothing returns EAGAIN instead of sleeping. That is what lets
+	// the send path take a whole burst at once: read the first packet, then keep taking whatever is
+	// ALREADY waiting until the queue runs dry. Read keeps its blocking contract by waiting on poll(2)
+	// when that happens, so no caller has to change.
+	if err := syscall.SetNonblock(d.fd, true); err != nil {
+		d.Close()
+		return nil, fmt.Errorf("making the tun fd non-blocking: %w", err)
+	}
 	if err := ipCmd("link", "set", "dev", real, "mtu", strconv.Itoa(mtu)); err != nil {
 		d.Close()
 		return nil, err
@@ -199,10 +209,47 @@ func rawWrite(fd int, p []byte) (int, error) {
 // netpoller-free path above; the test-only FromFile device sets fd<0 and falls back to os.File
 // (its socketpair stand-in is pollable and never hits the poisoned-pollDesc problem).
 func (d *Device) rd(p []byte) (int, error) {
-	if d.fd >= 0 {
-		return rawRead(d.fd, p)
+	if d.fd < 0 {
+		return d.f.Read(p)
 	}
-	return d.f.Read(p)
+	for {
+		n, err := rawRead(d.fd, p)
+		if err != syscall.EAGAIN {
+			return n, err
+		}
+		if err := d.waitReadable(); err != nil {
+			return 0, err
+		}
+	}
+}
+
+// tryRd is rd without the wait: ok is false the moment the fd has nothing, which is how a drain knows
+// where the burst ended. The FromFile stand-in has no non-blocking mode, so it reports nothing waiting
+// and simply never batches.
+func (d *Device) tryRd(p []byte) (int, bool, error) {
+	if d.fd < 0 {
+		return 0, false, nil
+	}
+	n, err := rawRead(d.fd, p)
+	if err == syscall.EAGAIN {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return n, true, nil
+}
+
+// waitReadable sleeps until the fd has something, on poll(2) rather than go's netpoller -- the same
+// reason rawRead uses a bare syscall. Only reached because the fd is non-blocking.
+func (d *Device) waitReadable() error {
+	fds := []unix.PollFd{{Fd: int32(d.fd), Events: unix.POLLIN}}
+	for {
+		_, err := unix.Poll(fds, -1)
+		if err != unix.EINTR {
+			return err
+		}
+	}
 }
 
 func (d *Device) wr(p []byte) (int, error) {
@@ -226,26 +273,50 @@ func (d *Device) Read(buf []byte) (int, error) {
 			}
 			d.q = segs
 		}
-		seg := d.q[0]
-		d.q = d.q[1:]
-		// A packet that does not fit is DROPPED, not truncated. copy() silently shortens, and the carrier
-		// would then ship a header claiming a length the body no longer has — a corrupt packet the far end
-		// cannot even diagnose. No caller in THIS binary can reach it (rbuf is vnetHdrLen+65535 and every
-		// caller passes maxDatagram), but Read is exported, so this stays as the boundary guard it is.
-		if len(seg) > len(buf) {
-			d.nOversize.Add(1)
-			continue
+		if n, ok := d.serve(buf); ok {
+			return n, nil
 		}
-		return copy(buf, seg), nil
 	}
 }
 
-// Queued reports how many segments the last kernel read already split out and Read has not served yet.
+// TryRead is Read without the wait: it serves a segment already split out, or takes a packet already
+// waiting on the fd, and reports ok=false the moment there is neither.
 //
-// It exists so a sender can take a BATCH without ever waiting for one: these bytes are in userspace
-// already, so draining them costs nothing and adds no latency, while asking the kernel for "more, if
-// any" would. Always 0 without GSO, where every read is one packet.
-func (d *Device) Queued() int { return len(d.q) }
+// It is what lets a sender collect a burst into ONE syscall without ever holding the first packet back
+// for a second that may not come. The send path used to get its batches only from the GSO queue, which
+// meant it got them only when the kernel coalesced -- MEASURED on two real hosts, that is close to
+// never: one super-packet in a ten-second transfer. Asking the fd directly does not care.
+func (d *Device) TryRead(buf []byte) (int, bool, error) {
+	if !d.gso {
+		return d.tryRd(buf)
+	}
+	for {
+		for len(d.q) == 0 {
+			segs, ok, err := d.tryReadGSO()
+			if err != nil || !ok {
+				return 0, false, err
+			}
+			d.q = segs
+		}
+		if n, ok := d.serve(buf); ok {
+			return n, true, nil
+		}
+	}
+}
+
+// serve hands out the next queued segment. A packet that does not fit is DROPPED, not truncated:
+// copy() silently shortens, and the carrier would then ship a header claiming a length the body no
+// longer has -- a corrupt packet the far end cannot even diagnose. No caller in THIS binary can reach
+// it (rbuf is vnetHdrLen+65535 and every caller passes maxDatagram), but Read is exported.
+func (d *Device) serve(buf []byte) (int, bool) {
+	seg := d.q[0]
+	d.q = d.q[1:]
+	if len(seg) > len(buf) {
+		d.nOversize.Add(1)
+		return 0, false
+	}
+	return copy(buf, seg), true
+}
 
 // readGSO reads one virtio super-packet and returns its L3 segments (one element
 // for a non-GSO packet). A runt read returns no segments so Read retries.
@@ -254,8 +325,23 @@ func (d *Device) readGSO() ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	return d.segsFrom(n), nil
+}
+
+// tryReadGSO is readGSO without the wait, for the drain half of a batch.
+func (d *Device) tryReadGSO() ([][]byte, bool, error) {
+	n, ok, err := d.tryRd(d.rbuf)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	return d.segsFrom(n), true, nil
+}
+
+// segsFrom turns one super-packet read of n bytes into its L3 segments: one element for a plain
+// packet, and none for a runt so the caller reads again.
+func (d *Device) segsFrom(n int) [][]byte {
 	if n <= vnetHdrLen {
-		return nil, nil
+		return nil
 	}
 	flags := d.rbuf[0]
 	gsoType := int(d.rbuf[1])
@@ -277,12 +363,12 @@ func (d *Device) readGSO() ([][]byte, error) {
 			d.nUnsplit.Add(1)
 		}
 		d.reportGSO()
-		return segs, nil
+		return segs
 	}
 	d.nSuper.Add(1)
 	d.nSeg.Add(uint64(len(segs)))
 	d.reportGSO()
-	return segs, nil
+	return segs
 }
 
 // Write hands one L3 packet to the kernel. With GSO the kernel expects a virtio-net header prefix, and a

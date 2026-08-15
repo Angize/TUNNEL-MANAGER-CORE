@@ -47,25 +47,26 @@ func TestOnlyAPlainSendPathBatches(t *testing.T) {
 	}
 }
 
-// The cheap half of the condition has to be tested FIRST. canBatch reaches an atomic and an interface
-// method; Queued is a slice length. With the two the other way round the expensive half ran on every
-// packet even on a tunnel that never batches — MEASURED at about -7% with GSO off, where the queue is
-// always empty. There is no way to observe evaluation order from outside, so this reads the source.
-func TestTheCheapConditionIsTestedFirst(t *testing.T) {
+// A batch must never WAIT for a second packet. The drain uses TryRead, which reports "nothing there"
+// instead of sleeping; with a plain Read in that loop a tunnel carrying one packet at a time would
+// hold each one until the next arrived, turning an idle link into a stalled one. There is no way to
+// observe that from outside a running tunnel, so this reads the source.
+func TestTheBatchDrainNeverWaits(t *testing.T) {
 	b, err := os.ReadFile("raw_linux.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	src := string(b)
-	i := strings.Index(src, "r.dev.Queued() > 0 && r.canBatch()")
-	j := strings.Index(src, "r.canBatch() && r.dev.Queued() > 0")
-	if j >= 0 {
-		t.Fatal("canBatch() is evaluated before Queued(), so its cost is paid per packet on every " +
-			"carrier — including the ones that can never batch")
-	}
+	i := strings.Index(src, "for len(ms) < maxBatch {")
 	if i < 0 {
-		t.Fatal("the batch condition is not the expected shape; check whether it still short-circuits " +
-			"on the cheap test")
+		t.Fatal("the drain loop is not the expected shape; check what bounds it now")
+	}
+	body := src[i:]
+	if end := strings.Index(body, "\n\t\t\t}"); end > 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "TryRead") {
+		t.Fatal("the drain does not use TryRead, so it can block waiting for a packet that never comes")
 	}
 }
 
