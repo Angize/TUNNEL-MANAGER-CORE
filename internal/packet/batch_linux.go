@@ -65,7 +65,11 @@ func (b *recvBatcher) recv(pc *ipv4.PacketConn) ([]ipv4.Message, error) {
 
 // batchConn wraps a socket so bursts can leave in one call. A nil return is not a failure worth
 // reporting: every caller keeps its single-packet path and simply uses it.
-func batchConn(c net.PacketConn) *ipv4.PacketConn {
+//
+// The parameter is the concrete socket type, not net.PacketConn, so the nil test is a real one. A nil
+// *net.IPConn handed to an INTERFACE parameter is not equal to nil, so the guard below would wave it
+// straight through into a wrap that dereferences it.
+func batchConn(c *net.IPConn) *ipv4.PacketConn {
 	if c == nil {
 		return nil
 	}

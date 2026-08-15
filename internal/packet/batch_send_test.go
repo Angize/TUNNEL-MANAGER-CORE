@@ -82,6 +82,12 @@ func TestSendBatchIsSafeWhenThereIsNothingToSend(t *testing.T) {
 	if batchConn(nil) != nil {
 		t.Fatal("wrapping a nil socket produced a non-nil batcher")
 	}
+	// The shape that actually reaches a guard like this one: a TYPED nil. An interface parameter would
+	// have carried it past the test above and into a dereference, so the literal nil alone proves
+	// nothing about the case that can really happen.
+	if batchConn((*net.IPConn)(nil)) != nil {
+		t.Fatal("wrapping a typed-nil socket produced a non-nil batcher")
+	}
 }
 
 // maxBatch bounds the message array. The TUN's queue holds at most one super-packet's worth of
