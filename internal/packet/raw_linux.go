@@ -946,7 +946,13 @@ func addAntiLeak(proto int, decoy net.IP, tun string) func() {
 // tunToNet reads L3 packets from TUN, seals+wraps them, and sends to the peer.
 func (r *Raw) tunToNet() error {
 	buf := make([]byte, maxDatagram)
-	ms := make([]ipv4.Message, 0, maxBatch)
+	// The message array AND its one-element Buffers slices are built once. Writing
+	// `ipv4.Message{Buffers: [][]byte{pkt}}` per packet allocates that inner slice every time, on the
+	// hottest path there is; here each slot's Buffers[0] is simply pointed at this packet's bytes.
+	ms := make([]ipv4.Message, maxBatch)
+	for i := range ms {
+		ms[i].Buffers = make([][]byte, 1)
+	}
 	for {
 		n, err := r.dev.Read(buf)
 		if err != nil {
@@ -977,8 +983,9 @@ func (r *Raw) tunToNet() error {
 		// -- and on a real host it barely does: one super-packet in a ten-second transfer, on both of
 		// the machines this was measured on. Asking the fd does not depend on that.
 		if r.canBatch() {
-			ms = append(ms[:0], ipv4.Message{Buffers: [][]byte{pkt}, Addr: peer})
-			for len(ms) < maxBatch {
+			ms[0].Buffers[0], ms[0].Addr = pkt, peer
+			n := 1
+			for n < maxBatch {
 				m, ok, err := r.dev.TryRead(buf)
 				if err != nil || !ok {
 					break
@@ -987,13 +994,14 @@ func (r *Raw) tunToNet() error {
 				if err != nil {
 					continue
 				}
-				ms = append(ms, ipv4.Message{Buffers: [][]byte{r.wire(b, peer.IP)}, Addr: peer})
+				ms[n].Buffers[0], ms[n].Addr = r.wire(b, peer.IP), peer
+				n++
 			}
-			if len(ms) > 1 {
+			if n > 1 {
 				// A short write is the kernel saying how many it took; the rest are dropped exactly as a
 				// single send would drop them and the tunnelled L4 retransmits. Re-sending the accepted
 				// ones would duplicate packets that already left.
-				if sent := sendBatch(r.batch, ms); sent != len(ms) {
+				if sent := sendBatch(r.batch, ms[:n]); sent != n {
 					r.sendErr.note("raw/batch", errShortBatch)
 				}
 				continue
