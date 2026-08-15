@@ -187,7 +187,9 @@ func (s *Sealer) Seal(plaintext, aad []byte) ([]byte, error) {
 	sealed := s.sendAEAD.Seal(nonce, nonce, plaintext, aad) // nonce||ct||tag
 
 	out := make([]byte, maskSaltLen+len(sealed))
-	if _, err := io.ReadFull(rand.Reader, out[:maskSaltLen]); err != nil {
+	// Buffered, not weakened: RandRead hands out crypto/rand's own bytes a block at a time, because
+	// reading them one salt at a time is a syscall per packet. See randpool.go.
+	if err := RandRead(out[:maskSaltLen]); err != nil {
 		return nil, err
 	}
 	copy(out[maskSaltLen:], sealed)
