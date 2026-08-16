@@ -1013,7 +1013,14 @@ func (r *Raw) tunToNet(q *txQueue) error {
 		// -- and on a real host it barely does: one super-packet in a ten-second transfer, on both of
 		// the machines this was measured on. Asking the fd does not depend on that.
 		if r.canBatch(q) {
-			ms[0].Buffers[0], ms[0].Addr = pkt, peer
+			// The pin is read ONCE for the whole burst. It changes only when the peer starts dialing a
+			// different address of ours, and a burst is microseconds -- the same staleness the
+			// single-packet path already has between two consecutive sends.
+			var oob []byte
+			if src := r.pinnedSrc(); src != nil {
+				oob = r.srcOOB(src)
+			}
+			ms[0].Buffers[0], ms[0].Addr, ms[0].OOB = pkt, peer, oob
 			n := 1
 			for n < maxBatch {
 				m, ok, err := q.dev.TryRead(buf)
@@ -1024,7 +1031,7 @@ func (r *Raw) tunToNet(q *txQueue) error {
 				if err != nil {
 					continue
 				}
-				ms[n].Buffers[0], ms[n].Addr = r.wire(b, peer.IP), peer
+				ms[n].Buffers[0], ms[n].Addr, ms[n].OOB = r.wire(b, peer.IP), peer, oob
 				n++
 			}
 			if n > 1 {
@@ -1044,11 +1051,15 @@ func (r *Raw) tunToNet(q *txQueue) error {
 }
 
 // canBatch reports that this carrier's sends are plain "write these bytes to that address", so a burst
-// can go in one call. Everything that needs per-packet work at the socket -- a pinned source (its own
-// control message), a forged link (its own AF_PACKET/HDRINCL socket), FEC (shards leave on a callback,
-// not from here) -- keeps the single-packet path, which is also the only one those have ever used.
+// can go in one call. A forged link (its own AF_PACKET/HDRINCL socket) and FEC (shards leave on a
+// callback, not from here) keep the single-packet path.
+//
+// A pinned source does NOT: sendmmsg carries a control message PER MESSAGE, so the same IP_PKTINFO the
+// single-packet path attaches rides along on every message of the batch. Excluding it meant a SERVER --
+// which pins its reply source the moment it learns which of its IPs the client dialed -- could never
+// batch at all.
 func (r *Raw) canBatch(q *txQueue) bool {
-	return q.batch != nil && r.fecEnc == nil && r.pinnedSrc() == nil && r.link.fakeFD() < 0
+	return q.batch != nil && r.fecEnc == nil && r.link.fakeFD() < 0
 }
 
 // recvConnLoop receives raw packets on the AF_INET socket, strips the profile header, authenticates, and
