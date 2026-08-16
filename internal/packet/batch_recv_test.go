@@ -89,6 +89,25 @@ func TestABurstIsTakenWithoutWaitingForTheArrayToFill(t *testing.T) {
 	}
 }
 
+// The depth is the whole point: a burst has to come back in ONE call rather than in instalments, both
+// because each call is a syscall and because the run it returns is what the TUN writer joins into a
+// single write. A shallower array silently caps both.
+func TestAWholeBurstComesBackInOneCall(t *testing.T) {
+	pc, _, tx := listener(t)
+	b := newRecvBatcher(maxRecvBatch)
+
+	const sent = 40 // more than a batch used to hold, fewer than one holds now
+	for i := 0; i < sent; i++ {
+		if _, err := tx.Write([]byte{byte(i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ms := recvOrTimeout(t, b, pc); len(ms) != sent {
+		t.Fatalf("took %d of %d queued datagrams in one call: the rest wait for another syscall, and the "+
+			"tun writer never sees them as one run", len(ms), sent)
+	}
+}
+
 func TestEverySlotKeepsItsOwnBytes(t *testing.T) {
 	pc, _, tx := listener(t)
 	b := newRecvBatcher(maxRecvBatch)

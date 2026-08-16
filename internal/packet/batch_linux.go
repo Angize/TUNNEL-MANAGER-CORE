@@ -29,10 +29,13 @@ const maxBatch = 64
 // log says which path dropped rather than reporting a bare nil.
 var errShortBatch = errors.New("sendmmsg accepted only part of the batch")
 
-// maxRecvBatch caps one recvmmsg. It is a memory trade, not a free cap like the send side's: every
-// slot holds its own full-size buffer for as long as the batch is being handled, so 8 buys 7 of every
-// 8 receive syscalls back for half a megabyte per tunnel, and 16 would buy only 3 more in 32.
-const maxRecvBatch = 8
+// maxRecvBatch caps one recvmmsg. It is a memory trade, not a free cap like the send side's: every slot
+// holds its own full-size buffer for as long as the batch is being handled.
+//
+// It buys two things, not one. Beyond the receive syscalls it saves, the run it returns is what the TUN
+// writer joins into a single write, so the same number bounds how well the WRITE side can batch -- which
+// is why it is worth more now than the arithmetic on receive syscalls alone once said.
+const maxRecvBatch = 64
 
 // recvBatcher owns the message array a batched receive reads into. Each slot keeps its OWN buffer:
 // sharing one across slots would leave every message pointing at the same bytes.
