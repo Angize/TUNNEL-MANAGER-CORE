@@ -527,21 +527,45 @@ func Listen(listenAddrs []string, dev *tun.Device, keepalive time.Duration, obfs
 // unauthenticated datagram to another pool IP cannot hijack the reply source.
 func (b *UDP) serverReadLoop(c *net.UDPConn) error {
 	buf := make([]byte, maxDatagram)
+	bat := newUDPBatch(c) // nil off linux; the single-datagram read below is the fallback
 	for {
+		if bat != nil {
+			ds, err := bat.recv()
+			if err != nil {
+				return err
+			}
+			for _, d := range ds {
+				// Locked per datagram, not per batch: one socket must not hold the receiver while it
+				// drains a burst, or a pooled server's other listen sockets wait behind it.
+				b.rxMu.Lock()
+				b.rxConn.Store(c)
+				b.receive(d.pkt, d.addr)
+				b.rxMu.Unlock()
+			}
+			continue
+		}
 		n, addr, err := c.ReadFromUDP(buf)
 		if err != nil {
 			return err
 		}
 		b.rxMu.Lock()
 		b.rxConn.Store(c) // candidate; learnPeer promotes it to replyConn after the frame authenticates
-		if b.fecDec != nil {
-			b.rxAddr.Store(addr)
-			b.fecDec.input(buf[:n])
-		} else {
-			b.deliver(buf[:n], addr)
-		}
+		b.receive(buf[:n], addr)
 		b.rxMu.Unlock()
 	}
+}
+
+// receive takes one datagram into the FEC decoder or straight to the carrier's delivery, under whatever
+// the caller holds. Both receive loops go through here, so the two cannot drift apart.
+func (b *UDP) receive(pkt []byte, addr *net.UDPAddr) {
+	if b.fecDec != nil {
+		// The caller is the sole receiver, so rxAddr is stable for the whole input() call (the decoder
+		// delivers recovered frames synchronously within it).
+		b.rxAddr.Store(addr)
+		b.fecDec.input(pkt)
+		return
+	}
+	b.deliver(pkt, addr)
 }
 
 // learnPeer records the authenticated client's source address and, on a server, promotes the socket the
@@ -757,26 +781,41 @@ func (b *UDP) tunToNet(dev *tun.Device) error {
 // under the current session are tried as handshake messages.
 func (b *UDP) netToTun() error {
 	buf := make([]byte, maxDatagram)
+	// A source rotation swaps the socket, so the batcher is rebuilt whenever the conn it wraps is no
+	// longer the current one. Rebuilding per rotation is nothing; rebuilding per datagram would cost
+	// more than the syscall it saves.
+	var bat *udpBatch
+	var batFor *net.UDPConn
 	for {
 		gen := b.rebindGen.Load()
-		n, addr, err := b.conn.Load().ReadFromUDP(buf)
+		c := b.conn.Load()
+		if batFor != c {
+			bat, batFor = newUDPBatch(c), c
+		}
+		// A source rotation closes the old socket out from under this read. Distinguish that deliberate
+		// swap (gen advanced) — reload the new socket and keep going — from a genuine socket death (gen
+		// unchanged), which ends the loop as before.
+		if bat != nil {
+			ds, err := bat.recv()
+			if err != nil {
+				if b.rebindGen.Load() != gen {
+					continue
+				}
+				return err
+			}
+			for _, d := range ds {
+				b.receive(d.pkt, d.addr)
+			}
+			continue
+		}
+		n, addr, err := c.ReadFromUDP(buf)
 		if err != nil {
-			// A source rotation closes the old socket out from under this read. Distinguish that
-			// deliberate swap (gen advanced) — reload the new socket and keep going — from a genuine
-			// socket death (gen unchanged), which ends the loop as before.
 			if b.rebindGen.Load() != gen {
 				continue
 			}
 			return err
 		}
-		if b.fecDec != nil {
-			// netToTun is the sole reader, so rxAddr is stable for the whole input()
-			// call (the decoder delivers recovered frames synchronously within it).
-			b.rxAddr.Store(addr)
-			b.fecDec.input(buf[:n])
-			continue
-		}
-		b.deliver(buf[:n], addr)
+		b.receive(buf[:n], addr)
 	}
 }
 
