@@ -1,6 +1,8 @@
-//go:build linux
-
 // One TUN writer per queue, so received packets stop queueing behind a single file descriptor.
+//
+// Carrier-agnostic on purpose: the packet handed in is already plaintext, so nothing here knows which
+// carrier decrypted it. Portable for the same reason -- it uses only the device's Write, which exists
+// off linux too, and a carrier that lives in a portable file could not reference it otherwise.
 //
 // A cpu profile of a saturated RECEIVING end, taken on a production node, put 71% of the process in
 // syscalls and 3.1% in the AEAD. The cost is the write, not the crypto -- so the crypto stays where it
@@ -61,7 +63,7 @@ func (w *tunWriters) run(i int) {
 
 func (w *tunWriters) put(i int, pkt []byte) {
 	if _, err := w.devs[i].Write(pkt); err != nil {
-		log.Printf("raw: tun write error: %v", err)
+		log.Printf("core: tun write error: %v", err)
 	}
 }
 
@@ -83,6 +85,11 @@ func (w *tunWriters) write(pkt []byte) {
 	default: // that writer is behind; drop, exactly as this carrier drops everywhere else
 	}
 }
+
+// spread reports whether writes actually go to more than one queue. Callers use it to decide whether a
+// packet is about to cross a goroutine boundary, which is the only case where a buffer they do not own
+// has to be copied.
+func (w *tunWriters) spread() bool { return len(w.ch) > 1 }
 
 func (w *tunWriters) close() { w.once.Do(func() { close(w.done) }) }
 

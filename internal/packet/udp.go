@@ -90,7 +90,11 @@ type UDP struct {
 	replyConn atomic.Pointer[net.UDPConn]
 	rxConn    atomic.Pointer[net.UDPConn]
 	rxMu      sync.Mutex
-	dev       *tun.Device
+	// devs is every TUN queue this tunnel owns. One send loop reads each: a queue the kernel steers
+	// egress onto with nobody reading it is a blackhole, so the send side has to match the receive side
+	// one for one. tw spreads the RECEIVE writes across the same set.
+	devs      []*tun.Device
+	tw        *tunWriters
 	keepalive time.Duration
 	obfs      bool
 	cryptoOn  bool
@@ -460,7 +464,7 @@ func (b *UDP) provenFrom(ip net.IP) {
 }
 
 // Dial (client role) binds an ephemeral UDP socket and targets peerAddr.
-func Dial(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, fec bool, fecData, fecParity int) (*UDP, error) {
+func Dial(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, fec bool, fecData, fecParity int, extra ...*tun.Device) (*UDP, error) {
 	ra, err := net.ResolveUDPAddr("udp", peerAddr)
 	if err != nil {
 		return nil, err
@@ -470,19 +474,29 @@ func Dial(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, crypt
 		return nil, err
 	}
 	applyConnSockBuf(conn)
-	b := &UDP{dev: dev, keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, isClient: true,
+	b := &UDP{keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, isClient: true,
 		closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
+	b.initQueues(dev, extra)
 	b.conn.Store(conn)
 	b.peer.Store(ra)
 	b.initFec(fec, fecData, fecParity)
 	return b, nil
 }
 
+// initQueues records every TUN queue this tunnel owns and builds the receive-side writers. With no
+// extra queues this is exactly the old path: newTunWriters returns a writer set with no channels and no
+// goroutines, and write() puts straight to devs[0] inline.
+func (b *UDP) initQueues(dev *tun.Device, extra []*tun.Device) {
+	b.devs = append([]*tun.Device{dev}, extra...)
+	b.tw = newTunWriters(b.devs)
+}
+
 // Listen (server role) binds one socket per listen address and waits to learn the peer. A non-pooled
 // server passes a single address; a pooled server passes one "ip:port" per selected pool IP, so only
 // those IPs listen (not 0.0.0.0) and each reply leaves from the IP the client actually dialed.
-func Listen(listenAddrs []string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, fec bool, fecData, fecParity int) (*UDP, error) {
-	b := &UDP{dev: dev, keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, closeCh: make(chan struct{})}
+func Listen(listenAddrs []string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, fec bool, fecData, fecParity int, extra ...*tun.Device) (*UDP, error) {
+	b := &UDP{keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, closeCh: make(chan struct{})}
+	b.initQueues(dev, extra)
 	for _, listenAddr := range listenAddrs {
 		la, err := net.ResolveUDPAddr("udp", listenAddr)
 		if err == nil {
@@ -649,8 +663,11 @@ func (b *UDP) initFec(fec bool, fecData, fecParity int) {
 // Run blocks until one of the loops fails (e.g. a socket or the device closes). The client reads its one
 // socket; a server reads each of its listen sockets (one per pool IP) in its own loop.
 func (b *UDP) Run() error {
-	errc := make(chan error, 2+len(b.srvConns))
-	go func() { errc <- b.tunToNet() }()
+	errc := make(chan error, 1+len(b.devs)+len(b.srvConns))
+	for _, d := range b.devs {
+		d := d
+		go func() { errc <- b.tunToNet(d) }()
+	}
 	if b.isClient {
 		go func() { errc <- b.netToTun() }()
 		go b.clientLoop()
@@ -667,6 +684,7 @@ func (b *UDP) Run() error {
 // than once.
 func (b *UDP) Close() error {
 	b.closeOnce.Do(func() { close(b.closeCh) })
+	b.tw.close()
 	if b.fecEnc != nil {
 		b.fecEnc.Close() // stop the FEC flush timer before the socket goes away
 	}
@@ -701,10 +719,10 @@ func (b *UDP) frame(typ byte, payload []byte) ([]byte, error) {
 // tunToNet reads L3 packets from TUN, seals them, and sends to the peer. Packets
 // read before a session exists (crypto on, handshake not yet complete) are
 // dropped; the peer retransmits at L4.
-func (b *UDP) tunToNet() error {
+func (b *UDP) tunToNet(dev *tun.Device) error {
 	buf := make([]byte, maxDatagram)
 	for {
-		n, err := b.dev.Read(buf)
+		n, err := dev.Read(buf)
 		if err != nil {
 			return err
 		}
@@ -780,7 +798,14 @@ func (b *UDP) deliver(pkt []byte, addr *net.UDPAddr) {
 	if b.pp == nil {      // a pooled client owns its peer (mirror the crypto path); a server always learns it
 		b.learnPeer(addr)
 	}
-	b.dispatch(pkt[1], iff(pkt[1] == typeData, pkt[2:], nil), addr)
+	pt := iff(pkt[1] == typeData, pkt[2:], nil)
+	if pt != nil && b.tw.spread() {
+		// Clear mode has no AEAD to allocate for us: pt aliases the receive buffer, which the reader
+		// overwrites on the very next datagram. Crossing a goroutine boundary with it would hand a
+		// writer packets that change under it. Copy exactly here, where that is the case.
+		pt = append([]byte(nil), pt...)
+	}
+	b.dispatch(pkt[1], pt, addr)
 }
 
 // sealBody builds one outbound frame for typ/payload: obfs, crypto (magic+type+sealed), or clear
@@ -958,9 +983,7 @@ func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {
 		// Nothing to record. A pong proved the endpoint answers, and provenFrom already stamped
 		// that off the receive path; the rtt this used to time went to a status field nobody read.
 	case typeData:
-		if _, err := b.dev.Write(payload); err != nil {
-			log.Printf("core: tun write error: %v", err)
-		}
+		b.tw.write(payload)
 	}
 }
 

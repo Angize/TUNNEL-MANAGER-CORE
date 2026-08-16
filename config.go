@@ -35,6 +35,11 @@ type WSSNI struct {
 // for both "http" and "grpc", since both ride ordinary requests through the CDN.
 func (c *Config) cdnIsHTTP() bool { return c.CDNCarrier == "http" || c.CDNCarrier == "grpc" }
 
+// queueingCarrier reports whether a carrier drains every TUN queue it is given. Adding one here is not
+// a config change: that carrier's send side must read EACH queue and its receive side must write through
+// the flow-hashed writers, or the queues the kernel steers egress onto swallow traffic silently.
+func queueingCarrier(t string) bool { return t == "raw" || t == "udp" }
+
 // maxWorkers caps the queues one tunnel may take. Past a few, the send and receive paths stop being
 // what limits it, and every queue costs a read buffer and a share of a host cpu that this tunnel's
 // siblings on the same node also want.
