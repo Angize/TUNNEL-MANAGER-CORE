@@ -241,6 +241,28 @@ func rawWrite(fd int, p []byte) (int, error) {
 	}
 }
 
+// rawWritev writes hdr and pkt as ONE packet, gathered by the kernel, so a caller that has a packet in
+// two pieces does not have to join them first.
+//
+// The iovec array is built here on the stack rather than through unix.Writev, which allocates one per
+// call: this runs once per received packet, and not allocating is the whole point of the two pieces.
+func rawWritev(fd int, hdr, pkt []byte) (int, error) {
+	var iov [2]unix.Iovec
+	iov[0].Base, iov[1].Base = &hdr[0], &pkt[0]
+	iov[0].SetLen(len(hdr))
+	iov[1].SetLen(len(pkt))
+	for {
+		n, _, errno := syscall.Syscall(unix.SYS_WRITEV, uintptr(fd), uintptr(unsafe.Pointer(&iov[0])), 2)
+		if errno == syscall.EINTR {
+			continue
+		}
+		if errno != 0 {
+			return int(n), errno
+		}
+		return int(n), nil
+	}
+}
+
 // rd/wr are the data-path I/O. The production device (Open) has a real fd and uses the raw,
 // netpoller-free path above; the test-only FromFile device sets fd<0 and falls back to os.File
 // (its socketpair stand-in is pollable and never hits the poisoned-pollDesc problem).
@@ -293,6 +315,18 @@ func (d *Device) wr(p []byte) (int, error) {
 		return rawWrite(d.fd, p)
 	}
 	return d.f.Write(p)
+}
+
+// wrv is wr for a packet the caller holds in two pieces. The test-only FromFile device has no raw fd
+// and joins them; every device that carries traffic has one.
+func (d *Device) wrv(hdr, pkt []byte) (int, error) {
+	if d.fd >= 0 {
+		return rawWritev(d.fd, hdr, pkt)
+	}
+	joined := make([]byte, len(hdr)+len(pkt))
+	copy(joined, hdr)
+	copy(joined[len(hdr):], pkt)
+	return d.f.Write(joined)
 }
 
 // Read returns one L3 packet into buf. With GSO enabled it serves segments from
@@ -407,17 +441,21 @@ func (d *Device) segsFrom(n int) [][]byte {
 	return segs
 }
 
-// Write hands one L3 packet to the kernel. With GSO the kernel expects a virtio-net header prefix, and a
-// zero header means "one complete packet, checksums done". There is no GRO here — the write side never
-// coalesces — so with GSO on this pays one allocation and one copy per packet just to prepend that
-// header. That is the cost side of the knob, and why the offload is a read-side win, not a symmetric one.
+// zeroVnetHdr is the virtio-net header meaning "one complete packet, checksums done". It is never
+// written to, so every packet points at this one copy instead of carrying a freshly zeroed prefix.
+var zeroVnetHdr [vnetHdrLen]byte
+
+// Write hands one L3 packet to the kernel. With GSO the kernel expects a virtio-net header prefix, which
+// goes as a second iovec: the packet is written where it already is, so nothing is allocated or copied
+// to make room for ten leading bytes. There is still no GRO here — the write side never coalesces.
 func (d *Device) Write(pkt []byte) (int, error) {
 	if !d.gso {
 		return d.wr(pkt)
 	}
-	out := make([]byte, vnetHdrLen+len(pkt))
-	copy(out[vnetHdrLen:], pkt)
-	n, err := d.wr(out)
+	if len(pkt) == 0 {
+		return 0, nil
+	}
+	n, err := d.wrv(zeroVnetHdr[:], pkt)
 	if n -= vnetHdrLen; n < 0 {
 		n = 0
 	}
