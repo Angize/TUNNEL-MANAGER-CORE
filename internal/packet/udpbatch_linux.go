@@ -48,3 +48,49 @@ func (b *udpBatch) recv() ([]datagram, error) {
 	}
 	return b.ds, nil
 }
+
+// udpTx sends a burst of frames in one sendmmsg.
+//
+// The message array AND its one-element Buffers slices are built once and then only re-pointed at each
+// frame. Writing `ipv4.Message{Buffers: [][]byte{pkt}}` per packet allocates that inner slice on the
+// hottest path there is.
+type udpTx struct {
+	pc *ipv4.PacketConn
+	ms []ipv4.Message
+	n  int
+}
+
+func newUDPTx(c *net.UDPConn) *udpTx {
+	if c == nil {
+		return nil
+	}
+	t := &udpTx{pc: ipv4.NewPacketConn(c), ms: make([]ipv4.Message, maxBatch)}
+	for i := range t.ms {
+		t.ms[i].Buffers = make([][]byte, 1)
+	}
+	return t
+}
+
+func (t *udpTx) reset()     { t.n = 0 }
+func (t *udpTx) full() bool { return t.n >= maxBatch }
+func (t *udpTx) count() int { return t.n }
+
+// add holds one frame for the next flush. pkt must be storage the caller does not reuse before then --
+// every framing path here seals into a fresh buffer, so it is.
+func (t *udpTx) add(pkt []byte, to *net.UDPAddr) {
+	t.ms[t.n].Buffers[0], t.ms[t.n].Addr = pkt, to
+	t.n++
+}
+
+// flush sends what was added and reports how many left.
+//
+// A short write is not an error to retry: sendmmsg says how many messages it accepted and the rest are
+// dropped here, which is the contract the single-packet path already has with the kernel. Re-sending
+// the accepted ones would duplicate packets that already went.
+func (t *udpTx) flush(errs *sendErrLog) int {
+	sent := sendBatch(t.pc, t.ms[:t.n])
+	if sent != t.n {
+		errs.note("udp/batch", errShortBatch)
+	}
+	return sent
+}
