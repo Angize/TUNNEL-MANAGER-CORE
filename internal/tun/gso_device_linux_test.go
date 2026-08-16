@@ -168,7 +168,7 @@ func TestGSOReportsAtRuntimeNotOnlyAtShutdown(t *testing.T) {
 	if _, err := dev.Read(buf); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "gso 1 super-packets -> 3 segments") {
+	if !strings.Contains(out.String(), "in 1 super-packets -> 3 segments") {
 		t.Fatalf("nothing reported while running; log was %q — the knob is unverifiable until shutdown", out.String())
 	}
 
@@ -252,7 +252,7 @@ func TestGSOFirstLineIsNotAllZeros(t *testing.T) {
 	if _, err := dev.Read(buf); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "gso 1 super-packets -> 3 segments") {
+	if !strings.Contains(out.String(), "in 1 super-packets -> 3 segments") {
 		t.Fatalf("the first real coalescing was not reported at once; log was %q", out.String())
 	}
 }

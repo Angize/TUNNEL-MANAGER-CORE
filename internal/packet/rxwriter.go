@@ -30,39 +30,57 @@ const rxQueueDepth = 256
 // tunWriters spreads TUN writes across a device's queues.
 type tunWriters struct {
 	devs []*tun.Device
-	ch   []chan []byte // nil for a single-queue carrier; ch[0] is always nil (written inline)
+	ch   []chan []byte
 	done chan struct{}
 	once sync.Once
 }
 
-// newTunWriters starts one goroutine per EXTRA queue. Queue 0 is written inline by the reader, so a
-// single-queue carrier keeps exactly the path it had: no channel, no goroutine, no added latency.
+// newTunWriters starts one goroutine per queue, the reader's own included.
+//
+// The writer exists to have MORE THAN ONE PACKET IN HAND: a device joins consecutive segments of one
+// connection into a single write, and a reader writing inline never holds two packets at once, so it
+// can never join anything. It costs one channel hop and removes most of the write syscalls.
 func newTunWriters(devs []*tun.Device) *tunWriters {
-	w := &tunWriters{devs: devs, done: make(chan struct{})}
-	if len(devs) < 2 {
-		return w
-	}
-	w.ch = make([]chan []byte, len(devs))
-	for i := 1; i < len(devs); i++ {
+	w := &tunWriters{devs: devs, done: make(chan struct{}), ch: make([]chan []byte, len(devs))}
+	for i := range devs {
 		w.ch[i] = make(chan []byte, rxQueueDepth)
 		go w.run(i)
 	}
 	return w
 }
 
+// run takes the packet that woke it plus everything ALREADY queued behind it -- never waiting for more,
+// so a quiet tunnel writes one packet exactly as it did -- and hands the run to the device, which joins
+// what it can into one write.
 func (w *tunWriters) run(i int) {
+	pend := make([][]byte, 0, rxQueueDepth)
 	for {
 		select {
 		case pkt := <-w.ch[i]:
-			w.put(i, pkt)
+			pend = w.drain(i, append(pend[:0], pkt))
+			w.put(i, pend)
+			clear(pend) // the run is written: stop holding its buffers alive
 		case <-w.done:
 			return
 		}
 	}
 }
 
-func (w *tunWriters) put(i int, pkt []byte) {
-	if _, err := w.devs[i].Write(pkt); err != nil {
+// drain takes what is already waiting on the queue, and stops the moment it is empty.
+func (w *tunWriters) drain(i int, pend [][]byte) [][]byte {
+	for len(pend) < cap(pend) {
+		select {
+		case p := <-w.ch[i]:
+			pend = append(pend, p)
+		default:
+			return pend
+		}
+	}
+	return pend
+}
+
+func (w *tunWriters) put(i int, pkts [][]byte) {
+	if err := w.devs[i].WriteBatch(pkts); err != nil {
 		log.Printf("core: tun write error: %v", err)
 	}
 }
@@ -77,7 +95,12 @@ func (w *tunWriters) write(pkt []byte) {
 		i = int(flowHash(pkt) % uint32(n))
 	}
 	if i == 0 {
-		w.put(0, pkt)
+		// Queue 0 is the reader's own: it waits for that writer exactly as it waited for the write
+		// syscall it used to make itself, so nothing is dropped here that was not dropped before.
+		select {
+		case w.ch[0] <- pkt:
+		case <-w.done:
+		}
 		return
 	}
 	select {
@@ -85,11 +108,6 @@ func (w *tunWriters) write(pkt []byte) {
 	default: // that writer is behind; drop, exactly as this carrier drops everywhere else
 	}
 }
-
-// spread reports whether writes actually go to more than one queue. Callers use it to decide whether a
-// packet is about to cross a goroutine boundary, which is the only case where a buffer they do not own
-// has to be copied.
-func (w *tunWriters) spread() bool { return len(w.ch) > 1 }
 
 func (w *tunWriters) close() { w.once.Do(func() { close(w.done) }) }
 
