@@ -114,21 +114,86 @@ func TestWhatCannotBeParsedGoesToTheReadersOwnQueue(t *testing.T) {
 	}
 }
 
-// A carrier with one queue must keep the path it had: written inline by the reader, with no channel
-// and no second goroutine. Anything else adds a hop and a scheduling delay to every packet of every
-// tunnel that never asked for workers.
-func TestASingleQueueCarrierWritesInline(t *testing.T) {
+// A carrier with one queue gets a writer of its own, because a reader writing inline holds one packet
+// at a time and can therefore never join two into one write. What must not change is that the packet
+// still arrives.
+func TestASingleQueueCarrierStillReachesItsDevice(t *testing.T) {
 	d, done := fakeDev(t)
 	w := newTunWriters([]*tun.Device{d})
 	defer w.close()
-	if w.ch != nil {
-		t.Fatal("a single-queue carrier built writer channels")
+	if len(w.ch) != 1 {
+		t.Fatalf("a single-queue carrier built %d writer channels, want 1", len(w.ch))
 	}
 	w.write(flowPkt(t, "10.0.0.1", "10.0.0.2", 6, 1234, 443))
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("the packet never reached the device")
+	}
+}
+
+// The reader must not be able to lose a packet by running ahead of its writer. Queue 0 is the one the
+// reader used to write itself, so it WAITS there: a full queue slows the reader down, as the write
+// syscall did, and never silently drops what it was handed.
+func TestTheReadersOwnQueueWaitsRatherThanDropping(t *testing.T) {
+	r, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close(); wr.Close() })
+	w := newTunWriters([]*tun.Device{tun.FromFile(wr, "q0")})
+	defer w.close()
+
+	const n = rxQueueDepth * 3
+	go func() {
+		for i := 0; i < n; i++ {
+			w.write(flowPkt(t, "10.0.0.1", "10.0.0.2", 6, 1234, 443))
+		}
+	}()
+	// A pipe is a byte stream, so count BYTES: several packets can land in one Read.
+	got, buf := 0, make([]byte, 65536)
+	deadline := time.Now().Add(10 * time.Second)
+	for got < n*24 {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of %d bytes arrived: the reader's own queue dropped what it was handed", got, n*24)
+		}
+		k, err := r.Read(buf)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		got += k
+	}
+}
+
+// A run handed to one queue must reach the device in the order it was written, whatever the writer
+// batches together: the tunnelled connection reads reordering as loss.
+func TestAQueueWritesItsRunInOrder(t *testing.T) {
+	r, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close(); wr.Close() })
+	w := newTunWriters([]*tun.Device{tun.FromFile(wr, "q0")})
+	defer w.close()
+
+	const n = 200
+	for i := 0; i < n; i++ {
+		p := flowPkt(t, "10.0.0.1", "10.0.0.2", 6, 1234, 443)
+		p[23] = byte(i) // the dport low byte carries the sequence this test checks
+		w.write(p)
+	}
+	buf, seen := make([]byte, 24*n), 0
+	for seen < 24*n {
+		k, err := r.Read(buf[seen:])
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		seen += k
+	}
+	for i := 0; i < n; i++ {
+		if got := buf[i*24+23]; got != byte(i) {
+			t.Fatalf("packet %d arrived at position %d: the run was reordered", got, i)
+		}
 	}
 }
 

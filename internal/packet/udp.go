@@ -871,10 +871,10 @@ func (b *UDP) deliver(pkt []byte, addr *net.UDPAddr) {
 		b.learnPeer(addr)
 	}
 	pt := iff(pkt[1] == typeData, pkt[2:], nil)
-	if pt != nil && b.tw.spread() {
+	if pt != nil {
 		// Clear mode has no AEAD to allocate for us: pt aliases the receive buffer, which the reader
-		// overwrites on the very next datagram. Crossing a goroutine boundary with it would hand a
-		// writer packets that change under it. Copy exactly here, where that is the case.
+		// overwrites on the very next datagram. Every queue is written by a goroutine of its own, so a
+		// packet always crosses that boundary and always has to be copied here.
 		pt = append([]byte(nil), pt...)
 	}
 	b.dispatch(pkt[1], pt, addr)

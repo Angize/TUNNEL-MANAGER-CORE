@@ -73,9 +73,14 @@ type Device struct {
 	// NON-ZERO — a permanent "0 oversize dropped" is noise in a line whose job is "is this knob working?".
 	nOversize atomic.Uint64
 
+	// nOut and nWrites are the WRITE side's answer to the same question: how many packets left, and how
+	// many writes carried them. BOTH halves are counted, joined or not -- a ratio that ignored the
+	// single-packet writes would read as "every packet is being joined" on a tunnel where most are not.
+	nOut, nWrites atomic.Uint64
+
 	// Reporting state, touched ONLY by the single reader goroutine (readGSO), so no lock.
 	repAt   time.Time // when the reporting window last restarted
-	repSeen [4]uint64 // the values logged then: super, seg, unsplit, oversize
+	repSeen [6]uint64 // the values logged then: super, seg, unsplit, oversize, joined, writes
 	repSaid bool      // a line has been written at least once
 }
 
@@ -91,10 +96,11 @@ const gsoReportEvery = 10 * time.Minute
 // read would say "0 -> 0" before the kernel could coalesce anything. readGSO only, so no lock.
 func (d *Device) reportGSO() {
 	now := time.Now()
-	cur := [4]uint64{d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), d.nOversize.Load()}
+	cur := [6]uint64{d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), d.nOversize.Load(),
+		d.nOut.Load(), d.nWrites.Load()}
 	if d.repAt.IsZero() {
 		d.repAt = now
-		if cur == ([4]uint64{}) {
+		if cur == ([6]uint64{}) {
 			// FIRST read and nothing has happened yet. "gso 0 super-packets -> 0 segments" here is not
 			// evidence of anything — it is just too early — and it reads exactly like the answer THE
 			// KNOB IS INERT. Printing it milliseconds after startup told the operator the opposite of
@@ -118,8 +124,8 @@ func (d *Device) reportGSO() {
 		}
 	}
 	d.repAt, d.repSeen, d.repSaid = now, cur, true
-	log.Printf("tun %s: gso %d super-packets -> %d segments, %d unsplit%s",
-		d.Name, cur[0], cur[1], cur[2], oversizeNote(cur[3]))
+	log.Printf("tun %s: gso in %d super-packets -> %d segments, %d unsplit%s; out %d packets in %d writes",
+		d.Name, cur[0], cur[1], cur[2], oversizeNote(cur[3]), cur[4], cur[5])
 }
 
 // OpenN creates the TUN interface, assigns addr (CIDR, e.g. "10.200.0.1/24"), sets mtu and brings it
@@ -241,18 +247,13 @@ func rawWrite(fd int, p []byte) (int, error) {
 	}
 }
 
-// rawWritev writes hdr and pkt as ONE packet, gathered by the kernel, so a caller that has a packet in
-// two pieces does not have to join them first.
-//
-// The iovec array is built here on the stack rather than through unix.Writev, which allocates one per
-// call: this runs once per received packet, and not allocating is the whole point of the two pieces.
-func rawWritev(fd int, hdr, pkt []byte) (int, error) {
-	var iov [2]unix.Iovec
-	iov[0].Base, iov[1].Base = &hdr[0], &pkt[0]
-	iov[0].SetLen(len(hdr))
-	iov[1].SetLen(len(pkt))
+// writeIovec writes the pieces as ONE packet, gathered by the kernel. Callers build the array on the
+// stack rather than going through unix.Writev, which allocates one per call: this runs once per
+// received packet, and not allocating is the whole point of writing in pieces.
+func writeIovec(fd int, iov []unix.Iovec) (int, error) {
 	for {
-		n, _, errno := syscall.Syscall(unix.SYS_WRITEV, uintptr(fd), uintptr(unsafe.Pointer(&iov[0])), 2)
+		n, _, errno := syscall.Syscall(unix.SYS_WRITEV, uintptr(fd),
+			uintptr(unsafe.Pointer(&iov[0])), uintptr(len(iov)))
 		if errno == syscall.EINTR {
 			continue
 		}
@@ -261,6 +262,16 @@ func rawWritev(fd int, hdr, pkt []byte) (int, error) {
 		}
 		return int(n), nil
 	}
+}
+
+// rawWritev writes hdr and pkt as ONE packet, so a caller that has a packet in two pieces does not have
+// to join them first.
+func rawWritev(fd int, hdr, pkt []byte) (int, error) {
+	var iov [2]unix.Iovec
+	iov[0].Base, iov[1].Base = &hdr[0], &pkt[0]
+	iov[0].SetLen(len(hdr))
+	iov[1].SetLen(len(pkt))
+	return writeIovec(fd, iov[:])
 }
 
 // rd/wr are the data-path I/O. The production device (Open) has a real fd and uses the raw,
@@ -326,6 +337,30 @@ func (d *Device) wrv(hdr, pkt []byte) (int, error) {
 	joined := make([]byte, len(hdr)+len(pkt))
 	copy(joined, hdr)
 	copy(joined[len(hdr):], pkt)
+	return d.f.Write(joined)
+}
+
+// wrvGSO is wrv for a super-packet: the virtio header, the leading packet entire, then each follower's
+// payload from where it already sits. Same seam as wrv, so the fd-less device joins here too rather
+// than in the caller.
+func (d *Device) wrvGSO(vnet, lead []byte, rest [][]byte, off int) (int, error) {
+	if d.fd >= 0 {
+		var iov [groMaxSegs + 1]unix.Iovec
+		iov[0].Base, iov[1].Base = &vnet[0], &lead[0]
+		iov[0].SetLen(len(vnet))
+		iov[1].SetLen(len(lead))
+		for i, p := range rest {
+			pay := p[off:]
+			iov[i+2].Base = &pay[0]
+			iov[i+2].SetLen(len(pay))
+		}
+		return writeIovec(d.fd, iov[:len(rest)+2])
+	}
+	joined := make([]byte, 0, len(vnet)+len(lead))
+	joined = append(append(joined, vnet...), lead...)
+	for _, p := range rest {
+		joined = append(joined, p[off:]...)
+	}
 	return d.f.Write(joined)
 }
 
@@ -450,7 +485,12 @@ var zeroVnetHdr [vnetHdrLen]byte
 // to make room for ten leading bytes. There is still no GRO here — the write side never coalesces.
 func (d *Device) Write(pkt []byte) (int, error) {
 	if !d.gso {
-		return d.wr(pkt)
+		n, err := d.wr(pkt)
+		if err == nil {
+			d.nOut.Add(1)
+			d.nWrites.Add(1)
+		}
+		return n, err
 	}
 	if len(pkt) == 0 {
 		return 0, nil
@@ -458,6 +498,10 @@ func (d *Device) Write(pkt []byte) (int, error) {
 	n, err := d.wrv(zeroVnetHdr[:], pkt)
 	if n -= vnetHdrLen; n < 0 {
 		n = 0
+	}
+	if err == nil {
+		d.nOut.Add(1)
+		d.nWrites.Add(1)
 	}
 	return n, err
 }
@@ -475,11 +519,12 @@ func oversizeNote(n uint64) string {
 
 // Close removes the interface (non-persistent).
 func (d *Device) Close() error {
-	if d.gso && (d.nSuper.Load() > 0 || d.nUnsplit.Load() > 0 || d.nOversize.Load() > 0) {
+	if d.gso && (d.nSuper.Load() > 0 || d.nUnsplit.Load() > 0 || d.nOversize.Load() > 0 || d.nOut.Load() > 0) {
 		// log, not fmt: this is the closing entry of the same series reportGSO writes while the
 		// tunnel runs, so it belongs in the journal beside them and not on a stdout nobody reads.
-		log.Printf("tun %s: gso final: %d super-packets -> %d segments, %d unsplit%s",
-			d.Name, d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), oversizeNote(d.nOversize.Load()))
+		log.Printf("tun %s: gso final: in %d super-packets -> %d segments, %d unsplit%s; out %d packets in %d writes",
+			d.Name, d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), oversizeNote(d.nOversize.Load()),
+			d.nOut.Load(), d.nWrites.Load())
 	}
 	return d.f.Close()
 }
