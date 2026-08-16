@@ -57,6 +57,19 @@ func pktinfoOOB(src net.IP) []byte {
 	return b
 }
 
+// udpSegmentOOB builds the UDP_SEGMENT control message that tells the kernel to cut one outgoing buffer
+// into datagrams of size bytes. The wire is unchanged: the peer receives the same separate datagrams,
+// with the same header on each -- only the number of trips through the local stack changes.
+func udpSegmentOOB(size int) []byte {
+	b := make([]byte, unix.CmsgSpace(2))
+	h := (*unix.Cmsghdr)(unsafe.Pointer(&b[0]))
+	h.Level = unix.IPPROTO_UDP
+	h.Type = unix.UDP_SEGMENT
+	h.SetLen(unix.CmsgLen(2))
+	*(*uint16)(unsafe.Pointer(&b[unix.CmsgLen(0)])) = uint16(size)
+	return b
+}
+
 // cachedOOB is the control message pktinfoOOB built for one source. Every outbound packet of a
 // pinned-source carrier needs it and it is 32 bytes of identical work each time; the source itself
 // changes only on a rotation.
