@@ -92,9 +92,13 @@ type Raw struct {
 	tsStart atomic.Int64 // unix nanos; both are re-drawn with the flow, so both must be atomic
 	tsEcr   atomic.Uint32
 	lastRx  atomic.Int64 // unix-nano of the last authenticated frame (client staleness)
+	// lastRxCur is that stamp narrowed to the CURRENT destination. A rotation pool keeps ONE session
+	// across every endpoint, so a reply from the endpoint we are not on proves the session is alive --
+	// and nothing at all about whether the tuple we ARE on still carries.
+	lastRxCur atomic.Int64
 	// lastAsk: unix-nano of the last frame this client sent that the peer OWES an answer to -- a
-	// keepalive ping, or a handshake init. Older than lastRx means everything asked has been answered.
-	// Stamped only where those are sent, never on the data path.
+	// keepalive ping, or a handshake init. Older than lastRxCur means everything asked has been
+	// answered. Stamped only where those are sent, never on the data path.
 	lastAsk atomic.Int64
 	// peerAnswered gates the clear-mode heal: set when the CURRENT endpoint replies, cleared on
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
@@ -868,15 +872,15 @@ func portSilence(keepalive time.Duration) time.Duration {
 // portDead reports that the CURRENT 4-tuple is not carrying: something we sent that the peer owes an
 // answer to has gone unanswered for longer than any legitimate gap.
 //
-// Keyed on the ASK rather than on lastRx alone, because an idle tunnel between keepalives looks exactly
-// as silent as a dead one -- and the whole point is to tell them apart.
+// Keyed on the ASK rather than on lastRxCur alone, because an idle tunnel between keepalives looks
+// exactly as silent as a dead one -- and the whole point is to tell them apart.
 func (r *Raw) portDead(now time.Time) bool {
 	ps := portSilence(r.keepalive)
 	if ps <= 0 {
 		return false // no window fits inside this dead window: the scheduled roll owns the port alone
 	}
 	ask := r.lastAsk.Load()
-	if ask == 0 || ask <= r.lastRx.Load() {
+	if ask == 0 || ask <= r.lastRxCur.Load() {
 		return false // nothing outstanding: the last thing we asked for came back
 	}
 	return now.Sub(time.Unix(0, ask)) > ps
@@ -1207,7 +1211,7 @@ func (r *Raw) openWith(s Sealer, body []byte) (typ byte, session, seq uint64, pa
 func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
 	if s := r.sealer(); s != nil {
 		if typ, session, seq, payload, oerr := r.openWith(s, body); oerr == nil && r.rp.ok(session, seq) {
-			r.markRx()            // the session is answering
+			r.markRx(addr.IP)     // the session is answering
 			r.provenFrom(addr.IP) // ...and, unless it came from an endpoint we left, the current one is alive
 			r.learnPeer(addr)
 			r.learnClientPort(sport)
@@ -1225,7 +1229,7 @@ func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
 			r.fecDec.reset() // a fresh session: the peer may have restarted its block numbering
 			r.rp = st.rp
 			r.staged = nil
-			r.markRx() // a pending session promoted -> genuine inbound
+			r.markRx(addr.IP) // a pending session promoted -> genuine inbound
 			r.learnPeer(addr)
 			r.learnClientPort(sport)
 			r.dispatch(typ, payload, addr)
@@ -1287,7 +1291,7 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 		// instead of re-parsing and wiping the fresh anti-replay window. A legitimate
 		// re-handshake regenerates a fresh ci in sendInit (ci==nil path).
 		r.ci.Store(nil)
-		r.markRx()              // server RESP arrived: genuine inbound (green on a real connect)
+		r.markRx(addr.IP)       // server RESP arrived: genuine inbound (green on a real connect)
 		r.provenFrom(addr.IP)   // ...and it answered the endpoint we are addressing
 		r.st.reconnected("raw") // recovery after a self-heal (nil-safe; silent on first connect)
 		return
@@ -1384,9 +1388,26 @@ func (r *Raw) deadWin() time.Duration { return deadWindow(r.keepalive) }
 func (r *Raw) sessionStale() bool { return staleSince(r.lastRx.Load(), r.deadWin()) }
 
 // markRx stamps a genuine inbound frame onto the failover clock. Failover-clock seeds
-// (connect / rotation) call lastRx.Store directly, so this stays the one PROVEN-inbound stamp.
-func (r *Raw) markRx() {
-	r.lastRx.Store(time.Now().UnixNano())
+// (connect / rotation) go through seedRx, so this stays the one PROVEN-inbound stamp.
+//
+// from is the address the frame arrived from: only the CURRENT destination's reply advances the
+// per-tuple clock the source-port roll reads, or a pool probing its other endpoints would answer
+// on their behalf and the dead tuple could never be condemned.
+func (r *Raw) markRx(from net.IP) {
+	now := time.Now().UnixNano()
+	r.lastRx.Store(now)
+	if p := r.peer.Load(); p != nil && from != nil && p.IP.Equal(from) {
+		r.lastRxCur.Store(now)
+	}
+}
+
+// seedRx re-bases both receive clocks on a destination nothing has been heard from yet. Both, or an
+// ask the endpoint we just left never answered would date the fresh tuple's silence and condemn its
+// source port before it has had a chance to reply.
+func (r *Raw) seedRx() {
+	now := time.Now().UnixNano()
+	r.lastRx.Store(now)
+	r.lastRxCur.Store(now)
 }
 
 // provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for
@@ -1547,7 +1568,7 @@ func (r *Raw) rotatePeerRaw(proactive bool) {
 	// Give the jumped-to endpoint a FRESH staleness window and mark it unproven, so a proactive jump
 	// onto a dead endpoint fails over within the dead window instead of stranding (clear mode), and its
 	// burn isn't healed until it actually replies. Mirrors rotatePeerUDP.
-	r.lastRx.Store(time.Now().UnixNano())
+	r.seedRx()
 	r.peerAnswered.Store(false)
 	log.Printf("raw: rotated destination to %s", addr)
 	if proactive {
@@ -1582,7 +1603,7 @@ func (r *Raw) adoptPeerRaw() {
 	// has proven NOTHING yet. Leaving peerAnswered true from the PREVIOUS endpoint lets the very next tick
 	// treat the pinned one as proven — clearing its burn, emitting a false heal and releasing the pin
 	// before it landed — and its dead window would be measured from a frame it never sent.
-	r.lastRx.Store(time.Now().UnixNano())
+	r.seedRx()
 	r.peerAnswered.Store(false)
 	log.Printf("raw: pinned destination to %s", ip)
 	// "Make this active" is a deliberate operator jump — SILENT, like udp/tcp and the ws edge pool: only
@@ -1632,7 +1653,7 @@ func (r *Raw) clientLoop() {
 	}
 	// Seed the staleness baseline NOW: sessionStale() reads false while lastRx==0, and the first thing
 	// the loop below does is ask it.
-	r.lastRx.Store(time.Now().UnixNano())
+	r.seedRx()
 	for {
 		if r.sealer() != nil && r.sessionStale() {
 			r.session.Store(nil) // server likely restarted — drop the dead session so we re-handshake
@@ -1730,7 +1751,7 @@ func (r *Raw) ask() {
 	if !r.isClient || r.peer.Load() == nil {
 		return
 	}
-	if r.lastAsk.Load() <= r.lastRx.Load() {
+	if r.lastAsk.Load() <= r.lastRxCur.Load() {
 		r.lastAsk.Store(time.Now().UnixNano())
 	}
 }
