@@ -32,8 +32,11 @@ func TestOnlyAPlainSendPathBatches(t *testing.T) {
 		{"no wrapped socket: nothing to batch with", func(r *Raw) { r.batch = nil }, false},
 		{"FEC: shards leave on a callback, not from this loop",
 			func(r *Raw) { r.fecEnc = &fecEncoder{} }, false},
-		{"a pinned source needs its own control message per packet",
-			func(r *Raw) { r.replySrc.Store(&net.IP{10, 0, 0, 1}) }, false},
+		// A SERVER pins its reply source as soon as it learns which of its IPs the client dialed, so
+		// excluding a pin here meant no server ever batched at all. sendmmsg carries a control message
+		// per message, so the pin rides along.
+		{"a pinned source still batches — sendmmsg carries its control message",
+			func(r *Raw) { r.replySrc.Store(&net.IP{10, 0, 0, 1}) }, true},
 		{"a forged link sends on its own socket",
 			func(r *Raw) { r.link = &fakeFDLink{fd: 7} }, false},
 	} {
@@ -45,6 +48,32 @@ func TestOnlyAPlainSendPathBatches(t *testing.T) {
 				t.Fatalf("canBatch() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// Letting a pinned source batch is only half the fix: the control message has to actually RIDE every
+// message of the burst. If the drain leaves OOB unset, each packet leaves from the kernel's default
+// source instead of the IP the client dialed, the peer's source filter drops it, and the tunnel goes
+// dark while every counter still reads healthy. Nothing about the shape of the code says the two belong
+// together, so it is asserted here.
+func TestABatchedSendCarriesThePinnedSource(t *testing.T) {
+	src := string(mustRead(t, "raw_linux.go"))
+	i := strings.Index(src, "if r.canBatch(q) {")
+	if i < 0 {
+		t.Fatal("the batch block is not the expected shape; check what guards it now")
+	}
+	body := src[i:]
+	if end := strings.Index(body, "r.writeOut(pkt, peer)"); end > 0 {
+		body = body[:end]
+	}
+	if !strings.Contains(body, "r.pinnedSrc()") || !strings.Contains(body, "r.srcOOB(") {
+		t.Fatal("the batch block never asks for the pinned source, so a server's burst would leave " +
+			"from the kernel's default IP")
+	}
+	// Both halves: the packet that opened the burst and every one the drain adds behind it.
+	if n := strings.Count(body, ".OOB = "); n < 2 {
+		t.Fatalf("only %d message(s) in the batch get a control message; the drained ones would go out "+
+			"unpinned", n)
 	}
 }
 
