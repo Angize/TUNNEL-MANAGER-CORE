@@ -227,15 +227,46 @@ func ipv6L4Offset(pkt []byte) (l4Off int, proto byte, ok bool) {
 
 // ---- checksums (RFC 1071) ----
 
+// sumBytes accumulates the 16-bit big-endian words of b into a running RFC-1071 sum, starting from
+// init and padding a final odd byte with a zero low byte.
+//
+// Thirty-two bytes per iteration, folded once at the end. Two things make the wide read legal: RFC
+// 1071's "the sum is the same however the bytes are grouped", and 2 ** 32 being 1 modulo 2 ** 16 - 1,
+// so a 32-bit half carries into the next word exactly as a 16-bit one does. The four reads are
+// independent, which is what buys the rest -- the adds issue together instead of in a chain.
+//
+// Splitting one super-packet re-derives a checksum over EVERY byte of it, which is why this is worth
+// widening at all.
 func sumBytes(b []byte, init uint32) uint32 {
-	s := init
-	for i := 0; i+1 < len(b); i += 2 {
-		s += uint32(b[i])<<8 | uint32(b[i+1])
+	sum := uint64(init)
+	for len(b) >= 32 {
+		v0 := binary.BigEndian.Uint64(b)
+		v1 := binary.BigEndian.Uint64(b[8:])
+		v2 := binary.BigEndian.Uint64(b[16:])
+		v3 := binary.BigEndian.Uint64(b[24:])
+		sum += v0>>32 + v0&0xffffffff
+		sum += v1>>32 + v1&0xffffffff
+		sum += v2>>32 + v2&0xffffffff
+		sum += v3>>32 + v3&0xffffffff
+		b = b[32:]
 	}
-	if len(b)%2 == 1 {
-		s += uint32(b[len(b)-1]) << 8
+	for len(b) >= 8 {
+		v := binary.BigEndian.Uint64(b)
+		sum += v>>32 + v&0xffffffff
+		b = b[8:]
 	}
-	return s
+	for len(b) >= 2 {
+		sum += uint64(binary.BigEndian.Uint16(b))
+		b = b[2:]
+	}
+	if len(b) == 1 {
+		sum += uint64(b[0]) << 8
+	}
+	// Back into 32 bits without losing a carry; fold finishes the job.
+	for sum>>32 != 0 {
+		sum = (sum & 0xffffffff) + (sum >> 32)
+	}
+	return uint32(sum)
 }
 
 func fold(s uint32) uint16 {
