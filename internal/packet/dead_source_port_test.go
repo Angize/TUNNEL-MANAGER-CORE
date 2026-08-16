@@ -61,7 +61,7 @@ func TestPortSilenceSitsBetweenAGapAndTheDeadWindow(t *testing.T) {
 }
 
 // The three states a client can be in, and only the third may roll. Getting this wrong in the obvious
-// way -- judging on lastRx alone -- rolls the port on every idle tunnel between keepalives.
+// way -- judging on lastRxCur alone -- rolls the port on every idle tunnel between keepalives.
 func TestOnlyAnUnansweredAskCondemnsThePort(t *testing.T) {
 	now := time.Now()
 	past := func(d time.Duration) int64 { return now.Add(-d).UnixNano() }
@@ -94,7 +94,7 @@ func TestOnlyAnUnansweredAskCondemnsThePort(t *testing.T) {
 			}
 			r := &Raw{isClient: true, keepalive: ka}
 			r.lastAsk.Store(tc.ask)
-			r.lastRx.Store(tc.rx)
+			r.lastRxCur.Store(tc.rx)
 			if got := r.portDead(now); got != tc.want {
 				t.Fatalf("portDead = %v, want %v (silence window %v)", got, tc.want, portSilence(ka))
 			}
@@ -148,7 +148,7 @@ func TestTheLoopRollsOnScheduleAndOnlyAddsTheReactiveReason(t *testing.T) {
 			}
 			n := time.Now().UnixNano()
 			r.lastAsk.Store(n)
-			r.lastRx.Store(n + 1)
+			r.lastRxCur.Store(n + 1)
 			time.Sleep(20 * time.Millisecond)
 		}
 	}()
@@ -193,7 +193,7 @@ func TestADeadPathCondemnsOneTuplePerWindow(t *testing.T) {
 	r.peer.Store(&net.IPAddr{IP: testDst})
 
 	base := time.Now()
-	r.lastRx.Store(base.Add(-time.Minute).UnixNano()) // last heard a minute ago: the path is down
+	r.lastRxCur.Store(base.Add(-time.Minute).UnixNano()) // last heard a minute ago: the path is down
 
 	r.ask() // the first unanswered ask dates the silence
 	first := r.lastAsk.Load()
@@ -243,7 +243,7 @@ func TestTheLoopRollsOncePerWindowOnADeadPath(t *testing.T) {
 	r := &Raw{isClient: true, keepalive: ka, profile: "tcp", closeCh: make(chan struct{})}
 	r.peer.Store(&net.IPAddr{IP: testDst})
 	r.cliPort.Store(40000)
-	r.lastRx.Store(time.Now().Add(-time.Minute).UnixNano()) // heard nothing for a minute
+	r.lastRxCur.Store(time.Now().Add(-time.Minute).UnixNano()) // heard nothing for a minute
 
 	stop := make(chan struct{})
 	go func() { // the handshake retransmit, ~1s apart like the real one
@@ -280,5 +280,78 @@ func TestTheLoopRollsOncePerWindowOnADeadPath(t *testing.T) {
 	if len(seen) > 5 {
 		t.Fatalf("%d ports in 12s with a %v window: the fresh tuple is being condemned on the "+
 			"previous one's silence -- a roll every tick", len(seen), portSilence(ka))
+	}
+}
+
+// A destination-rotation pool keeps ONE session across every endpoint, so a frame from the endpoint we
+// are NOT on opens under that session and is genuinely inbound. It proves the session is alive. It
+// proves nothing about the tuple we are on, and the two must not share a clock.
+func TestOnlyTheCurrentDestinationAnswersForItsOwnTuple(t *testing.T) {
+	cur, other := net.IPv4(10, 20, 0, 2), net.IPv4(10, 20, 0, 3)
+	r := &Raw{isClient: true, keepalive: 10 * time.Second}
+	r.peer.Store(&net.IPAddr{IP: cur})
+
+	r.markRx(other)
+	if r.lastRx.Load() == 0 {
+		t.Error("a pool endpoint's reply did not move the failover clock -- the session IS answering")
+	}
+	if r.lastRxCur.Load() != 0 {
+		t.Fatal("a reply from the endpoint we are NOT on answered on behalf of the tuple we are on")
+	}
+
+	r.markRx(cur)
+	if r.lastRxCur.Load() == 0 {
+		t.Fatal("the current destination's own reply did not answer its tuple: a carrying port would roll")
+	}
+}
+
+// ...and the same claim through the REAL sportLoop, which is where it decides anything. A tuple whose
+// return direction is gone, while the pool goes on proving its OTHER endpoint alive, must still be
+// condemned. One shared clock made the reactive roll unreachable on precisely the tunnels that have
+// somewhere else to roll to.
+func TestAPoolProbingItsOtherEndpointDoesNotSaveADeadTuple(t *testing.T) {
+	defer func(d time.Duration) { rawSportEvery = d }(rawSportEvery)
+	rawSportEvery = time.Hour // the SCHEDULED roll must not fire: every roll here is the reactive one
+
+	ka := 10 * time.Second // portSilence 5s
+	cur, other := net.IPv4(10, 20, 0, 2), net.IPv4(10, 20, 0, 3)
+	r := &Raw{isClient: true, keepalive: ka, profile: "tcp", closeCh: make(chan struct{})}
+	r.peer.Store(&net.IPAddr{IP: cur})
+	r.cliPort.Store(40000)
+	r.lastRxCur.Store(time.Now().Add(-time.Minute).UnixNano()) // the tuple we are on hears nothing
+
+	stop := make(chan struct{})
+	go func() { // our ask keeps going out, and the pool keeps retesting the endpoint we are NOT on
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(200 * time.Millisecond):
+				r.ask()
+				r.markRx(other)
+			}
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.sportLoop() }()
+
+	seen := map[uint32]bool{}
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		seen[r.cliPort.Load()] = true
+		time.Sleep(30 * time.Millisecond)
+	}
+	close(stop)
+	close(r.closeCh)
+	<-done
+
+	if len(seen) < 2 {
+		t.Fatalf("%d port(s) in 12s: the other endpoint's replies answered for the dead tuple, so the "+
+			"reactive roll never fired and only the schedule could recover it", len(seen))
+	}
+	if len(seen) > 5 {
+		t.Fatalf("%d ports in 12s with a %v window: rolling far faster than one per window",
+			len(seen), portSilence(ka))
 	}
 }
