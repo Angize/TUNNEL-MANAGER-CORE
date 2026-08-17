@@ -393,7 +393,7 @@ func probeAllPools(pp, sp *PeerPool) {
 // runPinPoll is the 1s ticker that applies operator pins for a datagram carrier: identical across
 // udp/raw/flux, which inject their own close channel and adopt-peer/adopt-source callbacks.
 func runPinPoll(rc *rotationController, closeCh <-chan struct{}, adoptPeer, adoptSource func(),
-	rotDst, rotSrc func(proactive bool), ev func(kind, code, detail string)) {
+	rotDst, rotSrc func(proactive bool), ev func(kind, code, detail string), pathEpoch func() int64) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
@@ -401,7 +401,7 @@ func runPinPoll(rc *rotationController, closeCh <-chan struct{}, adoptPeer, adop
 		case <-closeCh:
 			return
 		case <-t.C:
-			rc.pollPins(adoptPeer, adoptSource, rotDst, rotSrc, ev)
+			rc.pollPins(adoptPeer, adoptSource, rotDst, rotSrc, ev, pathEpoch)
 		}
 	}
 }
@@ -414,7 +414,7 @@ func (b *UDP) ProbeAllNow() {
 
 // pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin. Runs until Close.
 func (b *UDP) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, b.closeCh, b.adoptPeerUDP, b.adoptSourceUDP, b.rotatePeerUDP, b.rotateSourceUDP, b.st.event)
+	runPinPoll(rc, b.closeCh, b.adoptPeerUDP, b.adoptSourceUDP, b.rotatePeerUDP, b.rotateSourceUDP, b.st.event, b.st.pathEpoch)
 }
 
 // SetStatusPath (client, optional) wires a status-file event ring so self-heal re-handshakes and
@@ -428,6 +428,24 @@ func (b *UDP) SetStatusPath(path string) {
 		peer = p.String()
 	}
 	b.st = newCoreStatus(path, "udp · "+peer)
+}
+
+// livePath reports the 4-tuple this client is sending on right now, and whether a session is up on
+// it. Both halves come from the socket and the peer pointer the data path itself uses, so the answer
+// cannot drift from what leaves the host.
+func (b *UDP) livePath() (pathKey, bool) {
+	var k pathKey
+	if c := b.conn.Load(); c != nil {
+		k.Src, k.Sport = addrParts(c.LocalAddr())
+	}
+	if p := b.peer.Load(); p != nil {
+		k.Dst, k.Dport = p.IP.String(), uint16(p.Port)
+	}
+	// Clear mode has no session to prove itself, so the peer answering IS the proof.
+	if b.cryptoOn {
+		return k, b.sealer() != nil
+	}
+	return k, b.peerAnswered.Load()
 }
 
 // deadWin is the session-stale window this carrier enforces.
@@ -693,6 +711,7 @@ func (b *UDP) Run() error {
 	}
 	if b.isClient {
 		go func() { errc <- b.netToTun() }()
+		b.st.trackPath(b.livePath, b.closeCh)
 		go b.clientLoop()
 	} else {
 		for _, c := range b.srvConns {

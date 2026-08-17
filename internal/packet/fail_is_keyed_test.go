@@ -13,6 +13,7 @@ import (
 // method, so a test that called the pool directly would pass while the wire stayed broken.
 func nodeCmd(t *testing.T, rc *rotationController, c poolCmd) (rotated []string) {
 	t.Helper()
+	c.Epoch = testPathEpoch // these commands are all CURRENT; the staleness guard has its own test
 	data, err := json.Marshal(c)
 	if err != nil {
 		t.Fatal(err)
@@ -30,9 +31,16 @@ func nodeCmd(t *testing.T, rc *rotationController, c poolCmd) (rotated []string)
 		}
 		rotated = append(rotated, "src")
 	}
-	rc.pollPins(func() {}, func() {}, rotDst, rotSrc, nil)
+	rc.pollPins(func() {}, func() {}, rotDst, rotSrc, nil, atPathEpoch)
 	return rotated
 }
+
+// testPathEpoch is the path every command in these tests is stamped with, and the epoch pollPins is
+// told the carrier is on — so each one reads as a verdict about the LIVE path.
+const testPathEpoch = 7
+
+// atPathEpoch is that epoch as pollPins takes it.
+func atPathEpoch() int64 { return testPathEpoch }
 
 func burnedIn(p *PeerPool) map[string]bool {
 	p.mu.Lock()

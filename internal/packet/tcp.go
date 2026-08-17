@@ -439,6 +439,9 @@ type TCP struct {
 	lns     []net.Listener             // server: ALL bound listeners; a pooled direct-TCP server binds one per selected IP so it accepts on exactly the IPs the client rotates through (lns[0]==ln)
 	cur     atomic.Pointer[connFramer] // currently live connection / server downstream target (nil when none)
 	curConn atomic.Pointer[net.Conn]   // client+pool: the live carrier conn, closed to force a re-dial on rotation
+	// liveSNI is the SNI presented on curConn — the one path axis a net.Conn cannot report, and the only
+	// one that varies, so it is tracked for the edge pool alone. Written and cleared beside curConn.
+	liveSNI atomic.Pointer[string]
 	closed  atomic.Bool
 	closeCh chan struct{}
 	preAuth chan struct{} // permits: caps concurrent unauthenticated handlers
@@ -509,6 +512,25 @@ func (b *TCP) sourceIP() string {
 		return b.sp.current()
 	}
 	return b.bindIP
+}
+
+// livePath reports the tuple this client's live carrier connection sits on, and whether that
+// connection is the tunnel. Everything but the SNI comes from the socket, so it is the wire and not
+// the pool's cursor — the two diverge whenever a pin moves ahead of the dial that would honour it.
+// No connection means no path: the key stays empty and nothing is judged against it.
+func (b *TCP) livePath() (pathKey, bool) {
+	var k pathKey
+	c := b.curConn.Load()
+	if c == nil {
+		return k, false
+	}
+	k.Src, k.Sport = addrParts((*c).LocalAddr())
+	k.Dst, k.Dport = addrParts((*c).RemoteAddr())
+	if s := b.liveSNI.Load(); s != nil {
+		k.SNI = *s
+	}
+	// The connection IS the session for a stream carrier, and cur is what marks it adopted.
+	return k, b.cur.Load() != nil
 }
 
 // endRound clears the bookkeeping ONE outage owns: the lap each pool is walking and the allowance an
@@ -868,9 +890,13 @@ func (b *TCP) Run() error {
 		go b.keepaliveLoop()
 		go b.diagLoop() // low-rate goroutine-count heartbeat so a slow session leak is visible in the log
 		if b.pool != nil {
-			go b.retestLoop() // background health retests with exponential backoff
-		} else if b.pp != nil || b.sp != nil {
-			go b.peerPinPollLoop() // direct pp/sp pools: apply operator pins from the node's cmd file
+			b.pool.trackPath(b.livePath, b.closeCh) // the edge pool is this client's status writer
+			go b.retestLoop()                       // background health retests with exponential backoff
+		} else {
+			b.st.trackPath(b.livePath, b.closeCh)
+			if b.pp != nil || b.sp != nil {
+				go b.peerPinPollLoop() // direct pp/sp pools: apply operator pins from the node's cmd file
+			}
 		}
 		// Each of these blocks until Close, so it moves onto its own goroutine and reports through the
 		// same channel — Run now returns for whichever reason comes first, the connection side ending
@@ -1798,11 +1824,13 @@ func (b *TCP) dialLoop() {
 			// field and logs the auto-switch off its change). setActive is the single writer of the
 			// active edge — current() no longer touches it.
 			b.pool.setActive(combo)
+			sni := strings.TrimPrefix(combo, label+" · ")
+			b.liveSNI.Store(&sni) // the edge ACTUALLY connected on, for livePath
 			// A pin that targeted this edge has now LANDED — release it so a healthy pin does not freeze
 			// rotation while the pin is in force (current() forces the pinned edge, and the rotation
 			// timer skips every beat while isPinned()). The warm loop already does this on connect; the
 			// non-warm loop must too. No-op when no pin is in force (single-locked, no TOCTOU).
-			b.pool.pinApplied(label, strings.TrimPrefix(combo, label+" · "))
+			b.pool.pinApplied(label, sni)
 		} else {
 			// Direct pp/sp: release an operator pin that has now landed (a pin is "jump here and keep trying
 			// until connected"). pinLandedOn is single-locked, a no-op when no pin is in force, and it COMPARES —
@@ -1948,6 +1976,7 @@ func (b *TCP) dialLoop() {
 			rot.Stop()
 		}
 		b.curConn.CompareAndSwap(&cc, nil)
+		b.liveSNI.Store(nil) // cleared beside curConn: no connection, no path
 		b.cur.CompareAndSwap(cf, nil)
 		// Classify why this carrier died and feed the pool's health + event log. A drop we caused
 		// ourselves — an operator pin/rotate, or a scheduled proactive rotation — is NOT a failure
@@ -2139,7 +2168,13 @@ func (b *TCP) peerPinPollLoop() {
 		case <-t.C:
 			if b.pp != nil {
 				if cmd, ok := b.pp.readCmd(); ok {
+					epoch := b.st.pathEpoch()
 					switch {
+					case staleVerdict(cmd, epoch):
+						// It judged a path the carrier has already left. Acting on it would charge that
+						// silence to whatever the tunnel moved onto.
+						log.Printf("core/tcp: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
+							cmd.Epoch, epoch)
 					case cmd.Cmd == cmdOK:
 						// Both ends of the pair the probe measured are proven; keyed, so a verdict that
 						// crossed with a re-dial cannot clear an endpoint the tunnel has already left.
@@ -2191,7 +2226,13 @@ func (b *TCP) peerPinPollLoop() {
 // decision — is drivable end to end.
 func (b *TCP) pollWsCmd() {
 	if cmd, ok := b.pool.readCmd(); ok {
+		epoch := b.pool.pathEpoch()
 		switch {
+		case staleVerdict(cmd, epoch):
+			// It judged a path the carrier has already left. Acting on it would charge that silence to
+			// whatever the tunnel moved onto.
+			log.Printf("core/ws: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
+				cmd.Epoch, epoch)
 		case cmd.Cmd == cmdOK:
 			// The probe found traffic crossing, so BOTH halves of the combo it measured are
 			// proven. Cleared separately: the two axes rotate independently and either can

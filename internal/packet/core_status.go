@@ -19,6 +19,29 @@ type coreStatus struct {
 	events  []coreEvent
 	evSeq   int64
 	wasDown bool // a disconnect is pending a matching recovery -> the next connect is a reconnect
+	// tracker is the epoch a liveness verdict is keyed on. Sampled on every write, so any mover that
+	// publishes its status — which is all of the deliberate ones — moves the epoch by doing so.
+	tracker pathTracker
+}
+
+// trackPath installs the carrier's live-path report and starts the sampler that catches a mover which
+// publishes nothing. Client-only; a carrier with no tuple to name (dns) simply never calls it.
+func (s *coreStatus) trackPath(live func() (pathKey, bool), closeCh <-chan struct{}) {
+	if s == nil {
+		return
+	}
+	s.tracker.setLive(live)
+	go samplePathLoop(&s.tracker, s.write, closeCh)
+}
+
+// pathEpoch is the epoch a verdict must carry to be acted on. Nil-safe, and zero until a path has
+// been observed — which is also when there is nothing to judge.
+func (s *coreStatus) pathEpoch() int64 {
+	if s == nil {
+		return 0
+	}
+	e, _, _ := s.tracker.snapshot()
+	return e
 }
 
 // newCoreStatus creates the writer and flushes an initial (empty-ring) file so a reader sees a live
@@ -127,17 +150,22 @@ func (s *coreStatus) write() {
 	// Hold writeMu across BOTH the snapshot and the file write so the on-disk write order can never invert
 	// the snapshot order — an older snapshot must never clobber a newer status file. Lock order is
 	// writeMu->mu (mu released before I/O), matching ws_pool.go's writeStatus, so the two never deadlock.
+	s.tracker.sample() // before any lock: the tracker has its own, and livePath reads only carrier atomics
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	evs := append([]coreEvent(nil), s.events...) // copy so the marshal runs outside s.mu
 	active := s.active
 	s.mu.Unlock()
+	epoch, path, ready := s.tracker.snapshot()
 	payload := struct {
 		Active string      `json:"active"`
+		Epoch  int64       `json:"epoch"`
+		Ready  bool        `json:"ready"`
+		Path   pathKey     `json:"path"`
 		Events []coreEvent `json:"events"`
 		TS     int64       `json:"ts"`
-	}{Active: active, Events: evs, TS: time.Now().Unix()}
+	}{Active: active, Epoch: epoch, Ready: ready, Path: path, Events: evs, TS: time.Now().Unix()}
 	buf, err := json.Marshal(payload)
 	if err != nil {
 		return
