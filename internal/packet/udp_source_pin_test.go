@@ -12,7 +12,7 @@ import (
 // publishing an Active entry nothing had marked bad. 192.0.2.0/24 is on no interface here.
 func TestUDPRefusesASourceThisHostCannotBind(t *testing.T) {
 	t.Run("a pin onto an unbindable source is abandoned, not consumed", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, true, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0, "")
 		b := &UDP{isClient: true}
 		b.SetSourcePool(sp)
 		if !sp.selectEntry(unusableIP) {
@@ -36,7 +36,7 @@ func TestUDPRefusesASourceThisHostCannotBind(t *testing.T) {
 	})
 
 	t.Run("an unbindable first entry is burned at seed time", func(t *testing.T) {
-		sp := NewPeerPool([]string{unusableIP, usableLoopbackIP}, true, 0, "")
+		sp := NewPeerPool([]string{unusableIP, usableLoopbackIP}, 0, "")
 		b := &UDP{isClient: true}
 		b.SetSourcePool(sp)
 
@@ -50,7 +50,7 @@ func TestUDPRefusesASourceThisHostCannotBind(t *testing.T) {
 
 	// ...and a source that DOES bind must be unaffected, or "burn everything" would pass the above.
 	t.Run("a bindable source is neither burned nor un-pinned", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, "127.0.0.2"}, true, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, "127.0.0.2"}, 0, "")
 		b := &UDP{isClient: true}
 		b.SetSourcePool(sp)
 		if burned := poolBurned(sp); len(burned) > 0 {

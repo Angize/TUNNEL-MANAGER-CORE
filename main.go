@@ -240,10 +240,10 @@ func main() {
 					snis[i] = packet.WSPoolSNI{Host: s.Host, ECH: s.ECH, Path: s.Path}
 				}
 				b, err = packet.DialWSPoolCfg(dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher,
-					cfg.WSEdgeIPs, snis, time.Duration(cfg.WSRotateSecs)*time.Second, cfg.WSAutoBurn, cfg.WSStatusPath, cfg.cdnIsHTTP(), cfg.cdnMode())
+					cfg.WSEdgeIPs, snis, time.Duration(cfg.WSRotateSecs)*time.Second, cfg.WSStatusPath, cfg.cdnIsHTTP(), cfg.cdnMode())
 				if err == nil {
-					log.Printf("tnl-core: dialing (core/%s%s wss ech pool: %dIP×%dSNI rotate=%ds auto_burn=%v)",
-						carrier, obfsTag, len(cfg.WSEdgeIPs), len(cfg.WSEdgeSNIs), cfg.WSRotateSecs, cfg.WSAutoBurn)
+					log.Printf("tnl-core: dialing (core/%s%s wss ech pool: %dIP×%dSNI rotate=%ds)",
+						carrier, obfsTag, len(cfg.WSEdgeIPs), len(cfg.WSEdgeSNIs), cfg.WSRotateSecs)
 				}
 				break
 			}
@@ -353,9 +353,9 @@ func main() {
 	// implement SetPeerPool; ws has its own edge pool and the server ignores it.
 	if wantsDestPool(cfg) {
 		if s, ok := b.(interface{ SetPeerPool(*packet.PeerPool) }); ok {
-			pp := packet.NewPeerPool(cfg.PeerIPs, cfg.PeerAutoBurn, time.Duration(cfg.PeerRotateSecs)*time.Second, cfg.PeerStatusPath)
+			pp := packet.NewPeerPool(cfg.PeerIPs, time.Duration(cfg.PeerRotateSecs)*time.Second, cfg.PeerStatusPath)
 			s.SetPeerPool(pp)
-			log.Printf("tnl-core: destination pool: %d peers rotate=%ds auto_burn=%v", len(cfg.PeerIPs), cfg.PeerRotateSecs, cfg.PeerAutoBurn)
+			log.Printf("tnl-core: destination pool: %d peers rotate=%ds", len(cfg.PeerIPs), cfg.PeerRotateSecs)
 		}
 	}
 	// Source rotation pool (client, direct transports): cycle the client's OWN source IPs alongside the
@@ -364,9 +364,9 @@ func main() {
 	// wired as a one-entry pool that seeds the source and never rotates.
 	if wantsSourcePool(cfg) {
 		if s, ok := b.(interface{ SetSourcePool(*packet.PeerPool) }); ok {
-			sp := packet.NewPeerPool(cfg.SrcIPs, cfg.PeerAutoBurn, time.Duration(cfg.PeerRotateSecs)*time.Second, cfg.SrcStatusPath)
+			sp := packet.NewPeerPool(cfg.SrcIPs, time.Duration(cfg.PeerRotateSecs)*time.Second, cfg.SrcStatusPath)
 			s.SetSourcePool(sp)
-			log.Printf("tnl-core: source pool: %d source IPs rotate=%ds auto_burn=%v", len(cfg.SrcIPs), cfg.PeerRotateSecs, cfg.PeerAutoBurn)
+			log.Printf("tnl-core: source pool: %d source IPs rotate=%ds", len(cfg.SrcIPs), cfg.PeerRotateSecs)
 		}
 	}
 	// Pooled server (raw/flux): the client rotates its SOURCE IP, but these carriers see every host on the
@@ -455,10 +455,10 @@ func pinSource(b any, cfg *Config) string {
 			// says so, naming a pool the operator never configured; bind_ip is simply moot.
 			return pinBySpoof
 		}
-		// No auto-burn and no rotate: a fixed source must stay fixed, and burning the only entry
-		// would leave the pool with nothing to fall back to. No status path either — the panel's
+		// No rotate: a fixed source must stay fixed. Burning is already impossible on a one-entry
+		// pool, which would otherwise leave nothing to fall back to. No status path either — the panel's
 		// source box belongs to a pool the operator chose, not to this.
-		s.SetSourcePool(packet.NewPeerPool([]string{cfg.BindIP}, false, 0, ""))
+		s.SetSourcePool(packet.NewPeerPool([]string{cfg.BindIP}, 0, ""))
 		return pinByPool
 	}
 	return pinUnsupported

@@ -720,9 +720,7 @@ func (b *TCP) dropUnusableSource(src, host string, parsed bool) {
 	if b.sp.pinCannotLand(src) {
 		log.Printf("core/tcp: manual jump to source %s abandoned — that IP is not configured on this host", src)
 	}
-	// failUnusable, not fail: the kernel refused this address, which is not the remote-reachability
-	// question auto-burn is a policy for. See PeerPool.failUnusable.
-	b.sp.failUnusable() // pull it from rotation so the NEXT dial gets a source that can actually bind
+	b.sp.fail() // pull it from rotation so the NEXT dial gets a source that can actually bind
 }
 
 // canBindSource reports whether the kernel will let us bind an outbound socket to ip. It ASKS the kernel
@@ -775,11 +773,11 @@ func DialWSPool(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, p
 
 // newWSPoolFromCfg builds a pool from the config's clean IP/SNI lists (decoding each
 // SNI's base64 ECH), or returns nil when no pool is configured.
-func newWSPoolFromCfg(ips []string, snis []wsSNIEntry, autoBurn bool, statusPath string) *wsPool {
+func newWSPoolFromCfg(ips []string, snis []wsSNIEntry, statusPath string) *wsPool {
 	if len(ips) == 0 || len(snis) == 0 {
 		return nil
 	}
-	return newWSPool(ips, snis, autoBurn, statusPath)
+	return newWSPool(ips, snis, statusPath)
 }
 
 // DialHTTPC (client role) is DialWS over the HTTP carrier: it reaches the edge with the

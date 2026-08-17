@@ -53,7 +53,7 @@ func burnedIn(p *PeerPool) map[string]bool {
 // advance that follows drops the tunnel straight back onto the endpoint that was actually measured.
 func TestAStaleFailBurnsWhatItMeasured(t *testing.T) {
 	dir := t.TempDir()
-	p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(dir, "pool.json"))
+	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(dir, "pool.json"))
 	rc := newRotationController(p, nil)
 
 	measured := p.current() // "a" — where the node's probe found nothing crossing
@@ -81,7 +81,7 @@ func TestAStaleFailBurnsWhatItMeasured(t *testing.T) {
 // failover off: when the key still names the active endpoint, it burns and advances exactly as before.
 func TestAFreshFailStillBurnsAndAdvances(t *testing.T) {
 	dir := t.TempDir()
-	p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(dir, "pool.json"))
+	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(dir, "pool.json"))
 	rc := newRotationController(p, nil)
 
 	measured := p.current()
@@ -103,7 +103,7 @@ func TestAFreshFailStillBurnsAndAdvances(t *testing.T) {
 // mis-target with an extra step.
 func TestAStaleFailNamingNothingWeHoldChangesNothing(t *testing.T) {
 	dir := t.TempDir()
-	p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(dir, "pool.json"))
+	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(dir, "pool.json"))
 	rc := newRotationController(p, nil)
 
 	rotated := nodeCmd(t, rc, poolCmd{Cmd: cmdFail, Key: "c"})
@@ -120,7 +120,7 @@ func TestAStaleFailNamingNothingWeHoldChangesNothing(t *testing.T) {
 // instead" any more: that IS the mis-target, and a verdict with no endpoint in it is not a verdict.
 func TestAFailThatNamesNothingCondemnsNothing(t *testing.T) {
 	dir := t.TempDir()
-	p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(dir, "pool.json"))
+	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(dir, "pool.json"))
 	rc := newRotationController(p, nil)
 
 	rotated := nodeCmd(t, rc, poolCmd{Cmd: cmdFail})
@@ -134,16 +134,16 @@ func TestAFailThatNamesNothingCondemnsNothing(t *testing.T) {
 }
 
 // TestAFailIsNeverReadAsAPin guards the dispatch itself. The pin arm keys off the SAME field, so a fail
-// that burns nothing — auto-burn off, or a key the pool does not hold — must not reach it and select the
-// endpoint the probe just condemned. With auto-burn off the pool only rotates past a failure.
+// the burn arm does not consume — a key the rotation has already moved off, or one the pool does not
+// hold at all — must not fall through to it and select the endpoint the probe just condemned.
 func TestAFailIsNeverReadAsAPin(t *testing.T) {
 	for _, tc := range []struct{ name, key string }{
-		{"auto-burn off", "a"},
+		{"an endpoint the rotation moved off", "a"},
 		{"an endpoint we do not hold", "zzz"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			p := NewPeerPool([]string{"a", "b"}, false, 0, filepath.Join(dir, "pool.json"))
+			p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(dir, "pool.json"))
 			rc := newRotationController(p, nil)
 			if _, moved := p.rotateOnce(); !moved {
 				t.Fatal("setup: the proactive beat did not move the pool")
@@ -164,7 +164,7 @@ func TestAFailIsNeverReadAsAPin(t *testing.T) {
 func TestTCPStaleFailBurnsWhatItMeasured(t *testing.T) {
 	dir := t.TempDir()
 	st := newCoreStatus(filepath.Join(dir, "core.json"), "tcp · lab")
-	p := NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, true, 0, filepath.Join(dir, "pool.json"))
+	p := NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, 0, filepath.Join(dir, "pool.json"))
 	b := &TCP{pp: p, st: st, isClient: true, closeCh: make(chan struct{})}
 	defer close(b.closeCh)
 
@@ -208,7 +208,7 @@ func TestTCPStaleFailBurnsWhatItMeasured(t *testing.T) {
 // two verdicts have to agree about what a key means or one of them is condemning blind.
 func TestAKeyedOKStillClearsOnlyWhatItNames(t *testing.T) {
 	dir := t.TempDir()
-	p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(dir, "pool.json"))
+	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(dir, "pool.json"))
 	rc := newRotationController(p, nil)
 
 	nodeCmd(t, rc, poolCmd{Cmd: cmdFail, Key: "a"}) // burns a, pool advances to b

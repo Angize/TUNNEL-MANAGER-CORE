@@ -12,7 +12,7 @@ import (
 // while the pool aged against the fake one. Nothing would fail loudly — the ladder would simply stop
 // being exercised, and every backoff test would pass for the wrong reason.
 func TestHealthSetReadsTheOwnersClock(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(t.TempDir(), "p.json"))
 	clk := int64(1000)
 	p.now = func() int64 { return clk } // exactly what the pool tests do
 
@@ -185,7 +185,7 @@ func TestABurnStepsOnlyTheEntryItMeasured(t *testing.T) {
 // TestMarkSuspectDoesNotStepAWaitingEntry drives the real caller, not the helper: repeated verdicts
 // against an edge that is waiting out its backoff must not race it to dead.
 func TestMarkSuspectDoesNotStepAWaitingEntry(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), true, filepath.Join(t.TempDir(), "st.json"))
+	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
 	clk := int64(5000)
 	p.now = func() int64 { return clk }
 

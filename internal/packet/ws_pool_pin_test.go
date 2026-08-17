@@ -8,7 +8,7 @@ import "testing"
 // old 20s wall-clock one-shot that expired before a down origin could recover.
 func TestPinHeldUntilAppliedThenReleased(t *testing.T) {
 	snis := []wsSNIEntry{{host: "a.example"}, {host: "b.example"}}
-	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, snis, true, "")
+	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, snis, "")
 
 	// Drive a fake clock so the test never depends on wall time.
 	var clk int64 = 1000

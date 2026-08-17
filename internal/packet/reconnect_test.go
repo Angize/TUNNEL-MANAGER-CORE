@@ -35,7 +35,7 @@ func TestUDPRotationKeepsStreamFlowing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	cli.SetPeerPool(NewPeerPool([]string{a1, a2}, false, 700*time.Millisecond, "")) // rotate dest every 700ms
+	cli.SetPeerPool(NewPeerPool([]string{a1, a2}, 700*time.Millisecond, "")) // rotate dest every 700ms
 	go srv.Run()
 	go cli.Run()
 	t.Cleanup(func() { cli.Close(); srv.Close() })

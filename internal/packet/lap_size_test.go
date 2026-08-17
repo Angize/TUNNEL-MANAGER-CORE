@@ -18,8 +18,8 @@ import (
 func TestBurnAdvanceLapIsSizedOnce(t *testing.T) {
 	dir := t.TempDir()
 	b := &TCP{
-		pp: NewPeerPool([]string{"d1", "d2", "d3"}, true, 0, filepath.Join(dir, "dst.json")),
-		sp: NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(dir, "src.json")),
+		pp: NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "dst.json")),
+		sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "src.json")),
 	}
 	start := b.sp.current()
 	for i := 1; i <= 3; i++ {
@@ -41,8 +41,8 @@ func TestBurnAdvanceLapIsSizedOnce(t *testing.T) {
 func TestBurnAdvanceLapResetsOnAHealthySession(t *testing.T) {
 	dir := t.TempDir()
 	b := &TCP{
-		pp: NewPeerPool([]string{"d1", "d2", "d3"}, true, 0, filepath.Join(dir, "dst.json")),
-		sp: NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(dir, "src.json")),
+		pp: NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "dst.json")),
+		sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "src.json")),
 	}
 	b.burnAdvance(true)
 	b.burnAdvance(true)

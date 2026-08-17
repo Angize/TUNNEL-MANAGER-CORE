@@ -9,7 +9,7 @@ import "testing"
 // silent.
 func TestActiveEdgeNotCorruptedByARotationStep(t *testing.T) {
 	snis := []wsSNIEntry{{host: "a.example"}, {host: "b.example"}}
-	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, snis, true, "")
+	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, snis, "")
 
 	// current() picks an edge but must leave the published active empty.
 	ip0, sni0, ok := p.current()

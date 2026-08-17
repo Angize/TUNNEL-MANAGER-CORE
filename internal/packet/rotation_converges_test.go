@@ -48,8 +48,8 @@ func TestTheDirectWalkFindsTheOnePairThatWorks(t *testing.T) {
 
 			clk := int64(1000)
 			b := &TCP{
-				pp: NewPeerPool(dests, true, 0, filepath.Join(dir, "d.json")),
-				sp: NewPeerPool(srcs, true, 0, filepath.Join(dir, "s.json")),
+				pp: NewPeerPool(dests, 0, filepath.Join(dir, "d.json")),
+				sp: NewPeerPool(srcs, 0, filepath.Join(dir, "s.json")),
 			}
 			b.pp.now = func() int64 { return clk }
 			b.sp.now = func() int64 { return clk }
@@ -111,7 +111,7 @@ func TestTheEdgeWalkFindsTheOneComboThatWorks(t *testing.T) {
 			goodH := fmt.Sprintf("s%d", sh.goodH)
 
 			clk := int64(1000)
-			p := newWSPool(ips, snis(hosts...), true, filepath.Join(t.TempDir(), "st.json"))
+			p := newWSPool(ips, snis(hosts...), filepath.Join(t.TempDir(), "st.json"))
 			p.now = func() int64 { return clk }
 			b := &TCP{pool: p}
 
@@ -151,8 +151,8 @@ func TestNothingWorksAndTheNodeHandsItAllBack(t *testing.T) {
 		dir := t.TempDir()
 		clk := int64(1000)
 		b := &TCP{
-			pp: NewPeerPool([]string{"d1", "d2", "d3"}, true, 0, filepath.Join(dir, "d.json")),
-			sp: NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(dir, "s.json")),
+			pp: NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")),
+			sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
 		}
 		b.pp.now = func() int64 { return clk }
 		b.sp.now = func() int64 { return clk }
@@ -178,7 +178,7 @@ func TestNothingWorksAndTheNodeHandsItAllBack(t *testing.T) {
 
 	t.Run("edge", func(t *testing.T) {
 		clk := int64(1000)
-		p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1", "s2"), true, filepath.Join(t.TempDir(), "st.json"))
+		p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
 		p.now = func() int64 { return clk }
 		b := &TCP{pool: p}
 		for i := 0; i < 12; i++ {

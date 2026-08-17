@@ -63,7 +63,7 @@ func TestFailedWarmBuildLeavesTheDestinationCursorWhereTheTunnelIs(t *testing.T)
 		stTag: "tcp", closeCh: make(chan struct{})}
 	b.st = newCoreStatus(filepath.Join(dir, "core.status"), "tcp · "+addr)
 	b.warmNext = make(chan *warmDial, 1)
-	b.SetPeerPool(NewPeerPool([]string{addr, second, third}, true, 0, poolPath))
+	b.SetPeerPool(NewPeerPool([]string{addr, second, third}, 0, poolPath))
 
 	live := b.pp.current() // where the (imaginary) live connection is
 	if got := destPoolActive(t, poolPath); got != live {

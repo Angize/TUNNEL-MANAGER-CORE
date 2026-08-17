@@ -38,7 +38,7 @@ func probePair(t *testing.T, ka time.Duration, tag string, extra ...string) (cli
 	}
 	dir := t.TempDir()
 	cli.SetStatusPath(filepath.Join(dir, "core.json"))
-	cli.SetPeerPool(NewPeerPool(append([]string{a1, a2}, extra...), true, 0, filepath.Join(dir, "pool.json")))
+	cli.SetPeerPool(NewPeerPool(append([]string{a1, a2}, extra...), 0, filepath.Join(dir, "pool.json")))
 	go srv.Run()
 	go cli.Run()
 	t.Cleanup(func() { cli.Close(); srv.Close() })

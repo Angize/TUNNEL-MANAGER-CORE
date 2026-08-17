@@ -123,10 +123,9 @@ type Config struct {
 	// PeerIPs is a rotation pool of DESTINATION endpoints for the direct transports (tcp/udp/raw/flux):
 	// the client cycles them and burns a blocked one. With >1 entry it overrides the single Peer; each
 	// entry is "ip:port" for udp/tcp or "ip" for raw/flux. PeerRotateSecs is the proactive interval (0 =
-	// on failure only); PeerAutoBurn needs a liveness signal, so it is inert on a crypto-off udp pool.
+	// on failure only).
 	PeerIPs        []string `json:"peer_ips"`
 	PeerRotateSecs int      `json:"peer_rotate_secs"`
-	PeerAutoBurn   bool     `json:"peer_auto_burn"`
 	PeerStatusPath string   `json:"peer_status_path"`
 	// SrcIPs is the SOURCE rotation pool: the client's OWN IPs that it sends FROM, cycled alongside
 	// PeerIPs on the same interval and burn policy. Each is a bare IPv4. Client + direct transports only,
@@ -233,9 +232,8 @@ type Config struct {
 	WSEdgeIPs    []string `json:"ws_edge_ips"`
 	WSEdgeSNIs   []WSSNI  `json:"ws_edge_snis"`
 	WSRotateSecs int      `json:"ws_rotate_secs"`
-	WSAutoBurn   bool     `json:"ws_auto_burn"`
 	// WSStatusPath is where the pool writes its live status (active edge + burned
-	// IP/SNI lists) so the node/panel can surface and persist auto-burns. Set by main.
+	// IP/SNI lists) so the node/panel can surface and persist burns. Set by main.
 	WSStatusPath string `json:"ws_status_path"`
 
 	// StatusPath is the general per-core status file for the connectionless datagram transports

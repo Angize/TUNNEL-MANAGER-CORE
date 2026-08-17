@@ -43,7 +43,7 @@ func TestDialFailureLeavesTheDirectPoolAlone(t *testing.T) {
 	b := &TCP{dev: dev, cryptoOn: true, cipher: "aes-256-gcm", psk: "handshake-burn-psk-abcdefghijkl",
 		keepalive: time.Second, idle: deadWindow(time.Second), isClient: true, addr: addr,
 		closeCh: make(chan struct{})}
-	pp := NewPeerPool([]string{addr, second}, true, 0, filepath.Join(t.TempDir(), "pool.json"))
+	pp := NewPeerPool([]string{addr, second}, 0, filepath.Join(t.TempDir(), "pool.json"))
 	b.SetPeerPool(pp)
 	go b.Run()
 	t.Cleanup(func() { b.Close() })

@@ -45,10 +45,10 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 		stTag: "tcp", closeCh: make(chan struct{})}
 	b.st = newCoreStatus(path, active)
 	b.warmNext = make(chan *warmDial, 1) // dialLoop's job; this test drives buildWarm directly
-	b.SetPeerPool(NewPeerPool([]string{addr, second}, true, 0, ""))
+	b.SetPeerPool(NewPeerPool([]string{addr, second}, 0, ""))
 	// Both source IPs are real loopback addresses, so neither is dropped for being unbindable — the
 	// only thing that can burn one here is burnAdvance.
-	sp := NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, true, 0, srcPath)
+	sp := NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0, srcPath)
 	b.SetSourcePool(sp)
 
 	// One warm build per destination endpoint, so the pool cycles and burnAdvance reaches the source

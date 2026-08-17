@@ -14,7 +14,7 @@ import (
 // leaves it looking HEALTHY on the panel -- the operator's own click having laundered it.
 func TestAnAbandonedPinPutsTheBurnBack(t *testing.T) {
 	t.Run("direct pool", func(t *testing.T) {
-		p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+		p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(t.TempDir(), "p.json"))
 		p.mu.Lock()
 		p.health.burn("b")
 		before := *p.health.rec("b")
@@ -45,7 +45,7 @@ func TestAnAbandonedPinPutsTheBurnBack(t *testing.T) {
 	})
 
 	t.Run("edge pool", func(t *testing.T) {
-		p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), true, filepath.Join(t.TempDir(), "st.json"))
+		p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
 		p.mu.Lock()
 		p.ipHealth.burn("e2")
 		before := *p.ipHealth.rec("e2")
@@ -76,7 +76,7 @@ func TestAnAbandonedPinPutsTheBurnBack(t *testing.T) {
 	})
 
 	t.Run("a pin that LANDS keeps the clear", func(t *testing.T) {
-		p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+		p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(t.TempDir(), "p.json"))
 		p.mu.Lock()
 		p.health.burn("b")
 		p.mu.Unlock()
@@ -99,7 +99,7 @@ func TestAnAbandonedPinPutsTheBurnBack(t *testing.T) {
 // the first connection it still named the PREVIOUS edge. A verdict measured during that window then
 // matched the old combination and condemned it, for a jump onto something else entirely.
 func TestTheEdgePoolsActiveFollowsThePin(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2"}, snis("s1"), true, filepath.Join(t.TempDir(), "st.json"))
+	p := newWSPool([]string{"e1", "e2"}, snis("s1"), filepath.Join(t.TempDir(), "st.json"))
 	ip, sni, _ := p.current()
 	p.setActive(activeLabel(ip, sni.host)) // the tunnel is up on e1
 	if got, _ := p.activeCombo(); got != "e1" {

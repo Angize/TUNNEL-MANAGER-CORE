@@ -8,7 +8,7 @@ import (
 )
 
 func TestPeerPoolRotateCycles(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b", "c"}, true, 0, "")
+	p := NewPeerPool([]string{"a", "b", "c"}, 0, "")
 	if p.current() != "a" {
 		t.Fatalf("first current = %q, want a", p.current())
 	}
@@ -30,7 +30,7 @@ func TestPeerPoolRotateCycles(t *testing.T) {
 }
 
 func TestPeerPoolBurnSkipsAndAdvances(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b", "c"}, true, 0, "")
+	p := NewPeerPool([]string{"a", "b", "c"}, 0, "")
 	// active is a; a fails -> burned, advance to b
 	if a, moved := p.fail(); a != "b" || !moved {
 		t.Fatalf("after burning a, got %q moved=%v, want b true", a, moved)
@@ -46,7 +46,7 @@ func TestPeerPoolBurnSkipsAndAdvances(t *testing.T) {
 }
 
 func TestPeerPoolNeverDeadEndsWhenAllBurned(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.fail() // burn a -> advance to b
 	// Burning the last live endpoint must still MOVE (never dead-end, never re-stick on the endpoint we
 	// just failed). Unlike the old revive-all, the burns are KEPT (suspect, on backoff) — the pool falls
@@ -63,23 +63,12 @@ func TestPeerPoolNeverDeadEndsWhenAllBurned(t *testing.T) {
 	}
 }
 
-func TestPeerPoolAutoBurnOffJustRotates(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b"}, false, 0, "") // auto-burn OFF
-	p.fail()
-	p.mu.Lock()
-	nb := len(p.health.recs)
-	p.mu.Unlock()
-	if nb != 0 {
-		t.Fatalf("auto-burn off must not burn, got %d burned", nb)
-	}
-}
-
 // TestPeerPoolSuspectToDeadBackoff walks a single endpoint through the whole health FSM: a fresh failure
 // makes it suspect (+30s), each failed live retest steps the backoff, and running off the end drops it to
 // dead on the slow interval — exactly the ws edge pool's schedule.
 func TestPeerPoolSuspectToDeadBackoff(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
 	// a fails -> suspect, nextRetest = now + suspectBackoff[0]
 	p.fail()
@@ -112,7 +101,7 @@ func TestPeerPoolSuspectToDeadBackoff(t *testing.T) {
 // skipped by current() while anything healthy exists, and once NOTHING is healthy the pool still hands
 func TestPeerPoolDueEndpointReadmitted(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
 	p.fail() // burn a (suspect), now on b
 	if got := p.current(); got != "b" {
@@ -139,7 +128,7 @@ func TestPeerPoolDueEndpointReadmitted(t *testing.T) {
 // a landing (pinApplied) releases it, and an unknown key is rejected.
 func TestPeerPoolSelectPin(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b", "c"}, true, 0, "")
+	p := NewPeerPool([]string{"a", "b", "c"}, 0, "")
 	p.now = func() int64 { return clk }
 	if p.selectEntry("zzz") {
 		t.Fatal("selectEntry must reject an unknown key")
@@ -189,7 +178,7 @@ func TestPeerPoolSelectPin(t *testing.T) {
 // immediately due.
 func TestPeerPoolProbeAllNow(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
 	p.fail() // burn a, +30s
 	if r := p.health.recs["a"]; r == nil || r.nextRetest <= clk {
@@ -206,7 +195,7 @@ func TestPeerPoolProbeAllNow(t *testing.T) {
 func TestPeerPoolStatusFileFSM(t *testing.T) {
 	dir := t.TempDir()
 	sp := dir + "/core-x.peerpool"
-	p := NewPeerPool([]string{"a", "b", "c"}, true, 0, sp)
+	p := NewPeerPool([]string{"a", "b", "c"}, 0, sp)
 	p.fail()           // burn a, active -> b
 	p.selectEntry("c") // pin c
 	data, err := os.ReadFile(sp)
@@ -243,7 +232,7 @@ func TestPeerPoolStatusFileFSM(t *testing.T) {
 }
 
 func TestPeerPoolSingleEndpointNoop(t *testing.T) {
-	p := NewPeerPool([]string{"only"}, true, 0, "")
+	p := NewPeerPool([]string{"only"}, 0, "")
 	if a, moved := p.fail(); a != "only" || moved {
 		t.Fatalf("single-endpoint fail = %q moved=%v, want only false", a, moved)
 	}
@@ -260,7 +249,7 @@ func TestTCPDialTargetUsesPool(t *testing.T) {
 	if got := b.dialTarget(); got != "1.1.1.1:9000" {
 		t.Fatalf("no pool: dialTarget = %q, want the fixed peer", got)
 	}
-	b.SetPeerPool(NewPeerPool([]string{"2.2.2.2:9000", "3.3.3.3:9000"}, true, 0, ""))
+	b.SetPeerPool(NewPeerPool([]string{"2.2.2.2:9000", "3.3.3.3:9000"}, 0, ""))
 	if b.pp == nil {
 		t.Fatal("direct-tcp client should accept a peer pool")
 	}
@@ -275,7 +264,7 @@ func TestTCPDialTargetUsesPool(t *testing.T) {
 
 	// A ws client must NOT accept a peer pool — ws has its own edge pool.
 	w := &TCP{isClient: true, ws: true, addr: "1.1.1.1:443"}
-	w.SetPeerPool(NewPeerPool([]string{"2.2.2.2:443", "3.3.3.3:443"}, true, 0, ""))
+	w.SetPeerPool(NewPeerPool([]string{"2.2.2.2:443", "3.3.3.3:443"}, 0, ""))
 	if w.pp != nil {
 		t.Fatal("ws client must reject a peer pool")
 	}
@@ -289,7 +278,7 @@ func TestTCPSourceIPUsesPool(t *testing.T) {
 	if got := b.sourceIP(); got != "10.0.0.1" {
 		t.Fatalf("no source pool: sourceIP = %q, want the fixed bindIP", got)
 	}
-	b.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, true, 0, ""))
+	b.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, 0, ""))
 	if b.sp == nil {
 		t.Fatal("direct-tcp client should accept a source pool")
 	}
@@ -304,7 +293,7 @@ func TestTCPSourceIPUsesPool(t *testing.T) {
 	}
 	// ws client must refuse a source pool (its edge pool owns rotation).
 	w := &TCP{isClient: true, ws: true, bindIP: "10.0.0.1"}
-	w.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, true, 0, ""))
+	w.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, 0, ""))
 	if w.sp != nil {
 		t.Fatal("ws client must reject a source pool")
 	}
@@ -320,7 +309,7 @@ func TestUDPSourceRebindSwapsConn(t *testing.T) {
 	}
 	b := &UDP{isClient: true}
 	b.conn.Store(c0)
-	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, true, 0, ""))
+	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0, ""))
 	gen0 := b.rebindGen.Load()
 
 	b.rotateSourceUDP(true) // advance 127.0.0.1 -> 127.0.0.2 and rebind
@@ -347,7 +336,7 @@ func TestUDPSourcePoolBindsInitialSource(t *testing.T) {
 	}
 	b := &UDP{isClient: true}
 	b.conn.Store(c0)
-	b.SetSourcePool(NewPeerPool([]string{"127.0.0.2", "127.0.0.3"}, true, 0, "")) // first entry != initial bind
+	b.SetSourcePool(NewPeerPool([]string{"127.0.0.2", "127.0.0.3"}, 0, "")) // first entry != initial bind
 	got := b.conn.Load().LocalAddr().(*net.UDPAddr).IP
 	if !got.Equal(net.IPv4(127, 0, 0, 2)) {
 		t.Fatalf("SetSourcePool should bind the initial source to SrcIPs[0]=127.0.0.2, got %v", got)
@@ -374,7 +363,7 @@ func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
 	b := &UDP{isClient: true}
 	b.conn.Store(c0)
 	// 127.0.0.1 is bindable; 192.0.2.1 (TEST-NET-1) is never on this host, so a rebind onto it fails.
-	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "192.0.2.1"}, true, 0, ""))
+	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "192.0.2.1"}, 0, ""))
 	sockBefore := b.conn.Load()
 	gen0 := b.rebindGen.Load()
 
@@ -412,8 +401,8 @@ func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
 // TestRotationControllerCouplesSource verifies the failover policy: burning destinations advances the
 // source only once every destination has been tried against the current source.
 func TestRotationControllerCouplesSource(t *testing.T) {
-	dst := NewPeerPool([]string{"d0", "d1"}, true, 0, "") // size 2
-	src := NewPeerPool([]string{"s0", "s1"}, true, 0, "")
+	dst := NewPeerPool([]string{"d0", "d1"}, 0, "") // size 2
+	src := NewPeerPool([]string{"s0", "s1"}, 0, "")
 	rc := newRotationController(dst, src)
 	dstMoves, srcMoves := 0, 0
 	rotDst := func(bool) { dstMoves++ }
@@ -434,7 +423,7 @@ func TestRotationControllerCouplesSource(t *testing.T) {
 	}
 
 	// Source-only pool (no destination pool) advances the source on every failure.
-	rc2 := newRotationController(nil, NewPeerPool([]string{"s0", "s1"}, true, 0, ""))
+	rc2 := newRotationController(nil, NewPeerPool([]string{"s0", "s1"}, 0, ""))
 	n := 0
 	rc2.fail(func(bool) { t.Fatal("no dest pool: rotDst must not be called") }, func(bool) { n++ })
 	if n != 1 {
@@ -448,7 +437,7 @@ func TestRotationControllerCouplesSource(t *testing.T) {
 // releases a good pin.
 func TestRotationControllerPinAutoReleasesOnProvenBlock(t *testing.T) {
 	clk := int64(1000)
-	dst := NewPeerPool([]string{"d0", "d1"}, true, 0, "")
+	dst := NewPeerPool([]string{"d0", "d1"}, 0, "")
 	dst.now = func() int64 { return clk }
 	rc := newRotationController(dst, nil)
 	if !dst.selectEntry("d1") {
@@ -505,7 +494,7 @@ func TestPeerPoolExpirePinFlushesStatus(t *testing.T) {
 	dir := t.TempDir()
 	sp := dir + "/core-x.peerpool"
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, true, 0, sp)
+	p := NewPeerPool([]string{"a", "b"}, 0, sp)
 	p.now = func() int64 { return clk }
 	p.selectEntry("b") // pins b and writes the status file with pin=b
 	readPin := func() string {

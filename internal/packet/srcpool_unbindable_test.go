@@ -19,7 +19,7 @@ const unbindableSrc = "203.0.113.9"
 // bind is deliberate, since dialLoop charges a failed dial to the DESTINATION. What must not be skipped
 // is the rest: an entry left HEALTHY and ACTIVE brings every rotation straight back to it, silently.
 func TestUnusableSourceIsBurnedNotSilentlyIgnored(t *testing.T) {
-	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, true, 0, "")
+	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, 0, "")
 	b := &TCP{sp: sp}
 	if got := b.sourceIP(); got != unbindableSrc {
 		t.Fatalf("setup: the pool should start on %s, got %s", unbindableSrc, got)
@@ -92,7 +92,7 @@ func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialTCP: %v", err)
 	}
-	sp := NewPeerPool([]string{"127.0.0.1", unbindableSrc}, true, 0, "")
+	sp := NewPeerPool([]string{"127.0.0.1", unbindableSrc}, 0, "")
 	cli.SetSourcePool(sp)
 	if !sp.selectEntry(unbindableSrc) {
 		t.Fatalf("selectEntry(%s) refused the pin", unbindableSrc)
@@ -120,7 +120,7 @@ func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 // reads the source and the moment it discovers the bind is impossible. Cancelling must therefore be
 // keyed — an unkeyed release would silently throw away the jump they just made.
 func TestAbandoningAJumpNeverCancelsADifferentOne(t *testing.T) {
-	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, true, 0, "")
+	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, 0, "")
 	if !sp.selectEntry("127.0.0.1") { // the operator has since aimed at a DIFFERENT entry
 		t.Fatal("selectEntry refused the jump")
 	}

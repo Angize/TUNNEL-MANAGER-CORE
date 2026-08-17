@@ -14,7 +14,7 @@ import (
 func TestWSPoolReadECHCmd(t *testing.T) {
 	dir := t.TempDir()
 	status := filepath.Join(dir, "core-x.status")
-	p := newWSPool([]string{"1.1.1.1"}, []wsSNIEntry{{host: "a.example", ech: []byte("OLD")}}, true, status)
+	p := newWSPool([]string{"1.1.1.1"}, []wsSNIEntry{{host: "a.example", ech: []byte("OLD")}}, status)
 
 	newECH := []byte("FRESH-ech-config-list-bytes")
 	cmd := map[string]map[string]string{"snis": {"a.example": base64.StdEncoding.EncodeToString(newECH)}}

@@ -25,7 +25,7 @@ func TestRawAndFluxRefuseASourceThisHostCannotSendFrom(t *testing.T) {
 	// A rotation that lands on an unusable source must not move the tunnel onto it, must not publish
 	// the move, and must leave the working source healthy and current.
 	t.Run("raw rotation undoes the move", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, true, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0, "")
 		r := &Raw{isClient: true}
 		r.link = &directLink{r: r}
 		r.SetSourcePool(sp)
@@ -42,7 +42,7 @@ func TestRawAndFluxRefuseASourceThisHostCannotSendFrom(t *testing.T) {
 	})
 
 	t.Run("flux rotation undoes the move", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, true, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0, "")
 		f := &Flux{isClient: true}
 		f.SetSourcePool(sp)
 		if got := srcOf(f.localIP.Load()); got != usableLoopbackIP {
@@ -65,7 +65,7 @@ func TestRawAndFluxRefuseASourceThisHostCannotSendFrom(t *testing.T) {
 		log.SetOutput(&sink)
 		defer log.SetOutput(old)
 
-		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, true, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0, "")
 		r := &Raw{isClient: true}
 		r.link = &directLink{r: r}
 		r.SetSourcePool(sp)
@@ -90,7 +90,7 @@ func TestRawAndFluxRefuseASourceThisHostCannotSendFrom(t *testing.T) {
 	// ...and the seed, which is the worst case: it is stamped from the FIRST packet, so on the
 	// checksum-binding profiles the tunnel never comes up at all.
 	t.Run("raw seed refuses an unusable first entry", func(t *testing.T) {
-		sp := NewPeerPool([]string{unusableIP, usableLoopbackIP}, true, 0, "")
+		sp := NewPeerPool([]string{unusableIP, usableLoopbackIP}, 0, "")
 		r := &Raw{isClient: true}
 		r.link = &directLink{r: r}
 		r.SetSourcePool(sp)
@@ -100,7 +100,7 @@ func TestRawAndFluxRefuseASourceThisHostCannotSendFrom(t *testing.T) {
 	})
 
 	t.Run("flux seed refuses an unusable first entry", func(t *testing.T) {
-		sp := NewPeerPool([]string{unusableIP, usableLoopbackIP}, true, 0, "")
+		sp := NewPeerPool([]string{unusableIP, usableLoopbackIP}, 0, "")
 		f := &Flux{isClient: true}
 		f.SetSourcePool(sp)
 		if got := srcOf(f.localIP.Load()); got == unusableIP {

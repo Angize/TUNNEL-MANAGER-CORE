@@ -43,8 +43,8 @@ func burnedSet(p *PeerPool) []string {
 func runControllerOdometer(t *testing.T, dests, srcs []string, rounds int) odoTrace {
 	t.Helper()
 	dir := t.TempDir()
-	dst := NewPeerPool(dests, true, 0, filepath.Join(dir, "d.json"))
-	src := NewPeerPool(srcs, true, 0, filepath.Join(dir, "s.json"))
+	dst := NewPeerPool(dests, 0, filepath.Join(dir, "d.json"))
+	src := NewPeerPool(srcs, 0, filepath.Join(dir, "s.json"))
 	c := newRotationController(dst, src)
 
 	var tr odoTrace
@@ -73,8 +73,8 @@ func runTCPOdometer(t *testing.T, dests, srcs []string, rounds int) odoTrace {
 	t.Helper()
 	dir := t.TempDir()
 	b := &TCP{
-		pp: NewPeerPool(dests, true, 0, filepath.Join(dir, "d.json")),
-		sp: NewPeerPool(srcs, true, 0, filepath.Join(dir, "s.json")),
+		pp: NewPeerPool(dests, 0, filepath.Join(dir, "d.json")),
+		sp: NewPeerPool(srcs, 0, filepath.Join(dir, "s.json")),
 	}
 	var tr odoTrace
 	for r := 1; r <= rounds; r++ {
@@ -134,7 +134,7 @@ func TestBothDirectOdometersAbsorbTheSamePin(t *testing.T) {
 	dests := []string{"d1", "d2", "d3"}
 
 	dir := t.TempDir()
-	dst := NewPeerPool(dests, true, 0, filepath.Join(dir, "d.json"))
+	dst := NewPeerPool(dests, 0, filepath.Join(dir, "d.json"))
 	c := newRotationController(dst, nil)
 	dst.selectEntry("d2")
 	ctlReleasedOn := 0
@@ -146,7 +146,7 @@ func TestBothDirectOdometersAbsorbTheSamePin(t *testing.T) {
 	}
 
 	dir2 := t.TempDir()
-	b := &TCP{pp: NewPeerPool(dests, true, 0, filepath.Join(dir2, "d.json"))}
+	b := &TCP{pp: NewPeerPool(dests, 0, filepath.Join(dir2, "d.json"))}
 	b.pp.selectEntry("d2")
 	tcpReleasedOn := 0
 	for r := 1; r <= 10 && tcpReleasedOn == 0; r++ {
@@ -188,7 +188,7 @@ func TestNoDirectCarrierBurnsWithNowhereToGo(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dst := NewPeerPool([]string{"only"}, true, 0, filepath.Join(t.TempDir(), "d.json"))
+			dst := NewPeerPool([]string{"only"}, 0, filepath.Join(t.TempDir(), "d.json"))
 			tc.run(t, dst)
 			if got := burnedSet(dst); len(got) > 0 {
 				t.Fatalf("the only destination was condemned (%v) though nothing varied and there is "+

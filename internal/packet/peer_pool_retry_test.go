@@ -30,9 +30,9 @@ func burnUntilDue(t *testing.T, p *PeerPool, at int, clk *int64) {
 // inside its backoff is passed over. Every reader must agree with what the rotation announced.
 func TestProactiveRotationRetriesADueBurnButNotAPendingOne(t *testing.T) {
 	clk := int64(1000)
-	dst := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, true, 0, "")
+	dst := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 0, "")
 	dst.now = func() int64 { return clk }
-	src := NewPeerPool([]string{"192.0.2.1", "192.0.2.2"}, true, 0, "")
+	src := NewPeerPool([]string{"192.0.2.1", "192.0.2.2"}, 0, "")
 	src.now = func() int64 { return clk }
 	b := &TCP{pp: dst, sp: src}
 
@@ -55,7 +55,7 @@ func TestProactiveRotationRetriesADueBurnButNotAPendingOne(t *testing.T) {
 	}
 
 	// A burn still inside its backoff is passed over for a healthy endpoint.
-	p2 := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, true, 0, "")
+	p2 := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 0, "")
 	p2.now = func() int64 { return clk }
 	p2.mu.Lock()
 	p2.health.recs["10.0.0.2"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600}
@@ -92,7 +92,7 @@ func TestFailoverLandsOnADueEndpointAndIsNotSticky(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clk := int64(1000)
-			p := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, true, 0, "")
+			p := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 0, "")
 			p.now = func() int64 { return clk }
 			burnUntilDue(t, p, 1, &clk) // .2 burned, retest due
 			p.mu.Lock()
@@ -135,7 +135,7 @@ func TestEveryAdvanceAgreesWithCurrent(t *testing.T) {
 		for _, proactive := range []bool{true, false} {
 			t.Run(tc.name, func(t *testing.T) {
 				clk := int64(100000)
-				p := NewPeerPool([]string{"a", "b", "c", "d"}, true, 0, "")
+				p := NewPeerPool([]string{"a", "b", "c", "d"}, 0, "")
 				p.now = func() int64 { return clk }
 				p.mu.Lock()
 				for _, i := range tc.burnedDue {
@@ -163,8 +163,8 @@ func TestEveryAdvanceAgreesWithCurrent(t *testing.T) {
 // them in lockstep, so (src1,dst2) and (src2,dst1) were never seen at all. The destination is the low
 // digit; the source moves only when the destination has been all the way round, or cannot move at all.
 func TestTheRotationWalksEveryCombination(t *testing.T) {
-	dst := NewPeerPool([]string{"d1", "d2"}, true, time.Minute, "")
-	src := NewPeerPool([]string{"s1", "s2"}, true, time.Minute, "")
+	dst := NewPeerPool([]string{"d1", "d2"}, time.Minute, "")
+	src := NewPeerPool([]string{"s1", "s2"}, time.Minute, "")
 	rc := newRotationController(dst, src)
 	rotDst := func(bool) { dst.nextEndpoint(true) }
 	rotSrc := func(bool) { src.nextEndpoint(true) }
@@ -209,9 +209,9 @@ func TestTheRotationWalksEveryCombination(t *testing.T) {
 // lap, and burned an innocent source — measured on core42, where 94.183.210.130 went for it.
 func TestASourceIsOnlyBlamedAfterARealLap(t *testing.T) {
 	clk := int64(1000)
-	dst := NewPeerPool([]string{"d1", "d2"}, true, 0, "")
+	dst := NewPeerPool([]string{"d1", "d2"}, 0, "")
 	dst.now = func() int64 { return clk }
-	src := NewPeerPool([]string{"s1", "s2"}, true, 0, "")
+	src := NewPeerPool([]string{"s1", "s2"}, 0, "")
 	src.now = func() int64 { return clk }
 	dst.mu.Lock()
 	dst.health.recs["d2"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600} // condemned, cannot be tried
@@ -229,8 +229,8 @@ func TestASourceIsOnlyBlamedAfterARealLap(t *testing.T) {
 	}
 
 	// And with both eligible it takes two asks per source move — the real lap.
-	dst2 := NewPeerPool([]string{"d1", "d2"}, false, 0, "") // auto-burn off: nothing leaves the eligible set
-	src2 := NewPeerPool([]string{"s1", "s2"}, false, 0, "")
+	dst2 := NewPeerPool([]string{"d1", "d2"}, 0, "") // rotDst is a no-op below, so both stay eligible
+	src2 := NewPeerPool([]string{"s1", "s2"}, 0, "")
 	rc2 := newRotationController(dst2, src2)
 	srcMoves = 0
 	rc2.fail(func(bool) {}, rotSrc)

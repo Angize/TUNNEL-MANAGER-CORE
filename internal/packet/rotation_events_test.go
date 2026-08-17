@@ -38,7 +38,7 @@ func TestRotateSourceTCPProactiveDefersEvent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "src.status")
 	b := &TCP{isClient: true, stTag: "tcp", addr: "d0:443"}
 	b.st = newCoreStatus(path, "tcp · d0:443")
-	b.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, true, 0, ""))
+	b.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, 0, ""))
 
 	addr, moved := b.rotateSourceTCP(true) // proactive beat
 	if !moved || addr != "10.0.0.6" {
@@ -86,7 +86,7 @@ func TestDirectPoolShortDeathEmitsOneDown(t *testing.T) {
 	}
 	statusPath := filepath.Join(t.TempDir(), "core.status")
 	// Direct dest pool (failover-only) + the coreStatus event ring under test.
-	cli.SetPeerPool(NewPeerPool([]string{a1, a2}, true, 0, ""))
+	cli.SetPeerPool(NewPeerPool([]string{a1, a2}, 0, ""))
 	cli.SetStatusPath(statusPath)
 
 	go srv.Run()
@@ -187,8 +187,8 @@ func TestSourceOnlyRotationDoesNotAnnounceTheDestination(t *testing.T) {
 	}
 	statusPath := filepath.Join(t.TempDir(), "core.status")
 	// One destination (cannot rotate) + two bindable sources on a 1s beat (will rotate).
-	cli.SetPeerPool(NewPeerPool([]string{addr}, true, 0, ""))
-	cli.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, true, time.Second, ""))
+	cli.SetPeerPool(NewPeerPool([]string{addr}, 0, ""))
+	cli.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, time.Second, ""))
 	cli.SetStatusPath(statusPath)
 
 	go srv.Run()

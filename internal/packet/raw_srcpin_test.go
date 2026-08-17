@@ -16,7 +16,7 @@ func TestRawPinnedSrc(t *testing.T) {
 
 	t.Run("client with a source pool pins the pool's current source", func(t *testing.T) {
 		r := &Raw{fakeFd: -1,
-			sp: NewPeerPool([]string{"10.9.9.1", "10.9.9.2"}, false, 0, "")}
+			sp: NewPeerPool([]string{"10.9.9.1", "10.9.9.2"}, 0, "")}
 		r.localIP.Store(&net.IPAddr{IP: ip("10.9.9.1")})
 		if got := r.pinnedSrc(); !got.Equal(ip("10.9.9.1")) {
 			t.Fatalf("want the seeded pool source, got %v", got)
@@ -47,7 +47,7 @@ func TestRawPinnedSrc(t *testing.T) {
 
 	t.Run("server's reply source wins over a source pool", func(t *testing.T) {
 		r := &Raw{fakeFd: -1,
-			sp: NewPeerPool([]string{"10.9.9.1", "10.9.9.2"}, false, 0, "")}
+			sp: NewPeerPool([]string{"10.9.9.1", "10.9.9.2"}, 0, "")}
 		r.localIP.Store(&net.IPAddr{IP: ip("10.9.9.1")})
 		d := ip("94.183.210.134")
 		r.replySrc.Store(&d)

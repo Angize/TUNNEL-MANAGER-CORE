@@ -89,7 +89,7 @@ func TestPoolCmdRejectsNothingBurgers(t *testing.T) {
 // an unset axis must keep meaning that. Left empty it would look the key up in the SNI map, find nothing,
 // and the operator's pick would silently do nothing.
 func TestWSPoolPinDefaultsToTheEdgeAxis(t *testing.T) {
-	p := newWSPool([]string{"e1"}, snis("s1"), true, filepath.Join(t.TempDir(), "status.json"))
+	p := newWSPool([]string{"e1"}, snis("s1"), filepath.Join(t.TempDir(), "status.json"))
 	if err := os.WriteFile(p.cmdPath(), []byte(`{"key":"e1"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
