@@ -203,6 +203,18 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 	cli, _, a1, _, _, _ := probePair(t, time.Second, "onej")
 	p := cli.pp
 
+	// The FIRST verdict buys a free step, not a burn: this carrier's ladder still has its handshake to
+	// spend, and that costs one round trip and blames nobody. Only once the free steps are gone may an
+	// endpoint answer for the silence.
+	liveVerdict(t, p, settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: a1})
+	time.Sleep(3 * time.Second)
+	p.mu.Lock()
+	early := p.health.recs[a1] != nil
+	p.mu.Unlock()
+	if early {
+		t.Fatalf("the first verdict condemned %s while the ladder still had a free step", a1)
+	}
+
 	liveVerdict(t, p, settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: a1})
 	deadline := time.Now().Add(15 * time.Second)
 	for {

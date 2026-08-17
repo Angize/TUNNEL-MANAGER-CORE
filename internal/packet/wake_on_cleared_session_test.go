@@ -46,11 +46,17 @@ func TestAClearedSessionDoesNotWaitOutTheKeepalive(t *testing.T) {
 	for round := 1; round <= 5; round++ {
 		settle()
 		gone := p.current()
+		// The SESSION is what this measures, not the pool. A verdict now spends the ladder's free
+		// handshake first, which clears the session exactly as a failover rotation used to — and
+		// deliberately moves no endpoint, so waiting for the pool to move would wait for something that
+		// is no longer supposed to happen. Hold the old session pointer so a re-handshake is seen as a
+		// DIFFERENT one, not merely a non-nil one.
+		was := cli.session.Load()
 		start := time.Now()
 		liveVerdict(t, p, settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: gone})
 
 		deadline := time.Now().Add(wakeKeepalive + 10*time.Second)
-		for p.current() == gone || cli.sealer() == nil {
+		for cli.session.Load() == was || cli.sealer() == nil {
 			if time.Now().After(deadline) {
 				t.Fatalf("round %d: the tunnel never re-handshaked after the node's verdict", round)
 			}

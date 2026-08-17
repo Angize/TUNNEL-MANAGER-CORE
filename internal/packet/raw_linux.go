@@ -1410,6 +1410,19 @@ func (r *Raw) livePath() (pathKey, bool) {
 // deadWin is the session-stale window this carrier enforces.
 func (r *Raw) deadWin() time.Duration { return deadWindow(r.keepalive) }
 
+// dropSession gives up the crypto session so the client loop handshakes again, and reports whether
+// there was one to give up — the ladder's rung one. See the udp twin for why it wakes the loop.
+func (r *Raw) dropSession() bool {
+	if r.sealer() == nil {
+		return false // a handshake already in flight is not a step
+	}
+	r.session.Store(nil)
+	r.ci.Store(nil)
+	r.st.down("rehandshake", "raw")
+	wakeLoop(r.wake)
+	return true
+}
+
 // sessionStale reports that the client has heard nothing authenticated from the server for long
 // enough that the peer most likely restarted with a fresh session, so the client should drop its
 // dead session and re-handshake. Without it a SERVER restart wedges the tunnel: the client keeps
@@ -1677,6 +1690,7 @@ func (r *Raw) clientLoop() {
 	failN := 0        // consecutive handshake retransmits (or unanswered probes) -> the endpoint may be dead
 	unproven := false // the current destination has not answered since we jumped to it -> probe at 1s, not keepalive
 	rc := newRotationController(r.pp, r.sp)
+	rc.session.setDrop(r.dropSession)
 	// The one carrier with a source port of its own to redraw: it lives in the forged header, so a new
 	// one costs no socket, no session and no coordination — the server reads it off the next
 	// authenticated frame. Declared here rather than discovered per verdict: a carrier whose profile

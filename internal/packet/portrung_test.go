@@ -99,7 +99,11 @@ func TestTrafficCrossingRefillsTheDraws(t *testing.T) {
 		t.Fatalf("expected one draw spent, got %d", *rolls)
 	}
 
-	rc.success() // the carrier is answering again
+	// Traffic CROSSING is what settles the outage, and it arrives as the judge's cmdOK. Driven through
+	// that real path: the carrier answering its OWN frames deliberately refills nothing, because in the
+	// failure this ladder exists for those frames keep coming back while nothing crosses.
+	liveVerdict(t, rc.dst, testPathEpoch, poolCmd{Cmd: cmdOK, Key: rc.dst.current()})
+	rc.pollPins(func() {}, func() {}, func(bool) {}, func(bool) {}, nil, atPathEpoch)
 
 	for i := 1; i <= portTries; i++ {
 		rc.failCounting(burns)
