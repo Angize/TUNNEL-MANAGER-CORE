@@ -13,6 +13,7 @@ func rungLadder(t *testing.T) (rc *rotationController, rolls, drops, burns *int)
 	dst := NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json"))
 	src := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json"))
 	rc = newRotationController(dst, src)
+	rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
 	rolls, drops, burns = new(int), new(int), new(int)
 	rc.port.setRoll(func() bool { *rolls++; return true })
 	rc.session.setDrop(func() bool { *drops++; return true })
@@ -106,7 +107,7 @@ func TestTrafficCrossingRefillsBothRungs(t *testing.T) {
 	}
 
 	// Traffic CROSSING, through the real cmdOK path — see portrung_test for why success() is not it.
-	liveVerdict(t, rc.dst, testPathEpoch, poolCmd{Cmd: cmdOK, Key: rc.dst.current()})
+	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdOK, Key: rc.dst.current()})
 	rc.pollPins(func() {}, func() {}, func(bool) {}, func(bool) {}, nil, atPathEpoch)
 
 	for i := 1; i <= portTries+1; i++ {

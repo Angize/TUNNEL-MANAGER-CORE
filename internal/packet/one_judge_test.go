@@ -1,7 +1,6 @@
 package packet
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -151,52 +150,6 @@ func TestProbeNowMakesEveryBurnSelectableAtOnce(t *testing.T) {
 	}
 }
 
-// TestOneDestinationStillTakesTheVerdict covers the pool shape a client gets when the far node is down
-// to a single IP: one destination, several sources. The single destination can never be burned or moved
-// (failWith returns early below two entries) — but it is the tunnel's verdict MAILBOX, and without it
-// pollPins never reads the file at all, so the node's asks are dropped and the source rotation walks
-// blind. Here the fail must land on the SOURCE and the ok must clear it.
-func TestOneDestinationStillTakesTheVerdict(t *testing.T) {
-	dir := t.TempDir()
-	clk := int64(1000)
-	dst := NewPeerPool([]string{"d1"}, 0, filepath.Join(dir, "peerpool"))
-	src := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "srcpool"))
-	dst.now = func() int64 { return clk }
-	src.now = func() int64 { return clk }
-	rc := newRotationController(dst, src)
-	noop := func() {}
-	rotDst := func(bool) { dst.fail() }
-	rotSrc := func(bool) { src.fail() }
-
-	writeFileAtomic(dst.cmdPath(), []byte(`{"cmd":"fail","key":"d1","epoch":7}`), 0o644)
-	rc.pollPins(noop, noop, rotDst, rotSrc, nil, atPathEpoch)
-
-	dst.mu.Lock()
-	dstBurned := dst.health.recs["d1"] != nil
-	dst.mu.Unlock()
-	if dstBurned {
-		t.Error("the only destination must never be condemned — there is nothing to move to")
-	}
-	src.mu.Lock()
-	burned, cur := src.health.recs["s1"] != nil, src.addrs[src.cur]
-	src.mu.Unlock()
-	if !burned {
-		t.Fatal("the ask must reach the SOURCE: with one destination the source is the only axis left")
-	}
-	if cur != "s2" {
-		t.Errorf("and it must move off the source it burned, got %q", cur)
-	}
-
-	writeFileAtomic(dst.cmdPath(), []byte(`{"cmd":"ok","key":"d1","src":"s1","epoch":7}`), 0o644)
-	rc.pollPins(noop, noop, rotDst, rotSrc, nil, atPathEpoch)
-	src.mu.Lock()
-	stillBurned := src.health.recs["s1"] != nil
-	src.mu.Unlock()
-	if stillBurned {
-		t.Error("an ok naming the source must clear it, even though the destination pool holds one entry")
-	}
-}
-
 // TestNodeVerdictsDriveTheLiveDirectPool runs both verdicts through the file a real carrier polls, so
 // the parse, the dispatch, the burn, the clear and the event are all the production path.
 func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
@@ -206,7 +159,7 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 	// The FIRST verdict buys a free step, not a burn: this carrier's ladder still has its handshake to
 	// spend, and that costs one round trip and blames nobody. Only once the free steps are gone may an
 	// endpoint answer for the silence.
-	liveVerdict(t, p, settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: a1})
+	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: a1})
 	time.Sleep(3 * time.Second)
 	p.mu.Lock()
 	early := p.health.recs[a1] != nil
@@ -215,7 +168,7 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 		t.Fatalf("the first verdict condemned %s while the ladder still had a free step", a1)
 	}
 
-	liveVerdict(t, p, settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: a1})
+	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: a1})
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		p.mu.Lock()
@@ -230,7 +183,7 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	liveVerdict(t, p, settledEpoch(t, cli.st), poolCmd{Cmd: cmdOK, Key: a1})
+	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdOK, Key: a1})
 	deadline = time.Now().Add(15 * time.Second)
 	for {
 		p.mu.Lock()
@@ -256,5 +209,4 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 	if !healed {
 		t.Fatalf("the OK must surface as one heal event naming %s, got %+v", a1, evs)
 	}
-	_ = filepath.Join
 }

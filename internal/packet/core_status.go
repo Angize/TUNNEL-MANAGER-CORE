@@ -44,6 +44,20 @@ func (s *coreStatus) pathEpoch() int64 {
 	return e
 }
 
+// verdictPath is the file the node's tun probe drops its verdict about THIS TUNNEL into. Derived from
+// the status file both ends already agree on, like the .echcmd sidecar, so no config key carries it.
+//
+// It belongs to the tunnel and not to a pool because the question it answers — does this path carry —
+// is about the tunnel. A client with no pool still has a path, still has free rungs to spend on it,
+// and used to have no way to be told anything at all. Empty when no status file is wired: then there
+// is no judge.
+func (s *coreStatus) verdictPath() string {
+	if s == nil || s.path == "" {
+		return ""
+	}
+	return s.path + ".verdict"
+}
+
 // newCoreStatus creates the writer and flushes an initial (empty-ring) file so a reader sees a live
 // tunnel immediately rather than a missing file.
 func newCoreStatus(path, active string) *coreStatus {

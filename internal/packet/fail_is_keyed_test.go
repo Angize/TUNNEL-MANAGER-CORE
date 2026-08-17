@@ -8,7 +8,18 @@ import (
 	"time"
 )
 
-// nodeCmd writes one command file exactly as the node does, then runs the poll that reads it. It goes
+// judgedPool builds a destination pool and the controller that hears verdicts about it, wired the way
+// the product wires them: the verdict mailbox belongs to the TUNNEL, the cmd file to the pool.
+func judgedPool(t *testing.T, addrs ...string) (*PeerPool, *rotationController) {
+	t.Helper()
+	dir := t.TempDir()
+	p := NewPeerPool(addrs, 0, filepath.Join(dir, "pool.json"))
+	rc := newRotationController(p, nil)
+	rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
+	return p, rc
+}
+
+// nodeCmd writes one verdict file exactly as the node does, then runs the poll that reads it. It goes
 // through pollPins on purpose: the mis-target this file is about lives in that switch, not in any pool
 // method, so a test that called the pool directly would pass while the wire stayed broken.
 func nodeCmd(t *testing.T, rc *rotationController, c poolCmd) (rotated []string) {
@@ -18,7 +29,7 @@ func nodeCmd(t *testing.T, rc *rotationController, c poolCmd) (rotated []string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(rc.dst.cmdPath(), data, 0o644); err != nil {
+	if err := os.WriteFile(rc.verdict, data, 0o644); err != nil {
 		t.Fatalf("write cmd: %v", err)
 	}
 	rotDst := func(bool) {
@@ -60,9 +71,7 @@ func burnedIn(p *PeerPool) map[string]bool {
 // which an unkeyed verdict condemns the endpoint the rotation just arrived at — a healthy one — and the
 // advance that follows drops the tunnel straight back onto the endpoint that was actually measured.
 func TestAStaleFailBurnsWhatItMeasured(t *testing.T) {
-	dir := t.TempDir()
-	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(dir, "pool.json"))
-	rc := newRotationController(p, nil)
+	p, rc := judgedPool(t, "a", "b")
 
 	measured := p.current() // "a" — where the node's probe found nothing crossing
 	if _, moved := p.rotateOnce(); !moved || p.current() != "b" {
@@ -88,9 +97,7 @@ func TestAStaleFailBurnsWhatItMeasured(t *testing.T) {
 // TestAFreshFailStillBurnsAndAdvances pins the ordinary path down so keying does not quietly turn the
 // failover off: when the key still names the active endpoint, it burns and advances exactly as before.
 func TestAFreshFailStillBurnsAndAdvances(t *testing.T) {
-	dir := t.TempDir()
-	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(dir, "pool.json"))
-	rc := newRotationController(p, nil)
+	p, rc := judgedPool(t, "a", "b")
 
 	measured := p.current()
 	rotated := nodeCmd(t, rc, poolCmd{Cmd: cmdFail, Key: measured})
@@ -110,9 +117,7 @@ func TestAFreshFailStillBurnsAndAdvances(t *testing.T) {
 // the pool was rebuilt under the verdict. Burning "the current one instead" would be the same
 // mis-target with an extra step.
 func TestAStaleFailNamingNothingWeHoldChangesNothing(t *testing.T) {
-	dir := t.TempDir()
-	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(dir, "pool.json"))
-	rc := newRotationController(p, nil)
+	p, rc := judgedPool(t, "a", "b")
 
 	rotated := nodeCmd(t, rc, poolCmd{Cmd: cmdFail, Key: "c"})
 
@@ -127,9 +132,7 @@ func TestAStaleFailNamingNothingWeHoldChangesNothing(t *testing.T) {
 // TestAFailThatNamesNothingCondemnsNothing covers the empty key. There is no "burn whatever is active
 // instead" any more: that IS the mis-target, and a verdict with no endpoint in it is not a verdict.
 func TestAFailThatNamesNothingCondemnsNothing(t *testing.T) {
-	dir := t.TempDir()
-	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(dir, "pool.json"))
-	rc := newRotationController(p, nil)
+	p, rc := judgedPool(t, "a", "b")
 
 	rotated := nodeCmd(t, rc, poolCmd{Cmd: cmdFail})
 
@@ -141,18 +144,16 @@ func TestAFailThatNamesNothingCondemnsNothing(t *testing.T) {
 	}
 }
 
-// TestAFailIsNeverReadAsAPin guards the dispatch itself. The pin arm keys off the SAME field, so a fail
-// the burn arm does not consume — a key the rotation has already moved off, or one the pool does not
-// hold at all — must not fall through to it and select the endpoint the probe just condemned.
+// TestAFailIsNeverReadAsAPin guards the dispatch itself. Both carry an endpoint in Key, so a fail the
+// burn arm does not consume — a key the rotation has already moved off, or one the pool does not hold
+// at all — must not be re-read as a pin and select the endpoint the probe just condemned.
 func TestAFailIsNeverReadAsAPin(t *testing.T) {
 	for _, tc := range []struct{ name, key string }{
 		{"an endpoint the rotation moved off", "a"},
 		{"an endpoint we do not hold", "zzz"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(dir, "pool.json"))
-			rc := newRotationController(p, nil)
+			p, rc := judgedPool(t, "a", "b")
 			if _, moved := p.rotateOnce(); !moved {
 				t.Fatal("setup: the proactive beat did not move the pool")
 			}
@@ -181,7 +182,7 @@ func TestTCPStaleFailBurnsWhatItMeasured(t *testing.T) {
 		t.Fatal("setup: the proactive beat did not move the pool")
 	}
 	moved := p.current()
-	if err := os.WriteFile(p.cmdPath(), []byte(`{"cmd":"fail","key":"`+measured+`"}`), 0o644); err != nil {
+	if err := os.WriteFile(st.verdictPath(), []byte(`{"cmd":"fail","key":"`+measured+`"}`), 0o644); err != nil {
 		t.Fatalf("write cmd: %v", err)
 	}
 	go b.peerPinPollLoop()
@@ -215,9 +216,7 @@ func TestTCPStaleFailBurnsWhatItMeasured(t *testing.T) {
 // TestAKeyedOKStillClearsOnlyWhatItNames is the mirror half, driven through the same file path: the
 // two verdicts have to agree about what a key means or one of them is condemning blind.
 func TestAKeyedOKStillClearsOnlyWhatItNames(t *testing.T) {
-	dir := t.TempDir()
-	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(dir, "pool.json"))
-	rc := newRotationController(p, nil)
+	p, rc := judgedPool(t, "a", "b")
 
 	nodeCmd(t, rc, poolCmd{Cmd: cmdFail, Key: "a"}) // burns a, pool advances to b
 	if !burnedIn(p)["a"] {

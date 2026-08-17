@@ -1103,7 +1103,8 @@ func (b *UDP) clientLoop() {
 	unproven := false // the current destination has not answered since we jumped to it -> probe at 1s, not keepalive
 	rc := newRotationController(b.pp, b.sp)
 	rc.session.setDrop(b.dropSession)
-	if rc.active() {
+	rc.setVerdict(b.st.verdictPath())
+	if rc.polls() {
 		go b.pinPollLoop(rc)
 	}
 	// Seed the staleness baseline NOW (clear mode). Without a baseline, sessionStale() returns false

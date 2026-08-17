@@ -53,7 +53,7 @@ func TestAClearedSessionDoesNotWaitOutTheKeepalive(t *testing.T) {
 		// DIFFERENT one, not merely a non-nil one.
 		was := cli.session.Load()
 		start := time.Now()
-		liveVerdict(t, p, settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: gone})
+		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: gone})
 
 		deadline := time.Now().Add(wakeKeepalive + 10*time.Second)
 		for cli.session.Load() == was || cli.sealer() == nil {

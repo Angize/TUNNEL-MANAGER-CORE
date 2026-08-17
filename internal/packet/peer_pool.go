@@ -610,6 +610,7 @@ type rotationController struct {
 	// across them cannot invert against the pools' own locks.
 	mu       sync.Mutex
 	dst, src *PeerPool
+	verdict  string      // the judge's mailbox for this tunnel; "" = no judge, so no ladder
 	port     portRung    // rung zero: redraw the source port before anything is condemned
 	session  sessionRung // rung one: handshake again before anything is condemned
 	od       odometer    // destination is the low digit, source the high one
@@ -634,6 +635,13 @@ func newRotationController(dst, src *PeerPool) *rotationController {
 
 // active reports whether any rotation is wired (either pool present).
 func (c *rotationController) active() bool { return c != nil && (c.dst != nil || c.src != nil) }
+
+// setVerdict installs the judge's mailbox. A carrier that never calls this hears no verdicts.
+func (c *rotationController) setVerdict(path string) { c.verdict = path }
+
+// polls reports whether the poll loop has anything to read: a pool whose pin file to watch, or a
+// judge to hear from. Neither means a ticker over two paths that do not exist.
+func (c *rotationController) polls() bool { return c != nil && (c.active() || c.verdict != "") }
 
 // pinned reports whether either pool currently holds an operator pin (rotation is frozen).
 func (c *rotationController) pinned() bool {
@@ -743,67 +751,23 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 	}
 }
 
-// pollPins reads a pending pin command for each pool and, when one is present, pins the requested
-// endpoint and calls the carrier's apply func (which re-points the live dataplane at the newly-pinned
-// endpoint via the pool's current()). Carriers run this on a ~1s ticker so a manual switch is prompt.
+// pollPins reads this tunnel's verdict mailbox and each pool's pin file, applying whatever is pending:
+// the judge drives the ladder, a pin pins the requested endpoint and calls the carrier's apply func
+// (which re-points the live dataplane via the pool's current()). Carriers run this on a ~1s ticker so a
+// manual switch is prompt.
+//
+// Three separate files, because they are three separate questions and the pools are optional. A verdict
+// that had to arrive through the destination pool's file was heard only by a tunnel that HAD one, which
+// left every single-endpoint tunnel with no ladder at all — and a source-pooled one with its verdicts
+// written to a file nothing read.
 func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc func(proactive bool),
 	ev func(kind, code, detail string), pathEpoch func() int64) {
+	if cmd, ok := readPoolCmd(c.verdict); ok {
+		c.judge(cmd, rotDst, rotSrc, ev, pathEpoch())
+	}
 	if c.dst != nil {
-		if cmd, ok := c.dst.readCmd(); ok {
-			epoch := pathEpoch()
-			switch {
-			case staleVerdict(cmd, epoch):
-				// It judged a path the carrier has already left. Acting on it would charge that silence
-				// to whatever the tunnel moved onto.
-				log.Printf("core: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
-					cmd.Epoch, epoch)
-			case cmd.Cmd == cmdOK:
-				// Traffic is CROSSING, so the outage the ladder was working through is over and its free
-				// steps are refilled. This is the only evidence that settles it: the carrier's own frames
-				// coming back would not, because in the failure this ladder exists for they keep coming
-				// back while nothing crosses — and a budget refilled on that never runs out.
-				c.port.restart()
-				c.session.restart()
-				// Both ends of the pair the probe measured are proven, so both burns go. Keyed on each
-				// side separately: a source rotation is seamless and can slide under a verdict.
-				if cmd.Key != "" && c.dst.clearBurn(cmd.Key) && ev != nil {
-					ev("heal", "peer-retest", cmd.Key)
-				}
-				if c.src != nil && cmd.Src != "" && c.src.clearBurn(cmd.Src) && ev != nil {
-					ev("heal", "src-retest", cmd.Src)
-				}
-			case cmd.Cmd == cmdFail:
-				// The verdict names the endpoint it was MEASURED on, and that name is the whole guard.
-				// This poll is a one-second ticker and the probe ahead of it takes most of a second, so
-				// the proactive timer can move the pool in between; current() would then condemn an
-				// endpoint the probe never tested AND drop the tunnel back onto the one it did.
-				// Both arms live in THIS case, never as sibling cases: a fail that burns nothing must not
-				// fall through to the pin arm below and select the very endpoint it condemns.
-				if addr := c.dst.current(); cmd.Key == addr {
-					// Still where it was measured: burn and advance, so a node-driven failover and a
-					// carrier-driven one are the same move. The endpoint is captured BEFORE the move,
-					// while we still know which one goes, but announced only if it really was charged —
-					// a verdict the ladder answered with a free step, or one a pin absorbed, condemns
-					// nobody, and saying otherwise puts a burn card on the operator's log for an address
-					// that is still healthy.
-					if c.fail(rotDst, rotSrc) {
-						log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", addr)
-						if ev != nil {
-							ev("burn", "tun-probe", "ip:"+addr)
-						}
-					}
-				} else if c.dst.burnNamed(cmd.Key) {
-					// It moved under the verdict. Burn what was measured and stay put: the rotation has
-					// already advanced, and nothing has measured where it went.
-					log.Printf("core: destination %s failed by the node's tun probe, but the rotation has "+
-						"since moved to %s — burning what was measured, staying put", cmd.Key, addr)
-					if ev != nil {
-						ev("burn", "tun-probe", "ip:"+cmd.Key)
-					}
-				}
-			case cmd.Key != "" && c.dst.selectEntry(cmd.Key):
-				applyDst()
-			}
+		if cmd, ok := c.dst.readCmd(); ok && cmd.Key != "" && c.dst.selectEntry(cmd.Key) {
+			applyDst()
 		}
 	}
 	if c.src != nil {
@@ -811,6 +775,67 @@ func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc 
 		// and the controller already walks the source once every destination has been tried against it.
 		if cmd, ok := c.src.readCmd(); ok && cmd.Key != "" && c.src.selectEntry(cmd.Key) {
 			applySrc()
+		}
+	}
+}
+
+// judge applies one verdict from the node's tun probe: the only evidence that says whether this tunnel
+// carries, and therefore the only thing allowed to spend a rung or condemn an endpoint.
+func (c *rotationController) judge(cmd poolCmd, rotDst, rotSrc func(proactive bool),
+	ev func(kind, code, detail string), epoch int64) {
+	switch {
+	case staleVerdict(cmd, epoch):
+		// It judged a path the carrier has already left. Acting on it would charge that silence
+		// to whatever the tunnel moved onto.
+		log.Printf("core: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
+			cmd.Epoch, epoch)
+	case cmd.Cmd == cmdOK:
+		// Traffic is CROSSING, so the outage the ladder was working through is over and its free
+		// steps are refilled. This is the only evidence that settles it: the carrier's own frames
+		// coming back would not, because in the failure this ladder exists for they keep coming
+		// back while nothing crosses — and a budget refilled on that never runs out.
+		c.port.restart()
+		c.session.restart()
+		// Both ends of the pair the probe measured are proven, so both burns go. Keyed on each
+		// side separately: a source rotation is seamless and can slide under a verdict. A pool-less
+		// tunnel names neither and has nothing to clear — the refill above was the whole message.
+		if c.dst != nil && cmd.Key != "" && c.dst.clearBurn(cmd.Key) && ev != nil {
+			ev("heal", "peer-retest", cmd.Key)
+		}
+		if c.src != nil && cmd.Src != "" && c.src.clearBurn(cmd.Src) && ev != nil {
+			ev("heal", "src-retest", cmd.Src)
+		}
+	case cmd.Cmd == cmdFail && c.dst == nil:
+		// No destination pool: there is no endpoint to name and none to advance onto, so the free
+		// rungs ARE the whole ladder. fail() spends them in order and, with a source pool, walks that
+		// once they are gone.
+		c.fail(rotDst, rotSrc)
+	case cmd.Cmd == cmdFail:
+		// The verdict names the endpoint it was MEASURED on, and that name is the whole guard.
+		// This poll is a one-second ticker and the probe ahead of it takes most of a second, so
+		// the proactive timer can move the pool in between; current() would then condemn an
+		// endpoint the probe never tested AND drop the tunnel back onto the one it did.
+		if addr := c.dst.current(); cmd.Key == addr {
+			// Still where it was measured: burn and advance, so a node-driven failover and a
+			// carrier-driven one are the same move. The endpoint is captured BEFORE the move,
+			// while we still know which one goes, but announced only if it really was charged —
+			// a verdict the ladder answered with a free step, or one a pin absorbed, condemns
+			// nobody, and saying otherwise puts a burn card on the operator's log for an address
+			// that is still healthy.
+			if c.fail(rotDst, rotSrc) {
+				log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", addr)
+				if ev != nil {
+					ev("burn", "tun-probe", "ip:"+addr)
+				}
+			}
+		} else if c.dst.burnNamed(cmd.Key) {
+			// It moved under the verdict. Burn what was measured and stay put: the rotation has
+			// already advanced, and nothing has measured where it went.
+			log.Printf("core: destination %s failed by the node's tun probe, but the rotation has "+
+				"since moved to %s — burning what was measured, staying put", cmd.Key, addr)
+			if ev != nil {
+				ev("burn", "tun-probe", "ip:"+cmd.Key)
+			}
 		}
 	}
 }

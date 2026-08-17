@@ -1698,7 +1698,8 @@ func (r *Raw) clientLoop() {
 	if r.sportRandom {
 		rc.port.setRoll(r.rollSourcePort)
 	}
-	if rc.active() {
+	rc.setVerdict(r.st.verdictPath())
+	if rc.polls() {
 		go r.pinPollLoop(rc)
 	}
 	// Seed the staleness baseline NOW: sessionStale() reads false while lastRx==0, and the first thing

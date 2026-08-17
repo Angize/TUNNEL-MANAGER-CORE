@@ -2129,10 +2129,11 @@ func (b *TCP) ProbeAllNow() {
 	}
 }
 
-// peerPinPollLoop polls the direct destination/source pools' cmd files on a 1s ticker; a pending pin
-// pins the requested endpoint and drops the live carrier so dialLoop immediately re-dials onto it
-// (dialTarget()/sourceIP() read the pinned endpoint via the pool's current()). No rebuild — the TUN
-// stays up. Runs until Close. The ws edge pool uses retestLoop for the same job on its own axes.
+// peerPinPollLoop polls this tunnel's verdict mailbox and the direct destination/source pools' pin
+// files on a 1s ticker; a pending pin pins the requested endpoint and drops the live carrier so
+// dialLoop immediately re-dials onto it (dialTarget()/sourceIP() read the pinned endpoint via the
+// pool's current()). No rebuild — the TUN stays up. Runs until Close. The ws edge pool uses retestLoop
+// for the same job on its own axes.
 func (b *TCP) peerPinPollLoop() {
 	drop := func() {
 		b.manualSwitch.Store(true) // operator-initiated: skip fault accounting on the induced drop
@@ -2147,48 +2148,52 @@ func (b *TCP) peerPinPollLoop() {
 		case <-b.closeCh:
 			return
 		case <-t.C:
-			if b.pp != nil {
-				if cmd, ok := b.pp.readCmd(); ok {
-					epoch := b.st.pathEpoch()
-					switch {
-					case staleVerdict(cmd, epoch):
-						// It judged a path the carrier has already left. Acting on it would charge that
-						// silence to whatever the tunnel moved onto.
-						log.Printf("core/tcp: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
-							cmd.Epoch, epoch)
-					case cmd.Cmd == cmdOK:
-						// Both ends of the pair the probe measured are proven; keyed, so a verdict that
-						// crossed with a re-dial cannot clear an endpoint the tunnel has already left.
-						if cmd.Key != "" && b.pp.clearBurn(cmd.Key) {
-							b.st.event("heal", "peer-retest", "ip:"+cmd.Key)
-						}
-						if b.sp != nil && cmd.Src != "" && b.sp.clearBurn(cmd.Src) {
-							b.st.event("heal", "src-retest", "ip:"+cmd.Src)
-						}
-					case cmd.Cmd == cmdFail && cmd.Key == b.pp.current():
-						// Same burn the carrier does on a dead peer; burnAdvance leaves the event to its
-						// caller, so publish here and drop so dialLoop re-dials on the new destination.
-						// The event names the KEY, never burnAdvance's return: that is where the pool
-						// moved TO, and blaming the replacement is the mis-target one step later.
-						gone := cmd.Key
-						if addr, moved := b.burnAdvance(true); moved {
-							log.Printf("core/tcp: destination %s failed by the node's tun probe — burning and advancing to %s", gone, addr)
-							b.st.event("burn", "tun-probe", "ip:"+gone)
-							drop()
-						}
-					case cmd.Cmd == cmdFail:
-						// The rotation moved between the measurement and this read (this ticker is 1s and
-						// the probe ahead of it takes most of a second). Burn what was MEASURED and leave
-						// the connection alone — it is already somewhere no verdict covers.
-						if b.pp.burnNamed(cmd.Key) {
-							log.Printf("core/tcp: destination %s failed by the node's tun probe, but the rotation has since moved to %s — burning what was measured, staying put", cmd.Key, b.pp.current())
-							b.st.event("burn", "tun-probe", "ip:"+cmd.Key)
-						}
-					case cmd.Key != "" && b.pp.selectEntry(cmd.Key):
-						log.Printf("core/tcp: pin destination %s (panel select)", cmd.Key)
-						b.st.setActive(b.stTag + " · " + cmd.Key) // reflect the pinned destination in "active" — silently; drop() below is deliberate (no event)
+			// The verdict is about the TUNNEL and arrives in the tunnel's own mailbox; the pin below is
+			// about a pool ENTRY and arrives in that pool's. Consumed even with no destination pool, so
+			// a tunnel this carrier can do nothing for does not leave a verdict lying on disk.
+			if cmd, ok := readPoolCmd(b.st.verdictPath()); ok && b.pp != nil {
+				epoch := b.st.pathEpoch()
+				switch {
+				case staleVerdict(cmd, epoch):
+					// It judged a path the carrier has already left. Acting on it would charge that
+					// silence to whatever the tunnel moved onto.
+					log.Printf("core/tcp: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
+						cmd.Epoch, epoch)
+				case cmd.Cmd == cmdOK:
+					// Both ends of the pair the probe measured are proven; keyed, so a verdict that
+					// crossed with a re-dial cannot clear an endpoint the tunnel has already left.
+					if cmd.Key != "" && b.pp.clearBurn(cmd.Key) {
+						b.st.event("heal", "peer-retest", "ip:"+cmd.Key)
+					}
+					if b.sp != nil && cmd.Src != "" && b.sp.clearBurn(cmd.Src) {
+						b.st.event("heal", "src-retest", "ip:"+cmd.Src)
+					}
+				case cmd.Cmd == cmdFail && cmd.Key == b.pp.current():
+					// Same burn the carrier does on a dead peer; burnAdvance leaves the event to its
+					// caller, so publish here and drop so dialLoop re-dials on the new destination.
+					// The event names the KEY, never burnAdvance's return: that is where the pool
+					// moved TO, and blaming the replacement is the mis-target one step later.
+					gone := cmd.Key
+					if addr, moved := b.burnAdvance(true); moved {
+						log.Printf("core/tcp: destination %s failed by the node's tun probe — burning and advancing to %s", gone, addr)
+						b.st.event("burn", "tun-probe", "ip:"+gone)
 						drop()
 					}
+				case cmd.Cmd == cmdFail:
+					// The rotation moved between the measurement and this read (this ticker is 1s and
+					// the probe ahead of it takes most of a second). Burn what was MEASURED and leave
+					// the connection alone — it is already somewhere no verdict covers.
+					if b.pp.burnNamed(cmd.Key) {
+						log.Printf("core/tcp: destination %s failed by the node's tun probe, but the rotation has since moved to %s — burning what was measured, staying put", cmd.Key, b.pp.current())
+						b.st.event("burn", "tun-probe", "ip:"+cmd.Key)
+					}
+				}
+			}
+			if b.pp != nil {
+				if cmd, ok := b.pp.readCmd(); ok && cmd.Key != "" && b.pp.selectEntry(cmd.Key) {
+					log.Printf("core/tcp: pin destination %s (panel select)", cmd.Key)
+					b.st.setActive(b.stTag + " · " + cmd.Key) // reflect the pinned destination in "active" — silently; drop() below is deliberate (no event)
+					drop()
 				}
 			}
 			if b.sp != nil {
