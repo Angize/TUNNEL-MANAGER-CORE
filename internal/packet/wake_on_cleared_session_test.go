@@ -47,7 +47,7 @@ func TestAClearedSessionDoesNotWaitOutTheKeepalive(t *testing.T) {
 		settle()
 		gone := p.current()
 		start := time.Now()
-		writeFileAtomic(p.cmdPath(), []byte(`{"cmd":"fail","key":"`+gone+`"}`), 0o644)
+		liveVerdict(t, p, settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: gone})
 
 		deadline := time.Now().Add(wakeKeepalive + 10*time.Second)
 		for p.current() == gone || cli.sealer() == nil {

@@ -96,6 +96,23 @@ type wsPool struct {
 	// verdict, and a jump that never connected must not leave a dead entry looking healthy on the panel.
 	pinTook map[string]*healthRec // "ip:<k>" / "sni:<k>" -> what was there before the pin
 	now     func() int64          // injectable clock (unix seconds); overridden in tests
+	// tracker is the epoch a liveness verdict is keyed on. This pool is the status writer for a pooled ws
+	// client, so it owns the tracker the direct carriers keep on coreStatus.
+	tracker pathTracker
+}
+
+// trackPath installs the carrier's live-path report and starts the sampler that catches a mover which
+// publishes nothing — the edge-pool twin of coreStatus.trackPath.
+func (p *wsPool) trackPath(live func() (pathKey, bool), closeCh <-chan struct{}) {
+	p.tracker.setLive(live)
+	go samplePathLoop(&p.tracker, p.writeStatus, closeCh)
+}
+
+// pathEpoch is the epoch a verdict must carry to be acted on — the edge-pool twin of
+// coreStatus.pathEpoch.
+func (p *wsPool) pathEpoch() int64 {
+	e, _, _ := p.tracker.snapshot()
+	return e
 }
 
 // suspectBackoff and deadRetest are operator-tunable package vars,
@@ -916,6 +933,7 @@ func (p *wsPool) writeStatus() {
 	// Hold writeMu across BOTH the snapshot and the file write, so two concurrent writers cannot snapshot
 	// in one order and win the write in the reverse order — an older snapshot must never overwrite a newer
 	// file. p.mu is always released before any caller reaches writeStatus, so writeMu→p.mu never inverts.
+	p.tracker.sample() // before any lock: the tracker has its own, and livePath reads only carrier atomics
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 	p.mu.Lock()
@@ -935,12 +953,16 @@ func (p *wsPool) writeStatus() {
 		health = append(health, hs)
 	}
 	evs := append([]coreEvent(nil), p.events...) // copy so the marshal runs outside the lock
+	epoch, path, ready := p.tracker.snapshot()
 	st := struct {
 		Active string         `json:"active"`
+		Epoch  int64          `json:"epoch"`
+		Ready  bool           `json:"ready"`
+		Path   pathKey        `json:"path"`
 		Health []healthStatus `json:"health"`
 		Events []coreEvent    `json:"events"`
 		TS     int64          `json:"ts"`
-	}{Active: p.active, Health: health, Events: evs, TS: time.Now().Unix()}
+	}{Active: p.active, Epoch: epoch, Ready: ready, Path: path, Health: health, Events: evs, TS: time.Now().Unix()}
 	p.mu.Unlock()
 	if data, err := json.Marshal(st); err == nil {
 		// writeMu already held across the snapshot above (serializes writers AND orders snapshot->write).

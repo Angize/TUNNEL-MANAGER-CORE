@@ -100,7 +100,7 @@ type Raw struct {
 	// keepalive ping, or a handshake init. Older than lastRxCur means everything asked has been
 	// answered. Stamped only where those are sent, never on the data path.
 	lastAsk atomic.Int64
-	// peerAnswered gates the clear-mode heal: set when the CURRENT endpoint replies, cleared on
+	// peerAnswered marks an endpoint PROVEN answering: set when the CURRENT endpoint replies, cleared on
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
 	peerAnswered atomic.Bool
 
@@ -456,6 +456,7 @@ func (r *Raw) Run() error {
 	}
 	go func() { errc <- r.link.recvLoop() }() // conn (netToTun) or, for a decoy server, AF_PACKET
 	if r.isClient {
+		r.st.trackPath(r.livePath, r.closeCh)
 		go r.clientLoop()
 		if r.sportRandom {
 			go r.sportLoop()
@@ -1378,6 +1379,26 @@ func (r *Raw) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	}
 }
 
+// livePath reports the addressing this client is on right now, and whether a session is up on it. The
+// ports come from rawPorts, the same call rawEncap makes when it builds the header, so they cannot
+// drift from the wire. A profile with no ports has none in its key — they are not on the wire, so
+// they are not part of the path.
+//
+// The addresses are the REAL peer and source, deliberately NOT what link.header() puts in the packet.
+// A spoof carrier forges both, and the forged pair is fixed for the tunnel's life while the real peer
+// still rotates: keying on the header would leave the epoch standing still across a destination
+// rotation that genuinely changed where the packets go.
+func (r *Raw) livePath() (pathKey, bool) {
+	k := pathKey{Src: r.srcIP().String()}
+	if p := r.peer.Load(); p != nil {
+		k.Dst = p.IP.String()
+	}
+	if RawProfileHasPorts(r.profile) {
+		k.Sport, k.Dport = rawPorts(r.isClient, r.port, r.cport())
+	}
+	return k, r.sealer() != nil // config rejects a raw tunnel without crypto, so there is no other session
+}
+
 // deadWin is the session-stale window this carrier enforces.
 func (r *Raw) deadWin() time.Duration { return deadWindow(r.keepalive) }
 
@@ -1641,7 +1662,7 @@ func (r *Raw) ProbeAllNow() {
 
 // pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin. Runs until Close.
 func (r *Raw) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, r.closeCh, r.adoptPeerRaw, r.adoptSourceRaw, r.rotatePeerRaw, r.rotateSourceRaw, r.st.event)
+	runPinPoll(rc, r.closeCh, r.adoptPeerRaw, r.adoptSourceRaw, r.rotatePeerRaw, r.rotateSourceRaw, r.st.event, r.st.pathEpoch)
 }
 
 func (r *Raw) clientLoop() {

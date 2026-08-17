@@ -168,8 +168,8 @@ func TestOneDestinationStillTakesTheVerdict(t *testing.T) {
 	rotDst := func(bool) { dst.fail() }
 	rotSrc := func(bool) { src.fail() }
 
-	writeFileAtomic(dst.cmdPath(), []byte(`{"cmd":"fail","key":"d1"}`), 0o644)
-	rc.pollPins(noop, noop, rotDst, rotSrc, nil)
+	writeFileAtomic(dst.cmdPath(), []byte(`{"cmd":"fail","key":"d1","epoch":7}`), 0o644)
+	rc.pollPins(noop, noop, rotDst, rotSrc, nil, atPathEpoch)
 
 	dst.mu.Lock()
 	dstBurned := dst.health.recs["d1"] != nil
@@ -187,8 +187,8 @@ func TestOneDestinationStillTakesTheVerdict(t *testing.T) {
 		t.Errorf("and it must move off the source it burned, got %q", cur)
 	}
 
-	writeFileAtomic(dst.cmdPath(), []byte(`{"cmd":"ok","key":"d1","src":"s1"}`), 0o644)
-	rc.pollPins(noop, noop, rotDst, rotSrc, nil)
+	writeFileAtomic(dst.cmdPath(), []byte(`{"cmd":"ok","key":"d1","src":"s1","epoch":7}`), 0o644)
+	rc.pollPins(noop, noop, rotDst, rotSrc, nil, atPathEpoch)
 	src.mu.Lock()
 	stillBurned := src.health.recs["s1"] != nil
 	src.mu.Unlock()
@@ -203,7 +203,7 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 	cli, _, a1, _, _, _ := probePair(t, time.Second, "onej")
 	p := cli.pp
 
-	writeFileAtomic(p.cmdPath(), []byte(`{"cmd":"fail","key":"`+a1+`"}`), 0o644)
+	liveVerdict(t, p, settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: a1})
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		p.mu.Lock()
@@ -218,7 +218,7 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	writeFileAtomic(p.cmdPath(), []byte(`{"cmd":"ok","key":"`+a1+`"}`), 0o644)
+	liveVerdict(t, p, settledEpoch(t, cli.st), poolCmd{Cmd: cmdOK, Key: a1})
 	deadline = time.Now().Add(15 * time.Second)
 	for {
 		p.mu.Lock()

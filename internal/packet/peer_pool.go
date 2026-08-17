@@ -545,6 +545,20 @@ type poolCmd struct {
 	Kind string `json:"kind"` // edge-pool pin only: which axis, "ip" | "sni"
 	IP   string `json:"ip"`   // edge-pool verdict: the EDGE it was measured on
 	SNI  string `json:"sni"`  // edge-pool verdict: the SNI it was measured with
+	// Epoch is the path the verdict MEASURED, read from the status file either side of the probe. See
+	// staleVerdict.
+	Epoch int64 `json:"epoch"`
+}
+
+// staleVerdict reports that this command judged a path the carrier has already left, so acting on it
+// would charge the silence to whatever the tunnel moved onto. One definition for all three consumers
+// (the datagram poller, the edge poller, the direct-tcp poller): three copies of a guard is how two of
+// them end up disagreeing about what "current" means.
+//
+// A pin carries no epoch and is never stale — the operator is naming an entry, not reporting a
+// measurement.
+func staleVerdict(c poolCmd, epoch int64) bool {
+	return (c.Cmd == cmdOK || c.Cmd == cmdFail) && c.Epoch != epoch
 }
 
 // readPoolCmd consumes a pending command file and returns what it held. The file is REMOVED once read,
@@ -723,10 +737,16 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 // endpoint and calls the carrier's apply func (which re-points the live dataplane at the newly-pinned
 // endpoint via the pool's current()). Carriers run this on a ~1s ticker so a manual switch is prompt.
 func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc func(proactive bool),
-	ev func(kind, code, detail string)) {
+	ev func(kind, code, detail string), pathEpoch func() int64) {
 	if c.dst != nil {
 		if cmd, ok := c.dst.readCmd(); ok {
+			epoch := pathEpoch()
 			switch {
+			case staleVerdict(cmd, epoch):
+				// It judged a path the carrier has already left. Acting on it would charge that silence
+				// to whatever the tunnel moved onto.
+				log.Printf("core: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
+					cmd.Epoch, epoch)
 			case cmd.Cmd == cmdOK:
 				// Both ends of the pair the probe measured are proven, so both burns go. Keyed on each
 				// side separately: a source rotation is seamless and can slide under a verdict.

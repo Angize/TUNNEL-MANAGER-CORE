@@ -278,6 +278,7 @@ func (f *Flux) Run() error {
 	go func() { errc <- f.netToTun() }()
 	go f.rotateWatcher()
 	if f.isClient {
+		f.st.trackPath(f.livePath, f.closeCh)
 		go f.clientLoop()
 	}
 	return <-errc
@@ -762,6 +763,21 @@ func (f *Flux) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	}
 }
 
+// livePath reports the tuple this client's crafted header carries right now, and whether a session
+// is up on it. Source and ports come from the same srcIP()/curShape pair carrierOut sends with, so
+// the reported path is the sent path. A shape not yet derived leaves the ports zero — nothing has
+// gone out under it either.
+func (f *Flux) livePath() (pathKey, bool) {
+	k := pathKey{Src: f.srcIP().String()}
+	if p := f.peer.Load(); p != nil {
+		k.Dst = p.IP.String()
+	}
+	if sh := f.curShape.Load(); sh != nil {
+		k.Sport, k.Dport = sh.sport, sh.dportFor(f.carrier)
+	}
+	return k, f.sealer() != nil // config rejects a flux tunnel without crypto, so there is no other session
+}
+
 // deadWin is the session-stale window this carrier enforces.
 func (f *Flux) deadWin() time.Duration { return deadWindow(f.keepalive) }
 
@@ -999,7 +1015,7 @@ func (f *Flux) ProbeAllNow() {
 // pinPollLoop polls the pools' cmd files on a 1s ticker and applies any operator pin (re-pointing the
 // live dataplane at the pinned endpoint via pollPins). Runs until Close.
 func (f *Flux) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, f.closeCh, f.adoptPeerFlux, f.adoptSourceFlux, f.rotatePeerFlux, f.rotateSourceFlux, f.st.event)
+	runPinPoll(rc, f.closeCh, f.adoptPeerFlux, f.adoptSourceFlux, f.rotatePeerFlux, f.rotateSourceFlux, f.st.event, f.st.pathEpoch)
 }
 
 func (f *Flux) clientLoop() {
