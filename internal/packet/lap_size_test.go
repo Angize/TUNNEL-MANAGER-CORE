@@ -46,7 +46,7 @@ func TestBurnAdvanceLapResetsOnAHealthySession(t *testing.T) {
 	}
 	b.burnAdvance(true)
 	b.burnAdvance(true)
-	b.destRot.Store(0) // what dialLoop's succeedBoth does when a carrier proves healthy
+	b.odPeer.restart() // what dialLoop's succeedBoth does when a carrier proves healthy
 	b.pp.probeAllNow()
 	b.pp.clearBurn("d1")
 	b.pp.clearBurn("d2")

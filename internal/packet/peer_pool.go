@@ -610,10 +610,8 @@ type rotationController struct {
 	// across them cannot invert against the pools' own locks.
 	mu       sync.Mutex
 	dst, src *PeerPool
-	destRot  int
-	destTick int // beats since the source last moved — the odometer's low digit (see proactive)
-	destWant int // destinations this failover round can actually try (see fail)
-	pinFails int // consecutive proven-dead rounds while a pin is in force -> auto-release at pinFailRelease
+	od       odometer // destination is the low digit, source the high one
+	pinFails int      // consecutive proven-dead rounds while a pin is in force -> auto-release at pinFailRelease
 	rotate   time.Duration
 	rotateAt time.Time
 }
@@ -665,21 +663,11 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 		c.pinFails = 0 // not pinned -> reset so a later pin starts its release count fresh
 	}
 	if c.dst != nil {
-		// How many destinations this round can actually try, snapshotted BEFORE the burn and at the
-		// START of the round: ELIGIBLE, not the raw list. A condemned destination cannot be tried, so
-		// counting the list read two asks that both landed on the one survivor as a full lap and burned
-		// an innocent source for a destination that never varied — measured on core42. Floored at one:
-		// with nothing eligible, the endpoint we are sitting on IS the whole experiment.
-		if c.destRot == 0 {
-			if c.destWant = c.dst.eligibleCount(); c.destWant < 1 {
-				c.destWant = 1
-			}
-		}
+		// ELIGIBLE, not the raw list, and counted before the burn — see odometer.failed for both halves.
+		lap := c.od.failed(c.dst.eligibleCount)
 		rotDst(false)
-		c.destRot++
-		if c.src != nil && c.destRot >= c.destWant {
+		if c.src != nil && lap {
 			rotSrc(false) // every destination that could be tried has been — move the source
-			c.destRot = 0
 		}
 		return
 	}
@@ -695,7 +683,7 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 func (c *rotationController) success() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.destRot = 0
+	c.od.restart()
 	c.pinFails = 0
 }
 
@@ -724,12 +712,8 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 	}
 	before := c.dst.activeIdx()
 	rotDst(true)
-	c.destTick++
-	lap := c.dst.activeIdx() == before || c.destTick >= c.dst.eligibleCount()
-	if c.src != nil && lap {
+	if lap := c.od.beat(c.dst.activeIdx() != before, c.dst.eligibleCount); c.src != nil && lap {
 		rotSrc(true)
-		c.destTick = 0
-		c.destRot = 0 // a source move restarts the "every destination tried" count, which is per-source
 	}
 }
 

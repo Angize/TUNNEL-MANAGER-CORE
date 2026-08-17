@@ -400,20 +400,18 @@ type TCP struct {
 	isClient bool
 	addr     string // server: listen addr; client: peer addr
 	bindIP   string // client: source IP to dial FROM (empty = kernel default); tcp/ws/http only
-	// destRot counts destination burns since the last healthy session, so the SOURCE pool is only walked
-	// once the destination pool has cycled through every endpoint against it. Written by the dial loop and
-	// by the rotation timer (which reaches burnAdvance through buildWarm), hence atomic.
-	destRot  atomic.Int64
-	destWant atomic.Int64 // ...and how many that round set out to try, snapshotted before the first burn
+	// The two walks this carrier can run: destination-then-source for direct endpoints, SNI-then-edge for
+	// a CDN pool. A carrier has one or the other, never both, but they are separate counters because they
+	// count different axes. Each carries its own lock — the dial loop and the rotation timer both reach
+	// them, from different goroutines.
+	odPeer odometer
+	odEdge odometer
 	// pinFails counts consecutive proven-dead rounds while an operator pin is in force, so a pin costs
 	// a SECOND OPINION to break rather than being either absolute or worth one measurement. One field
 	// for both pools: a carrier has direct endpoints or a CDN edge pool, never both.
 	pinFails  atomic.Int64
-	destTick  atomic.Int32 // timed-rotation beats since the source last moved (the odometer's low digit)
-	sniRot    atomic.Int64 // ws edge pool: SNI burns on this edge since the last healthy session
-	sniWant   atomic.Int64 // ...and how many that round set out to try, snapshotted before the first burn
-	srcWarned sync.Map     // sources already reported as unbindable (one log line per source)
-	probing   atomic.Bool  // a retest batch is in flight; keeps the retest tick free for the operator pin
+	srcWarned sync.Map    // sources already reported as unbindable (one log line per source)
+	probing   atomic.Bool // a retest batch is in flight; keeps the retest tick free for the operator pin
 	// lastSrc is the source the dialer really BOUND to — empty when no bind was applied (none
 	// configured, or the IP is not on this host). Releasing a source pin is conditioned on it, so a
 	// pin is never consumed by a connection that leaves from somewhere else. Written in dialer(),
@@ -538,8 +536,8 @@ func (b *TCP) livePath() (pathKey, bool) {
 // healthy ends the run — this is rotationController.success, for the two carriers that reach their
 // odometer through this file instead of through that controller.
 func (b *TCP) endRound() {
-	b.destRot.Store(0)
-	b.sniRot.Store(0)
+	b.odPeer.restart()
+	b.odEdge.restart()
 	b.pinFails.Store(0)
 }
 
@@ -586,24 +584,11 @@ func (b *TCP) burnAdvance(carrierGone bool) (string, bool) {
 		}
 		return "", false
 	}
-	// ELIGIBLE, not size, and sized ONCE at the start of the round — see rotationController.fail, which
-	// snapshots it the same way. A condemned destination cannot be tried, so counting the raw list blames
-	// the source for a lap that never happened; and re-reading the ELIGIBLE count on every ask is the
-	// same bug one step in: each burn shrinks the number the next ask compares against, so three
-	// destinations declare a lap after two. Floored at one: with nothing eligible, the endpoint we are
-	// on IS the experiment.
-	want := int(b.destWant.Load())
-	if b.destRot.Load() == 0 {
-		want = b.pp.eligibleCount()
-		b.destWant.Store(int64(want))
-	}
-	if want < 1 {
-		want = 1
-	}
+	// ELIGIBLE, not size, and counted before the burn — see odometer.failed for both halves.
+	lap := b.odPeer.failed(b.pp.eligibleCount)
 	addr, _ := b.pp.fail()
-	if n := b.destRot.Add(1); b.sp != nil && int(n) >= want {
+	if b.sp != nil && lap {
 		walkSource()
-		b.destRot.Store(0)
 	}
 	return addr, true
 }
@@ -1922,11 +1907,7 @@ func (b *TCP) dialLoop() {
 					if _, m := b.pp.rotateOnce(); m {
 						dstMoved = true // the endpoint itself is read back at the adoption site, once it is real
 					}
-					n := int32(b.pp.eligibleCount())
-					lap = !dstMoved || (n > 0 && b.destTick.Add(1) >= n)
-					if lap {
-						b.destTick.Store(0)
-					}
+					lap = b.odPeer.beat(dstMoved, b.pp.eligibleCount)
 				}
 				moved := dstMoved
 				// srcMovedTo is announced at the adoption site, not here — see rotateSourceTCP.
@@ -2305,25 +2286,14 @@ func (b *TCP) burnAdvanceWS(ip, sni string) bool {
 	if b.pool.snisCount() < 2 {
 		b.pool.markSuspect("ip", ip, "tun-probe")
 		b.pool.advanceIP()
-		b.sniRot.Store(0)
+		b.odEdge.restart()
 		return true
 	}
-	// Size the lap ONCE, at the start of the round: ELIGIBLE SNIs, before the first burn. Re-reading it
-	// every ask is the trap — each burn shrinks the count the next ask compares against, so three SNIs
-	// declare a lap after two and the edge is convicted a step early. Floored at one: with nothing else
-	// eligible, the SNI we are sitting on IS the whole experiment.
-	want := b.sniWant.Load()
-	if b.sniRot.Load() == 0 {
-		want = int64(b.pool.eligibleSNIs())
-		b.sniWant.Store(want)
-	}
-	if want < 1 {
-		want = 1
-	}
+	// ELIGIBLE SNIs, counted before the burn — see odometer.failed for both halves.
+	lap := b.odEdge.failed(b.pool.eligibleSNIs)
 	b.pool.markSuspect("sni", sni, "tun-probe")
-	if n := b.sniRot.Add(1); n >= want {
+	if lap {
 		b.pool.advanceEdgeFreshRow() // every SNI that could be tried has been — the edge is what did not vary
-		b.sniRot.Store(0)
 	}
 	return true
 }
