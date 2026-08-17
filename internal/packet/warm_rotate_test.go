@@ -45,12 +45,12 @@ func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 		stTag: "tcp", closeCh: make(chan struct{})}
 	b.st = newCoreStatus(path, active)
 	b.warmNext = make(chan *warmDial, 1) // dialLoop's job; this test drives buildWarm directly
-	b.SetPeerPool(NewPeerPool([]string{addr, second}, true, 0, ""))
+	b.SetPeerPool(NewPeerPool([]string{addr, second}, 0, ""))
 	// Also wire a SOURCE pool and rotate it, for the source half: the proactive timer advances the source
 	// (via rotateSourceTCP(true)) BEFORE buildWarm proves the move. The source-rotate event must NOT be
 	// published until the warm carrier goes live — so a build that then fails announces nothing at all.
 	// (The source IPs need not be local: dialer() skips an unbindable bind and dials from the default.)
-	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, true, 0, ""))
+	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0, ""))
 	if _, moved := b.rotateSourceTCP(true); !moved {
 		t.Fatal("proactive source rotate should move in a 2-entry pool")
 	}

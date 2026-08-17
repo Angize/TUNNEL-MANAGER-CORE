@@ -17,8 +17,8 @@ func snis(hosts ...string) []wsSNIEntry {
 
 // clockPool builds a pool with an injectable clock so the FSM's scheduling is deterministic.
 // The returned pointer is the "now" value; bump it to advance time.
-func clockPool(ips []string, snis []wsSNIEntry, autoBurn bool, statusPath string) (*wsPool, *int64) {
-	p := newWSPool(ips, snis, autoBurn, statusPath)
+func clockPool(ips []string, snis []wsSNIEntry, statusPath string) (*wsPool, *int64) {
+	p := newWSPool(ips, snis, statusPath)
 	var now int64 = 1000
 	p.now = func() int64 { return now }
 	return p, &now
@@ -30,7 +30,7 @@ func clockPool(ips []string, snis []wsSNIEntry, autoBurn bool, statusPath string
 // steps the IP leaves a flagged domain in place forever and keeps one reused SNI as a stable fingerprint.
 func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 	// Two IPs, one SNI: the IP must change on every single step.
-	p := newWSPool([]string{"a", "b"}, snis("x"), true, "")
+	p := newWSPool([]string{"a", "b"}, snis("x"), "")
 	for round := 0; round < 20; round++ {
 		before, _, ok := p.current()
 		if !ok {
@@ -46,7 +46,7 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 	}
 
 	// Two IPs x two SNIs: both axes must be exercised, and no step may resolve to the live combo.
-	p2 := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	p2 := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
 	seenIP, seenSNI := map[string]bool{}, map[string]bool{}
 	for round := 0; round < 8; round++ {
 		beforeIP, beforeSNI, _ := p2.current()
@@ -72,7 +72,7 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 	}
 
 	// A burned domain is skipped, not parked on: with y suspect, every step stays on x.
-	p3 := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	p3 := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
 	p3.markSuspect("sni", "y", "test")
 	for round := 0; round < 4; round++ {
 		p3.advance()
@@ -88,7 +88,7 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 // "one edge survived the filter" state, where a blind close costs a re-dial every interval for nothing.
 func TestPoolAdvanceReportsRealMove(t *testing.T) {
 	// Healthy multi-edge pool: a step reaches a different combo, so advance() reports a real move.
-	p := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	p := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
 	for i := 0; i < 4; i++ {
 		if !p.advance() {
 			t.Fatalf("healthy 2x2 pool: advance() must report a move (step %d)", i)
@@ -97,7 +97,7 @@ func TestPoolAdvanceReportsRealMove(t *testing.T) {
 
 	// Burn everything except one IP: every step resolves back to that same survivor, so advance()
 	// must report NO move and the timer must leave the live connection alone.
-	p2 := newWSPool([]string{"a", "b", "c"}, snis("x"), true, "")
+	p2 := newWSPool([]string{"a", "b", "c"}, snis("x"), "")
 	p2.markSuspect("ip", "b", "test")
 	p2.markSuspect("ip", "c", "test")
 	ipBefore, _, ok := p2.current()
@@ -122,20 +122,20 @@ func TestPoolAdvanceReportsRealMove(t *testing.T) {
 	}
 
 	// A single-combo pool can never move.
-	p3 := newWSPool([]string{"a"}, snis("x"), true, "")
+	p3 := newWSPool([]string{"a"}, snis("x"), "")
 	if p3.advance() {
 		t.Fatal("1x1 pool: advance() must report no move")
 	}
 
 	// An empty pool is not a move either (and must not panic).
-	p4 := newWSPool(nil, nil, true, "")
+	p4 := newWSPool(nil, nil, "")
 	if p4.advance() {
 		t.Fatal("empty pool: advance() must report no move")
 	}
 }
 
 func TestPoolRotatesAllCombos(t *testing.T) {
-	p := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	p := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
 	seen := map[string]bool{}
 	for i := 0; i < 4; i++ {
 		ip, sni, ok := p.current()
@@ -155,7 +155,7 @@ func TestPoolRotatesAllCombos(t *testing.T) {
 // updateECH persists a self-healed ECH key onto the matching pool SNI and reports a real change
 // exactly once, so the self-heal event fires per rotation (first heal) not per reconnect (repeats).
 func TestPoolUpdateECHTransitionGate(t *testing.T) {
-	p := newWSPool([]string{"a"}, snis("x", "y"), true, "")
+	p := newWSPool([]string{"a"}, snis("x", "y"), "")
 	fresh := []byte{1, 2, 3}
 	// first heal on x: stored key (nil) differs -> change reported, key persisted
 	if !p.updateECH("x", fresh) {
@@ -186,7 +186,7 @@ func TestPoolUpdateECHTransitionGate(t *testing.T) {
 // successful (re)connect, while the initial connect and plain rotations stay silent — so the panel
 // never shows an unbalanced "disconnected" for a tunnel that recovered.
 func TestPoolDownReconnectPairing(t *testing.T) {
-	p := newWSPool([]string{"a", "b"}, snis("x"), true, "")
+	p := newWSPool([]string{"a", "b"}, snis("x"), "")
 
 	p.setActive("a · x") // initial connect: no prior down -> silent
 	if len(p.events) != 0 {
@@ -214,7 +214,7 @@ func TestPoolDownReconnectPairing(t *testing.T) {
 // A verdict of IP_GUILTY (applied via markSuspect) moves a healthy IP into suspect, and
 // current() then skips it while a healthy alternative remains.
 func TestMarkSuspectPullsFromRotation(t *testing.T) {
-	p := newWSPool([]string{"a", "b"}, snis("x"), true, "")
+	p := newWSPool([]string{"a", "b"}, snis("x"), "")
 	p.markSuspect("ip", "a", "test")
 	if r := p.ipHealth.recs["a"]; r == nil || r.state != stateSuspect || r.fails != 0 {
 		t.Fatalf("a should be suspect with fails=0, got %#v", r)
@@ -232,7 +232,7 @@ func TestMarkSuspectPullsFromRotation(t *testing.T) {
 // retest, then drops to dead when it runs off the end (the initial markSuspect is failure #1). Read off
 // suspectBackoff rather than its literals, so retuning the schedule cannot look like a regression here.
 func TestSuspectBackoffThenDead(t *testing.T) {
-	p, now := clockPool([]string{"a", "b"}, snis("x"), true, "")
+	p, now := clockPool([]string{"a", "b"}, snis("x"), "")
 	p.markSuspect("ip", "a", "test")
 	if got := p.ipHealth.recs["a"].nextRetest; got != *now+suspectBackoff[0] {
 		t.Fatalf("entry retest should be now+%d, got %d (now=%d)", suspectBackoff[0], got, *now)
@@ -272,7 +272,7 @@ func TestSuspectBackoffThenDead(t *testing.T) {
 // the node's tun probe decides. The pool-level "the rotation can reach two edges again" transition is
 // still logged, because that is a fact about the POOL, not a claim about the edge.
 func TestARetestNeverHealsAnEdge(t *testing.T) {
-	p, _ := clockPool([]string{"a", "b"}, snis("x"), true, "")
+	p, _ := clockPool([]string{"a", "b"}, snis("x"), "")
 	p.markSuspect("ip", "a", "test") // emits burn + pool/degraded
 	base := len(p.events)
 
@@ -312,7 +312,7 @@ func TestARetestNeverHealsAnEdge(t *testing.T) {
 // pool spent its history mistaking for health. So it only says "worth a live try": the entry stays
 // tracked and becomes DUE, current()'s pass 2 offers it real traffic, and the tun probe decides.
 func TestASuccessfulRetestOffersALiveTryItDoesNotHeal(t *testing.T) {
-	p, now := clockPool([]string{"a", "b"}, snis("x"), true, "")
+	p, now := clockPool([]string{"a", "b"}, snis("x"), "")
 	p.markSuspect("ip", "a", "test")
 	p.retestResult("ip", "a", false) // suspect, fails=1 -> a longer wait
 	if p.ipHealth.due("a") {
@@ -337,7 +337,7 @@ func TestASuccessfulRetestOffersALiveTryItDoesNotHeal(t *testing.T) {
 // current() never dead-ends: with nothing fully healthy it returns the least-bad combo —
 // suspect preferred over dead, then soonest nextRetest.
 func TestCurrentFallbackLeastBad(t *testing.T) {
-	p, _ := clockPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	p, _ := clockPool([]string{"a", "b"}, snis("x", "y"), "")
 	// a dead (sooner) vs b suspect (later); x suspect (later) vs y dead (sooner).
 	p.ipHealth.recs["a"] = &healthRec{state: stateDead, nextRetest: 1005}
 	p.ipHealth.recs["b"] = &healthRec{state: stateSuspect, nextRetest: 1100}
@@ -363,7 +363,7 @@ func TestCurrentFallbackLeastBad(t *testing.T) {
 func TestStatusSnapshotStates(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "st.json")
-	p, now := clockPool([]string{"a", "b"}, snis("x"), true, path)
+	p, now := clockPool([]string{"a", "b"}, snis("x"), path)
 	p.current() // sets active
 	p.markSuspect("ip", "a", "test")
 
@@ -407,7 +407,7 @@ func TestStatusSnapshotStates(t *testing.T) {
 // paired with a healthy partner on the other axis. probeAllNow is the operator's way to pull that
 // forward (the panel's control arrives as a signal, which carries no key).
 func TestDueRetestsAndProbeAllNow(t *testing.T) {
-	p, now := clockPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	p, now := clockPool([]string{"a", "b"}, snis("x", "y"), "")
 	p.markSuspect("ip", "a", "test") // due at now+30
 	if due := p.dueRetests(); len(due) != 0 {
 		t.Fatalf("nothing should be due yet, got %v", due)
@@ -424,7 +424,7 @@ func TestDueRetestsAndProbeAllNow(t *testing.T) {
 		t.Fatalf("retest partner SNI must be healthy, got %q", due[0].sni.host)
 	}
 	// After the backoff elapses on the clock, it is due with no operator action at all.
-	p2, now2 := clockPool([]string{"a"}, snis("x"), true, "")
+	p2, now2 := clockPool([]string{"a"}, snis("x"), "")
 	p2.markSuspect("ip", "a", "test")
 	*now2 = *now + suspectBackoff[0] + 1
 	if due := p2.dueRetests(); len(due) != 1 {
@@ -435,7 +435,7 @@ func TestDueRetestsAndProbeAllNow(t *testing.T) {
 // altHealthy* feed the differential probe: they return a healthy partner on the other axis,
 // excluding the failed one, and report false when none exists.
 func TestAltHealthyLookups(t *testing.T) {
-	p := newWSPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	p := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
 	if s, ok := p.altHealthySNI("x"); !ok || s.host != "y" {
 		t.Fatalf("altHealthySNI(x) = %q ok=%v, want y", s.host, ok)
 	}
@@ -451,7 +451,7 @@ func TestAltHealthyLookups(t *testing.T) {
 // selectEntry pins a specific edge: it moves the index onto that entry and clears any
 // suspect/dead mark so current() picks it, even if it was blocked a moment ago.
 func TestSelectEntryPinsAndClears(t *testing.T) {
-	p := newWSPool([]string{"a", "b"}, snis("x"), true, "")
+	p := newWSPool([]string{"a", "b"}, snis("x"), "")
 	p.markSuspect("ip", "b", "test") // b was blocked
 	if !p.selectEntry("ip", "b") {
 		t.Fatal("selectEntry should find b")
@@ -472,7 +472,7 @@ func TestSelectEntryPinsAndClears(t *testing.T) {
 // core has disproven it, it clears so normal rotation resumes. It does NOT lock forever. A PROVEN burn of
 // the pinned edge is covered separately by TestPinReleasesOnProvenBlock.
 func TestPinOneShot(t *testing.T) {
-	p, _ := clockPool([]string{"a", "b", "c"}, snis("x", "y"), true, "")
+	p, _ := clockPool([]string{"a", "b", "c"}, snis("x", "y"), "")
 	p.markSuspect("sni", "x", "test") // messy partner axis
 	p.markSuspect("ip", "a", "test")
 	if !p.selectEntry("ip", "c") {
@@ -522,7 +522,7 @@ func TestPinOneShot(t *testing.T) {
 // It used to assert that markSuspect released the pin by itself, which made ONE measurement override the
 // operator while udp/raw/flux wanted two.
 func TestPinReleasesOnProvenBlock(t *testing.T) {
-	p, _ := clockPool([]string{"a", "b"}, snis("x"), true, "")
+	p, _ := clockPool([]string{"a", "b"}, snis("x"), "")
 	if !p.selectEntry("ip", "b") { // operator jumps onto b
 		t.Fatal("selectEntry should find b")
 	}
@@ -560,7 +560,7 @@ func TestPinReleasesOnProvenBlock(t *testing.T) {
 // TestPinHeldOnGuiltyPartnerAxis proves the release is axis-precise: an IP-pin must SURVIVE a burn
 // of a guilty SNI (the free axis), so current() keeps the pinned IP and just heals the SNI around it.
 func TestPinHeldOnGuiltyPartnerAxis(t *testing.T) {
-	p, _ := clockPool([]string{"a", "b"}, snis("x", "y"), true, "")
+	p, _ := clockPool([]string{"a", "b"}, snis("x", "y"), "")
 	if !p.selectEntry("ip", "b") {
 		t.Fatal("selectEntry should find b")
 	}
@@ -573,30 +573,10 @@ func TestPinHeldOnGuiltyPartnerAxis(t *testing.T) {
 	}
 }
 
-func TestAutoBurnOffNoTracking(t *testing.T) {
-	p := newWSPool([]string{"a", "b"}, snis("x"), false, "") // manual-only
-	p.markSuspect("ip", "a", "test")                         // must NOT track
-	if p.ipHealth.recs["a"] != nil {
-		t.Fatalf("autoBurn=off must not sideline an entry, got %#v", p.ipHealth.recs["a"])
-	}
-	got := map[string]bool{}
-	for i := 0; i < 4; i++ {
-		ip, _, ok := p.current()
-		if !ok {
-			t.Fatal("pool empty with autoBurn off")
-		}
-		got[ip] = true
-		p.advance()
-	}
-	if !got["a"] || !got["b"] {
-		t.Fatalf("autoBurn=off should keep all IPs; got %v", got)
-	}
-}
-
 // TestAdvanceIPAndSNIIndependently checks the manual per-dimension "rotate now": advanceIP
 // steps the IP while the SNI stays put, and advanceSNI does the reverse.
 func TestAdvanceIPAndSNIIndependently(t *testing.T) {
-	p := newWSPool([]string{"a", "b", "c"}, snis("x", "y"), true, "")
+	p := newWSPool([]string{"a", "b", "c"}, snis("x", "y"), "")
 	ip0, sni0, _ := p.current()
 	if ip0 != "a" || sni0.host != "x" {
 		t.Fatalf("start = %s/%s, want a/x", ip0, sni0.host)

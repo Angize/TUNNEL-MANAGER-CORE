@@ -18,7 +18,7 @@ import (
 // made. NO edge was ever blacklisted. A pool sold as «چرخش + بلک‌لیست» only rotated — the dead edge came
 // back every cycle, dropped the tunnel for a few seconds, and was walked off again, forever.
 func TestASingleSNIPoolBurnsTheEdge(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2", "e3"}, snis("only.example"), true, filepath.Join(t.TempDir(), "st.json"))
+	p := newWSPool([]string{"e1", "e2", "e3"}, snis("only.example"), filepath.Join(t.TempDir(), "st.json"))
 	b := &TCP{pool: p}
 	ip, sni, _ := p.current()
 	p.setActive(activeLabel(ip, sni.host))
@@ -50,7 +50,7 @@ func TestASingleSNIPoolBurnsTheEdge(t *testing.T) {
 // that is what a verdict names, and the edge is convicted only by a whole ROW failing on it. Losing this
 // would make one bad domain condemn a perfectly good edge on its first beat.
 func TestAMultiSNIPoolStillBurnsTheSNI(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2", "s3"), true, filepath.Join(t.TempDir(), "st.json"))
+	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2", "s3"), filepath.Join(t.TempDir(), "st.json"))
 	b := &TCP{pool: p}
 	ip, sni, _ := p.current()
 	p.setActive(activeLabel(ip, sni.host))
@@ -79,8 +79,8 @@ func TestAMultiSNIPoolStillBurnsTheSNI(t *testing.T) {
 func TestASingleDestinationDirectPoolBurnsNothing(t *testing.T) {
 	dir := t.TempDir()
 	b := &TCP{
-		pp: NewPeerPool([]string{"d1"}, true, 0, filepath.Join(dir, "d.json")),
-		sp: NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(dir, "s.json")),
+		pp: NewPeerPool([]string{"d1"}, 0, filepath.Join(dir, "d.json")),
+		sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
 	}
 	src := b.sp.current()
 	b.burnAdvance(true)

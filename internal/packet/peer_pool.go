@@ -23,7 +23,6 @@ type PeerPool struct {
 	addrs      []string      // candidate endpoints ("ip" or "ip:port"), in operator order
 	health     healthSet     // absent == healthy; only suspect/dead entries are tracked
 	cur        int           // index of the active endpoint
-	autoBurn   bool          // burn a failing endpoint (vs. only rotate past it)
 	rotate     time.Duration // proactive rotation interval (0 = failover-only)
 	statusPath string        // status file the panel reads (empty = off; also gates the pin cmd file)
 	// pinKey backs the panel's "make this active" button — a MOMENTARY jump, NOT a lock. It RELEASES on
@@ -43,11 +42,11 @@ type PeerPool struct {
 
 // NewPeerPool builds a pool from the candidate endpoints. addrs must be non-empty (the caller only
 // builds a pool when rotation is on with >1 endpoint; a 1-endpoint pool is harmless — it never
-// rotates). rotate is the proactive interval; autoBurn drops a failing endpoint from rotation.
-func NewPeerPool(addrs []string, autoBurn bool, rotate time.Duration, statusPath string) *PeerPool {
+// rotates). rotate is the proactive interval.
+func NewPeerPool(addrs []string, rotate time.Duration, statusPath string) *PeerPool {
 	cp := make([]string, len(addrs))
 	copy(cp, addrs)
-	p := &PeerPool{addrs: cp, autoBurn: autoBurn, rotate: rotate,
+	p := &PeerPool{addrs: cp, rotate: rotate,
 		statusPath: statusPath, now: func() int64 { return time.Now().Unix() }}
 	p.health = newHealthSet(&p.now)
 	p.writeStatus() // publish the initial state so the panel sees the pool immediately
@@ -177,9 +176,7 @@ func (p *PeerPool) bestIdxLocked(except int) int {
 }
 
 // burnLocked moves the endpoint's health FSM on a failure: healthy → suspect, or one step further down
-// the backoff toward dead if it is already tracked. Caller holds the lock. It does NOT consult auto-burn
-// itself — the callers do, and differently: fail() is about a REMOTE endpoint that looks unreachable,
-// which is what auto-burn is a policy for; failUnusable/rejectCandidate are about a LOCAL impossibility.
+// the backoff toward dead if it is already tracked. Caller holds the lock.
 func (p *PeerPool) burnLocked(addr string) {
 	p.health.burn(addr)
 }
@@ -243,18 +240,10 @@ func (p *PeerPool) advanceEligibleLocked() bool {
 	return false
 }
 
-// fail reports that the active endpoint looks dead. With auto-burn it is walked down the health FSM
-// (healthy→suspect→…→dead); either way the pool advances to the next endpoint to try and returns it
-// (plus whether it actually moved).
-func (p *PeerPool) fail() (addr string, moved bool) { return p.failWith(false) }
-
-// failUnusable is fail() for a source the KERNEL refuses — an IP not configured on this host — rather
-// than a peer that merely looks unreachable, so it burns even with auto-burn OFF. Auto-burn is a policy
-// about REMOTE reachability, where a peer that times out now may answer in a minute; an address this box
-// cannot send from is a local fact no policy changes, and leaving it healthy makes rotation return to it.
-func (p *PeerPool) failUnusable() (addr string, moved bool) { return p.failWith(true) }
-
-func (p *PeerPool) failWith(unusable bool) (addr string, moved bool) {
+// fail reports that the active endpoint looks dead: it is walked down the health FSM
+// (healthy→suspect→…→dead) and the pool advances to the next endpoint to try, which it returns (plus
+// whether it actually moved).
+func (p *PeerPool) fail() (addr string, moved bool) {
 	p.mu.Lock()
 	// A live operator pin freezes failover ATOMICALLY — checked under the same p.mu that selectEntry
 	// takes — so an in-flight fail() racing a just-set pin can't burn or advance off the pinned endpoint
@@ -266,9 +255,7 @@ func (p *PeerPool) failWith(unusable bool) (addr string, moved bool) {
 		return a, false
 	}
 	prev := p.cur
-	if p.autoBurn || unusable {
-		p.burnLocked(p.addrs[p.cur])
-	}
+	p.burnLocked(p.addrs[p.cur])
 	p.advanceFailLocked()
 	a := p.addrs[p.cur]
 	moved = p.cur != prev
@@ -373,17 +360,14 @@ func (p *PeerPool) clearBurn(addr string) bool {
 // burnNamed walks the named endpoint one step down the health FSM WITHOUT moving the cursor, and
 // reports whether it did. It is the other keyed half of clearBurn: what a fail verdict does once the
 // pool's own rotation has moved out from under it, so the endpoint the probe MEASURED is the one that
-// answers for it. An address the pool does not hold, and auto-burn off, are both no-ops — the same
-// policy fail() applies.
+// answers for it. An address the pool does not hold is a no-op.
 func (p *PeerPool) burnNamed(addr string) bool {
 	p.mu.Lock()
 	known := false
-	if p.autoBurn {
-		for _, a := range p.addrs {
-			if a == addr {
-				known = true
-				break
-			}
+	for _, a := range p.addrs {
+		if a == addr {
+			known = true
+			break
 		}
 	}
 	if known {

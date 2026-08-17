@@ -17,7 +17,7 @@ import (
 // TestPeerPoolUnderConcurrentDrivers hammers one direct pool from every caller it really has.
 func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
-	p := NewPeerPool([]string{"d1", "d2", "d3"}, true, 0, filepath.Join(t.TempDir(), "d.json"))
+	p := NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(t.TempDir(), "d.json"))
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -85,7 +85,7 @@ func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 // rotation timer and the operator's pin move the SAME cursor from different goroutines.
 func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
-	p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1", "s2"), true, filepath.Join(t.TempDir(), "st.json"))
+	p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
 	b := &TCP{pool: p}
 
 	stop := make(chan struct{})

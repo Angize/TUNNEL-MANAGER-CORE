@@ -12,7 +12,7 @@ func TestASourcePinLandsWhenTheSourceIsAdopted(t *testing.T) {
 	const other = "127.0.0.2"
 
 	t.Run("udp", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, other}, true, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, other}, 0, "")
 		b := &UDP{isClient: true}
 		b.SetSourcePool(sp)
 		if !sp.selectEntry(other) || !sp.isPinned() {
@@ -25,7 +25,7 @@ func TestASourcePinLandsWhenTheSourceIsAdopted(t *testing.T) {
 	})
 
 	t.Run("raw", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, other}, true, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, other}, 0, "")
 		r := &Raw{isClient: true}
 		r.link = &directLink{r: r}
 		r.SetSourcePool(sp)
@@ -39,7 +39,7 @@ func TestASourcePinLandsWhenTheSourceIsAdopted(t *testing.T) {
 	})
 
 	t.Run("flux", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, other}, true, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, other}, 0, "")
 		f := &Flux{isClient: true}
 		f.SetSourcePool(sp)
 		if !sp.selectEntry(other) || !sp.isPinned() {
@@ -55,8 +55,8 @@ func TestASourcePinLandsWhenTheSourceIsAdopted(t *testing.T) {
 	// It says nothing about the source, and releasing on it would report the operator's jump as
 	// complete over a tunnel still egressing from the old address — which is what success() did.
 	t.Run("a destination success does not release a source pin", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, other}, true, 0, "")
-		dp := NewPeerPool([]string{"203.0.113.10", "203.0.113.11"}, true, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, other}, 0, "")
+		dp := NewPeerPool([]string{"203.0.113.10", "203.0.113.11"}, 0, "")
 		rc := &rotationController{dst: dp, src: sp}
 		if !sp.selectEntry(other) || !sp.isPinned() {
 			t.Fatal("the pin did not take")

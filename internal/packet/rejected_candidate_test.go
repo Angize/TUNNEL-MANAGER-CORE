@@ -15,7 +15,7 @@ import (
 // sharpest: no burn was recorded this round at all, so there is nothing to undo, and the clear can only
 // erase a ladder some earlier verdict earned.
 func TestARejectedCandidateDoesNotLaunderTheLiveSource(t *testing.T) {
-	p := NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(t.TempDir(), "s.json"))
+	p := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(t.TempDir(), "s.json"))
 	clk := int64(1000)
 	p.now = func() int64 { return clk }
 
@@ -69,7 +69,7 @@ func TestARejectedCandidateDoesNotLaunderTheLiveSource(t *testing.T) {
 // tunnel, and the move failing does not unmake the measurement. What must not happen is the pool losing
 // track of where the socket actually is.
 func TestARejectedCandidateStillUndoesTheRoundsOwnBurn(t *testing.T) {
-	p := NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(t.TempDir(), "s.json"))
+	p := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(t.TempDir(), "s.json"))
 	if _, moved := p.fail(); !moved {
 		t.Fatal("setup: the failover did not move")
 	}

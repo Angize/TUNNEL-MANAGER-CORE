@@ -19,7 +19,7 @@ func nodeFail(p *PeerPool) string {
 // frame that came back proves an endpoint answered US, and an endpoint can answer everything we send
 // while carrying nothing — which is exactly what 5.75.197.201 does from Iran.
 func TestNothingButTheNodeClearsABurn(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	gone := nodeFail(p)
 	if gone != "a" {
 		t.Fatalf("setup: expected to burn a, got %s", gone)
@@ -59,7 +59,7 @@ func TestNothingButTheNodeClearsABurn(t *testing.T) {
 // rotation may pick it up again and the node's probe decides what happens next.
 func TestABurnedEndpointIsSelectableOnceDue(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
 	nodeFail(p) // burns a, cursor moves to b
 	if _, moved := p.rotateOnce(); moved {
@@ -82,7 +82,7 @@ func TestABurnedEndpointIsSelectableOnceDue(t *testing.T) {
 // pool can be in, and a test that forces it proves nothing about the ladder.
 func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
 	backOntoA := func(t *testing.T) {
 		t.Helper()
@@ -133,7 +133,7 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 // it only pulls every backoff forward so the rotation may retry them now — and the tun probe judges.
 func TestProbeNowMakesEveryBurnSelectableAtOnce(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
 	nodeFail(p)
 	if _, moved := p.rotateOnce(); moved {
@@ -159,8 +159,8 @@ func TestProbeNowMakesEveryBurnSelectableAtOnce(t *testing.T) {
 func TestOneDestinationStillTakesTheVerdict(t *testing.T) {
 	dir := t.TempDir()
 	clk := int64(1000)
-	dst := NewPeerPool([]string{"d1"}, true, 0, filepath.Join(dir, "peerpool"))
-	src := NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(dir, "srcpool"))
+	dst := NewPeerPool([]string{"d1"}, 0, filepath.Join(dir, "peerpool"))
+	src := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "srcpool"))
 	dst.now = func() int64 { return clk }
 	src.now = func() int64 { return clk }
 	rc := newRotationController(dst, src)

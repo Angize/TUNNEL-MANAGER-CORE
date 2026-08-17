@@ -38,7 +38,7 @@ func wsBurned(p *wsPool, kind string) map[string]bool {
 // does in production (setActive is what the dial path calls once a connection is up).
 func newVerdictPool(t *testing.T, ips, hosts []string) *TCP {
 	t.Helper()
-	p := newWSPool(ips, snis(hosts...), true, filepath.Join(t.TempDir(), "status.json"))
+	p := newWSPool(ips, snis(hosts...), filepath.Join(t.TempDir(), "status.json"))
 	ip, sni, ok := p.current()
 	if !ok {
 		t.Fatal("fresh pool has no current edge")

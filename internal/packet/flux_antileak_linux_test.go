@@ -15,7 +15,7 @@ func TestFluxRotationPreScopesAntiLeak(t *testing.T) {
 	defer func(d time.Duration) { antiLeakLinger = d }(antiLeakLinger)
 	antiLeakLinger = 20 * time.Millisecond // the displaced rule goes on its own timer; see the linger test
 	rec := &leakRecorder{}
-	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, false, 0, "")
+	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 0, "")
 	f := &Flux{carrier: "udp", pp: pool, closeCh: make(chan struct{})}
 	f.leak.init(f.closeCh, rec.install)
 	f.localIP.Store(&net.IPAddr{IP: net.ParseIP("10.9.9.9")}) // learnLocalIP must not resolve a route

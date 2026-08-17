@@ -7,19 +7,18 @@ import (
 	"time"
 )
 
-// TestUnbindableSourceLeavesRotationEvenWithAutoBurnOff pins ONE rule across every carrier and every
-// shape of the same event: a source IP the kernel will not let this host send from leaves rotation,
-// whatever peer_auto_burn says. Auto-burn is a policy about REMOTE reachability; an address not on this
-// box is not that question. Behavioural check: after the path has seen it, a rotate must not land there.
-func TestUnbindableSourceLeavesRotationEvenWithAutoBurnOff(t *testing.T) {
+// TestUnbindableSourceLeavesRotation pins ONE rule across every carrier and every shape of the same
+// event: a source IP the kernel will not let this host send from leaves rotation. Behavioural check:
+// after the path has seen it, a rotate must not land there.
+func TestUnbindableSourceLeavesRotation(t *testing.T) {
 	const gone = "203.0.113.9" // TEST-NET-3: never a local address
 	const good = "127.0.0.1"
 
-	// newPool builds a source pool with auto-burn OFF and the cursor already on the unusable entry,
-	// which is where a rotation (or a jump) leaves it before the carrier tries to adopt it.
+	// newPool builds a source pool with the cursor already on the unusable entry, which is where a
+	// rotation (or a jump) leaves it before the carrier tries to adopt it.
 	newPool := func(t *testing.T) *PeerPool {
 		t.Helper()
-		sp := NewPeerPool([]string{good, gone}, false /* autoBurn */, 0, "")
+		sp := NewPeerPool([]string{good, gone}, 0, "")
 		if a, moved := sp.rotateOnce(); !moved || a != gone {
 			t.Fatalf("pool setup: rotateOnce = %q/%v, want %s/true", a, moved, gone)
 		}
@@ -78,10 +77,9 @@ func TestUnbindableSourceLeavesRotationEvenWithAutoBurnOff(t *testing.T) {
 					"advanced onto %s", cur, good)
 			}
 			if a, moved := sp.rotateOnce(); moved {
-				t.Fatalf("the next rotation went straight back to %q. An IP the kernel refuses is a local "+
-					"impossibility, not the remote-reachability question peer_auto_burn is a policy for — "+
-					"leaving it in rotation is the defect, and on the raw udp/tcp profiles it is "+
-					"a silent blackout", a)
+				t.Fatalf("the next rotation went straight back to %q. An IP the kernel refuses cannot "+
+					"carry anything, so leaving it in rotation is the defect — and on the raw udp/tcp "+
+					"profiles it is a silent blackout", a)
 			}
 		})
 	}

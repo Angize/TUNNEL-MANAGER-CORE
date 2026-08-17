@@ -97,39 +97,36 @@ func TestPeerPoolInvariantsUnderRandomSequences(t *testing.T) {
 				addrs[i] = fmt.Sprintf("d%d", i+1)
 			}
 			clk := int64(1000)
-			p := NewPeerPool(addrs, rng.Intn(4) > 0, 0, filepath.Join(t.TempDir(), "p.json"))
+			p := NewPeerPool(addrs, 0, filepath.Join(t.TempDir(), "p.json"))
 			p.now = func() int64 { return clk }
 			pick := func() string { return addrs[rng.Intn(len(addrs))] }
 
 			var log []string
 			for step := 1; step <= 120; step++ {
-				op := rng.Intn(11)
+				op := rng.Intn(10)
 				switch op {
 				case 0:
 					log = append(log, "fail")
 					p.fail()
 				case 1:
-					log = append(log, "failUnusable")
-					p.failUnusable()
-				case 2:
 					log = append(log, "rotateOnce")
 					p.rotateOnce()
-				case 3:
+				case 2:
 					k := pick()
 					log = append(log, "pin:"+k)
 					p.selectEntry(k)
-				case 4:
+				case 3:
 					k := pick()
 					log = append(log, "landed:"+k)
 					p.pinLandedOn(k)
-				case 5:
+				case 4:
 					k := pick()
 					log = append(log, "pinFailed:"+k)
 					p.pinAttemptFailed(k)
-				case 6:
+				case 5:
 					log = append(log, "releasePin")
 					p.releasePin()
-				case 7:
+				case 6:
 					// Only ever with a key the pool has MOVED OFF, because that is the only way pollPins
 					// reaches it: the matching arm calls fail(), which absorbs a pin's second opinion.
 					// Driving it with the live key instead would "find" a pinned endpoint being burned
@@ -138,14 +135,14 @@ func TestPeerPoolInvariantsUnderRandomSequences(t *testing.T) {
 						log = append(log, "burnNamed:"+k)
 						p.burnNamed(k)
 					}
-				case 8:
+				case 7:
 					k := pick()
 					log = append(log, "clearBurn:"+k)
 					p.clearBurn(k)
-				case 9:
+				case 8:
 					clk += int64(rng.Intn(4000))
 					log = append(log, fmt.Sprintf("clock=%d", clk))
-				case 10:
+				case 9:
 					log = append(log, "probeAllNow")
 					p.probeAllNow()
 				}
@@ -256,7 +253,7 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 				hosts[i] = fmt.Sprintf("s%d", i+1)
 			}
 			clk := int64(1000)
-			p := newWSPool(ips, snis(hosts...), rng.Intn(4) > 0, filepath.Join(t.TempDir(), "st.json"))
+			p := newWSPool(ips, snis(hosts...), filepath.Join(t.TempDir(), "st.json"))
 			p.now = func() int64 { return clk }
 			b := &TCP{pool: p}
 			axis := func() (string, string) {

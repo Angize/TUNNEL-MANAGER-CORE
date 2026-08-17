@@ -50,7 +50,7 @@ func TestPinIsNotConsumedByAPreBuiltRotationCarrier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialTCP: %v", err)
 	}
-	pool := NewPeerPool([]string{a1, a2}, false, 0, "")
+	pool := NewPeerPool([]string{a1, a2}, 0, "")
 	cli.SetPeerPool(pool)
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })

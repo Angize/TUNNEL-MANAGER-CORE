@@ -15,7 +15,7 @@ import (
 // survives that -- and loses everything that makes it releasable and reversible.
 func TestALandingElsewhereDoesNotSettleThePin(t *testing.T) {
 	t.Run("direct pool keeps what the pin took", func(t *testing.T) {
-		p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+		p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(t.TempDir(), "p.json"))
 		p.mu.Lock()
 		p.health.burn("a")
 		before := *p.health.rec("a")
@@ -44,7 +44,7 @@ func TestALandingElsewhereDoesNotSettleThePin(t *testing.T) {
 	})
 
 	t.Run("edge pool keeps what the pin took", func(t *testing.T) {
-		p := newWSPool([]string{"e1", "e2"}, snis("s1"), true, filepath.Join(t.TempDir(), "st.json"))
+		p := newWSPool([]string{"e1", "e2"}, snis("s1"), filepath.Join(t.TempDir(), "st.json"))
 		p.mu.Lock()
 		p.ipHealth.burn("e2")
 		before := *p.ipHealth.rec("e2")
@@ -80,7 +80,7 @@ func TestALandingElsewhereDoesNotSettleThePin(t *testing.T) {
 // counter was added to prevent.
 func TestALandingElsewhereDoesNotDisarmThePin(t *testing.T) {
 	t.Run("direct pool", func(t *testing.T) {
-		p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+		p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(t.TempDir(), "p.json"))
 		if !p.selectEntry("a") {
 			t.Fatal("could not pin a")
 		}
@@ -96,7 +96,7 @@ func TestALandingElsewhereDoesNotDisarmThePin(t *testing.T) {
 	})
 
 	t.Run("edge pool", func(t *testing.T) {
-		p := newWSPool([]string{"e1", "e2"}, snis("s1"), true, filepath.Join(t.TempDir(), "st.json"))
+		p := newWSPool([]string{"e1", "e2"}, snis("s1"), filepath.Join(t.TempDir(), "st.json"))
 		if !p.selectEntry("ip", "e2") {
 			t.Fatal("could not pin e2")
 		}
@@ -117,7 +117,7 @@ func TestALandingElsewhereDoesNotDisarmThePin(t *testing.T) {
 // nothing left to restore it. Same button, same expectation, two different answers.
 func TestRepinningKeepsTheFirstTargetsBurn(t *testing.T) {
 	t.Run("direct pool", func(t *testing.T) {
-		p := NewPeerPool([]string{"a", "b", "c"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+		p := NewPeerPool([]string{"a", "b", "c"}, 0, filepath.Join(t.TempDir(), "p.json"))
 		p.mu.Lock()
 		p.health.burn("a")
 		beforeA := *p.health.rec("a")
@@ -141,7 +141,7 @@ func TestRepinningKeepsTheFirstTargetsBurn(t *testing.T) {
 	})
 
 	t.Run("edge pool, second pin abandoned", func(t *testing.T) {
-		p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1"), true, filepath.Join(t.TempDir(), "st.json"))
+		p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1"), filepath.Join(t.TempDir(), "st.json"))
 		p.mu.Lock()
 		p.ipHealth.burn("e2")
 		before := *p.ipHealth.rec("e2")
@@ -172,7 +172,7 @@ func TestRepinningKeepsTheFirstTargetsBurn(t *testing.T) {
 		run  func(t *testing.T) (before healthRec, after *healthRec, pinned bool)
 	}{
 		{"direct pool, second pin LANDS", func(t *testing.T) (healthRec, *healthRec, bool) {
-			p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+			p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(t.TempDir(), "p.json"))
 			p.mu.Lock()
 			p.health.burn("a")
 			before := *p.health.rec("a")
@@ -185,7 +185,7 @@ func TestRepinningKeepsTheFirstTargetsBurn(t *testing.T) {
 			return before, p.health.rec("a"), p.pinnedLocked()
 		}},
 		{"edge pool, second pin LANDS", func(t *testing.T) (healthRec, *healthRec, bool) {
-			p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1"), true, filepath.Join(t.TempDir(), "st.json"))
+			p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1"), filepath.Join(t.TempDir(), "st.json"))
 			p.mu.Lock()
 			p.ipHealth.burn("e2")
 			before := *p.ipHealth.rec("e2")

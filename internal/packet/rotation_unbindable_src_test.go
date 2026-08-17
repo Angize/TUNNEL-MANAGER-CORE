@@ -43,8 +43,8 @@ func TestUnbindableSourceRotationIsNotAnnounced(t *testing.T) {
 	statusPath := filepath.Join(t.TempDir(), "core.status")
 	// Both pools rotate on the same 1s beat: the destination really can move (two live endpoints),
 	// the source cannot (the only alternative is not on this host).
-	cli.SetPeerPool(NewPeerPool([]string{d1, d2}, true, time.Second, ""))
-	cli.SetSourcePool(NewPeerPool([]string{"127.0.0.1", gone}, true, time.Second, ""))
+	cli.SetPeerPool(NewPeerPool([]string{d1, d2}, time.Second, ""))
+	cli.SetSourcePool(NewPeerPool([]string{"127.0.0.1", gone}, time.Second, ""))
 	cli.SetStatusPath(statusPath)
 
 	go srv.Run()

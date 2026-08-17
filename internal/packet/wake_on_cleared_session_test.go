@@ -76,7 +76,7 @@ func TestAClearedSessionDoesNotWaitOutTheKeepalive(t *testing.T) {
 // timing tell on the one carrier family whose whole point is not having one.
 func TestATimedRotationDoesNotWakeTheLoop(t *testing.T) {
 	b := &UDP{isClient: true, cryptoOn: true, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
-	b.pp = NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, true, 0, "")
+	b.pp = NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, 0, "")
 	defer close(b.closeCh)
 
 	b.rotatePeerUDP(true)
@@ -99,7 +99,7 @@ func TestATimedRotationDoesNotWakeTheLoop(t *testing.T) {
 // wake says nothing about it.
 func TestAPinWakesTheLoop(t *testing.T) {
 	b := &UDP{isClient: true, cryptoOn: true, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
-	b.pp = NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, true, 0, "")
+	b.pp = NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, 0, "")
 	defer close(b.closeCh)
 
 	b.adoptPeerUDP()

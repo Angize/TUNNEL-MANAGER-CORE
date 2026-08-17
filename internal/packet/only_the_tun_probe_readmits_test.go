@@ -20,7 +20,7 @@ import (
 // honoured, then the rotation spends a real connection on the burned edge, and current() must not walk
 // back off it before the probe has had its say.
 func TestAProactiveRotationHandsADueEdgeLiveTraffic(t *testing.T) {
-	p, now := clockPool([]string{"e1", "e2"}, snis("x"), true, filepath.Join(t.TempDir(), "st.json"))
+	p, now := clockPool([]string{"e1", "e2"}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
 	if ip, _, _ := p.current(); ip != "e1" {
 		t.Fatalf("setup: the cursor starts on %q, want e1", ip)
 	}
@@ -56,7 +56,7 @@ func TestAProactiveRotationHandsADueEdgeLiveTraffic(t *testing.T) {
 // the operator watched happen on a live tunnel.
 func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 	t.Run("fail: burned again, and further down the ladder", func(t *testing.T) {
-		p, now := clockPool([]string{"e1", "e2"}, snis("x"), true, filepath.Join(t.TempDir(), "st.json"))
+		p, now := clockPool([]string{"e1", "e2"}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
 		p.markSuspect("ip", "e2", "tun-probe")
 		*now += suspectBackoff[0]
 		p.advance()
@@ -80,7 +80,7 @@ func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 	})
 
 	t.Run("ok: cleared outright, no ladder left to wait out", func(t *testing.T) {
-		p, now := clockPool([]string{"e1", "e2"}, snis("x"), true, filepath.Join(t.TempDir(), "st.json"))
+		p, now := clockPool([]string{"e1", "e2"}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
 		p.markSuspect("ip", "e2", "tun-probe")
 		*now += suspectBackoff[0]
 		p.advance()
@@ -102,7 +102,7 @@ func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 // the carrier hammers the whole pool at the shortest interval the ladder has.
 func TestTheLadderStillDeepensWhenEverythingIsBurned(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, true, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
 	p.fail() // burns a, moves to b
 	p.fail() // burns b — now nothing is healthy and nothing is due
@@ -127,7 +127,7 @@ func TestTheLadderStillDeepensWhenEverythingIsBurned(t *testing.T) {
 // its own, so it has to refuse while an operator pin is in force, or the timer silently steals the jump
 // the operator asked for.
 func TestAPinIsNotAProactiveRotation(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2", "e3"}, snis("x"), true, filepath.Join(t.TempDir(), "st.json"))
+	p := newWSPool([]string{"e1", "e2", "e3"}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
 	if !p.selectEntry("ip", "e3") {
 		t.Fatal("could not pin e3")
 	}

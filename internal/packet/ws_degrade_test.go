@@ -7,7 +7,7 @@ import "testing"
 // exactly one "pool/restored" when the edge recovers — so the operator can see WHY the rotation log
 // went quiet and when it resumed.
 func TestReassessRotationEvents(t *testing.T) {
-	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, []wsSNIEntry{{host: "a.com"}}, true /*autoBurn*/, "" /*no status file*/)
+	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, []wsSNIEntry{{host: "a.com"}}, "" /*no status file*/)
 
 	count := func(code string) int {
 		p.mu.Lock()
@@ -46,7 +46,7 @@ func TestReassessRotationEvents(t *testing.T) {
 	}
 
 	// A single-IP pool never rotated, so it must never emit these events.
-	p1 := newWSPool([]string{"9.9.9.9"}, []wsSNIEntry{{host: "a.com"}}, true, "")
+	p1 := newWSPool([]string{"9.9.9.9"}, []wsSNIEntry{{host: "a.com"}}, "")
 	p1.markSuspect("ip", "9.9.9.9", "test")
 	p1.mu.Lock()
 	for _, e := range p1.events {
@@ -63,7 +63,7 @@ func TestReassessRotationEvents(t *testing.T) {
 // stays stuck true, and the NEXT real degraded/restored transition is swallowed — the panel's rotation
 // indicator desyncs permanently.
 func TestSelectEntryReassessesRotation(t *testing.T) {
-	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, []wsSNIEntry{{host: "a.com"}}, true, "")
+	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, []wsSNIEntry{{host: "a.com"}}, "")
 	count := func(code string) int {
 		p.mu.Lock()
 		defer p.mu.Unlock()

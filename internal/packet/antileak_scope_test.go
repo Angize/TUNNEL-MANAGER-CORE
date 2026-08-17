@@ -46,7 +46,7 @@ func TestAntiLeakScopeIsNotDraggedBackByAStragglerFrame(t *testing.T) {
 		r := &Raw{isClient: true}
 		r.link = &directLink{r: r}
 		r.leak.install = rec.installer()
-		r.SetPeerPool(NewPeerPool([]string{old, live}, true, 0, ""))
+		r.SetPeerPool(NewPeerPool([]string{old, live}, 0, ""))
 		r.peer.Store(&net.IPAddr{IP: net.ParseIP(live).To4()}) // where a rotation has put us
 		r.leak.scope(net.ParseIP(live).To4())                  // ...and the rules follow, as rotatePeerRaw does
 		if got := rec.last(); got != live {
@@ -66,7 +66,7 @@ func TestAntiLeakScopeIsNotDraggedBackByAStragglerFrame(t *testing.T) {
 		rec := &scopeRecorder{}
 		f := &Flux{isClient: true}
 		f.leak.install = rec.installer()
-		f.SetPeerPool(NewPeerPool([]string{old, live}, true, 0, ""))
+		f.SetPeerPool(NewPeerPool([]string{old, live}, 0, ""))
 		f.peer.Store(&net.IPAddr{IP: net.ParseIP(live).To4()})
 		f.leak.scope(net.ParseIP(live).To4())
 		if got := rec.last(); got != live {

@@ -18,7 +18,7 @@ func TestOneEntrySourcePoolPinsTheSource(t *testing.T) {
 	t.Run("raw stamps the crafted header from it", func(t *testing.T) {
 		r := &Raw{isClient: true, proto: protoBare, profile: "bare", fakeFd: -1}
 		r.link = &directLink{r: r}
-		r.SetSourcePool(NewPeerPool([]string{pin}, false, 0, ""))
+		r.SetSourcePool(NewPeerPool([]string{pin}, 0, ""))
 		if got := r.srcIP(); got == nil || got.String() != pin {
 			t.Fatalf("raw source = %v, want %s — the crafted IPv4 header would carry the kernel's choice", got, pin)
 		}
@@ -26,7 +26,7 @@ func TestOneEntrySourcePoolPinsTheSource(t *testing.T) {
 
 	t.Run("flux stamps the crafted header from it", func(t *testing.T) {
 		f := &Flux{isClient: true}
-		f.SetSourcePool(NewPeerPool([]string{pin}, false, 0, ""))
+		f.SetSourcePool(NewPeerPool([]string{pin}, 0, ""))
 		if got := f.srcIP(); got == nil || got.String() != pin {
 			t.Fatalf("flux source = %v, want %s", got, pin)
 		}
@@ -34,7 +34,7 @@ func TestOneEntrySourcePoolPinsTheSource(t *testing.T) {
 
 	t.Run("udp binds its socket to it", func(t *testing.T) {
 		b := &UDP{isClient: true}
-		b.SetSourcePool(NewPeerPool([]string{pin}, false, 0, ""))
+		b.SetSourcePool(NewPeerPool([]string{pin}, 0, ""))
 		c := b.conn.Load()
 		if c == nil {
 			t.Fatal("udp bound no socket, so it still egresses from the kernel's default source")
@@ -47,10 +47,10 @@ func TestOneEntrySourcePoolPinsTheSource(t *testing.T) {
 	})
 
 	// A fixed source must never be burned or rotated away: it is the only entry, so burning it would
-	// leave the pool with nothing and a rotation has nowhere to go. main.pinSource builds it with
-	// auto-burn off and rotate 0 for exactly this reason.
+	// leave the pool with nothing and a rotation has nowhere to go. Both are the <2-entry guard in
+	// fail()/rotateOnce, and main.pinSource builds it with rotate 0 on top of that.
 	t.Run("it never moves", func(t *testing.T) {
-		p := NewPeerPool([]string{pin}, false, 0, "")
+		p := NewPeerPool([]string{pin}, 0, "")
 		if addr, moved := p.nextEndpoint(true); moved {
 			t.Fatalf("a one-entry pool rotated to %q; a pinned source must stay put", addr)
 		}

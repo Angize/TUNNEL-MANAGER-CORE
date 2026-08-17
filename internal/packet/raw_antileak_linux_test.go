@@ -259,7 +259,7 @@ func TestRawRotationPreScopesAntiLeak(t *testing.T) {
 	defer func(d time.Duration) { antiLeakLinger = d }(antiLeakLinger)
 	antiLeakLinger = 20 * time.Millisecond // the displaced rule goes on its own timer; see the linger test
 	rec := &leakRecorder{}
-	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, false, 0, "")
+	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 0, "")
 	r := &Raw{profile: "udp", isClient: true, pp: pool, closeCh: make(chan struct{})}
 	r.link = &directLink{r: r}
 	r.localIP.Store(&net.IPAddr{IP: net.ParseIP("10.9.9.9")}) // learnLocalIP must not resolve a route
@@ -336,7 +336,7 @@ func TestRawLearnPeerNeverBlocksOnIptables(t *testing.T) {
 // and each entry point must then be a no-op. DE runs these as root, so a regression here would put
 // real rules in the host's OUTPUT chain.
 func TestHandBuiltRawTouchesNoFirewall(t *testing.T) {
-	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2"}, false, 0, "")
+	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2"}, 0, "")
 	r := &Raw{profile: "icmp", isClient: true, pp: pool, closeCh: make(chan struct{})}
 	r.link = &directLink{r: r}
 	r.localIP.Store(&net.IPAddr{IP: net.ParseIP("10.9.9.9")})

@@ -28,7 +28,7 @@ type WSPoolSNI struct {
 
 // DialWSPoolCfg decodes the config's clean IP/SNI lists into a pool and returns a ws
 // client that rotates over it. rotate is the proactive-rotation interval.
-func DialWSPoolCfg(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []WSPoolSNI, rotate time.Duration, autoBurn bool, statusPath string, httpc bool, httpcMode string) (*TCP, error) {
+func DialWSPoolCfg(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []WSPoolSNI, rotate time.Duration, statusPath string, httpc bool, httpcMode string) (*TCP, error) {
 	entries := make([]wsSNIEntry, 0, len(snis))
 	for _, s := range snis {
 		var ech []byte
@@ -37,7 +37,7 @@ func DialWSPoolCfg(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool
 		}
 		entries = append(entries, wsSNIEntry{host: s.Host, ech: ech, path: s.Path})
 	}
-	pool := newWSPoolFromCfg(ips, entries, autoBurn, statusPath)
+	pool := newWSPoolFromCfg(ips, entries, statusPath)
 	if pool == nil {
 		return nil, errors.New("ws pool: need at least one IP and one SNI")
 	}
@@ -81,7 +81,6 @@ type wsPool struct {
 	ipHealth    healthSet // absent == healthy
 	sniHealth   healthSet // absent == healthy
 	i, j        int       // current ip / sni index
-	autoBurn    bool
 	statusPath  string
 	active      string
 	rotDegraded bool        // true once fewer than 2 edges are reachable; drives the degraded/restored event
@@ -138,9 +137,9 @@ func (p *wsPool) down(code, detail string) {
 	p.event("down", code, detail)
 }
 
-func newWSPool(ips []string, snis []wsSNIEntry, autoBurn bool, statusPath string) *wsPool {
+func newWSPool(ips []string, snis []wsSNIEntry, statusPath string) *wsPool {
 	p := &wsPool{ips: ips, snis: snis,
-		autoBurn: autoBurn, statusPath: statusPath, now: func() int64 { return time.Now().Unix() }}
+		statusPath: statusPath, now: func() int64 { return time.Now().Unix() }}
 	p.ipHealth, p.sniHealth = newHealthSet(&p.now), newHealthSet(&p.now)
 	p.writeStatus()
 	return p
@@ -476,13 +475,9 @@ func (p *wsPool) eligibleSNIs() int {
 	return p.sniHealth.countEligible(keys)
 }
 
-// markSuspect records a live verdict against one entry. A no-op when autoBurn is off — a manual-only pool
-// never auto-sidelines anything. Everything else is healthSet.burn's one rule: a fresh entry is
-// sidelined, one still waiting out its backoff is left alone, a DUE one pays a ladder step.
+// markSuspect records a live verdict against one entry: healthSet.burn's one rule, that a fresh entry is
+// sidelined, one still waiting out its backoff is left alone, and a DUE one pays a ladder step.
 func (p *wsPool) markSuspect(kind, key, reason string) {
-	if !p.autoBurn {
-		return
-	}
 	p.mu.Lock()
 	fresh := p.healthMap(kind).burn(key)
 	p.mu.Unlock()

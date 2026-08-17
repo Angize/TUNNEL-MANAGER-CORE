@@ -17,7 +17,7 @@ import (
 // shipped lived between hops.
 func TestLoopWholeEdgeOutage(t *testing.T) {
 	dir := t.TempDir()
-	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), true, filepath.Join(dir, "st.json"))
+	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), filepath.Join(dir, "st.json"))
 	clk := int64(10000)
 	p.now = func() int64 { return clk }
 	ip, sni, _ := p.current()
@@ -73,8 +73,8 @@ func TestLoopWholeEdgeOutage(t *testing.T) {
 func TestLoopWholeDirectOutage(t *testing.T) {
 	dir := t.TempDir()
 	b := &TCP{
-		pp: NewPeerPool([]string{"d1", "d2", "d3"}, true, 0, filepath.Join(dir, "d.json")),
-		sp: NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(dir, "s.json")),
+		pp: NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")),
+		sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
 	}
 	dsts, srcs := map[string]bool{}, map[string]bool{}
 	for round := 1; round <= 6; round++ {

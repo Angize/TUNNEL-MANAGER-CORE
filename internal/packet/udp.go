@@ -247,9 +247,8 @@ func (b *UDP) SetSourcePool(sp *PeerPool) {
 				log.Printf("core/udp: initial source bind to %s failed: %v", host, err)
 				// ...and BURN it, which loudness alone never did. The socket stayed on the kernel default while
 				// the pool went on calling this entry Active, so the panel named a source the datagram path had
-				// never adopted. failUnusable burns unconditionally: the kernel's refusal is not the
-				// remote-reachability question auto-burn is a policy for.
-				b.sp.failUnusable()
+				// never adopted.
+				b.sp.fail()
 			}
 			if err == nil {
 				applyConnSockBuf(nc)
@@ -373,11 +372,11 @@ func (b *UDP) adoptSourceUDP() {
 	// The rebind failed, so the socket never left the old source and the jump did NOT land. Leaving the pin
 	// live holds indefinitely forcing a source the host cannot bind, and the ordinary success path then
 	// releases it as though it HAD landed. End the jump — it is momentary, not a lock — and burn the entry,
-	// in that order, since failWith refuses to touch a pinned one. Unconditional, like adoptableSource.
+	// in that order, since fail() refuses to touch a pinned one.
 	if b.sp.pinCannotLand(addr) {
 		log.Printf("core/udp: manual jump to source %s abandoned — that IP will not bind on this host", addr)
 	}
-	b.sp.failUnusable()
+	b.sp.fail()
 }
 
 // probeAllPools pulls every suspect/dead endpoint's retest forward on both of a carrier's pools (the

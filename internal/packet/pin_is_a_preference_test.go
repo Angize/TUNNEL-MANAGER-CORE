@@ -18,8 +18,8 @@ import (
 // TestPinAbsorbsExactlyOneSecondOpinion_Direct is the reference the other two are held to.
 func TestPinAbsorbsExactlyOneSecondOpinion_Direct(t *testing.T) {
 	dir := t.TempDir()
-	dst := NewPeerPool([]string{"d1", "d2"}, true, 0, filepath.Join(dir, "d.json"))
-	src := NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(dir, "s.json"))
+	dst := NewPeerPool([]string{"d1", "d2"}, 0, filepath.Join(dir, "d.json"))
+	src := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json"))
 	rc := newRotationController(dst, src)
 	if !dst.selectEntry("d2") {
 		t.Fatal("could not pin")
@@ -50,8 +50,8 @@ func TestPinAbsorbsExactlyOneSecondOpinion_Direct(t *testing.T) {
 func TestPinAbsorbsExactlyOneSecondOpinion_TCP(t *testing.T) {
 	dir := t.TempDir()
 	b := &TCP{
-		pp: NewPeerPool([]string{"d1", "d2"}, true, 0, filepath.Join(dir, "d.json")),
-		sp: NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(dir, "s.json")),
+		pp: NewPeerPool([]string{"d1", "d2"}, 0, filepath.Join(dir, "d.json")),
+		sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
 	}
 	if !b.pp.selectEntry("d2") {
 		t.Fatal("could not pin")
@@ -78,7 +78,7 @@ func TestPinAbsorbsExactlyOneSecondOpinion_TCP(t *testing.T) {
 // TestPinAbsorbsExactlyOneSecondOpinion_CDN: the edge pool used to drop the pin as it burned, so ONE
 // measurement overrode the operator — the opposite failure from tcp's, and just as inconsistent.
 func TestPinAbsorbsExactlyOneSecondOpinion_CDN(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), true, filepath.Join(t.TempDir(), "st.json"))
+	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
 	b := &TCP{pool: p}
 	if !p.selectEntry("ip", "e2") {
 		t.Fatal("could not pin")
@@ -114,8 +114,8 @@ func TestPinAbsorbsExactlyOneSecondOpinion_CDN(t *testing.T) {
 func TestPinCountResetsBetweenPins(t *testing.T) {
 	dir := t.TempDir()
 	b := &TCP{
-		pp: NewPeerPool([]string{"d1", "d2", "d3"}, true, 0, filepath.Join(dir, "d.json")),
-		sp: NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(dir, "s.json")),
+		pp: NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")),
+		sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
 	}
 	// A first pin absorbs one verdict, then the operator drops it.
 	if !b.pp.selectEntry("d2") {
@@ -147,7 +147,7 @@ func TestPinCountResetsBetweenPins(t *testing.T) {
 // connecting, too long stranded the tunnel on a dead pick.
 func TestAPinEndsOnEvidenceNeverOnAClock(t *testing.T) {
 	t.Run("it lands", func(t *testing.T) {
-		p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+		p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(t.TempDir(), "p.json"))
 		if !p.selectEntry("b") || !p.isPinned() {
 			t.Fatal("could not pin")
 		}
@@ -157,7 +157,7 @@ func TestAPinEndsOnEvidenceNeverOnAClock(t *testing.T) {
 		}
 	})
 	t.Run("it cannot land", func(t *testing.T) {
-		p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+		p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(t.TempDir(), "p.json"))
 		if !p.selectEntry("b") || !p.isPinned() {
 			t.Fatal("could not pin")
 		}
@@ -174,7 +174,7 @@ func TestAPinEndsOnEvidenceNeverOnAClock(t *testing.T) {
 		}
 	})
 	t.Run("time alone does nothing", func(t *testing.T) {
-		p := NewPeerPool([]string{"a", "b"}, true, 0, filepath.Join(t.TempDir(), "p.json"))
+		p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(t.TempDir(), "p.json"))
 		clk := int64(1000)
 		p.now = func() int64 { return clk }
 		if !p.selectEntry("b") {
@@ -197,8 +197,8 @@ func TestAHealthySessionEndsTheRound(t *testing.T) {
 	t.Run("the direct pool's counters", func(t *testing.T) {
 		dir := t.TempDir()
 		b := &TCP{
-			pp: NewPeerPool([]string{"d1", "d2", "d3"}, true, 0, filepath.Join(dir, "d.json")),
-			sp: NewPeerPool([]string{"s1", "s2"}, true, 0, filepath.Join(dir, "s.json")),
+			pp: NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")),
+			sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
 		}
 		if !b.pp.selectEntry("d2") {
 			t.Fatal("could not pin")
@@ -214,7 +214,7 @@ func TestAHealthySessionEndsTheRound(t *testing.T) {
 		}
 	})
 	t.Run("the edge pool's counters", func(t *testing.T) {
-		p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2", "s3"), true, filepath.Join(t.TempDir(), "st.json"))
+		p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2", "s3"), filepath.Join(t.TempDir(), "st.json"))
 		b := &TCP{pool: p}
 		b.sniRot.Store(2)
 		b.pinFails.Store(1)
