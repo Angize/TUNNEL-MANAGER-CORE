@@ -20,7 +20,7 @@ func TestTCPTunProbeBurnNamesTheEndpointItBurned(t *testing.T) {
 	defer close(b.closeCh)
 
 	gone := p.current()
-	if err := os.WriteFile(p.cmdPath(), []byte(`{"cmd":"fail","key":"`+gone+`"}`), 0o644); err != nil {
+	if err := os.WriteFile(st.verdictPath(), []byte(`{"cmd":"fail","key":"`+gone+`"}`), 0o644); err != nil {
 		t.Fatalf("write cmd: %v", err)
 	}
 	go b.peerPinPollLoop()

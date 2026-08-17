@@ -25,18 +25,18 @@ func settledEpoch(t *testing.T, s *coreStatus) int64 {
 	}
 }
 
-// liveVerdict writes one verdict file the way the node does: stamped with the epoch the carrier is
-// publishing at that instant. Every test that drives a carrier through Run() has to go through this —
-// a hand-written command with no epoch names a path the carrier is right to refuse, and hard-coding a
-// number races the rotations the test is there to exercise.
-func liveVerdict(t *testing.T, p *PeerPool, epoch int64, c poolCmd) {
+// liveVerdict writes one verdict file the way the node does: into the TUNNEL's mailbox (never a pool's
+// pin file), stamped with the epoch the carrier is publishing at that instant. Every test that drives a
+// carrier through Run() has to go through this — a hand-written command with no epoch names a path the
+// carrier is right to refuse, and hard-coding a number races the rotations the test is there to exercise.
+func liveVerdict(t *testing.T, path string, epoch int64, c poolCmd) {
 	t.Helper()
 	c.Epoch = epoch
 	data, err := json.Marshal(c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeFileAtomic(p.cmdPath(), data, 0o644)
+	writeFileAtomic(path, data, 0o644)
 }
 
 // TestAStaleVerdictChangesNothingAndACurrentOneStillBurns.
@@ -52,16 +52,17 @@ func TestAStaleVerdictChangesNothingAndACurrentOneStillBurns(t *testing.T) {
 	dir := t.TempDir()
 	dst := NewPeerPool([]string{"d1", "d2"}, 0, filepath.Join(dir, "peerpool"))
 	rc := newRotationController(dst, nil)
+	rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
 	noop, rot := func() {}, func(bool) { dst.fail() }
 
 	stale := int64(testPathEpoch - 1)
-	liveVerdict(t, dst, stale, poolCmd{Cmd: cmdFail, Key: "d1"})
+	liveVerdict(t, rc.verdict, stale, poolCmd{Cmd: cmdFail, Key: "d1"})
 	rc.pollPins(noop, noop, rot, rot, nil, atPathEpoch)
 	if burned := burnedIn(dst); len(burned) != 0 {
 		t.Errorf("a verdict about epoch %d burned %v while the carrier is on %d", stale, burned, testPathEpoch)
 	}
 
-	liveVerdict(t, dst, testPathEpoch, poolCmd{Cmd: cmdFail, Key: "d1"})
+	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdFail, Key: "d1"})
 	rc.pollPins(noop, noop, rot, rot, nil, atPathEpoch)
 	if burned := burnedIn(dst); !burned["d1"] {
 		t.Error("a verdict on the LIVE path must still burn — the guard drops only the stale one")

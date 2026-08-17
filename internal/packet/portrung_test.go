@@ -13,6 +13,7 @@ func rungHarness(t *testing.T, withRung bool) (rc *rotationController, rolls *in
 	dst := NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json"))
 	src := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json"))
 	rc = newRotationController(dst, src)
+	rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
 	rolls, burns = new(int), new(int)
 	if withRung {
 		rc.port.setRoll(func() bool { *rolls++; return true })
@@ -102,7 +103,7 @@ func TestTrafficCrossingRefillsTheDraws(t *testing.T) {
 	// Traffic CROSSING is what settles the outage, and it arrives as the judge's cmdOK. Driven through
 	// that real path: the carrier answering its OWN frames deliberately refills nothing, because in the
 	// failure this ladder exists for those frames keep coming back while nothing crosses.
-	liveVerdict(t, rc.dst, testPathEpoch, poolCmd{Cmd: cmdOK, Key: rc.dst.current()})
+	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdOK, Key: rc.dst.current()})
 	rc.pollPins(func() {}, func() {}, func(bool) {}, func(bool) {}, nil, atPathEpoch)
 
 	for i := 1; i <= portTries; i++ {

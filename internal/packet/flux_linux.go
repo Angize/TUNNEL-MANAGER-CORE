@@ -1036,7 +1036,8 @@ func (f *Flux) clientLoop() {
 	unproven := false // the current destination has not answered since we jumped to it -> probe at 1s, not keepalive
 	rc := newRotationController(f.pp, f.sp)
 	rc.session.setDrop(f.dropSession)
-	if rc.active() {
+	rc.setVerdict(f.st.verdictPath())
+	if rc.polls() {
 		go f.pinPollLoop(rc)
 	}
 	// Seed the staleness baseline NOW (clear mode). Without it, sessionStale() returns false while

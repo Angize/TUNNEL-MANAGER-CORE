@@ -400,16 +400,12 @@ func main() {
 	}
 }
 
-// wantsDestPool / wantsSourcePool decide which rotation pools a client gets. ONE destination is enough
-// to build the pool, even though a single endpoint can never rotate or be burned (failWith returns early
-// below two entries): the destination pool is also the tunnel's VERDICT MAILBOX. The node writes both
-// `ok` and `fail` to the destination pool's command file and pollPins reads it only when that pool
-// exists, so a client with one destination and a source pool used to have every verdict it sent thrown
-// away in silence — no burn, no heal, and a source rotation walking blind.
-//
-// Which is why they are a pair: never build a source pool without a destination pool to receive for it.
+// wantsDestPool / wantsSourcePool decide which rotation pools a client gets. A pool is a thing to
+// ROTATE, so one destination does not make one: it can neither be burned nor moved off. The verdict
+// that used to need it as a mailbox no longer arrives through it — see coreStatus.verdictPath — so a
+// pool-less client hears the judge exactly as a pooled one does.
 func wantsDestPool(cfg *Config) bool {
-	return cfg.Role == "client" && len(cfg.PeerIPs) >= 1
+	return cfg.Role == "client" && len(cfg.PeerIPs) >= 2
 }
 
 func wantsSourcePool(cfg *Config) bool {
