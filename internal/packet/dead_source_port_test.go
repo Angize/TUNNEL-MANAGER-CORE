@@ -135,7 +135,7 @@ func TestTheLoopRollsOnScheduleAndOnlyAddsTheReactiveReason(t *testing.T) {
 	defer func(d time.Duration) { rawSportEvery = d }(rawSportEvery)
 	rawSportEvery = 3 * time.Second // the loop ticks at 1s, so this is a few scheduled rolls in the run
 
-	r := &Raw{isClient: true, keepalive: 10 * time.Second, profile: "tcp", closeCh: make(chan struct{})}
+	r := &Raw{isClient: true, keepalive: 10 * time.Second, profile: "tcp", sportRandom: true, closeCh: make(chan struct{})}
 	r.peer.Store(&net.IPAddr{IP: testDst})
 	r.cliPort.Store(40000)
 	// A tuple that is carrying: every ask answered, so portDead is false for the whole run.
@@ -240,7 +240,7 @@ func TestTheLoopRollsOncePerWindowOnADeadPath(t *testing.T) {
 	rawSportEvery = time.Hour // the SCHEDULED roll must not fire: every roll here is the reactive one
 
 	ka := 10 * time.Second // portSilence 5s
-	r := &Raw{isClient: true, keepalive: ka, profile: "tcp", closeCh: make(chan struct{})}
+	r := &Raw{isClient: true, keepalive: ka, profile: "tcp", sportRandom: true, closeCh: make(chan struct{})}
 	r.peer.Store(&net.IPAddr{IP: testDst})
 	r.cliPort.Store(40000)
 	r.lastRxCur.Store(time.Now().Add(-time.Minute).UnixNano()) // heard nothing for a minute
@@ -315,7 +315,7 @@ func TestAPoolProbingItsOtherEndpointDoesNotSaveADeadTuple(t *testing.T) {
 
 	ka := 10 * time.Second // portSilence 5s
 	cur, other := net.IPv4(10, 20, 0, 2), net.IPv4(10, 20, 0, 3)
-	r := &Raw{isClient: true, keepalive: ka, profile: "tcp", closeCh: make(chan struct{})}
+	r := &Raw{isClient: true, keepalive: ka, profile: "tcp", sportRandom: true, closeCh: make(chan struct{})}
 	r.peer.Store(&net.IPAddr{IP: cur})
 	r.cliPort.Store(40000)
 	r.lastRxCur.Store(time.Now().Add(-time.Minute).UnixNano()) // the tuple we are on hears nothing
