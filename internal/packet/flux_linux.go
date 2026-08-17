@@ -781,6 +781,19 @@ func (f *Flux) livePath() (pathKey, bool) {
 // deadWin is the session-stale window this carrier enforces.
 func (f *Flux) deadWin() time.Duration { return deadWindow(f.keepalive) }
 
+// dropSession gives up the crypto session so the client loop handshakes again, and reports whether
+// there was one to give up — the ladder's rung one. See the udp twin for why it wakes the loop.
+func (f *Flux) dropSession() bool {
+	if f.sealer() == nil {
+		return false // a handshake already in flight is not a step
+	}
+	f.session.Store(nil)
+	f.ci.Store(nil)
+	f.st.down("rehandshake", "flux")
+	wakeLoop(f.wake)
+	return true
+}
+
 // sessionStale mirrors Raw.sessionStale: if the client has heard nothing
 // authenticated for deadWin() the server probably restarted, so the client drops
 // the dead session and re-handshakes rather than pinging forever under a key the
@@ -1022,6 +1035,7 @@ func (f *Flux) clientLoop() {
 	failN := 0        // consecutive handshake retransmits (or unanswered probes) -> the endpoint may be dead
 	unproven := false // the current destination has not answered since we jumped to it -> probe at 1s, not keepalive
 	rc := newRotationController(f.pp, f.sp)
+	rc.session.setDrop(f.dropSession)
 	if rc.active() {
 		go f.pinPollLoop(rc)
 	}

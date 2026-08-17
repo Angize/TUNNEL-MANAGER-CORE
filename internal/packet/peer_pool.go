@@ -610,9 +610,10 @@ type rotationController struct {
 	// across them cannot invert against the pools' own locks.
 	mu       sync.Mutex
 	dst, src *PeerPool
-	port     portRung // rung zero: redraw the source port before anything is condemned
-	od       odometer // destination is the low digit, source the high one
-	pinFails int      // consecutive proven-dead rounds while a pin is in force -> auto-release at pinFailRelease
+	port     portRung    // rung zero: redraw the source port before anything is condemned
+	session  sessionRung // rung one: handshake again before anything is condemned
+	od       odometer    // destination is the low digit, source the high one
+	pinFails int         // consecutive proven-dead rounds while a pin is in force -> auto-release at pinFailRelease
 	rotate   time.Duration
 	rotateAt time.Time
 }
@@ -641,7 +642,9 @@ func (c *rotationController) pinned() bool {
 
 // fail is called when the current peer looks dead. rotDst/rotSrc are the carrier's swap funcs. While an
 // operator pin is in force it holds off failover until pinFailRelease proven-dead rounds auto-release it.
-func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
+// It reports whether the verdict was CHARGED to an endpoint. A free step answered it, or a pin
+// absorbed it, and nothing was condemned — the caller must not announce a burn that did not happen.
+func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (condemned bool) {
 	// Rung zero, ahead of everything: redraw the source port and let the next measurement judge that
 	// combination instead. It moves no endpoint — the tunnel stays exactly where it is, INCLUDING on a
 	// pinned one — so a round spent here is not evidence about any endpoint and must spend neither a
@@ -649,7 +652,13 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 	//
 	// Outside c.mu on purpose: the rung carries its own lock, and the redraw puts a packet on the wire.
 	if c.port.try() {
-		return
+		return false
+	}
+	// Rung one, on the same terms: a handshake moves the tunnel nowhere either, so it comes before any
+	// burn and before the pin's allowance is touched. A peer that restarted makes a good path carry
+	// nothing, and without this the walk answers that by condemning a healthy destination.
+	if c.session.try() {
+		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -659,7 +668,7 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 		// reaches even one; only after pinFailRelease decisive rounds does the pin drop and failover resume.
 		c.pinFails++
 		if c.pinFails < pinFailRelease {
-			return
+			return false
 		}
 		c.pinFails = 0
 		if c.dst != nil {
@@ -679,11 +688,13 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 		if c.src != nil && lap {
 			rotSrc(false) // every destination that could be tried has been — move the source
 		}
-		return
+		return true
 	}
 	if c.src != nil {
 		rotSrc(false)
+		return true
 	}
+	return false
 }
 
 // success resets the counters a live carrier invalidates: the dest-cycle count that drives source
@@ -691,7 +702,11 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 // tun probe does that, through cmdOK — and it releases no pin, which the carriers do themselves on the
 // endpoint they are PROVEN up on (see the clientLoops).
 func (c *rotationController) success() {
-	c.port.restart() // outside c.mu, like every other use of the rung's own lock
+	// The rungs are NOT refilled here. This runs off peerAnswered — the carrier's own frames coming
+	// back — and that proves an endpoint answered US, never that the tunnel carries. In the exact
+	// failure this ladder exists for, the carrier answers while nothing crosses, so refilling here
+	// would hand the budget back on every loop and the walk would never be reached. Only the judge's
+	// cmdOK settles it; see pollPins.
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.od.restart()
@@ -743,6 +758,12 @@ func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc 
 				log.Printf("core: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
 					cmd.Epoch, epoch)
 			case cmd.Cmd == cmdOK:
+				// Traffic is CROSSING, so the outage the ladder was working through is over and its free
+				// steps are refilled. This is the only evidence that settles it: the carrier's own frames
+				// coming back would not, because in the failure this ladder exists for they keep coming
+				// back while nothing crosses — and a budget refilled on that never runs out.
+				c.port.restart()
+				c.session.restart()
 				// Both ends of the pair the probe measured are proven, so both burns go. Keyed on each
 				// side separately: a source rotation is seamless and can slide under a verdict.
 				if cmd.Key != "" && c.dst.clearBurn(cmd.Key) && ev != nil {
@@ -760,13 +781,17 @@ func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc 
 				// fall through to the pin arm below and select the very endpoint it condemns.
 				if addr := c.dst.current(); cmd.Key == addr {
 					// Still where it was measured: burn and advance, so a node-driven failover and a
-					// carrier-driven one are the same move. Marked before the burn, while we still know
-					// which endpoint goes — the carrier's "peer-rotate" cannot say WHO decided.
-					log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", addr)
-					if ev != nil {
-						ev("burn", "tun-probe", "ip:"+addr)
+					// carrier-driven one are the same move. The endpoint is captured BEFORE the move,
+					// while we still know which one goes, but announced only if it really was charged —
+					// a verdict the ladder answered with a free step, or one a pin absorbed, condemns
+					// nobody, and saying otherwise puts a burn card on the operator's log for an address
+					// that is still healthy.
+					if c.fail(rotDst, rotSrc) {
+						log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", addr)
+						if ev != nil {
+							ev("burn", "tun-probe", "ip:"+addr)
+						}
 					}
-					c.fail(rotDst, rotSrc)
 				} else if c.dst.burnNamed(cmd.Key) {
 					// It moved under the verdict. Burn what was measured and stay put: the rotation has
 					// already advanced, and nothing has measured where it went.

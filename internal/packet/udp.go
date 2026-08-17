@@ -451,6 +451,24 @@ func (b *UDP) livePath() (pathKey, bool) {
 // deadWin is the session-stale window this carrier enforces.
 func (b *UDP) deadWin() time.Duration { return deadWindow(b.keepalive) }
 
+// dropSession gives up the crypto session so the client loop handshakes again, and reports whether
+// there was one to give up. This is the ladder's rung one; sessionStale does the same thing on its own
+// clock, for a carrier that has no ladder at all.
+//
+// The wake matters here and not there: the staleness path runs INSIDE the loop and re-decides its
+// interval at once, but this is called from the pin poller while the loop may be asleep on a whole
+// keepalive.
+func (b *UDP) dropSession() bool {
+	if !b.cryptoOn || b.sealer() == nil {
+		return false // clear mode has no session, and a handshake already in flight is not a step
+	}
+	b.session.Store(nil)
+	b.ci.Store(nil)
+	b.st.down("rehandshake", "udp")
+	wakeLoop(b.wake)
+	return true
+}
+
 // sessionStale reports that the client has heard nothing it could authenticate for long enough that the
 // peer has most likely restarted with a fresh session, so the client drops its now-useless session and
 // re-handshakes. Without it a SERVER restart wedges the tunnel: the client keeps pinging under a key the
@@ -1084,6 +1102,7 @@ func (b *UDP) clientLoop() {
 	failN := 0        // consecutive handshake retransmits (or unanswered probes) -> the endpoint may be dead
 	unproven := false // the current destination has not answered since we jumped to it -> probe at 1s, not keepalive
 	rc := newRotationController(b.pp, b.sp)
+	rc.session.setDrop(b.dropSession)
 	if rc.active() {
 		go b.pinPollLoop(rc)
 	}
