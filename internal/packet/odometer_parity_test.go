@@ -6,14 +6,16 @@ import (
 	"testing"
 )
 
-// The direct carriers do NOT share one failover path. udp, raw and flux go through
-// rotationController.fail; tcp has its own TCP.burnAdvance, with its own counters, its own lap sizing
-// and its own pin accounting. Two implementations of one rule, written months apart, and nothing has
-// ever compared them against each other -- every test so far drove one or the other.
+// The direct carriers still reach the walk by two different functions: udp, raw and flux through
+// rotationController.fail, tcp through TCP.burnAdvance. The COUNTER underneath them is now one
+// odometer, so this no longer compares two implementations of the rule — it compares the two WIRINGS
+// of it: the order the burn and the count happen in, which eligible set each hands over, and whether
+// each still guards the source walk on having a source pool at all. Any of those wrong in one caller
+// and only one carrier misbehaves, which is precisely how the two drifted apart before.
 //
 // So drive both with identical pools and identical verdicts and demand identical answers. What matters
 // is not the addresses (each carrier's swap func differs) but the DECISIONS: which destination is burned
-// on each round, and on which round the source is walked. That is the whole odometer.
+// on each round, and on which round the source is walked.
 
 type odoTrace struct {
 	destBurns  []string // the destination each round condemned, in order

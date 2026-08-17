@@ -75,7 +75,8 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 
 	// ...and the other half of the contract: a REAL failover still burns and still announces, so this
 	// fix cannot be satisfied by silencing the source walk everywhere.
-	b.destRot.Store(int64(b.pp.size()) - 1) // one more burn cycles the pool
+	// One burn short of a full lap: both halves set, because the round is only re-sized at its start.
+	b.odPeer.rot, b.odPeer.want = b.pp.size()-1, b.pp.size()
 	if _, burned := b.burnAdvance(true); !burned {
 		t.Fatal("a failover burn did not take")
 	}

@@ -204,23 +204,23 @@ func TestAHealthySessionEndsTheRound(t *testing.T) {
 			t.Fatal("could not pin")
 		}
 		b.burnAdvance(true) // absorbed; the allowance is now partly spent
-		b.destRot.Store(3)  // ...and a lap is half walked
+		b.odPeer.rot = 3    // ...and a lap is half walked
 		b.endRound()
 		if got := b.pinFails.Load(); got != 0 {
 			t.Fatalf("the pin's allowance survived a healthy session (pinFails=%d)", got)
 		}
-		if got := b.destRot.Load(); got != 0 {
-			t.Fatalf("the lap survived a healthy session (destRot=%d)", got)
+		if got := b.odPeer.rot; got != 0 {
+			t.Fatalf("the lap survived a healthy session (rot=%d)", got)
 		}
 	})
 	t.Run("the edge pool's counters", func(t *testing.T) {
 		p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2", "s3"), filepath.Join(t.TempDir(), "st.json"))
 		b := &TCP{pool: p}
-		b.sniRot.Store(2)
+		b.odEdge.rot = 2
 		b.pinFails.Store(1)
 		b.endRound()
-		if got := b.sniRot.Load(); got != 0 {
-			t.Fatalf("the edge pool's half-walked lap survived a healthy session (sniRot=%d) — the next "+
+		if got := b.odEdge.rot; got != 0 {
+			t.Fatalf("the edge pool's half-walked lap survived a healthy session (rot=%d) — the next "+
 				"outage would convict the edge after one verdict", got)
 		}
 		if got := b.pinFails.Load(); got != 0 {
