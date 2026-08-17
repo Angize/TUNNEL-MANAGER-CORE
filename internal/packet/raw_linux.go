@@ -912,28 +912,36 @@ func (r *Raw) sportLoop() {
 			continue
 		}
 		next = now.Add(jitterFrac(rawSportEvery))
-		p := rawRollSport()
-		if p == 0 {
-			continue
-		}
-		r.cliPort.Store(uint32(p))
-		// A new 4-tuple is a new flow, so it starts a new flow's numbers. Rolling only the port left the
-		// first segment of the new tuple a PSH|ACK carrying a sequence mid-stream and a TSval continuing
-		// the old series — which links it straight back to the tuple it replaced, and undoes what the
-		// roll is for. Nothing downstream depends on these: the peer skips the carrier header.
-		r.newTCPFlow()
-		// A new tuple asks its own question. Without this the old tuple's unanswered ask keeps dating
-		// the silence, and every following tick condemns the fresh port on the previous one's evidence
-		// -- a roll a second for as long as the path stays down.
-		r.lastAsk.Store(0)
-		// ...and say so at once. Until a packet carrying the new port reaches the server, its downstream
-		// is still stamped for the old one, and on a path with a stateful box those are dropped. Waiting
-		// for whatever the client happens to send next makes that window a whole keepalive interval on a
-		// download-only flow; one ping makes it half a round trip.
-		if peer := r.peer.Load(); peer != nil {
-			r.send(typePing, nil, peer)
-		}
+		r.rollSourcePort()
 	}
+}
+
+// rollSourcePort redraws the source port this client's forged header carries and asks its question at
+// once. Reports whether it MOVED — a draw that failed has not stepped, and the ladder must not count
+// it as one.
+//
+// Both callers gate on sportRandom before they can reach this — sportLoop is only started under it and
+// the ladder's rung is only wired under it — so there is no check for it here.
+//
+// The three lines after the draw are not decoration. A new 4-tuple is a new flow, so it starts a new
+// flow's numbers: rolling only the port left the first segment carrying a sequence mid-stream and a
+// TSval continuing the old series, which links it straight back to the tuple it replaced. The
+// outstanding ask is cleared because the old tuple's unanswered question must not date the new one's
+// silence. And the ping goes out immediately because until a packet carrying the new port reaches the
+// server its downstream is still stamped for the old one — on a download-only flow, waiting for
+// whatever the client sends next makes that window a whole keepalive instead of half a round trip.
+func (r *Raw) rollSourcePort() bool {
+	p := rawRollSport()
+	if p == 0 {
+		return false
+	}
+	r.cliPort.Store(uint32(p))
+	r.newTCPFlow()
+	r.lastAsk.Store(0)
+	if peer := r.peer.Load(); peer != nil {
+		r.send(typePing, nil, peer)
+	}
+	return true
 }
 
 func (r *Raw) tunName() string {
@@ -1669,6 +1677,13 @@ func (r *Raw) clientLoop() {
 	failN := 0        // consecutive handshake retransmits (or unanswered probes) -> the endpoint may be dead
 	unproven := false // the current destination has not answered since we jumped to it -> probe at 1s, not keepalive
 	rc := newRotationController(r.pp, r.sp)
+	// The one carrier with a source port of its own to redraw: it lives in the forged header, so a new
+	// one costs no socket, no session and no coordination — the server reads it off the next
+	// authenticated frame. Declared here rather than discovered per verdict: a carrier whose profile
+	// forges no port, or whose operator left the port fixed, simply has no rung zero.
+	if r.sportRandom {
+		rc.port.setRoll(r.rollSourcePort)
+	}
 	if rc.active() {
 		go r.pinPollLoop(rc)
 	}

@@ -610,6 +610,7 @@ type rotationController struct {
 	// across them cannot invert against the pools' own locks.
 	mu       sync.Mutex
 	dst, src *PeerPool
+	port     portRung // rung zero: redraw the source port before anything is condemned
 	od       odometer // destination is the low digit, source the high one
 	pinFails int      // consecutive proven-dead rounds while a pin is in force -> auto-release at pinFailRelease
 	rotate   time.Duration
@@ -641,6 +642,15 @@ func (c *rotationController) pinned() bool {
 // fail is called when the current peer looks dead. rotDst/rotSrc are the carrier's swap funcs. While an
 // operator pin is in force it holds off failover until pinFailRelease proven-dead rounds auto-release it.
 func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
+	// Rung zero, ahead of everything: redraw the source port and let the next measurement judge that
+	// combination instead. It moves no endpoint — the tunnel stays exactly where it is, INCLUDING on a
+	// pinned one — so a round spent here is not evidence about any endpoint and must spend neither a
+	// burn nor the pin's allowance.
+	//
+	// Outside c.mu on purpose: the rung carries its own lock, and the redraw puts a packet on the wire.
+	if c.port.try() {
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.pinned() {
@@ -681,6 +691,7 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) {
 // tun probe does that, through cmdOK — and it releases no pin, which the carriers do themselves on the
 // endpoint they are PROVEN up on (see the clientLoops).
 func (c *rotationController) success() {
+	c.port.restart() // outside c.mu, like every other use of the rung's own lock
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.od.restart()
