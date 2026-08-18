@@ -7,13 +7,6 @@ import (
 	"time"
 )
 
-// TestRotationControllerIsRaceFree hammers the controller from the two goroutines that really touch it —
-// the carrier's client loop (success/proactive) and the pin-poll loop (fail) — because nothing else in
-// the package makes them collide reliably. It found nothing for a long time only because the collision
-// window is narrow; under -race with both loops spinning it is immediate.
-//
-// The counters are the odometer: a lost update means a lap counted twice or not at all, which convicts
-// the SOURCE early or late. Not a crash — a wrong verdict, which is worse because nothing reports it.
 func TestRotationControllerIsRaceFree(t *testing.T) {
 	dir := t.TempDir()
 	dst := NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json"))
@@ -26,7 +19,7 @@ func TestRotationControllerIsRaceFree(t *testing.T) {
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { // the client loop
+	go func() {
 		defer wg.Done()
 		for {
 			select {
@@ -38,7 +31,7 @@ func TestRotationControllerIsRaceFree(t *testing.T) {
 			}
 		}
 	}()
-	go func() { // the pin-poll loop
+	go func() {
 		defer wg.Done()
 		for {
 			select {

@@ -6,9 +6,6 @@ import (
 	"time"
 )
 
-// TestTunnelTCPCover drives a full core TCP tunnel wrapped in the TLS cover, with
-// the ephemeral handshake + obfs framing running INSIDE the TLS session, and
-// asserts a packet traverses it both ways.
 func TestTunnelTCPCover(t *testing.T) {
 	const psk = "cover-e2e-psk-abcdefghijklmnop"
 	const cipher = "chacha20-poly1305"
@@ -28,7 +25,7 @@ func TestTunnelTCPCover(t *testing.T) {
 	go srv.Run()
 	go cli.Run()
 	t.Cleanup(func() { cli.Close(); srv.Close() })
-	time.Sleep(500 * time.Millisecond) // TLS handshake + core handshake
+	time.Sleep(500 * time.Millisecond)
 
 	pkt := bytes.Repeat([]byte{0xEE}, 300)
 	if _, err := cliCtrl.Write(pkt); err != nil {

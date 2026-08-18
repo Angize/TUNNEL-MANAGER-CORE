@@ -1,26 +1,16 @@
 //go:build linux
 
-// Fake-packet desync: a content-agnostic anti-DPI mechanism shared by the raw and flux carriers (the two
-// that build the whole IPv4 header, so they can forge a TTL/checksum). Just before each handshake the
-// client emits a few DECOY packets — low-TTL ones that expire before the server, and bad-checksum ones
-// that must go out at L2 because an IP_HDRINCL socket would repair them — so a stateful DPI mis-syncs.
 package packet
 
 import "crypto/rand"
 
-// injectMaxTTL lives in desync.go: the untagged carrier code reports the cap, so it cannot be
-// declared in a linux-only file.
-
-// desyncCfg holds the client-side fake-packet-desync parameters. The zero value is off.
 type desyncCfg struct {
 	on    bool
-	ttl   int    // hop budget stamped on a low-TTL decoy (it expires before the server)
-	count int    // decoys emitted per handshake cycle
-	mode  string // "ttl" | "badsum" | "both"
+	ttl   int
+	count int
+	mode  string
 }
 
-// newDesyncCfg normalises the config values (applying the same defaults the node/panel
-// use) and returns an off config when on is false.
 func newDesyncCfg(on bool, ttl, count int, mode string) desyncCfg {
 	if !on {
 		return desyncCfg{}
@@ -39,26 +29,15 @@ func newDesyncCfg(on bool, ttl, count int, mode string) desyncCfg {
 	return desyncCfg{on: true, ttl: ttl, count: count, mode: mode}
 }
 
-// usesBadsum reports whether any decoy this config emits carries a corrupted checksum, so a
-// carrier knows to set up the AF_PACKET injector (IP_HDRINCL would repair the checksum).
 func (d desyncCfg) usesBadsum() bool { return d.on && (d.mode == "badsum" || d.mode == "both") }
 
-// usesLowTTL is the mirror of usesBadsum: whether any decoy this config emits is a low-TTL one, so a
-// carrier knows whether it needs the IP_HDRINCL socket at all. mode "badsum" emits none — every one
-// of its decoys goes out through the AF_PACKET injector — so a carrier that cannot open an
-// IP_HDRINCL socket can still deliver that mode in full.
 func (d desyncCfg) usesLowTTL() bool { return d.on && (d.mode == "ttl" || d.mode == "both") }
 
-// fakeSpec is one decoy's IP-header knobs. A ttl decoy keeps a valid checksum (it must be
-// forwarded until the TTL runs out mid-path); a badsum decoy keeps a normal TTL (it must
-// reach the server host to be dropped there). The two are complementary, so "both"
-// alternates them.
 type fakeSpec struct {
 	ttl    int
 	badSum bool
 }
 
-// specs returns the per-decoy header knobs for this config (len == count, empty when off).
 func (d desyncCfg) specs() []fakeSpec {
 	if !d.on {
 		return nil
@@ -68,45 +47,35 @@ func (d desyncCfg) specs() []fakeSpec {
 		bad := d.mode == "badsum" || (d.mode == "both" && i%2 == 1)
 		ttl := d.ttl
 		if bad {
-			ttl = 64 // a bad-checksum decoy should reach the server host, so give it a live TTL
+			ttl = 64
 		}
 		out = append(out, fakeSpec{ttl: ttl, badSum: bad})
 	}
 	return out
 }
 
-// specsTCP is specs() for the kernel-TCP inject path (tcp/cover/ws): every decoy keeps the LOW TTL and is
-// never promoted to 64, because a well-formed segment on a REAL connection's 4-tuple must not reach the
-// server — it would draw an RST or a challenge-ACK. badsum still corrupts the checksum as insurance.
 func (d desyncCfg) specsTCP() []fakeSpec {
 	if !d.on {
 		return nil
 	}
 	ttl := d.ttl
 	if ttl > injectMaxTTL {
-		ttl = injectMaxTTL // never let an inject decoy reach the server, however high fake_ttl was set
+		ttl = injectMaxTTL
 	}
 	out := make([]fakeSpec, 0, d.count)
 	for i := 0; i < d.count; i++ {
 		bad := d.mode == "badsum" || (d.mode == "both" && i%2 == 1)
-		out = append(out, fakeSpec{ttl: ttl, badSum: bad}) // always the (clamped) configured low TTL
+		out = append(out, fakeSpec{ttl: ttl, badSum: bad})
 	}
 	return out
 }
 
-// fakeSeqGap offsets a decoy's sequence away from the live stream's, so a decoy does not land inside the
-// sequence space the real frames are using. It is a distance, not an impossibility — decoys fire once per
-// fresh handshake, near the counter's start. The low 15 bits matter as much as the size: icmp stamps only
-// uint16(seq), so a gap that is a multiple of 2^16 is ZERO there. This value is half the 16-bit space.
 const fakeSeqGap = 1<<20 + 1<<15
 
-// fakePayload returns a random-length, random-content payload sized like a small
-// handshake/keepalive frame. Our real frames are AEAD ciphertext (indistinguishable from
-// random on the wire), so a random decoy of a plausible size resembles a real flow packet.
 func fakePayload() []byte {
 	var lb [1]byte
 	_, _ = rand.Read(lb[:])
-	n := 48 + int(lb[0])%64 // 48..111 bytes
+	n := 48 + int(lb[0])%64
 	p := make([]byte, n)
 	_, _ = rand.Read(p)
 	return p

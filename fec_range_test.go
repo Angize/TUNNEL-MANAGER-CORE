@@ -2,10 +2,6 @@ package main
 
 import "testing"
 
-// fec_data has an upper bound the sum rule (fec_data+fec_parity<=255) says nothing about: the RECEIVER
-// has to be able to repair the block. The decoder delivers intact shards on arrival and recovered ones
-// last, so a repaired frame reaches the AEAD up to blocksize-1 sequences behind the newest, and the
-// replay guard refuses anything a full window behind — full bandwidth, no repair, in silence.
 func TestFecDataBoundedByTheReplayWindow(t *testing.T) {
 	base := func(fd, fp int) *Config {
 		return &Config{

@@ -9,10 +9,6 @@ import (
 	"time"
 )
 
-// A failed make-before-break build must ANNOUNCE NOTHING and BURN NO SOURCE. burnAdvance walks the source
-// once the destination pool has cycled, and its failover form publishes a rotation the live carrier never
-// made. A stray burn lands on the CANDIDATE source, not the live one, since the timer has already
-// advanced cur. This drives the REAL callback buildWarm receives; the sibling test passes a stub.
 func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -25,7 +21,7 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 			if aerr != nil {
 				return
 			}
-			c.Close() // TCP connects, the core handshake dies: buildWarm fails
+			c.Close()
 		}
 	}()
 
@@ -44,15 +40,12 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 		keepalive: time.Second, idle: deadWindow(time.Second), isClient: true, addr: addr,
 		stTag: "tcp", closeCh: make(chan struct{})}
 	b.st = newCoreStatus(path, active)
-	b.warmNext = make(chan *warmDial, 1) // dialLoop's job; this test drives buildWarm directly
+	b.warmNext = make(chan *warmDial, 1)
 	b.SetPeerPool(NewPeerPool([]string{addr, second}, 0, ""))
-	// Both source IPs are real loopback addresses, so neither is dropped for being unbindable — the
-	// only thing that can burn one here is burnAdvance.
+
 	sp := NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0, srcPath)
 	b.SetSourcePool(sp)
 
-	// One warm build per destination endpoint, so the pool cycles and burnAdvance reaches the source
-	// walk — the branch under test. Every one of them fails: the live carrier never moves.
 	for i := 0; i < b.pp.size(); i++ {
 		if b.buildWarm(func() { b.burnAdvance(false) }, b.sourceIP(), true, "") {
 			t.Fatal("buildWarm reported success against an endpoint that closes before a single core frame")
@@ -63,9 +56,6 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 		}
 	}
 
-	// Advancing the source is fine and is what the proactive form does — the move becomes real at the
-	// adoption site when a warm carrier finally goes live. Burning one is not: nothing here proved a
-	// source bad, and a burned entry is one rotation will avoid.
 	if burned := poolBurned(sp); len(burned) > 0 {
 		t.Errorf("a failed warm build burned source(s) %v — the build died on the DESTINATION (which is burned separately) and nothing proved a source bad", burned)
 	}
@@ -73,9 +63,6 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 		t.Errorf("a failed warm build published %q/%q — the tunnel never left its source or its endpoint", e.Kind, e.Code)
 	}
 
-	// ...and the other half of the contract: a REAL failover still burns and still announces, so this
-	// fix cannot be satisfied by silencing the source walk everywhere.
-	// One burn short of a full lap: both halves set, because the round is only re-sized at its start.
 	b.odPeer.rot, b.odPeer.want = b.pp.size()-1, b.pp.size()
 	if _, burned := b.burnAdvance(true); !burned {
 		t.Fatal("a failover burn did not take")
@@ -94,7 +81,6 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 	}
 }
 
-// poolBurned lists every entry carrying a burn/suspect record.
 func poolBurned(p *PeerPool) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()

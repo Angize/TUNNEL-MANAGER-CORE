@@ -16,19 +16,10 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
 
-// Received packets are written across the TUN's queues, one writer each, and the writer is chosen from
-// the packet's own flow.
-//
-// The failure that matters leaves a WORKING tunnel: send a connection's packets to two different
-// writers and they reach the TUN out of order. Nothing errors, nothing logs, every byte still arrives
-// -- and the tunnelled tcp reads its own reordering as loss and throttles itself. Throughput goes DOWN
-// and the only symptom is a number. So these pin the choice of writer, not whether it works.
-
-// flowPkt builds a minimal IPv4 packet with the given addresses, protocol and ports.
 func flowPkt(t *testing.T, src, dst string, proto byte, sport, dport uint16) []byte {
 	t.Helper()
 	p := make([]byte, 24)
-	p[0] = 0x45 // version 4, ihl 5
+	p[0] = 0x45
 	p[9] = proto
 	copy(p[12:16], net.ParseIP(src).To4())
 	copy(p[16:20], net.ParseIP(dst).To4())
@@ -46,7 +37,7 @@ func TestOneFlowAlwaysGoesToOneWriter(t *testing.T) {
 			pkt := flowPkt(t, "10.0.0.1", "10.0.0.2", tc.proto, 1234, 443)
 			want := flowHash(pkt)
 			for i := 0; i < 50; i++ {
-				// a fresh copy each time, as the receive path hands over a fresh buffer per frame
+
 				again := append([]byte(nil), pkt...)
 				if got := flowHash(again); got != want {
 					t.Fatalf("the same flow hashed to %d and %d: its packets would split across writers",
@@ -58,7 +49,7 @@ func TestOneFlowAlwaysGoesToOneWriter(t *testing.T) {
 }
 
 func TestDifferentFlowsDoNotAllLandOnOneWriter(t *testing.T) {
-	// 64 connections from one host to one host, as a browser or a download manager opens
+
 	seen := map[uint32]int{}
 	for port := 1024; port < 1088; port++ {
 		seen[flowHash(flowPkt(t, "10.0.0.1", "10.0.0.2", 6, uint16(port), 443))%4]++
@@ -73,8 +64,6 @@ func TestDifferentFlowsDoNotAllLandOnOneWriter(t *testing.T) {
 	}
 }
 
-// Every field that identifies a connection has to reach the hash. A hash that ignores the ports sends
-// every connection between two hosts to one writer -- which is exactly the busy case.
 func TestTheHashUsesAddressesAndPorts(t *testing.T) {
 	base := flowPkt(t, "10.0.0.1", "10.0.0.2", 6, 1234, 443)
 	for _, tc := range []struct {
@@ -95,8 +84,6 @@ func TestTheHashUsesAddressesAndPorts(t *testing.T) {
 	}
 }
 
-// Anything unparseable must land on queue 0 rather than on an arbitrary one: queue 0 is the reader's
-// own, written inline, so an odd packet keeps the exact path it had.
 func TestWhatCannotBeParsedGoesToTheReadersOwnQueue(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -114,9 +101,6 @@ func TestWhatCannotBeParsedGoesToTheReadersOwnQueue(t *testing.T) {
 	}
 }
 
-// A carrier with one queue gets a writer of its own, because a reader writing inline holds one packet
-// at a time and can therefore never join two into one write. What must not change is that the packet
-// still arrives.
 func TestASingleQueueCarrierStillReachesItsDevice(t *testing.T) {
 	d, done := fakeDev(t)
 	w := newTunWriters([]*tun.Device{d})
@@ -132,9 +116,6 @@ func TestASingleQueueCarrierStillReachesItsDevice(t *testing.T) {
 	}
 }
 
-// The reader must not be able to lose a packet by running ahead of its writer. Queue 0 is the one the
-// reader used to write itself, so it WAITS there: a full queue slows the reader down, as the write
-// syscall did, and never silently drops what it was handed.
 func TestTheReadersOwnQueueWaitsRatherThanDropping(t *testing.T) {
 	r, wr, err := os.Pipe()
 	if err != nil {
@@ -150,7 +131,7 @@ func TestTheReadersOwnQueueWaitsRatherThanDropping(t *testing.T) {
 			w.write(flowPkt(t, "10.0.0.1", "10.0.0.2", 6, 1234, 443))
 		}
 	}()
-	// A pipe is a byte stream, so count BYTES: several packets can land in one Read.
+
 	got, buf := 0, make([]byte, 65536)
 	deadline := time.Now().Add(10 * time.Second)
 	for got < n*24 {
@@ -165,8 +146,6 @@ func TestTheReadersOwnQueueWaitsRatherThanDropping(t *testing.T) {
 	}
 }
 
-// A run handed to one queue must reach the device in the order it was written, whatever the writer
-// batches together: the tunnelled connection reads reordering as loss.
 func TestAQueueWritesItsRunInOrder(t *testing.T) {
 	r, wr, err := os.Pipe()
 	if err != nil {
@@ -179,7 +158,7 @@ func TestAQueueWritesItsRunInOrder(t *testing.T) {
 	const n = 200
 	for i := 0; i < n; i++ {
 		p := flowPkt(t, "10.0.0.1", "10.0.0.2", 6, 1234, 443)
-		p[23] = byte(i) // the dport low byte carries the sequence this test checks
+		p[23] = byte(i)
 		w.write(p)
 	}
 	buf, seen := make([]byte, 24*n), 0
@@ -197,8 +176,6 @@ func TestAQueueWritesItsRunInOrder(t *testing.T) {
 	}
 }
 
-// Every packet must reach a device, whichever writer it is steered to -- a queue that is created but
-// never drained is a blackhole for the flows the kernel puts on it.
 func TestEveryQueueIsDrained(t *testing.T) {
 	const queues = 4
 	var mu sync.Mutex
@@ -212,8 +189,7 @@ func TestEveryQueueIsDrained(t *testing.T) {
 		}
 		files = append(files, r, wr)
 		devs = append(devs, tun.FromFile(wr, "q"))
-		// BYTES, not reads: a pipe is a byte stream, so several packets can arrive in one Read and
-		// counting reads would undercount them.
+
 		go func(i int, r *os.File) {
 			b := make([]byte, 4096)
 			for {
@@ -258,12 +234,6 @@ func TestEveryQueueIsDrained(t *testing.T) {
 	}
 }
 
-// The one that matters: ONE connection's packets must all reach the SAME writer.
-//
-// flowHash being right is not enough -- write has to actually use it. Anything that spreads packets by
-// something other than the flow (a round robin, a counter, the queue depth) still delivers every byte
-// and still fills every queue, so the drain test and the hash tests both stay green. What breaks is
-// the ORDER inside a connection, and the only symptom is the tunnelled tcp slowing down.
 func TestOneConnectionsPacketsAllReachOneWriter(t *testing.T) {
 	devs, count := pipeDevs(t, 4)
 	w := newTunWriters(devs)
@@ -271,7 +241,7 @@ func TestOneConnectionsPacketsAllReachOneWriter(t *testing.T) {
 
 	const packets, pktLen = 60, 24
 	for i := 0; i < packets; i++ {
-		// the SAME connection every time, as a download is
+
 		w.write(flowPkt(t, "10.0.0.1", "10.0.0.2", 6, 1234, 443))
 	}
 	deadline := time.After(5 * time.Second)
@@ -299,7 +269,6 @@ func TestOneConnectionsPacketsAllReachOneWriter(t *testing.T) {
 	}
 }
 
-// pipeDevs returns n pipe-backed devices and a function reporting the bytes each has received.
 func pipeDevs(t *testing.T, n int) ([]*tun.Device, func() []int) {
 	t.Helper()
 	var mu sync.Mutex
@@ -332,7 +301,6 @@ func pipeDevs(t *testing.T, n int) ([]*tun.Device, func() []int) {
 	}
 }
 
-// fakeDev is a Device over a pipe, and a channel that fires when something is written to it.
 func fakeDev(t *testing.T) (*tun.Device, chan struct{}) {
 	t.Helper()
 	r, w, err := os.Pipe()
@@ -350,30 +318,19 @@ func fakeDev(t *testing.T) (*tun.Device, chan struct{}) {
 	return tun.FromFile(w, "q0"), done
 }
 
-// Every queue the interface has must have a READER, not just a writer.
-//
-// This is the bug that shipped in the first cut of this work and was only caught on a live tunnel: the
-// receive side opened N queues and the send side still read from queue 0 alone. The kernel steers
-// packets onto every queue it knows about, in BOTH directions, so queues 1..N-1 swallowed everything
-// the send path was supposed to carry -- including the handshake. The tunnel did not run slow, it
-// never came up.
-//
-// Nothing about the shape of the code says the two counts must match, so it is asserted here.
 func TestEveryQueueOpenedAlsoGetsASendLoop(t *testing.T) {
 	src := string(mustRead(t, "raw_linux.go"))
 	if !strings.Contains(src, "for i := range r.txq {") {
 		t.Fatal("Run does not start a loop per send queue: any queue past the first is a blackhole for " +
 			"whatever the kernel steers onto it")
 	}
-	// and the loops must read their OWN queue, not the carrier's first device
+
 	if strings.Contains(src, "r.dev.Read(buf)") || strings.Contains(src, "r.dev.TryRead(buf)") {
 		t.Fatal("a send loop still reads r.dev: every loop would drain queue 0 and none would drain " +
 			"the rest")
 	}
 }
 
-// The two halves must agree on how many queues there are. A carrier that writes across N queues but
-// reads from M of them blackholes the difference, whichever way round it is.
 func TestTheReadAndWriteHalvesUseTheSameQueues(t *testing.T) {
 	c, err := net.ListenIP("ip4:253", &net.IPAddr{IP: net.IPv4zero})
 	if err != nil {
@@ -400,8 +357,6 @@ func TestTheReadAndWriteHalvesUseTheSameQueues(t *testing.T) {
 	}
 }
 
-// Each pipeline needs a socket of its OWN. Sharing one still sends every packet -- it just does it one
-// at a time behind go's per-socket write lock, so the tunnel works and the parallelism does not.
 func TestEachSendQueueHasItsOwnSocket(t *testing.T) {
 	c, err := net.ListenIP("ip4:254", &net.IPAddr{IP: net.IPv4zero})
 	if err != nil {

@@ -9,9 +9,6 @@ import (
 	"testing"
 )
 
-// rawGSOPair is a GSO Device holding a REAL fd, as production does, plus the peer standing in for the
-// kernel. FromFileGSO cannot serve here: it sets fd<0, which takes the joining fallback and so says
-// nothing about the path every received packet actually goes through.
 func rawGSOPair(t *testing.T) (*Device, *os.File) {
 	t.Helper()
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
@@ -24,9 +21,6 @@ func rawGSOPair(t *testing.T) (*Device, *os.File) {
 	return dev, peer
 }
 
-// A GSO write must reach the kernel as ONE packet carrying the ten-byte header the interface was opened
-// to expect, with the packet whole behind it. Two iovecs are an implementation detail the kernel must
-// not be able to observe -- a scatter that arrived as two writes would be two malformed frames.
 func TestAGSOWriteArrivesAsOnePacketBehindItsHeader(t *testing.T) {
 	dev, peer := rawGSOPair(t)
 	pkt := tcp4(120)
@@ -50,8 +44,6 @@ func TestAGSOWriteArrivesAsOnePacketBehindItsHeader(t *testing.T) {
 	}
 }
 
-// Consecutive writes must stay separate packets. A gather that leaked into the next write would splice
-// two L3 packets into one frame, which the interface would drop as malformed.
 func TestAGSOWriteDoesNotSmearIntoTheNextPacket(t *testing.T) {
 	dev, peer := rawGSOPair(t)
 	first, second := tcp4(40), tcp4(80)
@@ -73,17 +65,13 @@ func TestAGSOWriteDoesNotSmearIntoTheNextPacket(t *testing.T) {
 	}
 }
 
-// The point of the two iovecs: a received packet must reach the TUN without a per-packet allocation.
-// Prepending the header by joining cost one allocation and one copy of the whole packet, on the single
-// hottest call of a receiving core -- an allocation here is the defect, so the test measures allocations.
 func TestAGSOWriteAllocatesNothingPerPacket(t *testing.T) {
 	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		t.Skipf("open %s: %v", os.DevNull, err)
 	}
 	defer f.Close()
-	// /dev/null rather than a socketpair: it swallows every write, so the measurement is the write path
-	// and never a buffer filling up.
+
 	dev := &Device{f: f, fd: int(f.Fd()), Name: "null", gso: true}
 	pkt := tcp4(1360)
 
@@ -96,8 +84,6 @@ func TestAGSOWriteAllocatesNothingPerPacket(t *testing.T) {
 	}
 }
 
-// The device the tests use elsewhere has no raw fd and must keep working: it joins the two pieces
-// instead of gathering them, and the bytes that come out must be identical.
 func TestAGSOWriteWithoutARawFDStillCarriesTheHeader(t *testing.T) {
 	dev, peer := gsoPair(t)
 	pkt := tcp4(64)

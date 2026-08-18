@@ -7,14 +7,6 @@ import (
 	"testing"
 )
 
-// narrowSum is RFC 1071 written the obvious way, one 16-bit word at a time. It is the reference the
-// wide implementation is measured against: the wide one reads thirty-two bytes at a time, which is
-// only legal because the sum does not depend on how the bytes are grouped, and that is the property
-// worth checking rather than trusting.
-//
-// It accumulates in 64 bits even though 16-bit words are being added. A 32-bit accumulator wraps once
-// the running sum passes 4 GiB, and a wrap silently DROPS a carry the fold would have brought back --
-// so a narrow reference would report the wide version wrong exactly where the wide version is right.
 func narrowSum(b []byte, init uint32) uint32 {
 	s := uint64(init)
 	for i := 0; i+1 < len(b); i += 2 {
@@ -29,8 +21,6 @@ func narrowSum(b []byte, init uint32) uint32 {
 	return uint32(s)
 }
 
-// RFC 1071's own worked example, so the reference above is pinned to something outside this repo: two
-// implementations that agree with each other and disagree with the RFC would both be wrong.
 func TestChecksumMatchesRFC1071(t *testing.T) {
 	b := []byte{0x00, 0x01, 0xf2, 0x03, 0xf4, 0xf5, 0xf6, 0xf7}
 	if got := fold(sumBytes(b, 0)); got != 0xddf2 {
@@ -41,8 +31,6 @@ func TestChecksumMatchesRFC1071(t *testing.T) {
 	}
 }
 
-// Every length and every starting value must give the SAME folded sum as the narrow version. Folded,
-// because that is all any caller uses and the two are free to carry differently before that.
 func TestChecksumAgreesWithTheNarrowSum(t *testing.T) {
 	r := rand.New(rand.NewSource(1))
 	lens := []int{}
@@ -63,8 +51,6 @@ func TestChecksumAgreesWithTheNarrowSum(t *testing.T) {
 	}
 }
 
-// All-ones data is where a checksum implementation carries on every single word, so it is where a lost
-// carry shows up. Lengths around the eight-byte step catch a tail handled one way and a body another.
 func TestChecksumCarriesOnAllOnes(t *testing.T) {
 	for n := 0; n <= 64; n++ {
 		b := make([]byte, n)
@@ -77,8 +63,6 @@ func TestChecksumCarriesOnAllOnes(t *testing.T) {
 	}
 }
 
-// A trailing odd byte is the HIGH half of its word, not the low one. Getting this backwards passes
-// every even-length test there is and corrupts exactly the odd-length packets.
 func TestChecksumPadsTheOddByteHigh(t *testing.T) {
 	if got, want := fold(sumBytes([]byte{0xab}, 0)), uint16(0xab00); got != want {
 		t.Fatalf("a lone 0xab summed to %#04x, want %#04x", got, want)

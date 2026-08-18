@@ -10,21 +10,17 @@ import (
 	"time"
 )
 
-// TestDegradedSendDropsOnlyTheSourceBoundProfiles drives the REAL send path (sendViaConn) with a pinned
-// source the kernel cannot honour, and watches the wire. pinnedSrc is set on every raw SERVER, so this
-// is the ordinary path: when that IP stops being local mid-session the degraded send is right for a
-// profile whose bytes do not depend on the source, and wrong for udp/tcp, which checksummed over it.
 func TestDegradedSendDropsOnlyTheSourceBoundProfiles(t *testing.T) {
 	lo := net.IPv4(127, 0, 0, 1)
-	unbindable := net.IPv4(203, 0, 113, 9) // TEST-NET-3: never a local address
+	unbindable := net.IPv4(203, 0, 113, 9)
 	for _, tc := range []struct {
 		profile   string
 		proto     int
 		delivered bool
 	}{
-		{"bare", protoBare, true}, // no checksum at all — the degraded send is a VALID packet
-		{"icmp", protoICMP, true}, // checksum covers the icmp header+payload only
-		{"udp", protoUDP, false},  // pseudo-header: the bytes are only valid from the pinned source
+		{"bare", protoBare, true},
+		{"icmp", protoICMP, true},
+		{"udp", protoUDP, false},
 		{"tcp", protoTCP, false},
 	} {
 		t.Run(tc.profile, func(t *testing.T) {
@@ -41,7 +37,7 @@ func TestDegradedSendDropsOnlyTheSourceBoundProfiles(t *testing.T) {
 
 			r := &Raw{conn: tx, profile: tc.profile, proto: tc.proto, isClient: false, fakeFd: -1}
 			src := unbindable
-			r.replySrc.Store(&src) // pinnedSrc() -> an address IP_PKTINFO cannot select
+			r.replySrc.Store(&src)
 
 			marker := bytes.Repeat([]byte{0xC8}, 40)
 			pkt := rawEncap(tc.profile, marker, unbindable, lo, false, 0xBEEF, 0, 0, 7, 9, 0x11223344, 0, 0, tcpPshAck)

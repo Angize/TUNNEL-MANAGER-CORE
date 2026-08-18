@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// liveRemote returns the address the client's live carrier is actually connected to ("" if none).
 func liveRemote(b *TCP) string {
 	if c := b.curConn.Load(); c != nil {
 		return (*c).RemoteAddr().String()
@@ -17,17 +16,11 @@ func liveRemote(b *TCP) string {
 	return ""
 }
 
-// TestPinIsNotConsumedByAPreBuiltRotationCarrier drives the real dialLoop of a direct-TCP client with a
-// destination pool, reproducing the sequence an operator hits: the rotation timer has already built and
-// parked the NEXT carrier when the pin arrives. buildWarm resolved its target BEFORE the pin existed and
-// the adoption path reuses that connection verbatim, so the pin must not be released against it.
 func TestPinIsNotConsumedByAPreBuiltRotationCarrier(t *testing.T) {
 	const psk = "pin-prebuilt-rotation-psk-abcdef"
 	const cipher = "aes-256-gcm"
 	ka := time.Second
 
-	// One core server bound to two loopback addresses on the same port, so the endpoint the client
-	// landed on is visible from the outside as the carrier's remote address.
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -59,14 +52,10 @@ func TestPinIsNotConsumedByAPreBuiltRotationCarrier(t *testing.T) {
 		return liveRemote(cli) == a1
 	})
 
-	// The rotation timer parks the NEXT carrier. It resolves pp.current() now — a1 — which is the whole
-	// point of make-before-break, and the whole reason a later pin can be ignored.
 	if !cli.buildWarm(func() {}, "", true, "") {
 		t.Fatal("buildWarm did not park a carrier — the test cannot reproduce the race")
 	}
 
-	// NOW the operator pins the other endpoint. These are exactly the two steps peerPinPollLoop takes:
-	// force the pool onto the pick, then drop the live carrier so dialLoop re-dials.
 	if !pool.selectEntry(a2) {
 		t.Fatalf("selectEntry(%s) refused the pin", a2)
 	}
@@ -78,7 +67,7 @@ func TestPinIsNotConsumedByAPreBuiltRotationCarrier(t *testing.T) {
 	waitFor(t, 6*time.Second, "the tunnel landed on the PINNED endpoint", func() bool {
 		return liveRemote(cli) == a2
 	})
-	// ...and only then is the pin released, because it actually landed.
+
 	waitFor(t, 4*time.Second, "the pin was released once it landed", func() bool {
 		return !pool.isPinned()
 	})

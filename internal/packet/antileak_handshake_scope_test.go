@@ -12,14 +12,6 @@ import (
 
 const hsScopePSK = "tVYafNLrHaId1AaEM80YebyPzXThOEr2adA27E6mbRc="
 
-// A server's anti-leak rule is scoped to ONE peer, and a server has no peer until a frame OPENS under a
-// session — which never happens during a handshake. So from bind until the client's first data frame
-// authenticates, the server's own kernel answers everything the client sends: an echo-reply on icmp
-// (our ciphertext, mirrored straight back), an ICMP port-unreachable on udp, a RST on tcp. That is the
-// whole connect, on every restart, and the handshake is exactly when the tunnel is most fragile.
-//
-// ParseInit is what makes the fix safe: the sender proved the PSK, and the code already trusts it that
-// far — it steers the reply PORT off the same authentication.
 func TestTheServerScopesItsAntiLeakRuleForTheHandshake(t *testing.T) {
 	for _, profile := range []string{"udp", "tcp", "icmp"} {
 		t.Run("raw/"+profile, func(t *testing.T) {
@@ -34,8 +26,7 @@ func TestTheServerScopesItsAntiLeakRuleForTheHandshake(t *testing.T) {
 			if got := rec.last(); got != "" {
 				t.Fatalf("a freshly bound server already scoped a rule to %q", got)
 			}
-			// The client's init, wrapped exactly as the carrier puts it on the wire, fed to the receive
-			// path — not to tryHandshake, which would say nothing about whether the path reaches it.
+
 			srv.handleRaw(clientInit(t, profile), &net.IPAddr{IP: testSrc})
 
 			waitFor(t, 5*time.Second, "the server scoped its anti-leak rule off the authenticated init", func() bool {
@@ -61,8 +52,6 @@ func TestTheServerScopesItsAntiLeakRuleForTheHandshake(t *testing.T) {
 		})
 	})
 
-	// The other half: the rule set is single-scoped, so once a peer IS known an init replayed from
-	// anywhere else must not drag it off the endpoint carrying the tunnel. learnPeer owns the scope there.
 	t.Run("an init from a stranger does not move a scope that is already on the peer", func(t *testing.T) {
 		const stranger = "198.51.100.9"
 		rec := &scopeRecorder{}
@@ -80,14 +69,13 @@ func TestTheServerScopesItsAntiLeakRuleForTheHandshake(t *testing.T) {
 		}
 
 		srv.handleRaw(clientInit(t, "udp"), &net.IPAddr{IP: net.ParseIP(stranger).To4()})
-		time.Sleep(200 * time.Millisecond) // an async re-scope would have landed well inside this
+		time.Sleep(200 * time.Millisecond)
 		if got := rec.last(); got != testSrc.String() {
 			t.Errorf("an init from %s dragged the anti-leak rules onto it; they are now OFF %s, the endpoint carrying the tunnel", stranger, testSrc)
 		}
 	})
 }
 
-// clientInit builds the bytes a client puts on the wire for a fresh handshake init of this profile.
 func clientInit(t *testing.T, profile string) []byte {
 	t.Helper()
 	cli := &Raw{profile: profile, isClient: true, psk: hsScopePSK,

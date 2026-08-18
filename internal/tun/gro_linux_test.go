@@ -10,13 +10,11 @@ import (
 	"testing"
 )
 
-// seg builds one IPv4/TCP data segment of a single connection. Everything a follower must match is
-// fixed; what a test varies it changes on the returned packet.
 func seg(seq uint32, flags byte, payload int) []byte {
 	pkt := make([]byte, 20+20+payload)
 	pkt[0] = 0x45
 	binary.BigEndian.PutUint16(pkt[2:4], uint16(len(pkt)))
-	binary.BigEndian.PutUint16(pkt[4:6], 0x1111) // id: the kernel rewrites it per segment
+	binary.BigEndian.PutUint16(pkt[4:6], 0x1111)
 	pkt[8] = 64
 	pkt[9] = 6
 	copy(pkt[12:16], []byte{10, 0, 0, 1})
@@ -24,10 +22,10 @@ func seg(seq uint32, flags byte, payload int) []byte {
 	binary.BigEndian.PutUint16(pkt[20:22], 1234)
 	binary.BigEndian.PutUint16(pkt[22:24], 443)
 	binary.BigEndian.PutUint32(pkt[24:28], seq)
-	binary.BigEndian.PutUint32(pkt[28:32], 0x5555) // acknowledgement
+	binary.BigEndian.PutUint32(pkt[28:32], 0x5555)
 	pkt[32] = 5 << 4
 	pkt[33] = flags
-	binary.BigEndian.PutUint16(pkt[34:36], 0x2000) // window
+	binary.BigEndian.PutUint16(pkt[34:36], 0x2000)
 	for i := 40; i < len(pkt); i++ {
 		pkt[i] = byte(seq) ^ byte(i)
 	}
@@ -36,12 +34,11 @@ func seg(seq uint32, flags byte, payload int) []byte {
 	return pkt
 }
 
-// seg6 is seg over IPv6.
 func seg6(seq uint32, flags byte, payload int) []byte {
 	pkt := make([]byte, 40+20+payload)
 	pkt[0] = 0x60
 	binary.BigEndian.PutUint16(pkt[4:6], uint16(20+payload))
-	pkt[6] = 6 // next header: TCP
+	pkt[6] = 6
 	pkt[7] = 64
 	pkt[8], pkt[24] = 0xfd, 0xfd
 	pkt[23], pkt[39] = 1, 2
@@ -59,8 +56,6 @@ func seg6(seq uint32, flags byte, payload int) []byte {
 	return pkt
 }
 
-// notTCP builds an IPv4 packet of some other protocol. Only TCP has the sequence numbers that say two
-// packets are consecutive slices of one stream, so nothing else may ever be joined.
 func notTCP(proto byte, payload int) []byte {
 	pkt := seg(1, tcpACK, payload)
 	pkt[9] = proto
@@ -69,17 +64,13 @@ func notTCP(proto byte, payload int) []byte {
 	return pkt
 }
 
-// fragment marks a packet as one piece of a larger one. Its bytes are not a whole TCP segment however
-// they parse, so joining it would build a super-packet out of something that is not a segment at all.
 func fragment(pkt []byte) []byte {
-	pkt[6] |= 0x20 // more fragments
+	pkt[6] |= 0x20
 	binary.BigEndian.PutUint16(pkt[10:12], 0)
 	binary.BigEndian.PutUint16(pkt[10:12], ipChecksum(pkt[:20]))
 	return pkt
 }
 
-// groDev is a GSO device with a REAL fd, as production has, plus the peer that stands in for the
-// kernel. SOCK_DGRAM keeps message boundaries, so one datagram read is one write issued.
 func groDev(t *testing.T) (*Device, *os.File) {
 	t.Helper()
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
@@ -105,14 +96,12 @@ func readOne(t *testing.T, peer *os.File) []byte {
 	return buf[:n]
 }
 
-// writes counts how many writes a batch turned into, by writing a packet that can never join anything
-// and counting the datagrams that arrive before it.
 func writes(t *testing.T, dev *Device, peer *os.File, pkts [][]byte) [][]byte {
 	t.Helper()
 	if err := dev.WriteBatch(pkts); err != nil {
 		t.Fatalf("WriteBatch: %v", err)
 	}
-	sentinel := seg(0xdead0000, tcpACK|tcpFIN, 8) // FIN: never joinable, so it always stands alone
+	sentinel := seg(0xdead0000, tcpACK|tcpFIN, 8)
 	if _, err := dev.Write(sentinel); err != nil {
 		t.Fatalf("sentinel write: %v", err)
 	}
@@ -129,8 +118,6 @@ func writes(t *testing.T, dev *Device, peer *os.File, pkts [][]byte) [][]byte {
 	}
 }
 
-// The whole point: a run of one connection's segments must reach the kernel as ONE write, and cutting
-// that write back up must give back exactly the packets that went in.
 func TestGROJoinsARunAndSplittingItGivesTheRunBack(t *testing.T) {
 	dev, peer := groDev(t)
 	in := [][]byte{seg(1000, tcpACK, 100), seg(1100, tcpACK, 100), seg(1200, tcpACK|tcpPSH, 60)}
@@ -165,8 +152,7 @@ func TestGROJoinsARunAndSplittingItGivesTheRunBack(t *testing.T) {
 		t.Fatalf("splitting gave %d segments (split=%v), want %d", len(segs), split, len(want))
 	}
 	for i := range want {
-		// The kernel owns the id and re-derives every checksum, and it clears the push on all but the
-		// last, which is exactly what segment() reproduces. Compare what the CONNECTION sees.
+
 		if !bytes.Equal(segs[i][40:], want[i][40:]) {
 			t.Fatalf("segment %d carries different payload than the packet that went in", i)
 		}
@@ -179,9 +165,6 @@ func TestGROJoinsARunAndSplittingItGivesTheRunBack(t *testing.T) {
 	}
 }
 
-// NEEDS_CSUM promises the checksum field holds the pseudo-header sum and the kernel adds the rest.
-// If that partial were wrong, every segment would leave with a broken checksum and the connection would
-// stall while the tunnel looked healthy — so the completion the kernel performs is done here in full.
 func TestGROLeavesAPartialTheKernelCanComplete(t *testing.T) {
 	dev, peer := groDev(t)
 	got := writes(t, dev, peer, [][]byte{seg(1, tcpACK, 200), seg(201, tcpACK, 200)})
@@ -190,8 +173,6 @@ func TestGROLeavesAPartialTheKernelCanComplete(t *testing.T) {
 	}
 	super := got[0][vnetHdrLen:]
 
-	// What the kernel does with CHECKSUM_PARTIAL: sum from csum_start to the end, the partial in the
-	// field included, then fold and complement.
 	completed := ^fold(sumBytes(super[20:], 0))
 
 	zeroed := append([]byte(nil), super...)
@@ -201,9 +182,6 @@ func TestGROLeavesAPartialTheKernelCanComplete(t *testing.T) {
 	}
 }
 
-// Everything that means "this is not simply the next slice of the same stream" must end the run. Each
-// case here would corrupt a connection if it were joined: a replaced header, a hole in the stream, or a
-// control flag delivered on the wrong segment.
 func TestGRORefusesToJoinWhatItMustNot(t *testing.T) {
 	bump := func(f func([]byte)) [][]byte {
 		a, b := seg(1, tcpACK, 100), seg(101, tcpACK, 100)
@@ -245,8 +223,6 @@ func TestGRORefusesToJoinWhatItMustNot(t *testing.T) {
 	}
 }
 
-// A short segment is the end of what the sender had, so it may only ever be last. Joining a run PAST
-// one would make the kernel cut the rest at the wrong boundaries.
 func TestGROEndsTheRunAtAShortSegment(t *testing.T) {
 	dev, peer := groDev(t)
 	got := writes(t, dev, peer, [][]byte{
@@ -282,8 +258,6 @@ func TestGROJoinsIPv6TheSameWay(t *testing.T) {
 	}
 }
 
-// A run may not grow past what one write can carry. Whatever the bound stops must still go out, or the
-// connection loses data the moment a burst is large enough.
 func TestGROSplitsARunTooBigForOneWrite(t *testing.T) {
 	dev, peer := groDev(t)
 	var in [][]byte
@@ -308,8 +282,6 @@ func TestGROSplitsARunTooBigForOneWrite(t *testing.T) {
 	}
 }
 
-// A device opened without the virtio header has nothing to join into, so every packet must go exactly
-// as it did before.
 func TestGROIsInertWithoutTheVirtioHeader(t *testing.T) {
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
 	if err != nil {
@@ -335,9 +307,6 @@ func TestGROIsInertWithoutTheVirtioHeader(t *testing.T) {
 	}
 }
 
-// A device with no raw fd joins the pieces itself, the way its single-packet write already does. Left
-// untested this path is only reachable from a future test, and the first one to hit it would find it
-// broken rather than find it working.
 func TestGROJoinsWithoutARawFD(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -369,9 +338,6 @@ func TestGROJoinsWithoutARawFD(t *testing.T) {
 	}
 }
 
-// The line an operator reads to answer "is this working?" has to describe what LEFT, not only what was
-// joined. Counting the joined half alone reports a flattering ratio on a tunnel where most packets go
-// out one at a time — which is exactly the tunnel where the operator needs to know.
 func TestTheWriteCountersDescribeEverythingThatLeft(t *testing.T) {
 	dev, peer := groDev(t)
 	go func() {
@@ -382,7 +348,7 @@ func TestTheWriteCountersDescribeEverythingThatLeft(t *testing.T) {
 			}
 		}
 	}()
-	// two that join into one write, then three that cannot join anything
+
 	if err := dev.WriteBatch([][]byte{seg(1, tcpACK, 100), seg(101, tcpACK, 100)}); err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +363,6 @@ func TestTheWriteCountersDescribeEverythingThatLeft(t *testing.T) {
 	}
 }
 
-// Joining must not reintroduce the per-packet allocation the two-iovec write removed.
 func TestGROJoinsWithoutAllocating(t *testing.T) {
 	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
@@ -408,7 +373,7 @@ func TestGROJoinsWithoutAllocating(t *testing.T) {
 	in := [][]byte{seg(1, tcpACK, 1000), seg(1001, tcpACK, 1000), seg(2001, tcpACK, 1000)}
 
 	if n := testing.AllocsPerRun(200, func() {
-		// The leader carries the run's length, so restore it: production hands over a fresh buffer.
+
 		binary.BigEndian.PutUint16(in[0][2:4], uint16(len(in[0])))
 		if err := dev.WriteBatch(in); err != nil {
 			t.Fatalf("WriteBatch: %v", err)

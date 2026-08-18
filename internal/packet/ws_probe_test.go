@@ -7,17 +7,13 @@ import (
 	"time"
 )
 
-// wsRawReq is one hand-built HTTP request, so a test can send exactly what a prober would rather than
-// whatever a client library happens to produce. Empty fields are omitted from the request entirely,
-// which is how a probe differs from our client in the first place.
 type wsRawReq struct {
 	path, upgrade, connection, version, key string
 }
 
-// ours is the request wsClientHandshake really sends (same header values), against path p.
 func ours(p string) wsRawReq {
 	return wsRawReq{path: p, upgrade: "websocket", connection: "Upgrade", version: "13",
-		key: "dGhlIHNhbXBsZSBub25jZQ=="} // RFC 6455 §1.3's own example key: 16 bytes, base64
+		key: "dGhlIHNhbXBsZSBub25jZQ=="}
 }
 
 func (r wsRawReq) String() string {
@@ -33,8 +29,6 @@ func (r wsRawReq) String() string {
 	return strings.Join(lines, "\r\n") + "\r\n\r\n"
 }
 
-// wsProbe sends one raw request to a wsServerHandshake bound to wantPath and returns the raw bytes the
-// server wrote back, plus the handshake's own error.
 func wsProbe(t *testing.T, wantPath string, req wsRawReq) (raw string, hsErr error) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -51,7 +45,7 @@ func wsProbe(t *testing.T, wantPath string, req wsRawReq) (raw string, hsErr err
 		}
 		_, herr := wsServerHandshake(c, wantPath, time.Now().Add(2*time.Second))
 		errCh <- herr
-		time.Sleep(100 * time.Millisecond) // let the client drain before the conn goes away
+		time.Sleep(100 * time.Millisecond)
 		c.Close()
 	}()
 	c, err := net.Dial("tcp", ln.Addr().String())
@@ -75,10 +69,6 @@ func wsProbe(t *testing.T, wantPath string, req wsRawReq) (raw string, hsErr err
 	return sb.String(), <-errCh
 }
 
-// TestWSServerAnswers101OnlyForAWellFormedUpgradeOnItsOwnPath is the probe-resistance guard for the ws
-// origin. Answering 101 to ANY request carrying `Upgrade: websocket` — without reading the path, checking
-// the version, or requiring a Sec-WebSocket-Key — identifies the origin as a tunnel in one curl. The
-// cases are what a prober would actually send, and the assertion is on the RAW bytes the server wrote.
 func TestWSServerAnswers101OnlyForAWellFormedUpgradeOnItsOwnPath(t *testing.T) {
 	const secret = "/media/stream"
 
@@ -106,8 +96,7 @@ func TestWSServerAnswers101OnlyForAWellFormedUpgradeOnItsOwnPath(t *testing.T) {
 		name string
 		req  wsRawReq
 	}{
-		// Deliberately on the RIGHT path, so this fails on the header checks alone: even a prober who
-		// already knows ws_path cannot get an upgrade out of a bare Upgrade header.
+
 		{"the one-line fingerprint: an Upgrade header and nothing else",
 			wsRawReq{path: secret, upgrade: "websocket"}},
 		{"right shape, wrong path", ours("/")},
@@ -136,9 +125,7 @@ func TestWSServerAnswers101OnlyForAWellFormedUpgradeOnItsOwnPath(t *testing.T) {
 		if !strings.HasPrefix(raw, "HTTP/1.1 404 ") {
 			t.Fatalf("%s: want a plain 404, got %q", c.name, raw)
 		}
-		// Every rejection must be byte-identical. A per-reason response would replace the old
-		// fingerprint with a finer one: a prober could tell "wrong path on a tunnel" from "no such
-		// page on a web server", which is exactly what has to stay indistinguishable.
+
 		if seen == "" {
 			seen = raw
 		} else if raw != seen {

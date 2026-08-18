@@ -7,10 +7,6 @@ import (
 	"time"
 )
 
-// nonFlusherWriter is an http.ResponseWriter that deliberately does NOT implement http.Flusher, the one
-// thing the GET handler bails out on after its argument checks. net/http's own writer always implements
-// Flusher, so this is the only way to drive that branch — and driving it is the point: it was the single
-// statement that could return between creating the session and serving it.
 type nonFlusherWriter struct {
 	hdr    http.Header
 	status int
@@ -25,10 +21,6 @@ func (n *nonFlusherWriter) Header() http.Header {
 func (n *nonFlusherWriter) Write(p []byte) (int, error) { return len(p), nil }
 func (n *nonFlusherWriter) WriteHeader(code int)        { n.status = code }
 
-// TestHTTPCGetNeverLeavesAnUnservedSession replaces the reap watchdog with the property that made the
-// watchdog dead: no request may leave a session created and never served. The one real gap was the
-// Flusher assertion sitting BETWEEN the create and the serve; it runs first now, so the branch is not
-// merely unreachable but unproducible. Both halves are needed, or "no sessions, ever" would pass.
 func TestHTTPCGetNeverLeavesAnUnservedSession(t *testing.T) {
 	const sid = "00112233445566778899aabbccddeeff"
 
@@ -51,7 +43,7 @@ func TestHTTPCGetNeverLeavesAnUnservedSession(t *testing.T) {
 		b := &TCP{httpcSessions: map[string]*httpcSession{}}
 		rec := httptest.NewRecorder()
 		done := make(chan struct{})
-		// httptest's recorder DOES implement Flusher, so this takes the real path.
+
 		go func() {
 			defer close(done)
 			b.httpcHandler(rec, httptest.NewRequest(http.MethodGet, "/?s="+sid, nil))
@@ -62,10 +54,6 @@ func TestHTTPCGetNeverLeavesAnUnservedSession(t *testing.T) {
 			t.Fatal("the GET handler never returned")
 		}
 
-		// The session itself is NOT observable through the map here and that is correct: on a bare
-		// TCP the serve goroutine dies at once and its closeFn deletes the entry, so polling the map
-		// is a race by construction. What IS deterministic is that these are written only AFTER
-		// httpcGetOrCreate returns — the response head is the create's own downstream evidence.
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200: the ordinary path did not reach the serve, so the "+
 				"assertion above could be passing for the wrong reason", rec.Code)

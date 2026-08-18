@@ -7,8 +7,6 @@ import (
 	"testing"
 )
 
-// judgedPool builds a destination pool and the controller that hears verdicts about it, wired the way
-// the product wires them: the verdict mailbox belongs to the TUNNEL, the cmd file to the pool.
 func judgedPool(t *testing.T, addrs ...string) (*PeerPool, *rotationController) {
 	t.Helper()
 	dir := t.TempDir()
@@ -18,12 +16,9 @@ func judgedPool(t *testing.T, addrs ...string) (*PeerPool, *rotationController) 
 	return p, rc
 }
 
-// nodeCmd writes one verdict file exactly as the node does, then runs the poll that reads it. It goes
-// through pollPins on purpose: a test that called the pool's own methods would pass while the wire
-// between the two — the file, the parse, the dispatch — stayed broken.
 func nodeCmd(t *testing.T, rc *rotationController, c poolCmd) (rotated []string) {
 	t.Helper()
-	c.Epoch = testPathEpoch // these commands are all CURRENT; the staleness guard has its own test
+	c.Epoch = testPathEpoch
 	data, err := json.Marshal(c)
 	if err != nil {
 		t.Fatal(err)
@@ -45,11 +40,8 @@ func nodeCmd(t *testing.T, rc *rotationController, c poolCmd) (rotated []string)
 	return rotated
 }
 
-// testPathEpoch is the path every command in these tests is stamped with, and the epoch pollPins is
-// told the carrier is on — so each one reads as a verdict about the LIVE path.
 const testPathEpoch = 7
 
-// atPathEpoch is that epoch as pollPins takes it.
 func atPathEpoch() int64 { return testPathEpoch }
 
 func burnedIn(p *PeerPool) map[string]bool {
@@ -64,8 +56,6 @@ func burnedIn(p *PeerPool) map[string]bool {
 	return out
 }
 
-// TestAFreshFailStillBurnsAndAdvances pins the ordinary path down end to end: a fail on the live path
-// burns the endpoint it names and moves the tunnel off it, exactly once.
 func TestAFreshFailStillBurnsAndAdvances(t *testing.T) {
 	p, rc := judgedPool(t, "a", "b")
 
@@ -83,12 +73,10 @@ func TestAFreshFailStillBurnsAndAdvances(t *testing.T) {
 	}
 }
 
-// TestAKeyedOKStillClearsOnlyWhatItNames is the mirror half, driven through the same file path: the
-// two verdicts have to agree about what a key means or one of them is condemning blind.
 func TestAKeyedOKStillClearsOnlyWhatItNames(t *testing.T) {
 	p, rc := judgedPool(t, "a", "b")
 
-	nodeCmd(t, rc, poolCmd{Cmd: cmdFail, Key: "a"}) // burns a, pool advances to b
+	nodeCmd(t, rc, poolCmd{Cmd: cmdFail, Key: "a"})
 	if !burnedIn(p)["a"] {
 		t.Fatal("setup: a was not burned")
 	}

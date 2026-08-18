@@ -9,15 +9,8 @@ import (
 	"time"
 )
 
-// unbindableSrc is in TEST-NET-3 (RFC 5737, reserved for documentation), so it is never configured
-// on a host — the same state a source-pool IP reaches when a secondary address is not re-added after
-// a provider event.
 const unbindableSrc = "203.0.113.9"
 
-// TestUnusableSourceIsBurnedNotSilentlyIgnored drives the real dialer — the function every dial goes
-// through to install LocalAddr — over a source pool whose current entry cannot be bound. Skipping the
-// bind is deliberate, since dialLoop charges a failed dial to the DESTINATION. What must not be skipped
-// is the rest: an entry left HEALTHY and ACTIVE brings every rotation straight back to it, silently.
 func TestUnusableSourceIsBurnedNotSilentlyIgnored(t *testing.T) {
 	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, 0, "")
 	b := &TCP{sp: sp}
@@ -39,7 +32,6 @@ func TestUnusableSourceIsBurnedNotSilentlyIgnored(t *testing.T) {
 		t.Fatalf("the pool stayed on the unusable source (%s) instead of walking to one that binds", got)
 	}
 
-	// The next dial must actually bind the working source — the point of burning the other one.
 	d = b.dialer(time.Second)
 	la, ok := d.LocalAddr.(*net.TCPAddr)
 	if !ok || la.IP.String() != "127.0.0.1" {
@@ -50,9 +42,6 @@ func TestUnusableSourceIsBurnedNotSilentlyIgnored(t *testing.T) {
 	}
 }
 
-// TestUnusableSourceWarnsPerEntry: the warning is per source, not per process. With one sync.Once a
-// pool that walked onto a second dead IP was completely silent, so the operator could not tell one
-// bad entry from several.
 func TestUnusableSourceWarnsPerEntry(t *testing.T) {
 	b := &TCP{}
 	b.dropUnusableSource("a", "a", false)
@@ -65,10 +54,6 @@ func TestUnusableSourceWarnsPerEntry(t *testing.T) {
 	}
 }
 
-// TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed is the end-to-end half: a real direct-tcp client
-// against a real server, with an operator jump aimed at a source IP that cannot be bound. A jump ends one
-// of two ways — the carrier lands on it, or it is proven impossible — and this is the second. The
-// observable difference is the burn: an abandoned jump takes the IP out of rotation, a landed one does not.
 func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 	const psk = "srcpin-unbindable-psk-0123456789"
 	const cipher = "aes-256-gcm"
@@ -106,7 +91,7 @@ func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 	if got := cli.lastSourceUsed(); got != "" {
 		t.Fatalf("the connection reports source %q, but %s cannot be bound — nothing was bound at all", got, unbindableSrc)
 	}
-	// Abandoned, not consumed-as-landed: the jump is over AND the IP is out of rotation.
+
 	waitFor(t, 5*time.Second, "the impossible jump was abandoned", func() bool { return !sp.isPinned() })
 	if sp.health.recs[unbindableSrc] == nil {
 		t.Fatalf("%s was reported as a landed jump instead of an abandoned one: it stays active in the pool and the next rotation walks straight back onto it", unbindableSrc)
@@ -116,12 +101,9 @@ func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 	}
 }
 
-// TestAbandoningAJumpNeverCancelsADifferentOne: the operator can re-aim between the moment the dialer
-// reads the source and the moment it discovers the bind is impossible. Cancelling must therefore be
-// keyed — an unkeyed release would silently throw away the jump they just made.
 func TestAbandoningAJumpNeverCancelsADifferentOne(t *testing.T) {
 	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, 0, "")
-	if !sp.selectEntry("127.0.0.1") { // the operator has since aimed at a DIFFERENT entry
+	if !sp.selectEntry("127.0.0.1") {
 		t.Fatal("selectEntry refused the jump")
 	}
 	if sp.pinCannotLand(unbindableSrc) {

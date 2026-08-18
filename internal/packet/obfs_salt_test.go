@@ -7,9 +7,6 @@ import (
 	"time"
 )
 
-// writeRecorder records the SIZE of every conn.Write. Size is the observable that matters: on
-// tcp+cover each Write becomes one TLS record and on ws one WebSocket frame, so a Write of a fixed
-// length is a fixed-length record on the wire no matter what the bytes inside look like.
 type writeRecorder struct {
 	net.Conn
 	mu    sync.Mutex
@@ -29,10 +26,6 @@ func (w *writeRecorder) snapshot() []int {
 	return append([]int(nil), w.sizes...)
 }
 
-// TestObfsSaltNeverGetsAWriteOfItsOwn pins that obfs mode emits no fixed-size record. A write of its own
-// for the 24-byte per-connection salt is one TLS record on tcp+cover and one WebSocket frame on ws — the
-// same length on every connection, in BOTH directions, right after the handshake, walking straight past
-// the padding obfsSeal applies to every real frame. Both production paths use a recording conn.
 func TestObfsSaltNeverGetsAWriteOfItsOwn(t *testing.T) {
 	const psk = "obfs-salt-ride-pre-shared-key-123"
 	const cipher = "aes-256-gcm"
@@ -41,13 +34,12 @@ func TestObfsSaltNeverGetsAWriteOfItsOwn(t *testing.T) {
 
 	srvDev, _ := tunPair(t, "saltsrv")
 	addr := freeTCPPort(t)
-	srv, err := ListenTCP([]string{addr}, srvDev, ka, true /* obfs */, true, psk, cipher, false, "")
+	srv, err := ListenTCP([]string{addr}, srvDev, ka, true, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("ListenTCP: %v", err)
 	}
 	t.Cleanup(func() { srv.Close() })
 
-	// Our own accept loop, so each server-side conn is wrapped before the production handler sees it.
 	srvRecs := make(chan *writeRecorder, rounds)
 	go func() {
 		for {
@@ -69,7 +61,7 @@ func TestObfsSaltNeverGetsAWriteOfItsOwn(t *testing.T) {
 			t.Fatalf("round %d: dial: %v", i, derr)
 		}
 		cliRec := &writeRecorder{Conn: raw}
-		cli, cerr := DialTCP(addr, cliDev, ka, true /* obfs */, true, psk, cipher, false, "")
+		cli, cerr := DialTCP(addr, cliDev, ka, true, true, psk, cipher, false, "")
 		if cerr != nil {
 			t.Fatalf("round %d: DialTCP: %v", i, cerr)
 		}
@@ -77,7 +69,7 @@ func TestObfsSaltNeverGetsAWriteOfItsOwn(t *testing.T) {
 		if herr != nil {
 			t.Fatalf("round %d: handshakeAndPrime: %v", i, herr)
 		}
-		// Read the server's answer, so its salt+pong has really been written by the time we look.
+
 		_ = raw.SetReadDeadline(time.Now().Add(5 * time.Second))
 		if _, _, _, _, rerr := cf.readFrame(); rerr != nil {
 			t.Fatalf("round %d: reading the server's answer: %v", i, rerr)
@@ -120,8 +112,6 @@ func TestObfsSaltNeverGetsAWriteOfItsOwn(t *testing.T) {
 		raw.Close()
 	}
 
-	// And the size that carries the salt must actually move: a constant one would just be a longer
-	// fingerprint. obfsSeal's padding is random per frame, so 8 rounds practically never tie.
 	for _, side := range []struct {
 		name string
 		vals []int

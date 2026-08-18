@@ -10,13 +10,9 @@ import (
 	"time"
 )
 
-// rxBlackhole is a transparent TCP relay that can silently stop delivering the SERVER->CLIENT direction
-// while leaving both sockets open and the other direction untouched. That is what a receive-direction
-// blackhole looks like from the client: no FIN, no RST, nothing the kernel can report — only the ABSENCE
-// of answers reveals it. Closing a socket would test a different, already-handled failure.
 type rxBlackhole struct {
 	ln   net.Listener
-	down atomic.Bool // true = drop everything coming back from the server
+	down atomic.Bool
 }
 
 func newRxBlackhole(t *testing.T, target string) *rxBlackhole {
@@ -49,7 +45,7 @@ func (bh *rxBlackhole) pipe(cli net.Conn, target string) {
 	}
 	defer cli.Close()
 	defer srv.Close()
-	go func() { // upstream always flows, so the peer keeps receiving and keeps answering
+	go func() {
 		io.Copy(srv, cli)
 		srv.Close()
 		cli.Close()
@@ -68,10 +64,6 @@ func (bh *rxBlackhole) pipe(cli net.Conn, target string) {
 	}
 }
 
-// TestReceiveBlackholeIsDetectedWhileOutboundDataFlows guards the worst kind of stuck tunnel: the RECEIVE
-// direction dies and the core does nothing — no reconnect, no failover, not one log line. A successful
-// outbound write must not hold both dead-detection paths open, and outbound data DOES keep flowing,
-// because the inner TCP retransmits into the blackhole. b.idle is 60s, so only ping-loss can pass this.
 func TestReceiveBlackholeIsDetectedWhileOutboundDataFlows(t *testing.T) {
 	const psk = "rx-blackhole-pre-shared-key-123456"
 	const cipher = "aes-256-gcm"
@@ -97,10 +89,8 @@ func TestReceiveBlackholeIsDetectedWhileOutboundDataFlows(t *testing.T) {
 	t.Cleanup(func() { cli.Close() })
 	waitFor(t, 5*time.Second, "the client tunnel came up", func() bool { return cli.cur.Load() != nil })
 
-	bh.down.Store(true) // the receive direction dies; both sockets stay open and writable
+	bh.down.Store(true)
 
-	// Keep real DATA moving OUTBOUND for the whole window, faster than one keepalive period — this is
-	// the traffic that used to convince the client everything was fine.
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(1)

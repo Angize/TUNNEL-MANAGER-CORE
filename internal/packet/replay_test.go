@@ -41,8 +41,7 @@ func TestReplayGuardTooOld(t *testing.T) {
 func TestReplayGuardSessionReset(t *testing.T) {
 	var g replayGuard
 	g.ok(7, 500)
-	// A new session id (peer restarted: fresh prefix, counter back to 1) resets
-	// the window so the reconnect is accepted even though seq went backwards.
+
 	if !g.ok(8, 1) {
 		t.Fatal("a new session must adopt and accept, enabling reconnect")
 	}

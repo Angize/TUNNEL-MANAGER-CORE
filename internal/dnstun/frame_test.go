@@ -8,8 +8,7 @@ import (
 )
 
 func TestFrameRoundTripMany(t *testing.T) {
-	// A stream of variously-sized packets must read back byte-identical and in order — the framing
-	// the carrier relies on to recover discrete L3 packets from the reliable byte stream.
+
 	sizes := []int{0, 1, 20, 1400, 65535}
 	var buf bytes.Buffer
 	want := make([][]byte, len(sizes))
@@ -41,10 +40,10 @@ func TestWritePacketRejectsOversize(t *testing.T) {
 }
 
 func TestReadPacketTruncatedStream(t *testing.T) {
-	// A stream that ends mid-frame must surface an error (session died), not a partial packet.
+
 	var buf bytes.Buffer
 	_ = WritePacket(&buf, bytes.Repeat([]byte{0xAB}, 100))
-	truncated := buf.Bytes()[:50] // cut the frame in half
+	truncated := buf.Bytes()[:50]
 	if _, err := ReadPacket(bytes.NewReader(truncated)); err == nil {
 		t.Fatal("ReadPacket returned no error on a truncated frame")
 	}

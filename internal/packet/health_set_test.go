@@ -6,15 +6,10 @@ import (
 	"time"
 )
 
-// TestHealthSetReadsTheOwnersClock is the trap this type could most easily have introduced, and it is
-// invisible from every other test: both pools let a test replace their `now` field AFTER construction,
-// so a healthSet that captured a copy of the clock would age its entries against the real wall clock
-// while the pool aged against the fake one. Nothing would fail loudly — the ladder would simply stop
-// being exercised, and every backoff test would pass for the wrong reason.
 func TestHealthSetReadsTheOwnersClock(t *testing.T) {
 	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(t.TempDir(), "p.json"))
 	clk := int64(1000)
-	p.now = func() int64 { return clk } // exactly what the pool tests do
+	p.now = func() int64 { return clk }
 
 	p.mu.Lock()
 	p.health.burn("a")
@@ -41,10 +36,6 @@ func TestHealthSetReadsTheOwnersClock(t *testing.T) {
 	}
 }
 
-// TestHealthSetLadder walks the FSM the way a failing entry really does: suspect at the first step, one
-// step per failure, dead once the schedule runs out, and the slow interval from then on. Each wait must
-// be longer than the one before — the backwards-backoff bug was a record entering at one step while its
-// counter said another.
 func TestHealthSetLadder(t *testing.T) {
 	clk := int64(5000)
 	h := newHealthSet(&[]func() int64{func() int64 { return clk }}[0])
@@ -75,9 +66,6 @@ func TestHealthSetLadder(t *testing.T) {
 	}
 }
 
-// TestHealthSetEligibleVsHealthy pins the distinction the lap counter depends on: a burned entry whose
-// backoff has elapsed is NOT healthy but IS eligible. Collapsing the two is what makes a walk either
-// skip an endpoint that could have been tried, or declare a lap that never happened.
 func TestHealthSetEligibleVsHealthy(t *testing.T) {
 	clk := int64(5000)
 	h := newHealthSet(&[]func() int64{func() int64 { return clk }}[0])
@@ -105,8 +93,6 @@ func TestHealthSetEligibleVsHealthy(t *testing.T) {
 	}
 }
 
-// TestHealthSetBestRanksByTier: the last-resort pick is healthy < suspect < dead, with the soonest
-// retest breaking a tie. It is what stops a pool with everything burned from dead-ending.
 func TestHealthSetBestRanksByTier(t *testing.T) {
 	clk := int64(5000)
 	h := newHealthSet(&[]func() int64{func() int64 { return clk }}[0])
@@ -125,8 +111,6 @@ func TestHealthSetBestRanksByTier(t *testing.T) {
 	}
 }
 
-// TestHealthSetProbeAllNow: the operator's "probe now" and the node's end-of-matrix restore both pull
-// every waiting entry forward at once, so the rotation may reach them on its very next pick.
 func TestHealthSetProbeAllNow(t *testing.T) {
 	clk := time.Now().Unix()
 	h := newHealthSet(&[]func() int64{func() int64 { return clk }}[0])
@@ -146,14 +130,6 @@ func TestHealthSetProbeAllNow(t *testing.T) {
 	}
 }
 
-// TestSidelineDoesNotWalkTheLadder is the difference between the two pools' burns, and it is worth its
-// own test because getting it wrong is silent: everything still compiles, every other test still passes,
-// and the only symptom is an edge racing to dead several verdicts early, or never moving off due at all.
-//
-// It is ONE rule, and the question it asks is what the failure actually MEASURED. A verdict arriving while
-// the entry is waiting out its backoff measured a combination the rotation was not even trying, so it
-// changes nothing. A verdict on a DUE entry is the result of the live retry the ladder just granted it,
-// so it costs a step.
 func TestABurnStepsOnlyTheEntryItMeasured(t *testing.T) {
 	clk := int64(5000)
 	h := newHealthSet(&[]func() int64{func() int64 { return clk }}[0])
@@ -173,7 +149,6 @@ func TestABurnStepsOnlyTheEntryItMeasured(t *testing.T) {
 			"— the scheduler owns its cadence while it waits", r.fails, r.state, r.nextRetest-first)
 	}
 
-	// ...and once the wait elapses the rotation hands it live traffic, so THAT failure is news.
 	clk = first
 	h.burn("a")
 	if h.rec("a").nextRetest == first || h.rec("a").fails == 0 {
@@ -182,8 +157,6 @@ func TestABurnStepsOnlyTheEntryItMeasured(t *testing.T) {
 	}
 }
 
-// TestMarkSuspectDoesNotStepAWaitingEntry drives the real caller, not the helper: repeated verdicts
-// against an edge that is waiting out its backoff must not race it to dead.
 func TestMarkSuspectDoesNotStepAWaitingEntry(t *testing.T) {
 	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
 	clk := int64(5000)

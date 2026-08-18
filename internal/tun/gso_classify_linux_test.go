@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// The other half of the gso fallback lives here: main's retry is only correct if
-// Open marks the gso-specific ioctls AND NOTHING ELSE. A kernel that supports gso
-// perfectly well (every box we have) can never reach those branches, so the two
-// ioctls are driven through the setIff/setOffload seams instead.
 func TestOnlyTheGSOSpecificIoctlsAreMarkedGSOUnsupported(t *testing.T) {
 	f, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
 	if err != nil {
@@ -26,16 +22,13 @@ func TestOnlyTheGSOSpecificIoctlsAreMarkedGSOUnsupported(t *testing.T) {
 		failIff  bool
 		failOffl bool
 		gso      bool
-		want     bool // must errors.Is(err, ErrGSOUnsupported)
+		want     bool
 	}{
 		{"TUNSETIFF carrying IFF_VNET_HDR", true, false, true, true},
 		{"TUNSETOFFLOAD", false, true, true, true},
-		// The same ioctl with no gso asked for: there is nothing to fall back to, so
-		// marking it would send main into a second open that must fail the same way.
+
 		{"TUNSETIFF without gso", true, false, false, false},
-		// Everything after the two ioctls — the `ip` calls — has to stay a hard error
-		// even when gso is on, or a bad address would silently drop gso instead of
-		// failing. Here both ioctls "succeed" and no device exists, so `ip` fails.
+
 		{"the ip commands after the ioctls", false, false, true, false},
 	}
 

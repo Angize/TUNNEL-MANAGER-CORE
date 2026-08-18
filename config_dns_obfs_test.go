@@ -2,10 +2,6 @@ package main
 
 import "testing"
 
-// TestObfsRejectedOnDNS guards a silent no-op: obfs validated, persisted and displayed as enabled on a
-// dns tunnel while doing nothing at all, because main.go's dns case calls ListenDNS/DialDNS — whose
-// signatures take no obfs flag — and nothing in internal/dnstun references it. Rejecting the
-// combination turns false assurance about anti-DPI framing into a build-time error.
 func TestObfsRejectedOnDNS(t *testing.T) {
 	dns := func() *Config {
 		return &Config{Role: "client", Mode: "packet", Profile: "core", Transport: "dns",
@@ -19,11 +15,11 @@ func TestObfsRejectedOnDNS(t *testing.T) {
 		t.Fatal("obfs on the dns transport must be rejected — it silently does nothing")
 	}
 
-	if err := dns().validate(); err != nil { // the same config without obfs stays valid
+	if err := dns().validate(); err != nil {
 		t.Fatalf("dns without obfs must remain valid: %v", err)
 	}
 
-	c = dns() // ...and obfs must still be accepted on a carrier that actually implements it
+	c = dns()
 	c.Transport, c.Peer = "udp", "1.2.3.4:9000"
 	c.Obfs = true
 	if err := c.validate(); err != nil {

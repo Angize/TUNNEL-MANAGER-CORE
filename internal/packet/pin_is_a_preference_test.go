@@ -5,17 +5,6 @@ import (
 	"testing"
 )
 
-// A pin means the same thing on every carrier: the operator's PREFERENCE, held against the probe until
-// the probe has said the same thing pinFailRelease times, then released so the tunnel recovers.
-//
-// The three carriers reach that rule by three different functions, and before this they disagreed:
-// udp/raw/flux counted (rotationController.fail), tcp ignored the verdict outright for the whole of
-// pinTTL, and the CDN pool broke the pin on the FIRST verdict. Same evidence, three outcomes.
-//
-// So each case drives its own real entry point and asserts the identical schedule. A carrier that ever
-// needs its own numbers here has drifted back out.
-
-// TestPinAbsorbsExactlyOneSecondOpinion_Direct is the reference the other two are held to.
 func TestPinAbsorbsExactlyOneSecondOpinion_Direct(t *testing.T) {
 	dir := t.TempDir()
 	dst := NewPeerPool([]string{"d1", "d2"}, 0, filepath.Join(dir, "d.json"))
@@ -45,8 +34,6 @@ func TestPinAbsorbsExactlyOneSecondOpinion_Direct(t *testing.T) {
 	}
 }
 
-// TestPinAbsorbsExactlyOneSecondOpinion_TCP: the direct tcp carrier reaches the odometer through
-// burnAdvance, not through rotationController, and used to freeze outright instead of counting.
 func TestPinAbsorbsExactlyOneSecondOpinion_TCP(t *testing.T) {
 	dir := t.TempDir()
 	b := &TCP{
@@ -75,8 +62,6 @@ func TestPinAbsorbsExactlyOneSecondOpinion_TCP(t *testing.T) {
 	}
 }
 
-// TestPinAbsorbsExactlyOneSecondOpinion_CDN: the edge pool used to drop the pin as it burned, so ONE
-// measurement overrode the operator — the opposite failure from tcp's, and just as inconsistent.
 func TestPinAbsorbsExactlyOneSecondOpinion_CDN(t *testing.T) {
 	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
 	b := &TCP{pool: p}
@@ -108,16 +93,13 @@ func TestPinAbsorbsExactlyOneSecondOpinion_CDN(t *testing.T) {
 	}
 }
 
-// TestPinCountResetsBetweenPins: the tally is per PIN, not per lifetime. A round that arrives while
-// nothing is pinned clears it, so the operator's NEXT pin gets its own full allowance. Without that, a
-// pin placed after an earlier one had already absorbed a verdict would break on its very first.
 func TestPinCountResetsBetweenPins(t *testing.T) {
 	dir := t.TempDir()
 	b := &TCP{
 		pp: NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")),
 		sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
 	}
-	// A first pin absorbs one verdict, then the operator drops it.
+
 	if !b.pp.selectEntry("d2") {
 		t.Fatal("could not pin")
 	}
@@ -126,10 +108,8 @@ func TestPinCountResetsBetweenPins(t *testing.T) {
 	}
 	b.pp.releasePin()
 
-	// An UNPINNED round: this is what clears the tally.
 	b.burnAdvance(true)
 
-	// A fresh pin must get the full allowance again.
 	if !b.pp.selectEntry("d3") {
 		t.Fatal("could not re-pin")
 	}
@@ -141,10 +121,6 @@ func TestPinCountResetsBetweenPins(t *testing.T) {
 	}
 }
 
-// TestAPinEndsOnEvidenceNeverOnAClock: there is no TTL. A pin ends exactly two ways — the carrier lands
-// on it, or the core's own attempts disprove it — and both are things that were MEASURED. A clock could
-// only ever guess, and it guessed badly in both directions: too short froze a jump that was still
-// connecting, too long stranded the tunnel on a dead pick.
 func TestAPinEndsOnEvidenceNeverOnAClock(t *testing.T) {
 	t.Run("it lands", func(t *testing.T) {
 		p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(t.TempDir(), "p.json"))
@@ -161,7 +137,7 @@ func TestAPinEndsOnEvidenceNeverOnAClock(t *testing.T) {
 		if !p.selectEntry("b") || !p.isPinned() {
 			t.Fatal("could not pin")
 		}
-		p.pinAttemptFailed("a") // a failure on a DIFFERENT endpoint proves nothing about this pin
+		p.pinAttemptFailed("a")
 		for i := 1; i < pinFailRelease; i++ {
 			p.pinAttemptFailed("b")
 			if !p.isPinned() {
@@ -180,19 +156,13 @@ func TestAPinEndsOnEvidenceNeverOnAClock(t *testing.T) {
 		if !p.selectEntry("b") {
 			t.Fatal("could not pin")
 		}
-		clk += 86400 // a whole day
+		clk += 86400
 		if !p.isPinned() {
 			t.Fatal("the clock released a pin that nothing had disproven")
 		}
 	})
 }
 
-// TestAHealthySessionEndsTheRound is the other half of "consecutive": the counters a round feeds -- the
-// pin's allowance and the lap it is walking -- are per OUTAGE, and a carrier that came up healthy ends
-// it. udp/raw/flux get this from rotationController.success; tcp and the edge pool reach the same reset
-// through succeedBoth, which used to be wired on the direct branch ONLY. The edge pool's own counters
-// therefore ran for the life of the process: a round that burned two of three SNIs an hour ago would
-// make the NEXT outage convict the edge after one verdict.
 func TestAHealthySessionEndsTheRound(t *testing.T) {
 	t.Run("the direct pool's counters", func(t *testing.T) {
 		dir := t.TempDir()
@@ -203,8 +173,8 @@ func TestAHealthySessionEndsTheRound(t *testing.T) {
 		if !b.pp.selectEntry("d2") {
 			t.Fatal("could not pin")
 		}
-		b.burnAdvance(true) // absorbed; the allowance is now partly spent
-		b.odPeer.rot = 3    // ...and a lap is half walked
+		b.burnAdvance(true)
+		b.odPeer.rot = 3
 		b.endRound()
 		if got := b.pinFails.Load(); got != 0 {
 			t.Fatalf("the pin's allowance survived a healthy session (pinFails=%d)", got)

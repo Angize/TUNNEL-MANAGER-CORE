@@ -76,12 +76,11 @@ func TestEncodeNameRejectsBadNonce(t *testing.T) {
 }
 
 func TestNonceMakesEveryNameUnique(t *testing.T) {
-	// The whole point of the nonce: identical payloads (and the empty poll) must still yield DISTINCT
-	// query names every call, so a recursive resolver can never cache or coalesce them.
+
 	c, _ := NewCodec("t.example.com")
 	seen := make(map[string]bool)
 	for i := 0; i < 1000; i++ {
-		name, err := c.EncodeName(nil, newNonce()) // the idle poll: same (empty) payload every time
+		name, err := c.EncodeName(nil, newNonce())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -89,7 +88,7 @@ func TestNonceMakesEveryNameUnique(t *testing.T) {
 			t.Fatalf("duplicate poll name %q — resolver could cache/coalesce it", name)
 		}
 		seen[name] = true
-		// A nonce-only poll name must still decode to zero upstream bytes.
+
 		got, derr := c.DecodeName(name)
 		if derr != nil || len(got) != 0 {
 			t.Fatalf("poll name %q decoded to %x (err %v), want empty", name, got, derr)
@@ -98,8 +97,7 @@ func TestNonceMakesEveryNameUnique(t *testing.T) {
 }
 
 func TestDecodeName0x20CaseRandomization(t *testing.T) {
-	// A recursive resolver may randomize the case of the query name (0x20 encoding). Decoding must
-	// still recover the exact bytes, because we lowercase before base32-decoding.
+
 	c, _ := NewCodec("t.example.com")
 	data := make([]byte, 40)
 	if _, err := rand.Read(data); err != nil {
@@ -107,7 +105,6 @@ func TestDecodeName0x20CaseRandomization(t *testing.T) {
 	}
 	name, _ := c.EncodeName(data, newNonce())
 
-	// Flip case on alternating characters, as a 0x20-randomizing resolver would.
 	rc := []rune(name)
 	for i := range rc {
 		if i%2 == 0 {
@@ -131,9 +128,7 @@ func TestDecodeNameRejectsForeignZone(t *testing.T) {
 }
 
 func TestDecodeNameRejectsSharedSuffixLabel(t *testing.T) {
-	// "abt.example.com" shares the literal suffix "t.example.com" but "abt" is a single foreign
-	// label, not "ab" + the zone. A plain HasSuffix check would accept it and mis-parse "ab" as
-	// upstream data; the label-boundary check must reject it.
+
 	c, _ := NewCodec("t.example.com")
 	if _, err := c.DecodeName("abt.example.com."); err == nil {
 		t.Fatal("DecodeName accepted a name whose last label merely ends with the zone")
@@ -141,10 +136,7 @@ func TestDecodeNameRejectsSharedSuffixLabel(t *testing.T) {
 }
 
 func TestDecodeBareZoneIsRejected(t *testing.T) {
-	// A bare-zone query is NOT "a poll carrying zero upstream bytes": the server answered it by taking a
-	// datagram off the server->client queue, so anyone who read the PUBLIC zone off the delegation could
-	// drain the tunnel with `dig TXT <zone>` in a loop. Our client never sends a bare zone, because
-	// EncodeName always prepends a nonce label.
+
 	c, _ := NewCodec("t.example.com")
 	got, err := c.DecodeName("t.example.com.")
 	if !errors.Is(err, ErrBareZone) {

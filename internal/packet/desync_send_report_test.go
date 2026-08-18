@@ -13,16 +13,12 @@ import (
 	"testing"
 )
 
-// A decoy that never reaches the wire must SAY so. With every transmit error discarded, an L2 next hop
-// that will not resolve produced zero decoys and zero log lines, while startup had already printed that
-// the camouflage was on — so a blocked tunnel gave no way to tell it never ran. Drives the REAL path
-// (Raw.sendFakes) with a resolver that fails, not the reporter.
 func TestDecoyTransmitFailureIsReported(t *testing.T) {
 	f := &fakeResolver{err: errors.New("no next hop")}
 	r := &Raw{isClient: true, proto: protoBare, profile: "bare", fakeFd: -1}
 	r.link = &directLink{r: r}
 	r.localIP.Store(&net.IPAddr{IP: net.IPv4(192, 0, 2, 1)})
-	r.desync = newDesyncCfg(true, 4, 2, "badsum") // every decoy is badsum -> every one goes via the injector
+	r.desync = newDesyncCfg(true, 4, 2, "badsum")
 	r.inj = testInjector(f)
 	want := int64(len(r.desync.specs()))
 
@@ -44,8 +40,6 @@ func TestDecoyTransmitFailureIsReported(t *testing.T) {
 		t.Fatalf("a carrier whose every decoy failed logged nothing.\nlog was: %q", out.String())
 	}
 
-	// The repeat is paced, so a permanently-broken next hop cannot flood the journal — but the
-	// COUNT must keep moving, or a rate limit would recreate the silence it exists to bound.
 	before := strings.Count(out.String(), "fake-desync decoy NOT sent")
 	r.sendFakes(peer)
 	if got := r.dsSend.bad.Load(); got != 2*want {
@@ -56,10 +50,6 @@ func TestDecoyTransmitFailureIsReported(t *testing.T) {
 	}
 }
 
-// The class guard. Fixing the sites one by one does not stop the next from being written the same way —
-// a discarded send error is invisible in review, because `_ =` reads as deliberate. Every decoy transmit
-// in this package must hand its error to something. Bare-call statements count too: Go lets
-// `syscall.Sendto(fd, …)` stand alone as a statement and silently drop the error, with no `_ =` to see.
 func TestNoSendErrorIsDiscarded(t *testing.T) {
 	ents, err := os.ReadDir(".")
 	if err != nil {
@@ -70,7 +60,7 @@ func TestNoSendErrorIsDiscarded(t *testing.T) {
 	for _, e := range ents {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue // tests may ignore a send: they assert on the recorder, not on delivery
+			continue
 		}
 		file, err := parser.ParseFile(fset, name, nil, 0)
 		if err != nil {
@@ -79,9 +69,9 @@ func TestNoSendErrorIsDiscarded(t *testing.T) {
 		ast.Inspect(file, func(n ast.Node) bool {
 			var call *ast.CallExpr
 			switch s := n.(type) {
-			case *ast.ExprStmt: // a bare call statement: the error is dropped with nothing to see
+			case *ast.ExprStmt:
 				call, _ = s.X.(*ast.CallExpr)
-			case *ast.AssignStmt: // `_ = send(...)` / `_, _ = send(...)`
+			case *ast.AssignStmt:
 				if len(s.Rhs) != 1 || !allBlank(s.Lhs) {
 					return true
 				}

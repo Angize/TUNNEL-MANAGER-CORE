@@ -6,23 +6,15 @@ import (
 	"time"
 )
 
-// sendErrLog throttles a send-error line to at most one per interval, carrying the suppressed count. A
-// resolver we cannot write to fails at query rate, so logging every occurrence buries the journal, and
-// logging none made the fault invisible — the operator saw only a handshake timeout, which reads as
-// censorship when the cause is local. Deliberately duplicated from internal/packet's copy, not shared.
 type sendErrLog struct {
-	last atomic.Int64 // unix nanos of the last line emitted
-	n    atomic.Int64 // occurrences accumulated since then
+	last atomic.Int64
+	n    atomic.Int64
 }
 
 const sendErrEvery = 30 * time.Second
 
 func (s *sendErrLog) note(what string, err error) { s.noteAs(what, "send failed", err) }
 
-// noteAs is note with the caller's own description of the fault, for one that is not a send. A resolver
-// ANSWERING with SERVFAIL/REFUSED has the same shape — it recurs at query rate, and with nothing said
-// the only symptom is a tunnel that goes quiet, which reads as censorship — but "send failed" would
-// point the operator at the wrong end of the path.
 func (s *sendErrLog) noteAs(what, doing string, err error) {
 	if err == nil {
 		return
@@ -34,7 +26,7 @@ func (s *sendErrLog) noteAs(what, doing string, err error) {
 		return
 	}
 	if !s.last.CompareAndSwap(prev, now) {
-		return // another goroutine is emitting this round; its line covers ours
+		return
 	}
 	if n := s.n.Swap(0); n > 1 {
 		log.Printf("%s: %s: %v (+%d more in the last %s)", what, doing, err, n-1, sendErrEvery)

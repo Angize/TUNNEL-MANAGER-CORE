@@ -11,10 +11,6 @@ import (
 	"time"
 )
 
-// TestBuildWarmFailurePublishesNoRotation pins the contract make-before-break rests on: a warm carrier
-// that will not come up must BURN its endpoint and ANNOUNCE NOTHING. Announcing before the replacement
-// exists leaves the panel showing an endpoint the tunnel is not on and arms a down() the next connect
-// pairs as a phantom self-heal. The listener accepts and closes, so the HANDSHAKE fails, not the dial.
 func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -36,7 +32,7 @@ func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("split host/port: %v", err)
 	}
-	second := net.JoinHostPort("127.0.0.2", port) // loopback alias, same listener
+	second := net.JoinHostPort("127.0.0.2", port)
 
 	path := filepath.Join(t.TempDir(), "core-warm.status")
 	active := "tcp · " + addr
@@ -44,12 +40,9 @@ func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 		keepalive: time.Second, idle: deadWindow(time.Second), isClient: true, addr: addr,
 		stTag: "tcp", closeCh: make(chan struct{})}
 	b.st = newCoreStatus(path, active)
-	b.warmNext = make(chan *warmDial, 1) // dialLoop's job; this test drives buildWarm directly
+	b.warmNext = make(chan *warmDial, 1)
 	b.SetPeerPool(NewPeerPool([]string{addr, second}, 0, ""))
-	// Also wire a SOURCE pool and rotate it, for the source half: the proactive timer advances the source
-	// (via rotateSourceTCP(true)) BEFORE buildWarm proves the move. The source-rotate event must NOT be
-	// published until the warm carrier goes live — so a build that then fails announces nothing at all.
-	// (The source IPs need not be local: dialer() skips an unbindable bind and dials from the default.)
+
 	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0, ""))
 	if _, moved := b.rotateSourceTCP(true); !moved {
 		t.Fatal("proactive source rotate should move in a 2-entry pool")

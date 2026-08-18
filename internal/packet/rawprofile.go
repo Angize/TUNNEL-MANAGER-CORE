@@ -1,22 +1,3 @@
-// Raw-IP encapsulation profiles for the "raw" transport. Each profile wraps a sealed core frame in a
-// different IP-layer carrier so the tunnel mimics ordinary IPIP / GRE / ICMP / TCP / UDP traffic — or
-// "bare", our native minimal framing. Only the carrier header, and so the IP protocol number on the wire,
-// changes between them; the sealed frame is the innermost payload either way:
-//
-//	bare      proto 253   no L4 header             [IPv4][sealed]
-//	ipip     proto 4     no L4 header             [IPv4][sealed]
-//	etherip  proto 97    2-byte EtherIP header    [IPv4][EtherIP][sealed]     (version 3)
-//	ipcomp   proto 108   4-byte IPComp header     [IPv4][IPComp][sealed]      (next=IPIP, CPI=DEFLATE)
-//	gre      proto 47    4-byte GRE header        [IPv4][GRE][sealed]
-//	icmp     proto 1     8-byte ICMP echo         [IPv4][ICMP][sealed]        (req 8 / reply 0)
-//	udp      proto 17    8-byte UDP header        [IPv4][UDP][sealed]
-//	esp      proto 50    8-byte ESP header        [IPv4][ESP][sealed]         (per-session SPI + seq)
-//	l2tpv3   proto 115   8-byte L2TPv3 header     [IPv4][L2TPv3][sealed]      (session id + cookie)
-//	tcp      proto 6     20-byte TCP header       [IPv4][TCP][sealed]         (PSH|ACK, live-flow seq/ack)
-//	ah       proto 51    24-byte AH header        [IPv4][AH][sealed]          (SPI + seq + 12-byte ICV)
-//
-// The receiver ignores the carrier header's contents — the inner AEAD tag is the real integrity check —
-// so it only has to be well formed enough to look like the protocol it imitates and to be skipped.
 package packet
 
 import (
@@ -28,7 +9,6 @@ import (
 	"time"
 )
 
-// IP protocol numbers, one per profile.
 const (
 	protoICMP    = 1
 	protoIPIP    = 4
@@ -40,11 +20,9 @@ const (
 	protoEtherIP = 97
 	protoIPComp  = 108
 	protoL2TPv3  = 115
-	protoBare    = 253 // private/experimental range: our native no-L4-header profile
+	protoBare    = 253
 )
 
-// TCP option kinds the carrier writes and reads. Named here, in the portable file, because
-// tcpopts_linux.go's copies are behind a linux build tag and rawEncap is not.
 const (
 	tcpOptEOL     = 0
 	tcpOptNOPKind = 1
@@ -52,8 +30,6 @@ const (
 	tcpOptTSBytes = 10
 )
 
-// rawProfiles maps a profile name to its IP protocol number. It is also the
-// authoritative set of valid profile names.
 var rawProfiles = map[string]int{
 	"bare":    protoBare,
 	"ipip":    protoIPIP,
@@ -68,9 +44,6 @@ var rawProfiles = map[string]int{
 	"l2tpv3":  protoL2TPv3,
 }
 
-// rawHeaderLen is the carrier header each profile prepends, in bytes. ONE table: rawEncap sizes its
-// buffer from it, rawDecap skips by it, and the node's MTU arithmetic is checked against it across
-// repositories. A profile missing here would silently encapsulate with no header at all.
 var rawHeaderLens = map[string]int{
 	"bare":    0,
 	"ipip":    0,
@@ -81,49 +54,24 @@ var rawHeaderLens = map[string]int{
 	"udp":     8,
 	"esp":     8,
 	"l2tpv3":  8,
-	"tcp":     32, // 20 + NOP,NOP,Timestamp(10): every data segment of a timestamped flow carries it
+	"tcp":     32,
 	"ah":      24,
 }
 
-// rawHeaderLen is the carrier header size for a profile, 0 for an unknown one (which encapsulates bare,
-// the same as bare).
 func rawHeaderLen(profile string) int { return rawHeaderLens[profile] }
 
-// Default ports for the tcp/udp profiles: the client's 51820 (inside Linux's 32768-60999 ephemeral
-// range, so an ordinary source port) talking to the server's :443. The SERVER port is what a filter
-// keys on, so raw_port overrides it — the udp profile's 443 is QUIC's port, which some paths drop
-// wholesale, and a carrier is not worth much when its one plausible shape is the filtered one.
 const (
 	rawClientPort = 51820
 	rawServerPort = 443
-	// The client source port may instead ROTATE for the life of the tunnel, over Linux's own ephemeral
-	// range. A stateful middlebox keys a flow on the whole 4-tuple, so one constant source port means
-	// every packet of every raw tunnel from this host hits the same 4-tuple — measured burned on the
-	// Iran path. These bounds are not configurable: the ephemeral range is what an ordinary client's
-	// source port looks like, and any narrower or shifted range is MORE distinctive, not less.
+
 	rawSportLo = 32768
 	rawSportHi = 60999
-	// rawTCPWindow is the advertised window on the synthetic tcp profile. A fixed 0xffff
-	// paired with a zero ACK reads as a forged segment to a stateful DPI; a realistic,
-	// steady-state window plus a non-zero ACK (set in wire()) make it look like a live
-	// established flow instead. 64240 is a very common Linux advertised window.
-	rawTCPWindow = 0xFAF0 // 64240
+
+	rawTCPWindow = 0xFAF0
 )
 
-// rawSportEvery is the middle of the re-roll interval; each wait is jittered around it (jitterFrac),
-// because a port that changes on an exact clock is itself the period a DPI would lock onto. A var so a
-// test can drive the real refresh instead of imitating it.
 var rawSportEvery = 60 * time.Second
 
-// rawPorts returns the (source, destination) port pair THIS end stamps on a tcp/udp carrier packet. A
-// conversation reverses — client ephemeral->server, server->ephemeral — and two ends both sending
-// 51820->443 is not one: no middlebox pairs the halves up, so the downstream arrives as an unsolicited
-// NEW inbound flow a NAT drops, and two half-flows aimed at each other are a signature in themselves.
-//
-// srv is the configured server port; 0 keeps rawServerPort. Both ends must be told the same number, or
-// each stamps a pair the other's anti-leak rule does not match. cli is the CLIENT's port for this
-// conversation — its own current one on the client, the one it last authenticated as on the server —
-// and 0 keeps rawClientPort, which is the whole of the fixed mode.
 func rawPorts(isClient bool, srv, cli uint16) (sport, dport uint16) {
 	if srv == 0 {
 		srv = rawServerPort
@@ -137,13 +85,9 @@ func rawPorts(isClient bool, srv, cli uint16) (sport, dport uint16) {
 	return srv, cli
 }
 
-// rawRollSport draws the next client source port. Uniform over the ephemeral range via rejection
-// sampling — a plain modulo would bias the low ports, and a source-port histogram skewed to one end of
-// the range is exactly the kind of tell the rotation exists to remove. Returns 0 on a rand error, which
-// every caller reads as "keep the port you have".
 func rawRollSport() uint16 {
 	const span = rawSportHi - rawSportLo + 1
-	limit := 65536 - (65536 % span) // reject the short tail so the modulo below is uniform
+	limit := 65536 - (65536 % span)
 	for i := 0; i < 8; i++ {
 		var rb [2]byte
 		if _, err := io.ReadFull(rand.Reader, rb[:]); err != nil {
@@ -156,9 +100,6 @@ func rawRollSport() uint16 {
 	return 0
 }
 
-// RawProfileHasPorts reports whether a profile forges an L4 header with PORTS in it, and so has a
-// server port raw_port can override. Exported for config validation: a raw_port on any other profile
-// would validate, persist and read as set while the wire ignored it. "" is bare, which forges nothing.
 func RawProfileHasPorts(profile string) bool {
 	switch rawProfiles[profile] {
 	case protoUDP, protoTCP:
@@ -167,8 +108,6 @@ func RawProfileHasPorts(profile string) bool {
 	return false
 }
 
-// RawProfileNames lists the valid profile names, sorted, for config validation and its error messages.
-// Exported so config.go reads the same map the wire does instead of keeping a second copy of it.
 func RawProfileNames() []string {
 	out := make([]string, 0, len(rawProfiles))
 	for name := range rawProfiles {
@@ -178,18 +117,13 @@ func RawProfileNames() []string {
 	return out
 }
 
-// RawProfileValid reports whether name is a registered profile.
 func RawProfileValid(name string) bool {
 	_, ok := rawProfiles[name]
 	return ok
 }
 
-// RawProfileOwning returns the profile that owns an IP protocol number, if any. It is what stops bare's
-// raw_proto from borrowing a number whose header a middlebox will try to parse: bare sends no L4 header,
-// so an outer "protocol 6" with ciphertext where the TCP header belongs reads as a malformed segment on
-// every stateful box in the path — random ports, no SYN it ever saw, a checksum that cannot verify.
 func RawProfileOwning(proto int) (string, bool) {
-	for _, name := range RawProfileNames() { // sorted: one number, one owner, deterministically
+	for _, name := range RawProfileNames() {
 		if rawProfiles[name] == proto {
 			return name, true
 		}
@@ -197,10 +131,6 @@ func RawProfileOwning(proto int) (string, bool) {
 	return "", false
 }
 
-// rawChecksumBindsSource reports whether this profile's carrier header carries a checksum computed over
-// the OUTER SOURCE address, so rawEncap's bytes are only valid if the packet really leaves from that
-// source. udp and tcp do (the IPv4 pseudo-header is part of l4Checksum); icmp, bare, ipip, gre and esp do
-// not. It exists for one decision — sendViaConn's fallback when the pinned source cannot be used.
 func rawChecksumBindsSource(profile string) bool {
 	switch rawProfiles[profile] {
 	case protoUDP, protoTCP:
@@ -209,15 +139,11 @@ func rawChecksumBindsSource(profile string) bool {
 	return false
 }
 
-// rawProtoFor returns the IP protocol number for a profile name.
 func rawProtoFor(profile string) (int, bool) {
 	p, ok := rawProfiles[profile]
 	return p, ok
 }
 
-// rawEffProto returns the EFFECTIVE outer IP protocol number for a carrier. The bare "bare" profile may
-// override its native 253 with any 1..255 (raw_proto) to slip past a protocol-whitelist filter. Every
-// other profile keeps its fixed number, since that number is tied to its forged L4 header.
 func rawEffProto(profile string, rawProto int) (int, bool) {
 	base, ok := rawProfiles[profile]
 	if !ok {
@@ -229,14 +155,6 @@ func rawEffProto(profile string, rawProto int) (int, bool) {
 	return base, true
 }
 
-// rawEncap prepends profile's carrier header to a sealed frame and returns the bytes to hand the raw
-// socket (the kernel prepends the outer IPv4 header, so it is not included here). src/dst are the tunnel
-// endpoint IPs, needed for the TCP checksum; isClient selects the direction-dependent fields; id/seq make
-// the ICMP/TCP headers look like a live flow; spi is the per-session ESP SPI; port is the configured
-// tcp/udp server port (0 = the default 443).
-// tcpTSOption is the option block Linux stamps on a timestamped flow's data segments: two NOPs so the
-// 10-byte option lands 4-byte aligned, then TSval/TSecr. Kept here rather than inline so the raw carrier
-// and any future caller cannot disagree about the padding, which is what a DPI reads.
 func tcpTSOption(tsval, tsecr uint32) []byte {
 	o := []byte{tcpOptNOPKind, tcpOptNOPKind, tcpOptTSKind, tcpOptTSBytes, 0, 0, 0, 0, 0, 0, 0, 0}
 	binary.BigEndian.PutUint32(o[4:8], tsval)
@@ -244,9 +162,6 @@ func tcpTSOption(tsval, tsecr uint32) []byte {
 	return o
 }
 
-// peerTSVal reads the TSval out of a carrier TCP header's option block, 0 when the peer sent none. The
-// value is UNAUTHENTICATED (anyone can put bytes in a header), and it is used for one thing only: to echo
-// back as TSecr, so a forged one costs nothing but a wrong echo.
 func peerTSVal(tcp []byte) uint32 {
 	off := int(tcp[12]>>4) * 4
 	if off <= 20 || off > len(tcp) {
@@ -260,7 +175,7 @@ func peerTSVal(tcp []byte) uint32 {
 			i++
 		default:
 			if i+1 >= off || int(tcp[i+1]) < 2 || i+int(tcp[i+1]) > off {
-				return 0 // a malformed length would walk off the block
+				return 0
 			}
 			if tcp[i] == tcpOptTSKind && tcp[i+1] == tcpOptTSBytes {
 				return binary.BigEndian.Uint32(tcp[i+2 : i+6])
@@ -274,11 +189,11 @@ func peerTSVal(tcp []byte) uint32 {
 func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte) []byte {
 	switch rawProfiles[profile] {
 	case protoBare, protoIPIP:
-		return payload // native / IP-in-IP: the sealed frame is the whole payload
+		return payload
 
 	case protoGRE:
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
-		// flags+version = 0 (no checksum/key/seq, version 0); protocol type = IPv4
+
 		binary.BigEndian.PutUint16(h[2:4], 0x0800)
 		copy(h[4:], payload)
 		return h
@@ -286,14 +201,14 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 	case protoICMP:
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		if isClient {
-			h[0] = 8 // echo request
+			h[0] = 8
 		} else {
-			h[0] = 0 // echo reply
+			h[0] = 0
 		}
 		binary.BigEndian.PutUint16(h[4:6], id)
 		binary.BigEndian.PutUint16(h[6:8], uint16(seq))
 		copy(h[8:], payload)
-		binary.BigEndian.PutUint16(h[2:4], onesComplementSum(h)) // checksum over header+payload
+		binary.BigEndian.PutUint16(h[2:4], onesComplementSum(h))
 		return h
 
 	case protoUDP:
@@ -305,29 +220,18 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		copy(h[8:], payload)
 		cs := l4Checksum(src, dst, protoUDP, h)
 		if cs == 0 {
-			cs = 0xffff // 0 means "no checksum" in UDP; use the equivalent 0xffff
+			cs = 0xffff
 		}
 		binary.BigEndian.PutUint16(h[6:8], cs)
 		return h
 
 	case protoTCP:
-		// A data segment on the raw carrier's fixed ports, in this end's direction (seq advances by
-		// payload bytes like a real stream; ack is a non-zero peer ISN, not the tell-tale 0). Identical
-		// byte layout to the desync injector, so both share buildTCPSeg (tcpseg.go).
-		//
-		// It carries NOP,NOP,Timestamp, because a real Linux flow that negotiated RFC 7323 stamps that
-		// option on EVERY data segment — a 20-byte optionless header beside the host's own timestamped
-		// connections is separable on header shape alone, with no flow tracking at all. TSval advances
-		// with a millisecond clock and TSecr echoes the peer's last value, which is what makes the pair
-		// look like two ends of one conversation rather than two independent senders.
+
 		sp, dp := rawPorts(isClient, port, cport)
 		return buildTCPSeg(src, dst, sp, dp, seq, ack, flags, rawTCPWindow, tcpTSOption(tsval, tsecr), payload)
 
 	case protoESP:
-		// IPsec ESP (RFC 4303): [SPI 4B][seq 4B] then the sealed frame as the "encrypted
-		// payload". A real ESP flow keeps a constant SPI per Security Association and an
-		// incrementing sequence — spi is fixed for the session, seq advances per packet. The
-		// receiver ignores both (the inner AEAD tag is the real integrity check).
+
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		binary.BigEndian.PutUint32(h[0:4], spi)
 		binary.BigEndian.PutUint32(h[4:8], seq)
@@ -335,25 +239,19 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoL2TPv3:
-		// L2TPv3 over IP (RFC 3931 §4.1.2.1): [Session ID 4B][Cookie 4B]. Both are CONSTANT for the
-		// life of a session in real traffic, which is why this profile costs nothing to imitate — the
-		// repetition that would be a tell elsewhere is the correct behaviour here. Session ID 0 is
-		// reserved for control messages, so it is forced non-zero.
+
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		sess := spi
 		if sess == 0 {
 			sess = 1
 		}
 		binary.BigEndian.PutUint32(h[0:4], sess)
-		binary.BigEndian.PutUint32(h[4:8], spi*0x9E3779B9+0x85EBCA6B) // a cookie unrelated to the id
+		binary.BigEndian.PutUint32(h[4:8], spi*0x9E3779B9+0x85EBCA6B)
 		copy(h[8:], payload)
 		return h
 
 	case protoAH:
-		// IPsec AH (RFC 4302) in tunnel mode: [Next 1][PayloadLen 1][Reserved 2][SPI 4][Seq 4][ICV 12].
-		// PayloadLen counts 32-bit words minus two, so 24 bytes -> 4. Next = IPIP, which is what a real
-		// tunnel-mode AH protects. Nothing on the path can verify the ICV (it has no key), it only has
-		// to be unpredictable per packet the way an HMAC is — a constant there would be the tell.
+
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		h[0], h[1] = protoIPIP, 4
 		binary.BigEndian.PutUint32(h[4:8], spi)
@@ -367,9 +265,7 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoIPComp:
-		// IPComp (RFC 3173): [Next 1][Flags 1][CPI 2]. Next = IPIP for the same reason as AH; CPI 2 is
-		// DEFLATE, the algorithm essentially every IPComp deployment uses. All three are constant in a
-		// real flow too.
+
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		h[0] = protoIPIP
 		binary.BigEndian.PutUint16(h[2:4], 2)
@@ -377,8 +273,7 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoEtherIP:
-		// EtherIP (RFC 3378): a 2-byte header whose top nibble is the version (3) and the rest reserved.
-		// The payload is nominally an Ethernet frame; nothing on the path parses that far.
+
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		h[0] = 0x30
 		copy(h[2:], payload)
@@ -387,8 +282,6 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 	return payload
 }
 
-// splitmix64 is the standard finalizer, used only to make AH's ICV field unpredictable per packet. It
-// is NOT security-relevant — nothing verifies that field — it just must not be a constant on the wire.
 func splitmix64(x uint64) uint64 {
 	x += 0x9E3779B97F4A7C15
 	x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9
@@ -396,40 +289,25 @@ func splitmix64(x uint64) uint64 {
 	return x ^ (x >> 31)
 }
 
-// rawDecap strips the profile's carrier header, returning the inner sealed frame. A raw ip4 read MAY or
-// may not include the outer IPv4 header depending on the platform, so rawDecap detects a genuine one
-// (version 4, total-length and protocol matching) and strips it only then. proto is the EFFECTIVE outer
-// protocol number, used only to recognise that header; the stripping itself keys off the PROFILE.
-// sport is the SOURCE port off the carrier header, 0 for a profile that forges none. It is read here
-// rather than by the caller because only this function knows whether the read included an IPv4 header,
-// and a second copy of that decision is a second thing to get wrong. It is UNAUTHENTICATED at this
-// point -- anyone can send bytes with any port in them -- so a caller may only commit it after the
-// inner AEAD tag has verified, exactly like the peer address.
-// tsval is the peer's TCP timestamp off the carrier header (tcp profile only, 0 otherwise), returned for
-// the same reason as sport: only this function knows whether the read included an IPv4 header, and a
-// second copy of that decision is a second thing to get wrong.
 func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16, tsval uint32, ok bool) {
 	framing := rawProfiles[profile]
 	if len(pkt) >= 20 && pkt[0]>>4 == 4 {
 		ihl := int(pkt[0]&0x0f) * 4
 		total := int(binary.BigEndian.Uint16(pkt[2:4]))
-		// A genuine included IPv4 header: version 4, a sane IHL, this carrier's own protocol at byte 9, and a
-		// total-length that fits the bytes read. Keying off total <= len(pkt) rather than an exact match
-		// tolerates a platform that pads the read; the [ihl:total] slice then drops the pad.
+
 		if ihl >= 20 && total >= ihl && total <= len(pkt) && int(pkt[9]) == proto {
-			pkt = pkt[ihl:total] // a real IPv4 header was included; strip it (and any trailing pad)
+			pkt = pkt[ihl:total]
 		}
 	}
 	switch framing {
 	case protoBare, protoIPIP:
 		return pkt, 0, 0, true
 	case protoTCP:
-		// The only VARIABLE header: read its own data offset rather than the table, so a peer on an
-		// older build (20 bytes, no options) still decodes against a newer one.
+
 		if len(pkt) < 20 {
 			return nil, 0, 0, false
 		}
-		off := int(pkt[12]>>4) * 4 // data offset word count -> bytes
+		off := int(pkt[12]>>4) * 4
 		b, ok := skip(pkt, off)
 		return b, binary.BigEndian.Uint16(pkt[0:2]), peerTSVal(pkt), ok
 	case protoUDP:
@@ -452,13 +330,6 @@ func skip(pkt []byte, n int) ([]byte, bool) {
 	return pkt[n:], true
 }
 
-// sumBytes accumulates the 16-bit big-endian words of b into a running RFC-1071 sum, padding a final
-// odd byte with a zero low byte. Fold + complement with foldComplement to finish. Splitting the sum
-// out lets a caller add several buffers' partial sums without concatenating them (see l4Checksum).
-// Eight bytes per iteration, folded once at the end: the sum is over 16-bit words in a 64-bit
-// accumulator, so carries cannot escape until well past a packet's worth of them, and RFC 1071's
-// "the sum is the same however the bytes are grouped" is what makes the wide read legal. Whole MTUs
-// of it run per packet on the udp and tcp profiles, on both the send and the receive side.
 func sumBytes(b []byte) uint32 {
 	var sum uint64
 	for len(b) >= 8 {
@@ -476,14 +347,13 @@ func sumBytes(b []byte) uint32 {
 	if len(b) == 1 {
 		sum += uint64(b[0]) << 8
 	}
-	// Back into 32 bits without losing a carry; foldComplement finishes the job.
+
 	for sum>>32 != 0 {
 		sum = (sum & 0xffffffff) + (sum >> 32)
 	}
 	return uint32(sum)
 }
 
-// foldComplement folds a running RFC-1071 sum's carries into 16 bits and returns its one's-complement.
 func foldComplement(sum uint32) uint16 {
 	for sum>>16 != 0 {
 		sum = (sum & 0xffff) + (sum >> 16)
@@ -491,16 +361,10 @@ func foldComplement(sum uint32) uint16 {
 	return ^uint16(sum)
 }
 
-// onesComplementSum computes the 16-bit one's-complement checksum (RFC 1071)
-// used by ICMP over the buffer as-is (the checksum field must be zero on entry).
 func onesComplementSum(b []byte) uint16 {
 	return foldComplement(sumBytes(b))
 }
 
-// l4Checksum computes the TCP/UDP checksum over the IPv4 pseudo-header plus the
-// L4 segment (whose own checksum field must be zero on entry). The 12-byte pseudo-header lives on the
-// stack and is summed together with the segment IN PLACE — no per-packet heap buffer or copy. This is
-// exact because the pseudo-header is an even length, so sumBytes(ph)+sumBytes(l4) == sumBytes(ph++l4).
 func l4Checksum(src, dst net.IP, proto int, l4 []byte) uint16 {
 	s, d := src.To4(), dst.To4()
 	var ph [12]byte
@@ -515,8 +379,6 @@ func l4Checksum(src, dst net.IP, proto int, l4 []byte) uint16 {
 	return foldComplement(sumBytes(ph[:]) + sumBytes(l4))
 }
 
-// rawPortOr narrows a configured tcp/udp server port to the uint16 the header needs. Out of range
-// (including 0, "not set") means the profile default, which rawPorts then supplies.
 func rawPortOr(port int) uint16 {
 	if port < 1 || port > 65535 {
 		return 0

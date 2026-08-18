@@ -1,7 +1,3 @@
-// Edge pool for the ws client: a moving-target rotation over separate clean IP and SNI lists. The core
-// cycles (edge-IP × SNI) combinations so no single IP or domain stays exposed long enough to be
-// fingerprinted, and tracks per-entry HEALTH with a three-state FSM (healthy → suspect → dead) instead
-// of a one-shot burn, so a merely TEMPORARY block heals itself. The live state goes to a status file.
 package packet
 
 import (
@@ -18,22 +14,18 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
 
-// WSPoolSNI is the exported (config) form of a pool SNI passed from main: the domain,
-// its base64 ECHConfigList (empty = none), and request path (empty = "/").
 type WSPoolSNI struct {
 	Host string
 	ECH  string
 	Path string
 }
 
-// DialWSPoolCfg decodes the config's clean IP/SNI lists into a pool and returns a ws
-// client that rotates over it. rotate is the proactive-rotation interval.
 func DialWSPoolCfg(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []WSPoolSNI, rotate time.Duration, statusPath string, httpc bool, httpcMode string) (*TCP, error) {
 	entries := make([]wsSNIEntry, 0, len(snis))
 	for _, s := range snis {
 		var ech []byte
 		if s.ECH != "" {
-			ech, _ = base64.StdEncoding.DecodeString(s.ECH) // validated in config
+			ech, _ = base64.StdEncoding.DecodeString(s.ECH)
 		}
 		entries = append(entries, wsSNIEntry{host: s.Host, ech: ech, path: s.Path})
 	}
@@ -44,95 +36,68 @@ func DialWSPoolCfg(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool
 	return DialWSPool(dev, keepalive, obfs, cryptoOn, psk, cipher, pool, rotate, httpc, httpcMode)
 }
 
-// wsSNIEntry is one fronting domain in the pool with its own ECH config and path.
 type wsSNIEntry struct {
 	host string
 	ech  []byte
 	path string
 }
 
-// Health FSM states for a pool entry (an IP, or an SNI host). A HEALTHY entry has NO record
-// in the health map at all (absence == healthy); only suspect/dead entries are tracked.
 const (
-	stateSuspect = "suspect" // a probe found it guilty; pulled from rotation; retested on backoff
-	stateDead    = "dead"    // failed enough retests; retested only on the slow interval
+	stateSuspect = "suspect"
+	stateDead    = "dead"
 )
 
-// suspectBackoff and deadRetest are the pool health-FSM timings —
-// now operator-tunable package vars, defined with their defaults in tuning.go.
-
-// healthRec tracks one non-healthy pool entry. fails counts failed retests since it entered
-// suspect; nextRetest is the unix time the scheduler may probe it again.
 type healthRec struct {
 	state      string
 	fails      int
 	nextRetest int64
 }
 
-// wsPool holds the clean IP/SNI lists, the per-entry health FSM, and the active index.
-// ipHealth/sniHealth track only the non-healthy entries (absent == healthy). Every change
-// is snapshotted to statusPath. The pool is network-free (unit-testable): the prober and the
-// retest scheduler live in tcp.go and drive the FSM through these pure methods.
 type wsPool struct {
 	mu          sync.Mutex
-	writeMu     sync.Mutex // serializes the status file write+rename so concurrent writers don't race the shared .tmp
+	writeMu     sync.Mutex
 	ips         []string
 	snis        []wsSNIEntry
-	ipHealth    healthSet // absent == healthy
-	sniHealth   healthSet // absent == healthy
-	i, j        int       // current ip / sni index
+	ipHealth    healthSet
+	sniHealth   healthSet
+	i, j        int
 	statusPath  string
 	active      string
-	rotDegraded bool        // true once fewer than 2 edges are reachable; drives the degraded/restored event
-	chosen      string      // the combo a proactive rotate committed to, "" otherwise (see currentLocked pass 0)
-	events      []coreEvent // rolling ring of core-observed events (down/burn) for the panel log
-	evSeq       int64       // monotonic sequence so the panel can consume each event exactly once
-	wasDown     bool        // a genuine carrier down is pending its matching "up" (down/reconnect pairing)
-	pinIP       string      // operator-pinned IP: current() forces it until it lands or is disproven
-	pinSNI      string      // operator-pinned SNI: same
-	pinTries    int         // failed attempts on the pinned combination; at pinFailRelease the pin goes
-	// pinTook holds the health records the pin CLEARED, so a pin that turns out not to land can put the
-	// pool back exactly as it found it. Clearing is the operator saying "try this one again"; it is not a
-	// verdict, and a jump that never connected must not leave a dead entry looking healthy on the panel.
-	pinTook map[string]*healthRec // "ip:<k>" / "sni:<k>" -> what was there before the pin
-	now     func() int64          // injectable clock (unix seconds); overridden in tests
-	// tracker is the epoch a liveness verdict is keyed on. This pool is the status writer for a pooled ws
-	// client, so it owns the tracker the direct carriers keep on coreStatus.
+	rotDegraded bool
+	chosen      string
+	events      []coreEvent
+	evSeq       int64
+	wasDown     bool
+	pinIP       string
+	pinSNI      string
+	pinTries    int
+
+	pinTook map[string]*healthRec
+	now     func() int64
+
 	tracker pathTracker
 }
 
-// trackPath installs the carrier's live-path report and starts the sampler that catches a mover which
-// publishes nothing — the edge-pool twin of coreStatus.trackPath.
 func (p *wsPool) trackPath(live func() (pathKey, bool), closeCh <-chan struct{}) {
 	p.tracker.setLive(live)
 	go samplePathLoop(&p.tracker, p.writeStatus, closeCh)
 }
 
-// pathEpoch is the epoch a verdict must carry to be acted on — the edge-pool twin of
-// coreStatus.pathEpoch.
 func (p *wsPool) pathEpoch() int64 {
 	e, _, _ := p.tracker.snapshot()
 	return e
 }
 
-// suspectBackoff and deadRetest are operator-tunable package vars,
-// defined with its default in tuning.go.
-
-// coreEvent is one core-observed occurrence surfaced to the panel's system log: the CORE knows the
-// real reason a carrier dropped or an edge was burned (it saw the actual error), so instead of the
-// panel guessing, it records a stable machine `code` (+ optional detail) the panel maps to text.
 type coreEvent struct {
 	Seq    int64  `json:"seq"`
 	TS     int64  `json:"ts"`
-	Kind   string `json:"kind"`   // "down" (carrier dropped) | "up" (reconnected) | "burn" (edge sidelined) | "ech" (ECH self-heal)
-	Code   string `json:"code"`   // stable reason category, e.g. ping_timeout / reset / tls / ws_upgrade / throttle
-	Detail string `json:"detail"` // optional extra: the edge key, or a short raw-error snippet
+	Kind   string `json:"kind"`
+	Code   string `json:"code"`
+	Detail string `json:"detail"`
 }
 
-const coreEventRing = 48 // keep the most recent N events in the status file
+const coreEventRing = 48
 
-// event appends a core-observed event to the ring (newest kept) and flushes the status file so the
-// node/panel can surface it. Safe to call from the client loops.
 func (p *wsPool) event(kind, code, detail string) {
 	p.mu.Lock()
 	p.evSeq++
@@ -144,9 +109,6 @@ func (p *wsPool) event(kind, code, detail string) {
 	p.writeStatus()
 }
 
-// down records a genuine carrier drop (NOT an operator pin / proactive rotation) and arms the next
-// successful (re)connect — via setActive — to emit a matching "up", so a pool down is always paired
-// in the ring like the datagram coreStatus. Callers still classify the reason (code/detail).
 func (p *wsPool) down(code, detail string) {
 	p.mu.Lock()
 	p.wasDown = true
@@ -162,7 +124,6 @@ func newWSPool(ips []string, snis []wsSNIEntry, statusPath string) *wsPool {
 	return p
 }
 
-// healthMap returns the record map for the given axis ("ip" or "sni"). Caller holds the lock.
 func (p *wsPool) healthMap(kind string) healthSet {
 	if kind == "sni" {
 		return p.sniHealth
@@ -170,32 +131,21 @@ func (p *wsPool) healthMap(kind string) healthSet {
 	return p.ipHealth
 }
 
-// current returns the active (ip, sni). It prefers a FULLY-HEALTHY combo, scanning forward from the
-// current index so consecutive dials rotate for variety. With nothing fully healthy it never dead-ends:
-// it falls back to the least-bad ip and sni, so the tunnel keeps trying while the retest scheduler works
-// the blocked entries back to health. ok=false only if the pool has no IPs or no SNIs.
 func (p *wsPool) current() (string, wsSNIEntry, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.currentLocked()
 }
 
-// currentLocked is current() without taking the lock, so advance() can resolve the edge BEFORE and
-// AFTER a step under one lock and answer whether the step actually changes what the carrier will dial.
-// Caller holds the lock.
 func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 	if len(p.ips) == 0 || len(p.snis) == 0 {
 		return "", wsSNIEntry{}, false
 	}
-	// A manual pin is a ONE-SHOT exact jump: while it is in force current() FORCES the chosen axis, so
-	// the jump lands on EXACTLY that edge, never a neighbour. It ends on EVIDENCE, never on a clock:
-	// pinApplied when the carrier lands, or the verdict path once enough proven-dead rounds say it cannot.
+
 	if p.pinIP != "" || p.pinSNI != "" {
 		return p.resolvePinIPLocked(), p.resolvePinSNILocked(), true
 	}
-	// Pass 0: the combination a proactive rotate DELIBERATELY moved onto. The passes below re-select under
-	// their own rules and would walk straight back off a DUE burned combination — the only kind a live
-	// retry can ever be run on. This is the direct pool's pass 0, for the same reason.
+
 	if p.chosen != "" {
 		ip := p.ips[p.i%len(p.ips)]
 		sni := p.snis[p.j%len(p.snis)]
@@ -204,7 +154,7 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 		}
 	}
 	n := len(p.ips) * len(p.snis)
-	// Pass 1: a fully-HEALTHY combination.
+
 	for k := 0; k < n; k++ {
 		ip := p.ips[p.i%len(p.ips)]
 		sni := p.snis[p.j%len(p.snis)]
@@ -213,11 +163,7 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 		}
 		p.stepLocked()
 	}
-	// Pass 2: none healthy -- a combination whose backoff has ELAPSED gets a live try, which is the only
-	// way the tun probe can ever judge it. Without this pass a burned entry never carries traffic again,
-	// so nothing can ever prove it recovered, and the retest probe had to do the readmitting itself --
-	// off a control handshake that says nothing about whether DATA crosses. This is the direct pool's
-	// pass 2, for the same reason.
+
 	for k := 0; k < n; k++ {
 		ip := p.ips[p.i%len(p.ips)]
 		sni := p.snis[p.j%len(p.snis)]
@@ -226,9 +172,7 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 		}
 		p.stepLocked()
 	}
-	// Pass 3: nothing healthy or due — the least-bad combination, marked as tried because that is what
-	// handing it out means. Every path that yields a tracked entry leaves it DUE, which is what lets the
-	// next verdict deepen its ladder instead of freezing it on the first backoff step.
+
 	ip := p.bestIPLocked()
 	sni := p.bestSNILocked()
 	p.ipHealth.markTried(ip)
@@ -237,10 +181,6 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 	return ip, sni, true
 }
 
-// commitLocked records the combination at the cursor as a DELIBERATE choice, so currentLocked hands it
-// back instead of re-selecting past it. Only the proactive rotate uses it, because only a deliberate
-// move may spend a live connection on a DUE burned combination.
-// Refuses to commit to one the rotation could not pick at all; there the passes know better.
 func (p *wsPool) commitLocked() bool {
 	ip := p.ips[p.i%len(p.ips)]
 	sni := p.snis[p.j%len(p.snis)]
@@ -251,8 +191,6 @@ func (p *wsPool) commitLocked() bool {
 	return true
 }
 
-// stepToEligibleLocked walks the odometer to the next combination the rotation can actually pick and
-// commits to it, reporting whether it found one.
 func (p *wsPool) stepToEligibleLocked() bool {
 	n := len(p.ips) * len(p.snis)
 	for k := 0; k < n; k++ {
@@ -264,10 +202,6 @@ func (p *wsPool) stepToEligibleLocked() bool {
 	return false
 }
 
-// updateECH replaces the stored ECHConfigList for the pool SNI matching host with the fresh key the edge
-// returned after an in-band self-heal, so the NEXT reconnect presents it directly instead of hitting the
-// stale-key rejection again on every reconnect. Returns true only when the stored key actually changed,
-// which gives the caller a transition gate — one event per rotation, and concurrent healers converge.
 func (p *wsPool) updateECH(host string, ech []byte) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -283,18 +217,10 @@ func (p *wsPool) updateECH(host string, ech []byte) bool {
 	return false
 }
 
-// activeSep joins the two halves of a pooled carrier's status descriptor ("<ip> · <sni>"). The same
-// separator splits the IP back out in current(), so a single const keeps producer and parser in
-// lockstep — change it here and both sides move together.
 const activeSep = " · "
 
-// activeLabel builds the status-file "active edge" string for an (ip, sni) combo.
 func activeLabel(ip, host string) string { return ip + activeSep + host }
 
-// setActive records the edge the client is ACTUALLY carrying data on right now, for the status file's
-// live "active edge" and the panel's auto-switch log. current() is deliberately NOT the place for it:
-// current() is also asked before a dial lands, so letting it write p.active would show an edge
-// instead of the live carrier. An empty combo is ignored, so a not-yet-connected state blanks nothing.
 func (p *wsPool) setActive(combo string) {
 	if combo == "" {
 		return
@@ -302,19 +228,16 @@ func (p *wsPool) setActive(combo string) {
 	p.mu.Lock()
 	changed := p.active != combo
 	p.active = combo
-	pending := p.wasDown // a genuine down is awaiting its matching recovery
+	pending := p.wasDown
 	p.wasDown = false
 	p.mu.Unlock()
 	if pending {
-		p.event("up", "reconnect", combo) // recovered after a real drop; event() flushes the status file
+		p.event("up", "reconnect", combo)
 	} else if changed {
 		p.writeStatus()
 	}
 }
 
-// resolvePinIPLocked returns the IP current() should use: the pinned one (absolute) if it still
-// exists, else a healthy-preferred choice for the free axis (and the stale pin is dropped). Caller
-// holds the lock.
 func (p *wsPool) resolvePinIPLocked() string {
 	if p.pinIP != "" {
 		for _, ip := range p.ips {
@@ -322,7 +245,7 @@ func (p *wsPool) resolvePinIPLocked() string {
 				return ip
 			}
 		}
-		p.pinIP = "" // pinned IP was removed from the pool -> forget it
+		p.pinIP = ""
 	}
 	return p.healthyOrBestIPLocked()
 }
@@ -339,7 +262,6 @@ func (p *wsPool) resolvePinSNILocked() wsSNIEntry {
 	return p.healthyOrBestSNILocked()
 }
 
-// healthyOrBestIPLocked returns the first healthy IP, else the least-bad one. Caller holds the lock.
 func (p *wsPool) healthyOrBestIPLocked() string {
 	for _, ip := range p.ips {
 		if p.ipHealth.healthy(ip) {
@@ -358,18 +280,12 @@ func (p *wsPool) healthyOrBestSNILocked() wsSNIEntry {
 	return p.bestSNILocked()
 }
 
-// isPinned reports whether a manual pin is still in its (short) force window, during which
-// proactive rotation is held off so the jump lands exactly. After the window it returns false
-// and normal rotation resumes.
 func (p *wsPool) isPinned() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.pinIP != "" || p.pinSNI != ""
 }
 
-// bestIPLocked / bestSNILocked return the least-bad entry for the current() fallback: a
-// healthy one if any, else the tracked entry with the soonest nextRetest, preferring suspect
-// over dead. Caller holds the lock; the underlying slice is non-empty.
 func (p *wsPool) bestIPLocked() string { return p.ipHealth.best(p.ips) }
 
 func (p *wsPool) bestSNILocked() wsSNIEntry {
@@ -383,13 +299,10 @@ func (p *wsPool) bestSNILocked() wsSNIEntry {
 	return best
 }
 
-// tierLocked ranks an entry for the current() fallback: 0 healthy, 1 suspect, 2 dead, with
-// its nextRetest as the tiebreak within a tier. Caller holds the lock.
 func (p *wsPool) tierLocked(kind, key string) (tier int, next int64) {
 	return p.healthMap(kind).tier(key)
 }
 
-// stepLocked advances to the next (ip, sni) combination (caller holds the lock).
 func (p *wsPool) stepLocked() {
 	p.chosen = ""
 	p.j++
@@ -402,36 +315,24 @@ func (p *wsPool) stepLocked() {
 	}
 }
 
-// advance rotates to the next ELIGIBLE combination and reports whether the edge the carrier would
-// actually DIAL changed. A caller that drops the live connection on a false "moved" pays a re-dial and a
-// traffic gap every interval for nothing, so the answer is the resolved combo, never the cursor.
-//
-// ELIGIBLE, not healthy: a burned combination whose backoff has elapsed is one the rotation is MEANT to
-// reach. Only live traffic can prove an edge recovered and only the node's tun probe may say so, so a
-// walk that visits healthy combinations only can never readmit anything — the edge stays condemned for
-// the life of the pool. The choice is then committed, or currentLocked would re-select past it. Same
-// rule, same reason, as the direct pool's advanceEligibleLocked.
 func (p *wsPool) advance() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	beforeIP, beforeSNI, ok := p.currentLocked()
 	if !ok {
-		return false // empty pool — there is nothing to rotate onto
+		return false
 	}
 	if p.pinIP != "" || p.pinSNI != "" {
-		return false // a pin freezes proactive rotation, exactly as it does on the direct pool
+		return false
 	}
 	if !p.stepToEligibleLocked() {
-		return false // nothing else the rotation can reach — leave the live connection alone
+		return false
 	}
 	ip := p.ips[p.i%len(p.ips)]
 	sni := p.snis[p.j%len(p.snis)]
 	return ip != beforeIP || sni.host != beforeSNI.host
 }
 
-// advanceIP / advanceSNI rotate a single dimension (manual "rotate now, IP only" /
-// "rotate now, SNI only" from the panel). current() still skips unhealthy entries, so a
-// bump that lands on a suspect/dead one is passed over on the next dial.
 func (p *wsPool) advanceIP() {
 	p.mu.Lock()
 	p.chosen = ""
@@ -441,13 +342,6 @@ func (p *wsPool) advanceIP() {
 	p.mu.Unlock()
 }
 
-// advanceEdgeFreshRow moves to the next EDGE and starts its row clean, dropping every SNI burn.
-//
-// Both halves are needed. A whole row of SNIs failing on one edge convicts the EDGE — the SNIs were
-// never shown to be bad on their own, only in combination with it, so on the next edge they each deserve
-// the fresh try that is the whole experiment. And carrying the burns forward is not merely unfair, it
-// STALLS the walk: with every SNI condemned, currentLocked finds no healthy combo, falls through to
-// best-effort and hands back the edge the cursor just left.
 func (p *wsPool) advanceEdgeFreshRow() {
 	p.mu.Lock()
 	p.chosen = ""
@@ -471,25 +365,18 @@ func (p *wsPool) advanceSNI() {
 	p.mu.Unlock()
 }
 
-// snisCount is how many domains the pool holds. One means the SNI axis cannot vary, which changes WHICH
-// axis a verdict may blame -- see burnAdvanceWS.
 func (p *wsPool) snisCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.snis)
 }
 
-// comboCount is how many (IP × SNI) combinations a walk could reach — one lap. The same bound
-// stepToEligibleLocked scans, so a caller that spends one step per combination has tried them all.
 func (p *wsPool) comboCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.ips) * len(p.snis)
 }
 
-// eligibleSNIs is how many SNIs the rotation could actually try right now. Read BEFORE a burn to size one
-// lap of the matrix — a condemned SNI cannot be tried, so counting the raw list would call a lap complete
-// that never happened and walk the edge off an SNI that never varied.
 func (p *wsPool) eligibleSNIs() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -500,14 +387,12 @@ func (p *wsPool) eligibleSNIs() int {
 	return p.sniHealth.countEligible(keys)
 }
 
-// markSuspect records a live verdict against one entry: healthSet.burn's one rule, that a fresh entry is
-// sidelined, one still waiting out its backoff is left alone, and a DUE one pays a ladder step.
 func (p *wsPool) markSuspect(kind, key, reason string) {
 	p.mu.Lock()
 	fresh := p.healthMap(kind).burn(key)
 	p.mu.Unlock()
 	if fresh {
-		p.event("burn", reason, kind+":"+key) // only log the transition into suspect, not repeats
+		p.event("burn", reason, kind+":"+key)
 	}
 	p.writeStatus()
 	if fresh && kind == "ip" {
@@ -515,14 +400,10 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 	}
 }
 
-// restorePinTookLocked puts back the health records the pin cleared. Called only when the pin is
-// abandoned WITHOUT landing: the clear was the operator asking for a fresh try, and a try that never
-// happened must not leave the pool believing a dead entry recovered. A landed pin keeps the clear --
-// there the entry really did prove itself. Caller holds the lock.
 func (p *wsPool) restorePinTookLocked() {
 	for k, rec := range p.pinTook {
 		if rec == nil {
-			continue // it was healthy before the pin; leave it healthy
+			continue
 		}
 		if kind, key, found := strings.Cut(k, ":"); found {
 			p.healthMap(kind).recs[key] = rec
@@ -531,9 +412,6 @@ func (p *wsPool) restorePinTookLocked() {
 	clear(p.pinTook)
 }
 
-// restorePinTookAxisLocked puts back what a live pin on ONE axis took, when that pin is being replaced by
-// a pin on a different entry of the same axis. The other axis is untouched -- its pin is still live.
-// Caller holds the lock.
 func (p *wsPool) restorePinTookAxisLocked(kind, key string) {
 	live := p.pinIP
 	if kind == "sni" {
@@ -549,14 +427,6 @@ func (p *wsPool) restorePinTookAxisLocked(kind, key string) {
 	delete(p.pinTook, k)
 }
 
-// pinAttemptFailed is the core's OWN evidence about a pin, and the reason a pin needs no clock: it
-// watches the dial to the pinned edge fail, which says more about that exact edge than the node's tunnel
-// probe can, and says it in one timeout instead of two sweeps plus a settle window. At pinFailRelease
-// the pin is released so normal rotation resumes; a landing resets the count (pinApplied clears the pin
-// outright, so only a not-yet-landed pin is ever counting).
-//
-// A no-op unless the pin actually targets what just failed: a dial to some other edge says nothing
-// about the operator's pick.
 func (p *wsPool) pinAttemptFailed(ip, host string) {
 	p.mu.Lock()
 	counted := (p.pinIP != "" && p.pinIP == ip) || (p.pinSNI != "" && p.pinSNI == host)
@@ -575,14 +445,11 @@ func (p *wsPool) pinAttemptFailed(ip, host string) {
 	}
 }
 
-// releasePin drops any manual pin outright, on both axes. The counted release the verdict path performs
-// once a pin has absorbed its second opinion — see burnAdvanceWS and rotationController.fail, which do
-// the same thing for the other four carriers.
 func (p *wsPool) releasePin() {
 	p.mu.Lock()
 	changed := p.pinIP != "" || p.pinSNI != ""
 	if changed {
-		p.restorePinTookLocked() // abandoned without landing -- see restorePinTookLocked
+		p.restorePinTookLocked()
 	}
 	p.pinIP, p.pinSNI = "", ""
 	p.mu.Unlock()
@@ -592,19 +459,13 @@ func (p *wsPool) releasePin() {
 	}
 }
 
-// reassessRotation emits a ONE-SHOT event when the pool crosses the "can it still rotate its IP axis?"
-// boundary. IP rotation needs >=2 HEALTHY ip endpoints; with only one left the tunnel silently stops
-// switching edges, which reads in the log as "rotation stopped" — so the transition ("degraded") and its
-// recovery ("restored") are surfaced. No-op for a single-ip pool or an unmoved boundary; idempotent.
 func (p *wsPool) reassessRotation() {
 	p.mu.Lock()
 	if len(p.ips) < 2 {
 		p.mu.Unlock()
 		return
 	}
-	// ELIGIBLE, not healthy, because that is the set advance() walks: a burned edge whose wait has elapsed
-	// is one the rotation can still reach. Counting only the healthy ones reported a pool as stuck on one
-	// edge while it was in fact still rotating over two.
+
 	reachable := p.ipHealth.countEligible(p.ips)
 	degraded := reachable < 2
 	if degraded == p.rotDegraded {
@@ -615,28 +476,22 @@ func (p *wsPool) reassessRotation() {
 	p.mu.Unlock()
 	detail := strconv.Itoa(reachable) + "/" + strconv.Itoa(len(p.ips))
 	if degraded {
-		p.event("pool", "degraded", detail) // only one edge left the rotation can reach
+		p.event("pool", "degraded", detail)
 	} else {
-		p.event("pool", "restored", detail) // a second edge is reachable again
+		p.event("pool", "restored", detail)
 	}
 }
 
-// retestResult feeds a probe outcome for a tracked entry into the FSM: ANY success clears it
-// back to healthy; a failure walks the suspect backoff and eventually drops it to dead.
 func (p *wsPool) retestResult(kind, key string, success bool) {
 	p.mu.Lock()
 	m := p.healthMap(kind)
 	r := m.rec(key)
-	if r == nil { // cleared from under us (e.g. a concurrent live success) — nothing to do
+	if r == nil {
 		p.mu.Unlock()
 		return
 	}
 	if success {
-		// NOT a heal. The probe completes the control path -- TCP, TLS, the WebSocket upgrade -- and a
-		// path that passes all three can still carry nothing, which is the exact signal this pool spent
-		// its history mistaking for health. So a passing probe only says "worth a live try": the entry
-		// stays burned and DUE, currentLocked's pass 2 offers it real traffic, and the tun probe decides.
-		// Only cmdOK clears a burn now, on both pools.
+
 		r.nextRetest = p.now()
 	} else {
 		m.retestFailed(r)
@@ -644,23 +499,17 @@ func (p *wsPool) retestResult(kind, key string, success bool) {
 	p.mu.Unlock()
 	p.writeStatus()
 	if kind == "ip" {
-		p.reassessRotation() // a recovered/dead ip may have crossed the "can still rotate" boundary
+		p.reassessRotation()
 	}
 }
 
-// retestSpec is one entry the scheduler should probe now, paired with a partner on the OTHER
-// axis to probe it against (a known-healthy partner when one exists, else the current active
-// partner) so the probe changes only the entry under test.
 type retestSpec struct {
-	kind string // "ip" or "sni": which axis the entry belongs to
+	kind string
 	key  string
-	ip   string     // the IP to dial
-	sni  wsSNIEntry // the SNI to present
+	ip   string
+	sni  wsSNIEntry
 }
 
-// dueRetests returns the tracked entries whose nextRetest has arrived, each paired with a
-// partner to probe against. The scheduler runs one probe per spec and feeds the boolean back
-// through retestResult.
 func (p *wsPool) dueRetests() []retestSpec {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -678,8 +527,6 @@ func (p *wsPool) dueRetests() []retestSpec {
 	return out
 }
 
-// partnerSNILocked / partnerIPLocked pick a KNOWN-HEALTHY partner to retest an entry against,
-// falling back to the currently-selected one when none is healthy. Caller holds the lock.
 func (p *wsPool) partnerSNILocked() wsSNIEntry {
 	for _, s := range p.snis {
 		if p.sniHealth.healthy(s.host) {
@@ -698,8 +545,6 @@ func (p *wsPool) partnerIPLocked() string {
 	return p.ips[p.i%len(p.ips)]
 }
 
-// altHealthySNI returns a healthy SNI other than exclude (the differential probe's
-// "same IP, different SNI" arm); ok=false when none exists.
 func (p *wsPool) altHealthySNI(exclude string) (wsSNIEntry, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -711,8 +556,6 @@ func (p *wsPool) altHealthySNI(exclude string) (wsSNIEntry, bool) {
 	return wsSNIEntry{}, false
 }
 
-// altHealthyIP returns a healthy IP other than exclude (the differential probe's
-// "different IP, same SNI" arm); ok=false when none exists.
 func (p *wsPool) altHealthyIP(exclude string) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -724,9 +567,6 @@ func (p *wsPool) altHealthyIP(exclude string) (string, bool) {
 	return "", false
 }
 
-// probeAllNow pulls EVERY suspect/dead entry's retest forward to now, so the scheduler
-// probes them all on its next tick. Backs the panel's "probe now" control (a signal can't
-// carry a specific key, so this sweeps them all — cheap TLS-only probes).
 func (p *wsPool) probeAllNow() {
 	p.mu.Lock()
 	p.ipHealth.probeAllNow()
@@ -734,10 +574,6 @@ func (p *wsPool) probeAllNow() {
 	p.mu.Unlock()
 }
 
-// selectEntry PINS a specific edge as the active one on its axis: current() forces the chosen edge until
-// the carrier lands on it (pinApplied clears the pin) or the evidence disproves it. So it is "jump
-// exactly here and keep trying until connected" — it survives a transient outage but self-releases on
-// success and on a dead edge. It also clears any suspect/dead mark. False if the key is unknown.
 func (p *wsPool) selectEntry(kind, key string) bool {
 	p.mu.Lock()
 	p.chosen = ""
@@ -745,9 +581,7 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 	if p.pinTook == nil {
 		p.pinTook = map[string]*healthRec{}
 	}
-	// Re-pinning an axis ABANDONS what that axis was holding, and an abandoned pin puts back what it took.
-	// Without this the first target's burn stays laundered forever: a landing only ever settles the entry
-	// it landed on, so nothing is left to restore the one the operator moved off.
+
 	p.restorePinTookAxisLocked(kind, key)
 	if kind == "sni" {
 		for idx, s := range p.snis {
@@ -774,11 +608,7 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 	}
 	if ok {
 		p.pinTries = 0
-		// `active` follows the pin, before any dial. It is what the NODE keys its verdict on, and while a
-		// pin is in force the tunnel really is trying THAT combination -- leaving it on the previous one
-		// meant a verdict measured during the jump named an edge nothing was attempting, and burned it.
-		// The direct pool has always done this (peerPoolStatus publishes the cursor, which selectEntry
-		// moves); the edge pool published a string only a successful dial ever wrote.
+
 		if ip, sni, got := p.currentLocked(); got {
 			p.active = activeLabel(ip, sni.host)
 		}
@@ -787,30 +617,19 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 	if ok {
 		p.writeStatus()
 		if kind == "ip" {
-			// Clearing an IP's burn just raised the healthy-IP count and may have crossed the "can it
-			// still rotate?" boundary back up. succeeded()/retestResult() reassess here too; selectEntry
-			// must as well, or a "restored" event is never emitted and rotDegraded stays stuck true —
-			// which then swallows the NEXT degraded/restored transition. (Idempotent: no-op if unmoved.)
+
 			p.reassessRotation()
 		}
 	}
 	return ok
 }
 
-// pinApplied clears a manual pin once the carrier has ACTUALLY landed on the pinned edge, so a pin
-// behaves as "jump there and keep retrying until connected" (surviving a transient outage — see
-// yet releases the instant it succeeds instead of freezing rotation.
-// Each axis is cleared independently: an IP-only pin releases when the live IP matches, likewise SNI.
 func (p *wsPool) pinApplied(ip, host string) {
 	p.mu.Lock()
 	changed := false
-	// PER AXIS, and only for an axis this landing actually satisfies. tcp can adopt a carrier the rotation
-	// timer pre-built, whose edge was resolved before the pin existed, and settling the pin's memory for
-	// that wiped the burn the pin was holding and reset the count that is the pin's only way to end.
-	// Dropping the whole map on a one-axis landing was wrong too: the OTHER axis is still pinned, and its
-	// entry has proven nothing.
+
 	if p.pinIP != "" && p.pinIP == ip {
-		delete(p.pinTook, "ip:"+ip) // it landed: this entry proved itself, so its clear stands
+		delete(p.pinTook, "ip:"+ip)
 		p.pinIP = ""
 		changed = true
 	}
@@ -820,7 +639,7 @@ func (p *wsPool) pinApplied(ip, host string) {
 		changed = true
 	}
 	if changed {
-		p.pinTries = 0 // a landing on the pin is progress; the count starts over for whatever is left
+		p.pinTries = 0
 	}
 	p.mu.Unlock()
 	if changed {
@@ -828,8 +647,6 @@ func (p *wsPool) pinApplied(ip, host string) {
 	}
 }
 
-// cmdPath is the sidecar file the node writes its commands into. Empty when the pool has no status
-// path (nothing to poll).
 func (p *wsPool) cmdPath() string {
 	if p.statusPath == "" {
 		return ""
@@ -837,9 +654,6 @@ func (p *wsPool) cmdPath() string {
 	return p.statusPath + ".cmd"
 }
 
-// readCmd consumes this pool's pending command, if any, and defaults the PIN axis. A pin that names no
-// axis is an edge pin: that is the axis the panel's button has always meant, and "" would silently look
-// up an entry in the SNI map.
 func (p *wsPool) readCmd() (c poolCmd, ok bool) {
 	if c, ok = readPoolCmd(p.cmdPath()); !ok {
 		return c, false
@@ -850,8 +664,6 @@ func (p *wsPool) readCmd() (c poolCmd, ok bool) {
 	return c, true
 }
 
-// activeCombo splits the published "active" label back into the edge and the SNI it was published
-// with. Empty strings when nothing is active yet.
 func (p *wsPool) activeCombo() (ip, sni string) {
 	p.mu.Lock()
 	a := p.active
@@ -862,17 +674,13 @@ func (p *wsPool) activeCombo() (ip, sni string) {
 	return a, ""
 }
 
-// clearBurn drops an entry's health record outright, so a proven-carrying combo is healthy again
-// immediately instead of waiting out its retest ladder. Reports whether anything was actually cleared.
 func (p *wsPool) clearBurn(kind, key string) bool {
 	p.mu.Lock()
 	had := p.healthMap(kind).clear(key)
 	p.mu.Unlock()
 	if had {
 		p.writeStatus()
-		// This is now the ONLY path that clears a burn (the tun probe's cmdOK, which announces the heal
-		// event itself), so it is the only moment an entry really recovered — reassess in case that
-		// crossed the "can the rotation still reach two edges?" line back up.
+
 		if kind == "ip" {
 			p.reassessRotation()
 		}
@@ -880,8 +688,6 @@ func (p *wsPool) clearBurn(kind, key string) bool {
 	return had
 }
 
-// echCmdPath is the sidecar file the node writes a LIVE ECH-key update into (JSON {"snis":{host:base64}}).
-// The panel pushes a freshly-fetched ECHConfigList here so the RUNNING pool adopts it without a rebuild.
 func (p *wsPool) echCmdPath() string {
 	if p.statusPath == "" {
 		return ""
@@ -889,10 +695,6 @@ func (p *wsPool) echCmdPath() string {
 	return p.statusPath + ".echcmd"
 }
 
-// readECHCmd consumes a pending live ECH-key update (base64 ECHConfigList per SNI host) and hot-swaps it
-// into the pool via updateECH, so the NEXT dial presents the fresh key — no rebuild, no TUN drop. Returns
-// the hosts whose key actually changed, and removes the file so it fires once. The proactive counterpart
-// to the in-band self-heal: the panel pushes the key BEFORE the old one fails.
 func (p *wsPool) readECHCmd() []string {
 	cp := p.echCmdPath()
 	if cp == "" {
@@ -922,26 +724,20 @@ func (p *wsPool) readECHCmd() []string {
 	return changed
 }
 
-// healthStatus is one entry's health as published to the status file.
 type healthStatus struct {
 	Key        string `json:"key"`
-	Kind       string `json:"kind"`  // "ip" | "sni"
-	State      string `json:"state"` // "healthy" | "suspect" | "dead"
+	Kind       string `json:"kind"`
+	State      string `json:"state"`
 	Fails      int    `json:"fails"`
 	NextRetest int64  `json:"next_retest_unix"`
 }
 
-// writeStatus snapshots {active, health, ts} to statusPath (best effort) so the node/panel can show
-// the live edge and drive the pool. health carries the full per-entry FSM state (state/fails/
-// next_retest), which is what every reader actually uses.
 func (p *wsPool) writeStatus() {
 	if p.statusPath == "" {
 		return
 	}
-	// Hold writeMu across BOTH the snapshot and the file write, so two concurrent writers cannot snapshot
-	// in one order and win the write in the reverse order — an older snapshot must never overwrite a newer
-	// file. p.mu is always released before any caller reaches writeStatus, so writeMu→p.mu never inverts.
-	p.tracker.sample() // before any lock: the tracker has its own, and livePath reads only carrier atomics
+
+	p.tracker.sample()
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 	p.mu.Lock()
@@ -960,7 +756,7 @@ func (p *wsPool) writeStatus() {
 		}
 		health = append(health, hs)
 	}
-	evs := append([]coreEvent(nil), p.events...) // copy so the marshal runs outside the lock
+	evs := append([]coreEvent(nil), p.events...)
 	epoch, path, ready := p.tracker.snapshot()
 	st := struct {
 		Active string         `json:"active"`
@@ -973,7 +769,7 @@ func (p *wsPool) writeStatus() {
 	}{Active: p.active, Epoch: epoch, Ready: ready, Path: path, Health: health, Events: evs, TS: time.Now().Unix()}
 	p.mu.Unlock()
 	if data, err := json.Marshal(st); err == nil {
-		// writeMu already held across the snapshot above (serializes writers AND orders snapshot->write).
+
 		writeFileAtomic(p.statusPath, data, 0o644)
 	}
 }

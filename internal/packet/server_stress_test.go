@@ -12,9 +12,6 @@ import (
 	"time"
 )
 
-// httpcStressServer stands up a real httpc core server behind an httptest HTTP server, returning the
-// base URL and an http.Client. The core server's TUN side is a socketpair that nothing drains — fine,
-// the stress only exercises the HTTP-facing session machinery (create / serve / reap / teardown).
 func httpcStressServer(t *testing.T) (string, *http.Client, *TCP) {
 	t.Helper()
 	const psk = "server-stress-psk-abcdefghijklmnop"
@@ -31,44 +28,39 @@ func httpcStressServer(t *testing.T) (string, *http.Client, *TCP) {
 	return ts.URL, ts.Client(), srv
 }
 
-// liveSessions returns the current HTTP-carrier session-table size under its lock.
 func liveSessions(b *TCP) int {
 	b.httpcMu.Lock()
 	defer b.httpcMu.Unlock()
 	return len(b.httpcSessions)
 }
 
-// TestHTTPCServerMalformedBlast fires a flood of concurrent MALFORMED requests at the HTTP-carrier handler:
-// bad session ids, wrong methods, missing/garbage seq, oversized and empty bodies, bogus grpc. The
-// server must answer each with a clean 4xx and never panic, race, or wedge. Run under -race this is
-// the concurrency-safety check on the session table and the handler's error paths.
 func TestHTTPCServerMalformedBlast(t *testing.T) {
 	base, hc, _ := httpcStressServer(t)
 	hc.Timeout = 3 * time.Second
 
 	kinds := []func(i int) *http.Request{
-		func(i int) *http.Request { // bad sid (too short)
+		func(i int) *http.Request {
 			r, _ := http.NewRequest("GET", fmt.Sprintf("%s/?s=deadbeef", base), nil)
 			return r
 		},
-		func(i int) *http.Request { // bad sid (non-hex, right length)
+		func(i int) *http.Request {
 			r, _ := http.NewRequest("POST", fmt.Sprintf("%s/?s=%032d&seq=0", base, 0)+"ZZZ", nil)
 			return r
 		},
-		func(i int) *http.Request { // valid-format sid the GET never opened, POST -> 404 (no session to create)
+		func(i int) *http.Request {
 			r, _ := http.NewRequest("POST", fmt.Sprintf("%s/?s=%032x&seq=notanumber", base, i), bytes.NewReader([]byte("x")))
 			return r
 		},
-		func(i int) *http.Request { // wrong method (PUT) on a valid sid
+		func(i int) *http.Request {
 			r, _ := http.NewRequest("PUT", fmt.Sprintf("%s/?s=%032x", base, i), nil)
 			return r
 		},
-		func(i int) *http.Request { // bogus grpc POST with a garbage body
+		func(i int) *http.Request {
 			r, _ := http.NewRequest("POST", fmt.Sprintf("%s/?s=%032x", base, i), bytes.NewReader(bytes.Repeat([]byte{0xff}, 300)))
 			r.Header.Set("Content-Type", "application/grpc")
 			return r
 		},
-		func(i int) *http.Request { // POST a large chunk (must be LimitReader-capped, not OOM)
+		func(i int) *http.Request {
 			r, _ := http.NewRequest("POST", fmt.Sprintf("%s/?s=%032x&seq=%d", base, i, i), bytes.NewReader(bytes.Repeat([]byte{0x41}, 200000)))
 			return r
 		},
@@ -83,7 +75,7 @@ func TestHTTPCServerMalformedBlast(t *testing.T) {
 				req := kinds[(w+i)%len(kinds)](w*1000 + i)
 				resp, err := hc.Do(req)
 				if err != nil {
-					continue // client-side timeout on a grpc POST that the server holds — acceptable
+					continue
 				}
 				io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 				resp.Body.Close()
@@ -92,7 +84,6 @@ func TestHTTPCServerMalformedBlast(t *testing.T) {
 	}
 	wg.Wait()
 
-	// The server must still answer a fresh malformed request (proves it is alive, not wedged/panicked).
 	resp, err := hc.Get(base + "/?s=short")
 	if err != nil {
 		t.Fatalf("server unresponsive after malformed blast: %v", err)
@@ -103,13 +94,9 @@ func TestHTTPCServerMalformedBlast(t *testing.T) {
 	}
 }
 
-// TestHTTPCServerSessionChurn drives the session lifecycle concurrently: each worker binds a downstream
-// GET (which starts serve), POSTs an upstream chunk through it, then abandons the GET. GET-first is the
-// real client ordering, since deliver() writes to a pipe that only drains once serve reads it. The point
-// is running it under -race: any unsynchronised access to the session map shows up here.
 func TestHTTPCServerSessionChurn(t *testing.T) {
 	base, hc, srv := httpcStressServer(t)
-	hc.Timeout = 2 * time.Second // never let a held-open GET hang a worker
+	hc.Timeout = 2 * time.Second
 
 	var wg sync.WaitGroup
 	for w := 0; w < 30; w++ {
@@ -119,7 +106,7 @@ func TestHTTPCServerSessionChurn(t *testing.T) {
 			for i := 0; i < 20; i++ {
 				sid := fmt.Sprintf("%032x", w*100000+i)
 				ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
-				// GET first: binds serve so the upstream pipe has a reader.
+
 				var gwg sync.WaitGroup
 				gwg.Add(1)
 				go func() {
@@ -130,7 +117,7 @@ func TestHTTPCServerSessionChurn(t *testing.T) {
 						resp.Body.Close()
 					}
 				}()
-				time.Sleep(2 * time.Millisecond) // let serve bind before we POST
+				time.Sleep(2 * time.Millisecond)
 				pr, _ := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/?s=%s&seq=0", base, sid), bytes.NewReader([]byte("hi")))
 				if resp, err := hc.Do(pr); err == nil {
 					io.Copy(io.Discard, resp.Body)
@@ -143,8 +130,6 @@ func TestHTTPCServerSessionChurn(t *testing.T) {
 	}
 	wg.Wait()
 
-	// The server must still answer after the churn (proves it is alive, not wedged or panicked), and
-	// the session table must be bounded — not still holding all 600 churned sessions.
 	resp, err := hc.Get(base + "/?s=short")
 	if err != nil {
 		t.Fatalf("server unresponsive after session churn: %v", err)

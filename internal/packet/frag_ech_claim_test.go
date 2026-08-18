@@ -8,7 +8,6 @@ import (
 	"testing"
 )
 
-// captureLog redirects the standard logger for the duration of fn and returns what was written.
 func captureLog(fn func()) string {
 	var buf bytes.Buffer
 	old := log.Writer()
@@ -20,13 +19,8 @@ func captureLog(fn func()) string {
 	return buf.String()
 }
 
-// TestFragDoesNotBlameECHItWasNeverToldAbout pins that the two fallback messages state the cause they
-// actually know, not the one that is usually true. Both fired on ANY failure of the hostname search and
-// hard-asserted ECH, so the case that matters most — the hostname not matching, ECH off, the real SNI in
-// cleartext — told the operator they were protected. Two arms, since honesty in one state proves nothing.
 func TestFragDoesNotBlameECHItWasNeverToldAbout(t *testing.T) {
-	// A ClientHello-shaped buffer that does NOT contain the configured hostname, which is what both
-	// branches key on (splitAt returns -1, writeFake's bytes.Index returns -1).
+
 	hello := append([]byte{0x16, 0x03, 0x01, 0x00, 0x40}, bytes.Repeat([]byte{0xAB}, 64)...)
 
 	for _, tc := range []struct {
@@ -51,7 +45,7 @@ func TestFragDoesNotBlameECHItWasNeverToldAbout(t *testing.T) {
 			cli, srv := net.Pipe()
 			defer cli.Close()
 			defer srv.Close()
-			go func() { // drain, so the write does not block on the unbuffered pipe
+			go func() {
 				buf := make([]byte, 4096)
 				for {
 					if _, err := srv.Read(buf); err != nil {

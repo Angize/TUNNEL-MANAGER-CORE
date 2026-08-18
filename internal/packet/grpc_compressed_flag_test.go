@@ -8,10 +8,6 @@ import (
 	"testing"
 )
 
-// gRPC's 5-byte message prefix is `compressed(1) length(4)`, and the deframer must read both. The body IS
-// the data plane here, exactly as on the POST ladder: handing a compressed message to the framer makes
-// the AEAD open garbage, so the tunnel comes up, delivers nothing, and the fault is charged to the edge
-// far from its cause — and we advertise grpc-accept-encoding: gzip, so an intermediary is invited to.
 func TestGrpcDeframerRefusesACompressedMessage(t *testing.T) {
 	payload := []byte("a framed tunnel packet")
 
@@ -31,7 +27,7 @@ func TestGrpcDeframerRefusesACompressedMessage(t *testing.T) {
 		if msg[0] != 0 {
 			t.Fatalf("grpcFrame set the compressed flag itself (%d) — this test would prove nothing", msg[0])
 		}
-		msg[0] = 1 // exactly what a compressing intermediary sets
+		msg[0] = 1
 
 		g := &grpcDeframingReader{r: bytes.NewReader(msg)}
 		got, err := io.ReadAll(g)
@@ -43,11 +39,9 @@ func TestGrpcDeframerRefusesACompressedMessage(t *testing.T) {
 		}
 	})
 
-	// A length-only reading of the header cannot tell these two apart, so this pins that the flag —
-	// not the length — is what decides.
 	t.Run("the flag decides, not the length", func(t *testing.T) {
 		var hdr [5]byte
-		hdr[0] = 2 // any non-zero value is a compression algorithm id
+		hdr[0] = 2
 		binary.BigEndian.PutUint32(hdr[1:5], 0)
 		g := &grpcDeframingReader{r: bytes.NewReader(hdr[:])}
 		if _, err := io.ReadAll(g); err == nil {

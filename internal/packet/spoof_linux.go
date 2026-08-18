@@ -1,17 +1,5 @@
 //go:build linux
 
-// The "spoof" transport is a standalone IP-spoofing carrier. It rides the same bare-like raw-IP datapath
-// as the raw carrier — identical framing, AEAD, replay guard, handshake, keepalive, FEC and TUN plumbing,
-// all shared Raw code — but forges an outer IPv4 field:
-//
-//	spoof_src_ip  the client hides its real IP; the server is told real_peer_ip to answer, since it can
-//	              never learn it from the forged wire source.
-//	spoof_dst_ip  the wire shows traffic to a decoy while the packet is routed to the real server (only
-//	              works when the decoy IP routes there). The server receives via AF_PACKET, since the
-//	              decoy is not a local address, and answers AS the decoy.
-//
-// There is NO rotation of any kind here — that is why spoofing was lifted out of raw: it is a different
-// connection model, not a knob. The addressing is the forgedLink (iplink_linux.go).
 package packet
 
 import (
@@ -23,23 +11,19 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
 
-// DialSpoof (client role) opens a spoof carrier toward peerIP, forging the outer source and/or
-// destination. At least one of spoofSrc / spoofDst must be set (a carrier that forges nothing is
-// just raw bare — config validation enforces this, and so does the guard below). rawProto (1..255,
-// 0 = bare's native 253) overrides the outer IP protocol number to slip past a protocol whitelist.
 func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, spoofSrc, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
 	r, err := dialRawBase(peerIP, dev, ka, obfs, psk, cipher, "bare", rawProto, 0)
 	if err != nil {
 		return nil, err
 	}
 	var spoofSrcIP, spoofDstIP net.IP
-	if spoofSrc != "" { // forge the outer source; conn still receives replies at our real IP
+	if spoofSrc != "" {
 		if spoofSrcIP = parseIP4(spoofSrc); spoofSrcIP == nil {
 			r.conn.Close()
 			return nil, fmt.Errorf("spoof: spoof_src_ip %q is not an IPv4 address", spoofSrc)
 		}
 	}
-	if spoofDst != "" { // forge the outer destination to the decoy; routing still targets the real peer
+	if spoofDst != "" {
 		if spoofDstIP = parseIP4(hostOnly(spoofDst)); spoofDstIP == nil {
 			r.conn.Close()
 			return nil, fmt.Errorf("spoof: spoof_dst_ip %q is not an IPv4 address", spoofDst)
@@ -49,7 +33,7 @@ func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk,
 		r.conn.Close()
 		return nil, fmt.Errorf("spoof: needs a forged source or destination (a carrier that forges nothing is just raw bare)")
 	}
-	fd, err := openHdrincl(r.proto) // the forged header is built and sent via IP_HDRINCL
+	fd, err := openHdrincl(r.proto)
 	if err != nil {
 		r.conn.Close()
 		return nil, fmt.Errorf("spoof: IP_HDRINCL socket: %w", err)
@@ -59,17 +43,13 @@ func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk,
 	return r, nil
 }
 
-// ListenSpoof (server role) binds a spoof carrier. realPeer is the client's real IP to answer (the
-// forged source hides it from the wire, so the server can never learn it). When spoofDst is set the
-// clients aim at that decoy: the server receives those frames via AF_PACKET (the decoy is not a local
-// address) and answers AS the decoy. realPeer is required in both cases (config validation enforces it).
 func ListenSpoof(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, realPeer, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
 	r, err := listenRawBase(listenIP, dev, ka, obfs, psk, cipher, "bare", rawProto, 0)
 	if err != nil {
 		return nil, err
 	}
 	var fixedPeer net.IP
-	if realPeer != "" { // client forges its source, so we can't learn it — reply to this real IP
+	if realPeer != "" {
 		if fixedPeer = parseIP4(hostOnly(realPeer)); fixedPeer == nil {
 			r.conn.Close()
 			return nil, fmt.Errorf("spoof: real_peer_ip %q is not an IPv4 address", realPeer)
@@ -79,7 +59,7 @@ func ListenSpoof(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, 
 			r.localIP.Store(&net.IPAddr{IP: lip})
 		}
 	}
-	if spoofDst != "" { // clients aim at this decoy; receive it via AF_PACKET and answer AS it
+	if spoofDst != "" {
 		dip := parseIP4(hostOnly(spoofDst))
 		if dip == nil {
 			r.conn.Close()
@@ -96,18 +76,14 @@ func ListenSpoof(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, 
 			r.conn.Close()
 			return nil, fmt.Errorf("spoof: AF_PACKET socket: %w", err)
 		}
-		// decoy = the AF_PACKET receive filter; spoofSrc = dip so replies leave AS the decoy.
+
 		r.link = &forgedLink{r: r, spoofFd: fd, pktFd: pfd, spoofSrc: dip, decoy: dip,
-			fixedPeer: fixedPeer, antiLeak: addAntiLeak(r.proto, dip, r.tunName())} // anti-leak best-effort; stops the kernel forwarding the decoy dst
-		// NO applyConnSockBuf here on purpose: this link receives via pktFd and sends via spoofFd, so
-		// r.conn is never read and never written. Sizing it pinned the whole sock_buf (4 MiB by default)
-		// on a socket nothing drains — and the kernel would keep queuing matching frames into it forever.
+			fixedPeer: fixedPeer, antiLeak: addAntiLeak(r.proto, dip, r.tunName())}
+
 	} else {
-		// The client forges only its SOURCE (no decoy): we receive on the normal conn and forge
-		// nothing on our replies, but the reply target is the configured real peer, not the wire
-		// source, and the source filter must be off (a forged source can't be filtered by).
+
 		r.link = &forgedLink{r: r, spoofFd: -1, pktFd: -1, fixedPeer: fixedPeer}
-		applyConnSockBuf(r.conn) // this branch DOES send and receive on the conn
+		applyConnSockBuf(r.conn)
 	}
 	r.initFec(fec, fecData, fecParity)
 	return r, nil

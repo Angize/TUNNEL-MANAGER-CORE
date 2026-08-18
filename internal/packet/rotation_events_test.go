@@ -13,7 +13,6 @@ import (
 	"time"
 )
 
-// coreStatusEvents reads a coreStatus file and returns its event ring.
 func coreStatusEvents(t *testing.T, path string) []coreEvent {
 	t.Helper()
 	buf, err := os.ReadFile(path)
@@ -30,17 +29,13 @@ func coreStatusEvents(t *testing.T, path string) []coreEvent {
 	return doc.Events
 }
 
-// TestRotateSourceTCPProactiveDefersEvent pins the contract at the point that decides publication: a
-// PROACTIVE source rotation advances the pool but announces NOTHING — the move is not real until the
-// warm carrier goes live at the adoption site — while a FAILOVER rotation, the tunnel really leaving a
-// dead source, is announced at once. Announcing proactively describes a move a failed build never made.
 func TestRotateSourceTCPProactiveDefersEvent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "src.status")
 	b := &TCP{isClient: true, stTag: "tcp", addr: "d0:443"}
 	b.st = newCoreStatus(path, "tcp · d0:443")
 	b.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, 0, ""))
 
-	addr, moved := b.rotateSourceTCP(true) // proactive beat
+	addr, moved := b.rotateSourceTCP(true)
 	if !moved || addr != "10.0.0.6" {
 		t.Fatalf("proactive rotate: addr=%q moved=%v, want 10.0.0.6/true", addr, moved)
 	}
@@ -48,7 +43,7 @@ func TestRotateSourceTCPProactiveDefersEvent(t *testing.T) {
 		t.Fatalf("a proactive source rotation published %d event(s); it must defer to the adoption site: %+v", len(ev), ev)
 	}
 
-	if _, moved := b.rotateSourceTCP(false); !moved { // failover beat
+	if _, moved := b.rotateSourceTCP(false); !moved {
 		t.Fatal("failover rotate should move in a 2-entry pool")
 	}
 	ev := coreStatusEvents(t, path)
@@ -57,10 +52,6 @@ func TestRotateSourceTCPProactiveDefersEvent(t *testing.T) {
 	}
 }
 
-// TestDirectPoolShortDeathEmitsOneDown: a genuine, sub-minLiveness death on a direct destination pool
-// must surface EXACTLY ONE 'down' event — the classified reason — not a "peer-rotate" down from the burn
-// plus the classified one, which leaves the operator reading twice as many disconnects as happened. It
-// stands up a real server on two loopback IPs and drops the client's live connection directly.
 func TestDirectPoolShortDeathEmitsOneDown(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"
@@ -85,7 +76,7 @@ func TestDirectPoolShortDeathEmitsOneDown(t *testing.T) {
 		t.Fatalf("DialTCP: %v", err)
 	}
 	statusPath := filepath.Join(t.TempDir(), "core.status")
-	// Direct dest pool (failover-only) + the coreStatus event ring under test.
+
 	cli.SetPeerPool(NewPeerPool([]string{a1, a2}, 0, ""))
 	cli.SetStatusPath(statusPath)
 
@@ -93,8 +84,6 @@ func TestDirectPoolShortDeathEmitsOneDown(t *testing.T) {
 	go cli.Run()
 	t.Cleanup(func() { cli.Close(); srv.Close() })
 
-	// Wait until the client has a live connection published (curConn is stored right before serve()), so
-	// dropping it takes the post-serve death path, then confirm data actually flows over it.
 	deadline := time.Now().Add(10 * time.Second)
 	for cli.curConn.Load() == nil {
 		if time.Now().After(deadline) {
@@ -110,14 +99,12 @@ func TestDirectPoolShortDeathEmitsOneDown(t *testing.T) {
 		t.Fatalf("client->server payload mismatch: got %d bytes", len(got))
 	}
 
-	// Drop the live connection directly — a genuine death, well within minLiveness.
 	cc := cli.curConn.Load()
 	if cc == nil {
 		t.Fatal("live connection vanished before the drop")
 	}
 	(*cc).Close()
 
-	// Wait for the reconnect 'up' — by then every event for the drop is on disk.
 	deadline = time.Now().Add(15 * time.Second)
 	var events []coreEvent
 	for time.Now().Before(deadline) {
@@ -158,10 +145,6 @@ func hasKind(events []coreEvent, kind string) bool {
 	return false
 }
 
-// TestSourceOnlyRotationDoesNotAnnounceTheDestination drives the REAL dialLoop: a timed rotation whose
-// SOURCE pool moved while the destination pool could not must publish `src-rotate` only. The beat fires
-// when EITHER pool advances, so gating the destination announcement on `b.pp != nil` alone names an
-// endpoint the tunnel never left — the steady state once the other destinations are burned.
 func TestSourceOnlyRotationDoesNotAnnounceTheDestination(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"
@@ -186,7 +169,7 @@ func TestSourceOnlyRotationDoesNotAnnounceTheDestination(t *testing.T) {
 		t.Fatalf("DialTCP: %v", err)
 	}
 	statusPath := filepath.Join(t.TempDir(), "core.status")
-	// One destination (cannot rotate) + two bindable sources on a 1s beat (will rotate).
+
 	cli.SetPeerPool(NewPeerPool([]string{addr}, 0, ""))
 	cli.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, time.Second, ""))
 	cli.SetStatusPath(statusPath)
@@ -195,7 +178,6 @@ func TestSourceOnlyRotationDoesNotAnnounceTheDestination(t *testing.T) {
 	go cli.Run()
 	t.Cleanup(func() { cli.Close(); srv.Close() })
 
-	// Wait for a source rotation to be adopted (the beat is 1s; give it room on a loaded box).
 	deadline := time.Now().Add(20 * time.Second)
 	var events []coreEvent
 	for time.Now().Before(deadline) {
@@ -203,7 +185,7 @@ func TestSourceOnlyRotationDoesNotAnnounceTheDestination(t *testing.T) {
 			events = coreStatusEvents(t, statusPath)
 			for _, e := range events {
 				if e.Code == "src-rotate" {
-					deadline = time.Time{} // got one
+					deadline = time.Time{}
 					break
 				}
 			}

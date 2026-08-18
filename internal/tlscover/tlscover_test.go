@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-// tlsDest runs a TLS server with a recognizable cert CN and hands each accepted
-// connection to serve. Every dest helper below is a thin wrapper on this.
 func tlsDest(t *testing.T, cn string, serve func(c net.Conn)) (addr string) {
 	t.Helper()
 	cert, err := SelfSignedCert(cn)
@@ -34,8 +32,6 @@ func tlsDest(t *testing.T, cn string, serve func(c net.Conn)) (addr string) {
 	return ln.Addr().String()
 }
 
-// realDest stands in for the borrowed site: a normal TLS server with a
-// recognizable cert CN that greets whoever completes a handshake.
 func realDest(t *testing.T, cn string) (addr string) {
 	return tlsDest(t, cn, func(c net.Conn) {
 		c.Write([]byte("HELLO-FROM-REAL\n"))
@@ -44,8 +40,6 @@ func realDest(t *testing.T, cn string) (addr string) {
 	})
 }
 
-// holdingDest completes the handshake and then says nothing and never closes,
-// so ONLY the cover's own idle bound can ever end the relay.
 func holdingDest(t *testing.T, cn string) (addr string) {
 	stop := make(chan struct{})
 	addr = tlsDest(t, cn, func(c net.Conn) {
@@ -57,20 +51,17 @@ func holdingDest(t *testing.T, cn string) (addr string) {
 	return addr
 }
 
-// echoDest echoes forever: a connection that keeps exchanging bytes.
 func echoDest(t *testing.T, cn string) (addr string) {
 	return tlsDest(t, cn, func(c net.Conn) { io.Copy(c, c); c.Close() })
 }
 
-// coverServer runs a REALITY-style cover pointing at destAddr. tweak, if given,
-// adjusts the server BEFORE it accepts anything.
 func coverServer(t *testing.T, psk, destAddr string, tweak func(*Server)) (addr string) {
 	t.Helper()
 	sv, err := NewServer(psk, "real.example")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sv.dest = destAddr // override the :443 dest for the test
+	sv.dest = destAddr
 	if tweak != nil {
 		tweak(sv)
 	}
@@ -88,17 +79,15 @@ func coverServer(t *testing.T, psk, destAddr string, tweak func(*Server)) (addr 
 			go func() {
 				c, err := sv.Handle(raw, time.Now().Add(5*time.Second))
 				if err != nil {
-					return // ErrProbe (proxied) or a bad hello
+					return
 				}
-				c.Write([]byte("TUNNEL-OK\n")) // authenticated client
+				c.Write([]byte("TUNNEL-OK\n"))
 			}()
 		}
 	}()
 	return ln.Addr().String()
 }
 
-// TestCoverAuthenticatedClient: our client (with the token) terminates at the
-// cover server and gets the tunnel greeting, not the real site.
 func TestCoverAuthenticatedClient(t *testing.T) {
 	const psk = "reality-psk-abcdefghij"
 	dest := realDest(t, "real.example")
@@ -118,10 +107,6 @@ func TestCoverAuthenticatedClient(t *testing.T) {
 	}
 }
 
-// TestCoverProbeSeesRealSite: a probe (a plain TLS client WITHOUT the token) is
-// transparently proxied to the real dest, so it completes a handshake against
-// the real site's certificate and reads the real site's bytes — active-probe
-// resistance.
 func TestCoverProbeSeesRealSite(t *testing.T) {
 	const psk = "reality-psk-abcdefghij"
 	dest := realDest(t, "real.example")
@@ -142,10 +127,6 @@ func TestCoverProbeSeesRealSite(t *testing.T) {
 	}
 }
 
-// TestCoverProbeIsNeverDroppedWhenTheRelayPoolIsFull is the whole class: no probe may be closed on the
-// spot because earlier probes hold the relay slots. ⚠ It shrinks ONLY sv.relay and leaves sv.queue at
-// full size, so it passes with or without a working queue — the sibling below is the one that exercises
-// that. What this covers is the idle bound: dest never closes here, so only the idle timer frees a slot.
 func TestCoverProbeIsNeverDroppedWhenTheRelayPoolIsFull(t *testing.T) {
 	const psk = "reality-psk-abcdefghij"
 	dest := holdingDest(t, "real.example")
@@ -157,7 +138,7 @@ func TestCoverProbeIsNeverDroppedWhenTheRelayPoolIsFull(t *testing.T) {
 		return tls.Dial("tcp", cov, &tls.Config{InsecureSkipVerify: true, ServerName: "real.example"})
 	}
 
-	for i := 0; i < 2; i++ { // fill every slot with a probe that then goes silent
+	for i := 0; i < 2; i++ {
 		c, err := probe()
 		if err != nil {
 			t.Fatalf("filler probe %d: %v", i, err)
@@ -175,10 +156,6 @@ func TestCoverProbeIsNeverDroppedWhenTheRelayPoolIsFull(t *testing.T) {
 	}
 }
 
-// TestCoverRelayBoundIsIdleNotLifetime pins the other side of the same knob: the
-// bound must never become a lifetime cap. Cutting a busy relay would break a real
-// download through the cover and be a fingerprint of its own. Green before this
-// change too (there was no bound at all) — it exists to keep it that way.
 func TestCoverRelayBoundIsIdleNotLifetime(t *testing.T) {
 	const psk = "reality-psk-abcdefghij"
 	dest := echoDest(t, "real.example")
@@ -189,7 +166,7 @@ func TestCoverRelayBoundIsIdleNotLifetime(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	for i := 0; i < 10; i++ { // ~1s of chatter across a 200ms idle bound
+	for i := 0; i < 10; i++ {
 		if _, err := c.Write([]byte("x")); err != nil {
 			t.Fatalf("write %d on a busy relay: %v", i, err)
 		}
@@ -201,23 +178,19 @@ func TestCoverRelayBoundIsIdleNotLifetime(t *testing.T) {
 	}
 }
 
-// TestCoverQueueIsNotJustTheRelayPoolAgain is the test the sibling above only looked like. In production
-// maxWaiting == maxRelays, so a queue token held for the goroutine's WHOLE life makes the queue full
-// exactly when the relay pool is, and every new probe is closed on the spot. Shrinking BOTH semaphores
-// to the same small number reproduces that relationship: the third probe must wait, then reach dest.
 func TestCoverQueueIsNotJustTheRelayPoolAgain(t *testing.T) {
 	const psk = "reality-psk-abcdefghij"
 	dest := holdingDest(t, "real.example")
 	cov := coverServer(t, psk, dest, func(sv *Server) {
 		sv.relay = make(chan struct{}, 2)
-		sv.queue = make(chan struct{}, 2) // the production relationship: same size as the relay pool
+		sv.queue = make(chan struct{}, 2)
 		sv.idle = 300 * time.Millisecond
 	})
 	probe := func() (*tls.Conn, error) {
 		return tls.Dial("tcp", cov, &tls.Config{InsecureSkipVerify: true, ServerName: "real.example"})
 	}
 
-	for i := 0; i < 2; i++ { // both relay slots taken by probes that then go silent
+	for i := 0; i < 2; i++ {
 		c, err := probe()
 		if err != nil {
 			t.Fatalf("filler probe %d: %v", i, err)

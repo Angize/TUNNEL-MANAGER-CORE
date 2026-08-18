@@ -11,10 +11,6 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
 
-// tunPairFD is tunPair with the DEVICE end's raw fd exposed, so a test can make the carrier's blocked TUN
-// read fail. Nothing else can: Socketpair hands back BLOCKING fds, so os.NewFile cannot make them
-// pollable and closing the Device does not interrupt a read already parked in the kernel, and on an
-// AF_UNIX SOCK_DGRAM pair closing the PEER does not wake the reader either. shutdown(SHUT_RD) does.
 func tunPairFD(t *testing.T, name string) (*tun.Device, *os.File, int) {
 	t.Helper()
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
@@ -27,10 +23,6 @@ func tunPairFD(t *testing.T, name string) (*tun.Device, *os.File, int) {
 	return dev, ctrl, fds[0]
 }
 
-// TestTunReaderDeathStopsTheCarrier guards against the worst failure this carrier has: a green dot on a
-// tunnel that cannot move a single byte. tunLoop is the ONLY reader of the TUN device, so a
-// fire-and-forget reader that dies leaves the keepalive loop pinging and the failover clock
-// fresh. The assertion is that Run RETURNS, with an error — what turns a dead tunnel into a restart.
 func TestTunReaderDeathStopsTheCarrier(t *testing.T) {
 	const psk = "tun-reader-death-psk-abcdefghijkl"
 	const cipher = "aes-256-gcm"
@@ -45,9 +37,9 @@ func TestTunReaderDeathStopsTheCarrier(t *testing.T) {
 		t.Cleanup(func() { srv.Close() })
 		done := make(chan error, 1)
 		go func() { done <- srv.Run() }()
-		time.Sleep(200 * time.Millisecond) // let the loops start and park in their reads
+		time.Sleep(200 * time.Millisecond)
 
-		syscall.Shutdown(devFd, syscall.SHUT_RD) // the TUN dies — NOT a shutdown; srv.Close was never called
+		syscall.Shutdown(devFd, syscall.SHUT_RD)
 
 		select {
 		case err := <-done:
@@ -62,8 +54,7 @@ func TestTunReaderDeathStopsTheCarrier(t *testing.T) {
 	})
 
 	t.Run("client", func(t *testing.T) {
-		// A real server to dial, so the client is fully established — keepalives running, heartbeat
-		// advancing — which is the state that made this invisible in the first place.
+
 		srvDev, _ := tunPair(t, "a2csrv")
 		addr := freeTCPPort(t)
 		srv, err := ListenTCP([]string{addr}, srvDev, time.Second, false, true, psk, cipher, false, "")
@@ -84,7 +75,7 @@ func TestTunReaderDeathStopsTheCarrier(t *testing.T) {
 		waitFor(t, 5*time.Second, "the client tunnel came up", func() bool { return cli.cur.Load() != nil })
 
 		hbBefore := cli.lastRx.Load()
-		syscall.Shutdown(cliFd, syscall.SHUT_RD) // the client's TUN dies
+		syscall.Shutdown(cliFd, syscall.SHUT_RD)
 
 		select {
 		case err := <-done:
@@ -93,7 +84,7 @@ func TestTunReaderDeathStopsTheCarrier(t *testing.T) {
 			}
 			t.Logf("Run returned as it should: %v", err)
 		case <-time.After(5 * time.Second):
-			// Put the symptom itself in the failure message: the heartbeat kept moving on a dead tunnel.
+
 			if hb := cli.lastRx.Load(); hb > hbBefore {
 				t.Fatalf("the TUN reader died, Run never returned, and the heartbeat ADVANCED anyway "+
 					"(%d -> %d): this is the green dot on a tunnel carrying nothing", hbBefore, hb)

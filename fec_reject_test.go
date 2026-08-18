@@ -5,10 +5,6 @@ import (
 	"testing"
 )
 
-// TestFecRejectionNamesTheCarrier: the FEC rejection listed "tcp/ws" only, so a dns tunnel was refused
-// by a message that never mentioned dns and could reasonably be read as belonging to another tunnel.
-// Every non-datagram carrier must see its own name in the error. Each case starts from a config that
-// validates CLEAN on that transport and turns on nothing but fec, so a pass cannot come from elsewhere.
 func TestFecRejectionNamesTheCarrier(t *testing.T) {
 	build := map[string]func() *Config{
 		"dns": func() *Config {

@@ -13,19 +13,14 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
 
-// These drive openTUN — the function main() itself calls — not a helper beside it.
-// The class they close: a THROUGHPUT knob must never be able to keep the tunnel
-// down, and the startup line must never claim gso is on when it is not.
-
 type openCall struct {
 	name string
 	mtu  int
 	addr string
 	gso  bool
-	n    int // queues asked for
+	n    int
 }
 
-// scriptedOpener stands in for tun.Open: it records each call and answers from fn.
 func scriptedOpener(t *testing.T, calls *[]openCall, fn func(gso bool) error) tunOpener {
 	t.Helper()
 	return func(name string, mtu int, addr string, gso bool, n int) ([]*tun.Device, error) {
@@ -51,8 +46,6 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// A kernel or container without IFF_VNET_HDR used to take the whole tunnel down:
-// tun.Open failed, main called log.Fatalf and systemd restarted the unit forever.
 func TestAKernelWithoutVnetHdrGetsAWorkingTunnelWithoutGSO(t *testing.T) {
 	logs := captureLog(t)
 	var calls []openCall
@@ -79,8 +72,7 @@ func TestAKernelWithoutVnetHdrGetsAWorkingTunnelWithoutGSO(t *testing.T) {
 	if !calls[0].gso || calls[1].gso {
 		t.Fatalf("want gso=true then gso=false, got %v then %v", calls[0].gso, calls[1].gso)
 	}
-	// The retry must differ in exactly one thing. Reopening with a different name,
-	// MTU or address would build a tunnel nobody configured.
+
 	if calls[1].name != calls[0].name || calls[1].mtu != calls[0].mtu || calls[1].addr != calls[0].addr {
 		t.Fatalf("the retry changed more than gso: %+v vs %+v", calls[0], calls[1])
 	}
@@ -89,8 +81,6 @@ func TestAKernelWithoutVnetHdrGetsAWorkingTunnelWithoutGSO(t *testing.T) {
 	}
 }
 
-// The retry exists for gso and nothing else: a failure from a later step (the `ip`
-// commands, a name already in use) must stay fatal on the first try.
 func TestAFailureThatIsNotAboutGSOIsNotRetried(t *testing.T) {
 	var calls []openCall
 	open := scriptedOpener(t, &calls, func(bool) error {
@@ -105,9 +95,6 @@ func TestAFailureThatIsNotAboutGSOIsNotRetried(t *testing.T) {
 	}
 }
 
-// ErrGSOUnsupported cannot tell "no vnet-hdr" from "no CAP_NET_ADMIN" — same ioctl,
-// and the errno does not separate them. So when the plain open fails too, gso was
-// never the problem: report the SECOND error and claim nothing about gso.
 func TestWhenThePlainOpenFailsTooTheRealCauseIsReported(t *testing.T) {
 	logs := captureLog(t)
 	var calls []openCall
@@ -139,7 +126,6 @@ func TestWhenThePlainOpenFailsTooTheRealCauseIsReported(t *testing.T) {
 	}
 }
 
-// The happy path must be untouched: one open, gso stays on, nothing logged about it.
 func TestAKernelWithGSOOpensOnceAndKeepsIt(t *testing.T) {
 	logs := captureLog(t)
 	var calls []openCall
@@ -160,7 +146,6 @@ func TestAKernelWithGSOOpensOnceAndKeepsIt(t *testing.T) {
 	}
 }
 
-// gso=false must reach tun.Open as false and be reported as false.
 func TestGSOOffIsPassedThroughUntouched(t *testing.T) {
 	var calls []openCall
 	open := scriptedOpener(t, &calls, func(bool) error { return nil })

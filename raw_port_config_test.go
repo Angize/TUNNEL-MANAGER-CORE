@@ -2,9 +2,6 @@ package main
 
 import "testing"
 
-// TestRawPortOnlyOnAProfileThatForgesPorts is the mirror of the raw_proto rule. A knob accepted on a
-// profile that ignores it is worse than one refused: it validates, persists, and reads back as set
-// while the wire keeps 443 — the operator believes the carrier moved off QUIC's port and it did not.
 func TestRawPortOnlyOnAProfileThatForgesPorts(t *testing.T) {
 	for _, profile := range []string{"udp", "tcp"} {
 		c := validRaw()
@@ -27,7 +24,7 @@ func TestRawPortOnlyOnAProfileThatForgesPorts(t *testing.T) {
 			t.Errorf("raw_port %d is out of range and must be refused", bad)
 		}
 	}
-	// 0 is "unset" and must stay legal on every profile, or an untouched tunnel stops validating.
+
 	for _, profile := range []string{"bare", "udp", "tcp", "icmp"} {
 		c := validRaw()
 		c.RawProfile, c.RawPort = profile, 0
@@ -37,9 +34,6 @@ func TestRawPortOnlyOnAProfileThatForgesPorts(t *testing.T) {
 	}
 }
 
-// TestSpoofRefusesRawPort: spoof is headerless by definition — it forges no L4 header, so there is no
-// port in it to override. Accepting raw_port there is the same silent no-op the raw case refuses, one
-// transport tab away.
 func TestSpoofRefusesRawPort(t *testing.T) {
 	c := validSpoof()
 	c.RawPort = 51820

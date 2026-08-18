@@ -9,10 +9,6 @@ import (
 	"testing"
 )
 
-// TestOperatorPinIsSilentOnEveryCarrier guards the invariant that "make this active" is a deliberate
-// operator jump and must be COMPLETELY silent: the active endpoint changes and nothing lands in the
-// event ring. Per carrier, because raw and flux carry their own copies of adoptPeer/adoptSource — when
-// those drifted, a manual pin rendered as a red disconnect and flipped the node's liveness to dead.
 func TestOperatorPinIsSilentOnEveryCarrier(t *testing.T) {
 	type statusDoc struct {
 		Active string `json:"active"`
@@ -75,8 +71,7 @@ func TestOperatorPinIsSilentOnEveryCarrier(t *testing.T) {
 			if len(d.Events) != 0 {
 				t.Fatalf("%s: a manual pin must write NO event, got %d: %+v", c.name, len(d.Events), d.Events)
 			}
-			// The pin must still be visible somewhere: the active descriptor is the only channel it uses.
-			// (A source pin leaves `active` alone — it changes the source, not the endpoint we talk to.)
+
 			if wantActiveChange := c.name == "raw/dest" || c.name == "flux/dest" || c.name == "udp/dest"; wantActiveChange {
 				if d.Active == "before" {
 					t.Fatalf("%s: a destination pin must update the active descriptor, still %q", c.name, d.Active)

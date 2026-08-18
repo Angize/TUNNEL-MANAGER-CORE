@@ -8,10 +8,6 @@ import (
 	"testing"
 )
 
-// TestCraftedHeadersLookLikeTheFlowTheyJoin pins the two IPv4 header fields every hand-built packet used
-// to leave at zero. DF was wrong on every packet these functions build — one bit separating each decoy
-// from the flow it imitates, and on flux and the spoof link one bit separating the whole tunnel from an
-// ordinary Linux socket. The ID mattered only on AF_PACKET, since IP_HDRINCL fills a zero ID itself.
 func TestCraftedHeadersLookLikeTheFlowTheyJoin(t *testing.T) {
 	src, dst := net.IPv4(10, 99, 0, 1), net.IPv4(10, 99, 0, 2)
 	body := []byte("a sealed core frame")
@@ -48,8 +44,7 @@ func TestCraftedHeadersLookLikeTheFlowTheyJoin(t *testing.T) {
 			seen[id] = true
 		}
 	}
-	// ...and it must actually VARY. A constant non-zero ID would satisfy every check above while
-	// being just as much of a signature as zero.
+
 	if len(seen) < 150 {
 		t.Fatalf("192 packets produced only %d distinct Identification values — a near-constant ID is "+
 			"the same tell as ID=0 wearing a different number", len(seen))

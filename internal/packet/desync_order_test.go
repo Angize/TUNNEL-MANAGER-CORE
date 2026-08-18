@@ -8,9 +8,6 @@ import (
 	"time"
 )
 
-// countingRelay forwards a connection to target and counts the bytes the CLIENT has put on the wire.
-// It counts them as it READS them, i.e. at the earliest possible moment — so "0" really means we had
-// not sent anything yet, with no timing slack in our favour.
 type countingRelay struct {
 	ln net.Listener
 	up atomic.Int64
@@ -66,9 +63,6 @@ func (r *countingRelay) pipe(cli net.Conn, target string) {
 	srv.Close()
 }
 
-// assertDecoysFirst drives the REAL dial sequence — dialCarrier then handshakeAndPrime, exactly as
-// dialLoop and the single-edge retest dial do — and asserts the decoy injection happened before a
-// single byte of ours reached the wire.
 func assertDecoysFirst(t *testing.T, b *TCP, relay *countingRelay) {
 	t.Helper()
 	var calls int
@@ -101,10 +95,6 @@ func assertDecoysFirst(t *testing.T, b *TCP, relay *countingRelay) {
 	}
 }
 
-// TestDesyncDecoysGoOutBeforeAnyOfOurBytes pins where fake_desync fires: on the bare 4-tuple, before the
-// cover handshake or the WebSocket upgrade the decoys are meant to hide. The ordering is not visible in
-// the byte stream — decoys leave via AF_PACKET, not through the conn — so the test observes the injection
-// point (b.dsWatch) and asks how many of our bytes were on the wire. Real injection stays off.
 func TestDesyncDecoysGoOutBeforeAnyOfOurBytes(t *testing.T) {
 	const psk = "desync-order-pre-shared-key-12345"
 	const cipher = "aes-256-gcm"
@@ -148,8 +138,6 @@ func TestDesyncDecoysGoOutBeforeAnyOfOurBytes(t *testing.T) {
 		assertDecoysFirst(t, cli, relay)
 	})
 
-	// Plain tcp was already correct — it is here so a future change cannot quietly break the one
-	// carrier that never had the bug.
 	t.Run("plain tcp", func(t *testing.T) {
 		srvDev, _ := tunPair(t, "dsops")
 		addr := freeTCPPort(t)

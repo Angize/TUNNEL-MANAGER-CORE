@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-// capConn is a net.Conn that records what was written and exposes chosen addresses, so the SNI
-// fragmentation paths can be driven without a real socket.
 type capConn struct {
 	buf        bytes.Buffer
 	local, rem net.Addr
@@ -34,8 +32,6 @@ func fragLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// hello builds a stand-in ClientHello carrying host in cleartext (or not, when host is empty —
-// which is what ECH looks like from this layer).
 func hello(host string) []byte {
 	var b bytes.Buffer
 	b.WriteString("\x16\x03\x01padding-before-the-name-")
@@ -44,13 +40,9 @@ func hello(host string) []byte {
 	return b.Bytes()
 }
 
-// TestFakeModeSaysWhenItCouldNotRun is the regression test for sni_mode=fake degrading in silence. The
-// operator picks «fake», the only mode that beats a DPI reassembling the TCP stream, and the panel keeps
-// showing it — so a container missing CAP_NET_ADMIN, an IPv6 edge or a conn with no raw fd must not leave
-// the tunnel on a materially weaker defence without a word.
 func TestFakeModeSaysWhenItCouldNotRun(t *testing.T) {
 	buf := fragLog(t)
-	// A conn whose addresses are not TCP: writeFake's very first bail-out.
+
 	c := &capConn{local: strAddr("local"), rem: strAddr("remote")}
 	f := newFragConn(c, "example.com", 0, sniFakeMode, 0, false, nil)
 	if _, err := f.Write(hello("example.com")); err != nil {
@@ -62,7 +54,6 @@ func TestFakeModeSaysWhenItCouldNotRun(t *testing.T) {
 			"strongest mode on a tunnel that is not running it", out)
 	}
 
-	// Once per connection: a second write must not repeat it.
 	buf.Reset()
 	if _, err := f.Write(hello("example.com")); err != nil {
 		t.Fatal(err)
@@ -72,22 +63,16 @@ func TestFakeModeSaysWhenItCouldNotRun(t *testing.T) {
 	}
 }
 
-// TestFakeModeRefusesAByteIdenticalDecoy pins the ECH case. With the hostname encrypted there is nothing
-// in the ClientHello to overwrite, so the "decoy" is a byte-for-byte copy: injecting it at the same
-// sequence with a corrupt checksum gives a reassembling DPI the SNI it would have seen anyway, while a
-// duplicate bad-checksum segment is itself a signature. Reachable whenever ECH is on and split_pos is set.
 func TestFakeModeRefusesAByteIdenticalDecoy(t *testing.T) {
 	buf := fragLog(t)
-	// Real TCP addresses, so the earlier bail-outs are passed and the decoy branch is the one reached.
+
 	c := &capConn{
 		local: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 40000},
 		rem:   &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 443},
 	}
-	// An explicit split_pos, so splitAt does not need the hostname — and a payload that does NOT
-	// contain it, which is what ECH leaves behind. ech=true because that is the situation described:
-	// the refusal is right either way, but only this arm may claim there is nothing left to hide.
+
 	f := newFragConn(c, "example.com", 12, sniFakeMode, 0, true, nil)
-	p := hello("") // no cleartext hostname anywhere in the buffer
+	p := hello("")
 	if bytes.Contains(p, []byte("example.com")) {
 		t.Fatal("the fixture must not carry the hostname in cleartext")
 	}
@@ -104,18 +89,12 @@ func TestFakeModeRefusesAByteIdenticalDecoy(t *testing.T) {
 	}
 }
 
-// TestSNISplitSaysWhenNothingIsSplit: under ECH the cleartext search finds nothing, splitAt returns 0 and
-// the ClientHello goes out whole, while the config, the panel and the startup log all still say sni_split
-// is on. The behaviour is correct — there is no cleartext SNI left to straddle a boundary — but silence
-// let an operator running ECH plus sni_split believe both were active when only one was.
 func TestSNISplitSaysWhenNothingIsSplit(t *testing.T) {
 	for _, tc := range []struct {
 		name, host, want string
 		ech              bool
 	}{
-		// ech must be TRUE here: this case IS the ECH one, and the message it asserts is the one that
-		// concludes there is nothing left to protect. Passing false would make it assert that
-		// conclusion for a dial with no ECH at all — the defect this signature exists to prevent.
+
 		{"ech hides the hostname", "example.com", "not in the ClientHello in cleartext", true},
 		{"carrier dials with no SNI", "", "no SNI", false},
 	} {
@@ -134,7 +113,6 @@ func TestSNISplitSaysWhenNothingIsSplit(t *testing.T) {
 		}
 	}
 
-	// An out-of-range split_pos is its own cause and must name itself, not blame ECH.
 	buf := fragLog(t)
 	c := &capConn{local: strAddr("l"), rem: strAddr("r")}
 	p := hello("example.com")
@@ -146,7 +124,6 @@ func TestSNISplitSaysWhenNothingIsSplit(t *testing.T) {
 		t.Fatalf("an out-of-range split_pos must say so, got %q", got)
 	}
 
-	// And the case that WORKS must stay silent, or the line becomes noise on every healthy tunnel.
 	buf = fragLog(t)
 	c = &capConn{local: strAddr("l"), rem: strAddr("r")}
 	f = newFragConn(c, "example.com", 0, sniSplitMode, 0, false, nil)

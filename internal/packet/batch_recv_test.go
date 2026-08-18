@@ -13,8 +13,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// readSource returns a file of this package as text, for the few checks that can only be made against
-// the call site -- where the behaviour is real but needs root, or is invisible from outside the call.
 func readSource(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(name)
@@ -24,17 +22,6 @@ func readSource(t *testing.T, name string) string {
 	return string(b)
 }
 
-// The receive side takes a burst in one recvmmsg instead of one recvfrom per packet. A CPU profile of
-// a saturated receiving end put HALF the core in the syscall boundary while the AEAD was under 3%.
-//
-// These drive a real socket rather than the batcher's fields, because all three ways this can go wrong
-// are invisible from the outside: it can wait to FILL the array (a stall, not a wrong answer), it can
-// hand every slot the same buffer (every message reads as the last one), and it can drop whatever did
-// not fit in one call. A test that inspected the struct would pass through all three.
-
-// listener returns a bound udp socket and a sender aimed at it. udp, not the carrier's raw socket,
-// because a raw socket needs root and the batcher is what is under test -- it is handed an
-// ipv4.PacketConn and never learns which kind of socket is underneath.
 func listener(t *testing.T) (*ipv4.PacketConn, *net.UDPConn, *net.UDPConn) {
 	t.Helper()
 	rx, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -50,8 +37,6 @@ func listener(t *testing.T) (*ipv4.PacketConn, *net.UDPConn, *net.UDPConn) {
 	return ipv4.NewPacketConn(rx), rx, tx
 }
 
-// recvOrTimeout fails instead of hanging, which is the whole point: without MSG_WAITFORONE the call
-// blocks until the array fills, so "it stalled" has to be a test failure and not a stuck run.
 func recvOrTimeout(t *testing.T, b *recvBatcher, pc *ipv4.PacketConn) []ipv4.Message {
 	t.Helper()
 	type res struct {
@@ -77,7 +62,7 @@ func TestABurstIsTakenWithoutWaitingForTheArrayToFill(t *testing.T) {
 	pc, _, tx := listener(t)
 	b := newRecvBatcher(maxRecvBatch)
 
-	const sent = 3 // fewer than the array holds, so a fill-first read would never return
+	const sent = 3
 	for i := 0; i < sent; i++ {
 		if _, err := tx.Write([]byte{byte('a' + i)}); err != nil {
 			t.Fatal(err)
@@ -89,14 +74,11 @@ func TestABurstIsTakenWithoutWaitingForTheArrayToFill(t *testing.T) {
 	}
 }
 
-// The depth is the whole point: a burst has to come back in ONE call rather than in instalments, both
-// because each call is a syscall and because the run it returns is what the TUN writer joins into a
-// single write. A shallower array silently caps both.
 func TestAWholeBurstComesBackInOneCall(t *testing.T) {
 	pc, _, tx := listener(t)
 	b := newRecvBatcher(maxRecvBatch)
 
-	const sent = 40 // more than a batch used to hold, fewer than one holds now
+	const sent = 40
 	for i := 0; i < sent; i++ {
 		if _, err := tx.Write([]byte{byte(i)}); err != nil {
 			t.Fatal(err)
@@ -123,7 +105,7 @@ func TestEverySlotKeepsItsOwnBytes(t *testing.T) {
 		t.Fatalf("took %d of %d", len(ms), len(want))
 	}
 	for i := range ms {
-		// N, not the buffer length: a slot reused from a longer earlier packet keeps that tail.
+
 		if got := string(ms[i].Buffers[0][:ms[i].N]); got != want[i] {
 			t.Fatalf("slot %d carried %q, want %q -- the slots are sharing a buffer", i, got, want[i])
 		}
@@ -156,9 +138,6 @@ func TestWhatDoesNotFitInOneCallIsStillThereForTheNext(t *testing.T) {
 	}
 }
 
-// The server pins its reply source from the IP_PKTINFO control message of the frame it is answering.
-// That arrives per MESSAGE now, so the oob has to be read at that message's own NN -- reading the whole
-// buffer, or one shared oob, points the reply at whatever the previous packet was aimed at.
 func TestEachMessageCarriesItsOwnControlMessage(t *testing.T) {
 	pc, rx, tx := listener(t)
 	rc, err := rx.SyscallConn()
@@ -188,11 +167,6 @@ func TestEachMessageCarriesItsOwnControlMessage(t *testing.T) {
 	}
 }
 
-// The test above proves the KERNEL fills a per-message oob and length. It cannot prove the receive
-// loop reads them per message, because that loop needs a raw socket and root. Both lengths are the
-// kind of mistake that reads fine and behaves fine on the first packet of a run, so the call site is
-// checked here: N and NN are per-message, and using the slot's full buffer instead serves the previous
-// packet's tail and the previous packet's destination.
 func TestTheReceiveLoopSlicesEachMessageByItsOwnLengths(t *testing.T) {
 	src := readSource(t, "raw_linux.go")
 	for _, want := range []string{"m.OOB[:m.NN]", "m.Buffers[0][:m.N]"} {
@@ -202,8 +176,6 @@ func TestTheReceiveLoopSlicesEachMessageByItsOwnLengths(t *testing.T) {
 	}
 }
 
-// A slot must hold whatever the single-packet read held, or this change starts dropping frames that
-// used to work -- silently, since a truncated frame simply fails the AEAD.
 func TestASlotHoldsAFullDatagram(t *testing.T) {
 	b := newRecvBatcher(maxRecvBatch)
 	for i, m := range b.ms {

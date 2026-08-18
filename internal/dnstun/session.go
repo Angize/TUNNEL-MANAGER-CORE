@@ -11,41 +11,26 @@ import (
 	kcp "github.com/xtaci/kcp-go/v5"
 )
 
-// WireTransport ships opaque, unreliable datagrams to and from the ONE peer. The DNS carrier implements
-// it over DNS queries and responses; tests drive it with an in-memory lossy pipe. Send is best-effort —
-// a datagram may be lost or reordered — and Recv blocks for the next inbound one, erroring once the
-// transport closes. The reliability and ordering the tunnel needs are supplied ABOVE this by kcp-go.
 type WireTransport interface {
 	Send(datagram []byte) error
 	Recv() ([]byte, error)
 	Close() error
 }
 
-// Every WireTransport datagram carries a 1-byte kind prefix. All kinds are self-authenticating even if
-// flipped: a data/ping/pong parsed as a handshake fails the PSK MAC, and a handshake parsed as sealed
-// data fails the AEAD — either way it is dropped, not acted on.
 const (
 	kindHandshake = 0x00
 	kindData      = 0x01
-	kindPing      = 0x02 // client -> server sealed keepalive; the server echoes a kindPong
-	kindPong      = 0x03 // server -> client sealed keepalive reply
+	kindPing      = 0x02
+	kindPong      = 0x03
 )
 
-// Client keepalive. The client sends a sealed ping every keepalive and re-dials, with a fresh init, if it
-// hears nothing authentic for deadWindow — the ONLY way it detects a server that restarted or a session
-// the server tore down, since KCP's own dead-link never fires on a silent link. Floored generously: this
-// carrier is high-loss, so the window must survive several dropped pings.
 const keepaliveDeadMult = 3
 
-// Vars (not consts) so a test can shorten them; production keeps these.
 var (
 	defaultKeepalive   = 10 * time.Second
 	keepaliveDeadFloor = 20 * time.Second
 )
 
-// SessionConfig carries the crypto parameters both ends share (from the tunnel config), the KCP MTU the
-// transport can carry in one datagram (MTU<=0 falls back to kcpMTUDefault), and the client keepalive
-// interval (0 falls back to defaultKeepalive).
 type SessionConfig struct {
 	PSK       string
 	Cipher    string
@@ -53,77 +38,42 @@ type SessionConfig struct {
 	Keepalive time.Duration
 }
 
-// peerKey is the single logical peer identity on both ends' QueuePacketConn. The tunnel is
-// point-to-point (one client ⇄ one server), so a fixed key suffices; it is never on the wire.
 var peerKey = ClientID{0xD1, 0x5C, 0xA5, 0x5E, 0x55, 0x10, 0x0A, 0x1D}
 
-// kcpMTUDefault bounds a KCP datagram when the caller doesn't compute one. The DNS transport
-// derives the real value from the query-name budget (codec.MaxUpstream minus AEAD/kind overhead)
-// so every KCP datagram rides exactly one DNS query.
 const kcpMTUDefault = 220
 
-// SessionOverhead is the per-datagram cost the DNS transport must subtract from the codec's
-// MaxUpstream to get the KCP MTU: the 1-byte kind prefix plus AEAD sealing (12-byte mask salt +
-// up to a 24-byte nonce + 16-byte tag). A few bytes of slack keeps xchacha (24-byte nonce) safe.
 const SessionOverhead = 1 + 12 + 24 + 16 + 3
 
-// KCPOverhead is kcp-go's own per-segment header (IKCP_OVERHEAD). Every KCP datagram spends this
-// many bytes before it carries a byte of payload, so an MTU near it is nearly all header. Exported
-// so the caller can floor its MTU against the real number instead of a copy that can drift.
 const KCPOverhead = 24
 
-// MinUsefulMTU is the smallest KCP MTU the DNS carrier will accept. The ceiling is low to begin with — a
-// query name is 255 bytes, base32 costs 8 characters per 5, and the zone and nonce labels share that
-// budget. The floor is what KCP itself enforces plus a margin, not a throughput opinion: below
-// KCPOverhead SetMtu refuses outright and the carrier dies silently, above it the tunnel is merely slow.
 const MinUsefulMTU = KCPOverhead + 16
 
 const handshakeRetxInterval = 500 * time.Millisecond
 
-// handshakeTimeout is a var (not const) only so a test can shorten it; production keeps 15s,
-// generous for a slow DNS channel where a lost init/resp costs a full retransmit interval.
 var handshakeTimeout = 15 * time.Second
 
-// sessionConn is the reliable, AEAD-authenticated byte stream the carrier reads/writes. It is a
-// net.Conn (the kcp-go session) whose Close also tears down the seal pumps, queue conn and
-// transport. The carrier frames tunnel packets over it.
 type sessionConn struct {
 	*kcp.UDPSession
 	qpc *QueuePacketConn
 	t   WireTransport
-	// sealer authenticates the byte stream. It is an atomic.Pointer because the server can SWAP it: when
-	// the armed client vanishes before completing KCP and a new one proves itself, recvPump ADOPTS that
-	// session in place so the same AcceptKCP returns the new client — no teardown, no reconnect. Stored
-	// once at construction and swapped only by recvPump; sendPump only Loads it.
+
 	sealer atomic.Pointer[crypto.Sealer]
-	// staged is a BOUNDED set of sessions staged by recent different-ephemeral inits (server only). A data
-	// datagram that actually OPENS under a candidate proves a real, live new client — a replayed init
-	// never can — and then either adopts it in place or tears down. A SET, not one slot, so a replay
-	// cannot evict a legit candidate. Written and read on the single recvPump goroutine, so no lock.
+
 	staged []stagedSession
-	// lastRx is the unix-nano of the last authentic inbound frame (data, ping, or pong). The client's
-	// keepalive goroutine ages it against deadWindow to detect a dead/mismatched session and re-dial.
+
 	lastRx    atomic.Int64
 	done      chan struct{}
 	closeOnce sync.Once
 }
 
-// stagedSession is one server-side staged candidate: the client's init ephemeral (so a retransmit of
-// the SAME init is re-answered from resp without re-deriving), its derived sealer, and that cached
-// handshake response.
 type stagedSession struct {
 	eInit  [32]byte
 	sealer *crypto.Sealer
 	resp   []byte
 }
 
-// maxStaged bounds the staged-candidate set. Small: on the normal path the set holds one entry, and
-// every non-live datagram trial-opens against each entry, so the bound also caps that per-packet work.
 const maxStaged = 8
 
-// Close tears down the whole session exactly once, unblocking every loop. UDPSession may be nil
-// on a server error path (AcceptKCP failed before it was set), so it is guarded. Closing t makes
-// the transport's Recv return, which stops recvFanout.
 func (sc *sessionConn) Close() error {
 	sc.closeOnce.Do(func() {
 		close(sc.done)
@@ -136,8 +86,6 @@ func (sc *sessionConn) Close() error {
 	return nil
 }
 
-// recvFanout reads the transport and fans datagrams onto inCh until the session closes or the
-// transport dies. One reader keeps the handshake step and the data pump from racing on Recv.
 func recvFanout(t WireTransport, inCh chan<- []byte, done <-chan struct{}) {
 	for {
 		d, err := t.Recv()
@@ -153,7 +101,6 @@ func recvFanout(t WireTransport, inCh chan<- []byte, done <-chan struct{}) {
 	}
 }
 
-// sendPump drains kcp-go's outgoing datagrams, AEAD-seals each, and ships it over the transport.
 func (sc *sessionConn) sendPump() {
 	out := sc.qpc.OutgoingQueue(peerKey)
 	for {
@@ -170,14 +117,8 @@ func (sc *sessionConn) sendPump() {
 	}
 }
 
-// recvPump opens inbound datagrams and feeds data plaintext to kcp-go, answers keepalive pings, and
-// tracks liveness. onHandshake handles a late/duplicate handshake datagram (the server re-answers a
-// retransmitted init; the client ignores it). A datagram that fails to open is dropped in silence.
 func (sc *sessionConn) recvPump(inCh <-chan []byte, onHandshake func([]byte)) {
-	// liveProven flips true the first time a frame opens under the LIVE sealer — i.e. the live session
-	// is established / establishing. It gates promotion of a staged session: adopt-in-place while the
-	// armed session is still unproven (its client may have vanished), tear-down once it is established.
-	// recvPump-goroutine-local (onHandshake runs inline here too), so it needs no lock.
+
 	liveProven := false
 	for {
 		select {
@@ -185,9 +126,7 @@ func (sc *sessionConn) recvPump(inCh <-chan []byte, onHandshake func([]byte)) {
 			return
 		case d, ok := <-inCh:
 			if !ok {
-				// The transport died (recvFanout closed inCh). Close the queue conn so a
-				// blocked kcp read/AcceptKCP unblocks and the dead session tears down promptly
-				// instead of waiting for kcp's dead-link timeout.
+
 				_ = sc.qpc.Close()
 				return
 			}
@@ -197,29 +136,24 @@ func (sc *sessionConn) recvPump(inCh <-chan []byte, onHandshake func([]byte)) {
 			switch d[0] {
 			case kindData:
 				if _, _, pt, err := sc.sealer.Load().Open(d[1:], nil); err == nil {
-					liveProven = true // a real frame opened under the live session -> it is (being) established
+					liveProven = true
 					sc.lastRx.Store(time.Now().UnixNano())
 					sc.qpc.QueueIncoming(pt, peerKey)
 					continue
 				}
-				sc.tryStaged(d[1:], true, &liveProven) // a data frame's KCP SYN adopts a proven new client
+				sc.tryStaged(d[1:], true, &liveProven)
 			case kindPing:
 				if _, _, _, err := sc.sealer.Load().Open(d[1:], nil); err == nil {
-					// NOT liveProven. A ping proves the peer is ALIVE; liveProven means the KCP session is ESTABLISHED,
-					// and those are different facts — tryStaged tears down rather than adopting only because an
-					// established conv-0 KCP session cannot be retrofitted, and a ping establishes no KCP. lastRx and
-					// the pong are untouched: those ARE about liveness, which is what a ping really carries.
+
 					sc.lastRx.Store(time.Now().UnixNano())
-					sc.sendKind(kindPong) // server: echo so the client's keepalive sees a live session
+					sc.sendKind(kindPong)
 					continue
 				}
-				// A ping under a STAGED sealer proves a new client is alive but carries no KCP frame to
-				// feed, so tryStaged has nothing to adopt with: it tears down if the live session is
-				// already established, and otherwise waits for that client's first data frame.
+
 				sc.tryStaged(d[1:], false, &liveProven)
 			case kindPong:
 				if _, _, _, err := sc.sealer.Load().Open(d[1:], nil); err == nil {
-					sc.lastRx.Store(time.Now().UnixNano()) // client: our keepalive was answered -> session live
+					sc.lastRx.Store(time.Now().UnixNano())
 				}
 			case kindHandshake:
 				if onHandshake != nil {
@@ -230,10 +164,6 @@ func (sc *sessionConn) recvPump(inCh <-chan []byte, onHandshake func([]byte)) {
 	}
 }
 
-// tryStaged handles a frame the live session could not open by trying each staged candidate (server
-// only). The first that opens proves a real, live new client, which a replayed init can never produce.
-// If the live session has never carried data and this is a data frame, adopt the new client IN PLACE and
-// feed its KCP SYN; once the live session is established, tear down so the carrier reconnects instead.
 func (sc *sessionConn) tryStaged(payload []byte, isData bool, liveProven *bool) {
 	for i := range sc.staged {
 		_, _, pt, perr := sc.staged[i].sealer.Open(payload, nil)
@@ -242,7 +172,7 @@ func (sc *sessionConn) tryStaged(payload []byte, isData bool, liveProven *bool) 
 		}
 		switch {
 		case *liveProven:
-			_ = sc.qpc.Close() // established: tear down -> carrier reconnects and re-accepts the new client
+			_ = sc.qpc.Close()
 		case isData:
 			sc.sealer.Store(sc.staged[i].sealer)
 			sc.staged = nil
@@ -254,7 +184,6 @@ func (sc *sessionConn) tryStaged(payload []byte, isData bool, liveProven *bool) 
 	}
 }
 
-// sendKind ships a sealed zero-length control frame (a ping or pong) over the transport.
 func (sc *sessionConn) sendKind(kind byte) {
 	s := sc.sealer.Load()
 	if s == nil {
@@ -267,10 +196,6 @@ func (sc *sessionConn) sendKind(kind byte) {
 	_ = sc.t.Send(append([]byte{kind}, sealed...))
 }
 
-// keepalive (client only) sends a sealed ping every interval and re-dials — by Closing the session so the
-// carrier's Read errors — if nothing authentic has arrived for deadWindow. This is what detects a server
-// that restarted or a session it tore down: the mismatched server cannot produce a valid pong, so lastRx
-// ages out. interval and deadWindow are resolved by the caller, so this goroutine reads no tunables.
 func (sc *sessionConn) keepalive(interval, deadWindow time.Duration) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -281,16 +206,13 @@ func (sc *sessionConn) keepalive(interval, deadWindow time.Duration) {
 		case <-t.C:
 			sc.sendKind(kindPing)
 			if last := sc.lastRx.Load(); last != 0 && time.Since(time.Unix(0, last)) > deadWindow {
-				_ = sc.Close() // idempotent; unblocks the carrier read -> reconnect with a fresh init
+				_ = sc.Close()
 				return
 			}
 		}
 	}
 }
 
-// resolveKeepalive turns the configured interval into (interval, deadWindow), applying the defaults and
-// the DNS-carrier floor. Called synchronously in DialSession so the keepalive goroutine holds only
-// local copies (no shared read of the package tunables).
 func resolveKeepalive(interval time.Duration) (time.Duration, time.Duration) {
 	if interval <= 0 {
 		interval = defaultKeepalive
@@ -298,8 +220,6 @@ func resolveKeepalive(interval time.Duration) (time.Duration, time.Duration) {
 	return interval, resolveDeadWindow(interval)
 }
 
-// resolveDeadWindow is the window the client's keepalive goroutine enforces before it reaps a silent
-// session: keepaliveDeadMult×keepalive, floored generously because this carrier is high-loss.
 func resolveDeadWindow(keepalive time.Duration) time.Duration {
 	if keepalive <= 0 {
 		keepalive = defaultKeepalive
@@ -311,18 +231,12 @@ func resolveDeadWindow(keepalive time.Duration) time.Duration {
 	return dw
 }
 
-// dialFail is the shared pre-handshake teardown for Dial/ServeSession: signal the recv fanout to stop,
-// close the transport, and return the error. (The post-handshake failure path also closes qpc and is
-// left inline.)
 func dialFail(done chan struct{}, t WireTransport, err error) (net.Conn, error) {
 	close(done)
 	_ = t.Close()
 	return nil, err
 }
 
-// DialSession (client) runs the X25519 handshake over t (retransmitting the init until the
-// responder answers or the deadline passes), then returns a reliable, AEAD-authenticated stream
-// to the server. The caller must Close the returned conn to release the transport and goroutines.
 func DialSession(t WireTransport, cfg SessionConfig) (net.Conn, error) {
 	done := make(chan struct{})
 	inCh := make(chan []byte, 256)
@@ -346,7 +260,7 @@ handshake:
 		case <-deadline.C:
 			return dialFail(done, t, errors.New("dns session: handshake timed out"))
 		case <-retx.C:
-			_ = t.Send(initDG) // the transport is lossy — resend until answered
+			_ = t.Send(initDG)
 		case d, ok := <-inCh:
 			if !ok {
 				return dialFail(done, t, errors.New("dns session: transport closed during handshake"))
@@ -377,19 +291,15 @@ handshake:
 	}
 	tuneSession(conn, cfg.MTU)
 	sc := &sessionConn{UDPSession: conn, qpc: qpc, t: t, done: done}
-	sc.sealer.Store(sealer) // before the pumps start: sendPump's first Seal must not Load a nil sealer
+	sc.sealer.Store(sealer)
 	sc.lastRx.Store(time.Now().UnixNano())
 	kaInterval, kaDeadWindow := resolveKeepalive(cfg.Keepalive)
 	go sc.sendPump()
-	go sc.recvPump(inCh, nil)                 // client ignores any late handshake datagrams
-	go sc.keepalive(kaInterval, kaDeadWindow) // detect a dead/mismatched server and re-dial (client only)
+	go sc.recvPump(inCh, nil)
+	go sc.keepalive(kaInterval, kaDeadWindow)
 	return sc, nil
 }
 
-// ServeSession (server) waits for a valid init on t, derives the session and answers, then returns the
-// reliable stream once the client's kcp-go session establishes. It re-answers a retransmitted init (same
-// ephemeral) so a lost response self-heals. Single-session: a NEW, PSK-authenticated init is STAGED and
-// answered but does not replace the live session until a datagram actually opens under it.
 func ServeSession(t WireTransport, cfg SessionConfig) (net.Conn, error) {
 	done := make(chan struct{})
 	inCh := make(chan []byte, 256)
@@ -427,29 +337,25 @@ func ServeSession(t WireTransport, cfg SessionConfig) (net.Conn, error) {
 
 	qpc := NewQueuePacketConn(peerKey)
 	sc := &sessionConn{qpc: qpc, t: t, done: done}
-	sc.sealer.Store(sealer) // before the pumps start (below): sendPump's first Seal must not Load nil
+	sc.sealer.Store(sealer)
 	sc.lastRx.Store(time.Now().UnixNano())
-	// Re-answer a retransmit of the SAME init, so a lost response self-heals. A DIFFERENT ephemeral might
-	// be a new client dialing after a restart — or a REPLAYED old init an attacker captured, which still
-	// verifies the PSK MAC — so tearing the live session down on sight is a remote DoS. STAGE it and answer
-	// it instead; only a data datagram that actually opens under a candidate promotes it.
+
 	onHS := func(hs []byte) {
 		e, err := crypto.ParseInit(cfg.PSK, hs)
 		if err != nil {
-			return // unauthenticated/garbage init: never touch the live or staged sessions
+			return
 		}
 		if e == gotInit {
-			_ = t.Send(respDG) // retransmit of the CURRENT armed init: re-answer, self-heal
+			_ = t.Send(respDG)
 			return
 		}
 		for i := range sc.staged {
 			if sc.staged[i].eInit == e {
-				_ = t.Send(sc.staged[i].resp) // retransmit of a STAGED init: re-answer without re-deriving
+				_ = t.Send(sc.staged[i].resp)
 				return
 			}
 		}
-		// A new, PSK-authenticated init: derive + STAGE (do not adopt) a candidate session and answer
-		// it. Evict the OLDEST first (FIFO) when the set is full so this newest candidate survives.
+
 		sr, gerr := crypto.GenerateEphemeralNoPad()
 		if gerr != nil {
 			return
@@ -473,7 +379,7 @@ func ServeSession(t WireTransport, cfg SessionConfig) (net.Conn, error) {
 		sc.Close()
 		return nil, err
 	}
-	conn, err := lis.AcceptKCP() // returns once the client's first KCP datagram arrives
+	conn, err := lis.AcceptKCP()
 	if err != nil {
 		sc.Close()
 		return nil, err
@@ -483,10 +389,6 @@ func ServeSession(t WireTransport, cfg SessionConfig) (net.Conn, error) {
 	return sc, nil
 }
 
-// tuneSession applies the DNS-appropriate KCP settings. The carrier is HIGH-LATENCY and strictly paced at
-// about one datagram per round-trip by the client's poll loop, so a LAN turbo profile fires spurious
-// retransmits before an ACK can return and never converges. Instead: stream mode, nodelay OFF so the
-// min-RTO adapts up to the measured RTT, fast-retransmit disabled, and a flush interval matched to the pace.
 func tuneSession(s *kcp.UDPSession, mtu int) {
 	if mtu <= 0 {
 		mtu = kcpMTUDefault

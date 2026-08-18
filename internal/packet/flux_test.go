@@ -5,8 +5,6 @@ import (
 	"time"
 )
 
-// Both ends must derive the SAME shape from (PSK, epoch) — this is what lets them
-// rotate without any wire signal.
 func TestFluxShapeDeterministic(t *testing.T) {
 	for _, ep := range []int64{0, 1, 4471, 1 << 40} {
 		a := deriveFluxShape("hunter2", ep, "random")
@@ -26,9 +24,6 @@ func TestFluxShapeDeterministic(t *testing.T) {
 	}
 }
 
-// The shape profile changes the control-frame padding budget (the size signature)
-// but never the carrier ports, which must stay profile-independent so both ends
-// interoperate regardless of the mimicry profile chosen.
 func TestFluxShapeProfileOnlyChangesPadding(t *testing.T) {
 	r := deriveFluxShape("hunter2", 42, "random")
 	v := deriveFluxShape("hunter2", 42, "video")
@@ -40,7 +35,6 @@ func TestFluxShapeProfileOnlyChangesPadding(t *testing.T) {
 	}
 }
 
-// A different PSK must derive a different shape schedule (the shape is keyed).
 func TestFluxShapeKeyed(t *testing.T) {
 	same := 0
 	for ep := int64(0); ep < 64; ep++ {
@@ -48,17 +42,15 @@ func TestFluxShapeKeyed(t *testing.T) {
 			same++
 		}
 	}
-	// The source port spans 40000 values, so even one collision across 64 epochs is
-	// already improbable; all-64 identical would mean the PSK is not mixed in.
+
 	if same == 64 {
 		t.Fatal("two PSKs derived the identical port schedule — PSK not keyed into the shape")
 	}
 }
 
-// The epoch index advances by exactly one per rotation period and is stable within it.
 func TestFluxEpochBoundary(t *testing.T) {
 	rotate := 10 * time.Second
-	base := time.Unix(1_000_000_000, 0) // arbitrary fixed instant
+	base := time.Unix(1_000_000_000, 0)
 	e0 := fluxEpochAt(rotate, base)
 	if got := fluxEpochAt(rotate, base.Add(9*time.Second)); got != e0 {
 		t.Fatalf("epoch changed within the period: %d != %d", got, e0)
@@ -68,8 +60,6 @@ func TestFluxEpochBoundary(t *testing.T) {
 	}
 }
 
-// The grace window must contain the current epoch's destination port plus its
-// neighbours', so a frame sent just before a rotation still passes the receiver's filter.
 func TestFluxGraceWindow(t *testing.T) {
 	e := fluxEpochAt(10*time.Second, time.Unix(1_000_000_000, 0))
 	for _, c := range []string{"udp", "stun"} {
@@ -83,14 +73,12 @@ func TestFluxGraceWindow(t *testing.T) {
 	}
 }
 
-// A manual epoch offset shifts the whole schedule by exactly that many epochs, so
-// "rotate now" advances both ends in lock-step to a shape they'd otherwise reach later.
 func TestFluxEpochOffsetShiftsSchedule(t *testing.T) {
 	base := fluxEpochAt(600*time.Second, time.Unix(1_700_000_000, 0))
 	if s1, s2 := deriveFluxShape("k", base+5, "random"), deriveFluxShape("k", base+5, "random"); s1 != s2 {
-		t.Fatal("deriveFluxShape must be deterministic for the same (key, epoch, shape)") // two separate calls, not x!=x
+		t.Fatal("deriveFluxShape must be deterministic for the same (key, epoch, shape)")
 	}
-	// offset of +5 lands on the epoch-(base+5) shape; without it we'd be on base.
+
 	if deriveFluxShape("k", base, "random").sport == deriveFluxShape("k", base+5, "random").sport &&
 		deriveFluxShape("k", base, "random").dport == deriveFluxShape("k", base+5, "random").dport {
 		t.Skip("rare: base and base+5 happen to share carrier params")

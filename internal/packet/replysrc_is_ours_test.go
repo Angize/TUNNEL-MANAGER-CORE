@@ -14,8 +14,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// oobWithDst builds the IP_PKTINFO control message the kernel hands ReadMsgIP, with ipi_addr set to
-// dst — the destination the SENDER put in the header. Same layout the receive path parses.
 func oobWithDst(dst net.IP) []byte {
 	b := make([]byte, unix.CmsgSpace(unix.SizeofInet4Pktinfo))
 	h := (*unix.Cmsghdr)(unsafe.Pointer(&b[0]))
@@ -27,11 +25,6 @@ func oobWithDst(dst net.IP) []byte {
 	return b
 }
 
-// The server answers from the address the client dialed, read out of IP_PKTINFO. ipi_addr is whatever
-// the SENDER wrote in the header, and a raw socket bound to 0.0.0.0 is handed broadcast-addressed
-// packets of its protocol too — so an address this host does not hold must never become the reply
-// source. It is committed before the AEAD, and once it is wrong iplink's IP_PKTINFO send fails
-// outright: the udp and tcp profiles then answer NOTHING until an inbound frame corrects it.
 func TestTheReplySourceIsAlwaysAnAddressWeHold(t *testing.T) {
 	local := oneLocalIP4(t)
 
@@ -46,7 +39,7 @@ func TestTheReplySourceIsAlwaysAnAddressWeHold(t *testing.T) {
 	for _, dst := range []string{"255.255.255.255", "10.99.99.255", "224.0.0.1", "198.51.100.77"} {
 		t.Run("a frame aimed at "+dst+" cannot steer it", func(t *testing.T) {
 			r := &Raw{}
-			r.learnReplySrc(oobWithDst(local)) // the tunnel is up and answering from our own IP
+			r.learnReplySrc(oobWithDst(local))
 			r.learnReplySrc(oobWithDst(net.ParseIP(dst)))
 			got := r.replySrc.Load()
 			if got == nil || !got.Equal(local) {
@@ -65,8 +58,6 @@ func TestTheReplySourceIsAlwaysAnAddressWeHold(t *testing.T) {
 		}
 	})
 
-	// The steady state is one atomic load: the same destination, packet after packet, must not
-	// re-allocate or re-read the interface list on the receive path.
 	t.Run("the unchanged case allocates nothing", func(t *testing.T) {
 		r := &Raw{}
 		oob := oobWithDst(local)
@@ -76,8 +67,6 @@ func TestTheReplySourceIsAlwaysAnAddressWeHold(t *testing.T) {
 		}
 	})
 
-	// A pool IP the node adds while the core is running has to be picked up, and a sender spraying
-	// unknown destinations must not be able to spin the interface scan.
 	t.Run("the ownership answer is cached and refreshed", func(t *testing.T) {
 		var o ourIPs
 		if !o.has(local) {
@@ -95,8 +84,6 @@ func TestTheReplySourceIsAlwaysAnAddressWeHold(t *testing.T) {
 	})
 }
 
-// ...and the receive loop still asks. The check is worth nothing if recvConnLoop stops calling it,
-// and that is the half a test of the function alone can never see.
 func TestTheServerReceiveLoopStillLearnsItsReplySource(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "raw_linux.go", nil, 0)
@@ -126,8 +113,6 @@ func TestTheServerReceiveLoopStillLearnsItsReplySource(t *testing.T) {
 	}
 }
 
-// oneLocalIP4 is any IPv4 address this host really holds, so the test asserts against the same source
-// of truth the code uses rather than a hardcoded address.
 func oneLocalIP4(t *testing.T) net.IP {
 	t.Helper()
 	for k := range scanLocalIP4() {

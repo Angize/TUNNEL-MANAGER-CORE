@@ -9,12 +9,6 @@ import (
 	"time"
 )
 
-// A batched receive must hand back each datagram's OWN bytes, in arrival order, with the address it
-// came from.
-//
-// The failure that matters is silent: slots sharing one buffer still deliver a packet for every packet
-// sent, so the tunnel comes up, throughput looks right and nothing logs -- while the bytes handed to the
-// AEAD belong to a different datagram. So this pins the storage, not just the count.
 func TestABatchedReceiveKeepsEveryDatagramDistinct(t *testing.T) {
 	srv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -31,8 +25,6 @@ func TestABatchedReceiveKeepsEveryDatagramDistinct(t *testing.T) {
 	}
 	defer cli.Close()
 
-	// More than maxRecvBatch, so the burst spans several recvmmsg calls and a cap that silently
-	// truncated the rest would show up as missing packets.
 	const packets = 20
 	for i := 0; i < packets; i++ {
 		if _, err := cli.Write([]byte(fmt.Sprintf("packet-%03d", i))); err != nil {
@@ -56,7 +48,7 @@ func TestABatchedReceiveKeepsEveryDatagramDistinct(t *testing.T) {
 				t.Fatal("two datagrams in one batch share a buffer: every frame in the burst would be " +
 					"handed the same bytes, and the AEAD would open the wrong one")
 			}
-			got = append(got, string(d.pkt)) // a copy: pkt aliases the batch buffer until the next recv
+			got = append(got, string(d.pkt))
 		}
 	}
 	for i, s := range got {
@@ -66,8 +58,6 @@ func TestABatchedReceiveKeepsEveryDatagramDistinct(t *testing.T) {
 	}
 }
 
-// With no socket there is nothing to batch, and the answer must be a nil batcher rather than one that
-// dereferences it on the first read.
 func TestANilSocketGivesNoBatcher(t *testing.T) {
 	if newUDPBatch(nil) != nil {
 		t.Fatal("a nil socket must give a nil batcher, so the caller keeps its single-datagram read")

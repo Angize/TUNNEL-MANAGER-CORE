@@ -9,13 +9,6 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
-// A batched send holds several sealed frames while it drains MORE packets off the TUN into the same read
-// buffer. If a framing path returned storage that aliased its input, every frame already held would be
-// rewritten by the next TryRead — and the burst would leave carrying the last packet's bytes several
-// times over.
-//
-// Nothing errors and nothing logs when that happens: the AEAD seals whatever it is given, the kernel
-// sends what it is handed, and the far end simply decrypts packets that are not the ones that were sent.
 func TestAFramedPacketDoesNotAliasTheReadBuffer(t *testing.T) {
 	sealer, err := crypto.NewSealer("aes-256-gcm", "batch-test-psk-0123456789abcdef", true)
 	if err != nil {
@@ -40,7 +33,6 @@ func TestAFramedPacketDoesNotAliasTheReadBuffer(t *testing.T) {
 			}
 			held := append([]byte(nil), frame...)
 
-			// what the drain does next: the same read buffer, refilled with the following packet
 			copy(buf, bytes.Repeat([]byte{0x5E}, 200))
 			if !bytes.Equal(frame, held) {
 				t.Fatal("the framed packet changed when the read buffer was refilled: it aliases the " +
@@ -50,8 +42,6 @@ func TestAFramedPacketDoesNotAliasTheReadBuffer(t *testing.T) {
 	}
 }
 
-// The drain must never WAIT for a second packet. A blocking read here would hold the first packet
-// hostage until another arrives — on an idle tunnel that is forever, and a ping would never leave.
 func TestTheUDPBatchDrainNeverWaits(t *testing.T) {
 	b, err := os.ReadFile("udp.go")
 	if err != nil {

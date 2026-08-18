@@ -15,8 +15,6 @@ func snis(hosts ...string) []wsSNIEntry {
 	return out
 }
 
-// clockPool builds a pool with an injectable clock so the FSM's scheduling is deterministic.
-// The returned pointer is the "now" value; bump it to advance time.
 func clockPool(ips []string, snis []wsSNIEntry, statusPath string) (*wsPool, *int64) {
 	p := newWSPool(ips, snis, statusPath)
 	var now int64 = 1000
@@ -24,19 +22,15 @@ func clockPool(ips []string, snis []wsSNIEntry, statusPath string) (*wsPool, *in
 	return p, &now
 }
 
-// TestARotationMovesOffTheLiveEdgeAndVariesBothAxes is what the proactive rotation owes the tunnel now
-// that there is no second carrier to aim: every tick must land on a combination that is not the one being
-// carried, and over a run it must vary the SNI axis as well as the IP axis — a rotation that only ever
-// steps the IP leaves a flagged domain in place forever and keeps one reused SNI as a stable fingerprint.
 func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
-	// Two IPs, one SNI: the IP must change on every single step.
+
 	p := newWSPool([]string{"a", "b"}, snis("x"), "")
 	for round := 0; round < 20; round++ {
 		before, _, ok := p.current()
 		if !ok {
 			t.Fatal("current() returned not-ok on a healthy 2-IP pool")
 		}
-		p.setActive(activeLabel(before, "x")) // this is the edge actually carrying data
+		p.setActive(activeLabel(before, "x"))
 		if !p.advance() {
 			t.Fatalf("round %d: a healthy 2-IP pool reported no move", round)
 		}
@@ -45,7 +39,6 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 		}
 	}
 
-	// Two IPs x two SNIs: both axes must be exercised, and no step may resolve to the live combo.
 	p2 := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
 	seenIP, seenSNI := map[string]bool{}, map[string]bool{}
 	for round := 0; round < 8; round++ {
@@ -71,7 +64,6 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 		t.Fatalf("the rotation never varied the SNI axis; saw %v", seenSNI)
 	}
 
-	// A burned domain is skipped, not parked on: with y suspect, every step stays on x.
 	p3 := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
 	p3.markSuspect("sni", "y", "test")
 	for round := 0; round < 4; round++ {
@@ -82,12 +74,8 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 	}
 }
 
-// TestPoolAdvanceReportsRealMove pins advance()'s contract: it reports whether the edge the carrier would
-// actually DIAL changed, not whether the raw cursor moved — the cursor always moves. The rotation timer
-// uses this to avoid tearing a healthy connection down when every other combination is burned, the common
-// "one edge survived the filter" state, where a blind close costs a re-dial every interval for nothing.
 func TestPoolAdvanceReportsRealMove(t *testing.T) {
-	// Healthy multi-edge pool: a step reaches a different combo, so advance() reports a real move.
+
 	p := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
 	for i := 0; i < 4; i++ {
 		if !p.advance() {
@@ -95,8 +83,6 @@ func TestPoolAdvanceReportsRealMove(t *testing.T) {
 		}
 	}
 
-	// Burn everything except one IP: every step resolves back to that same survivor, so advance()
-	// must report NO move and the timer must leave the live connection alone.
 	p2 := newWSPool([]string{"a", "b", "c"}, snis("x"), "")
 	p2.markSuspect("ip", "b", "test")
 	p2.markSuspect("ip", "c", "test")
@@ -113,21 +99,16 @@ func TestPoolAdvanceReportsRealMove(t *testing.T) {
 		}
 	}
 
-	// A burned ws edge is offered live traffic again once its wait elapses — current() has the same
-	// "a DUE burned entry gets a live retry" pass PeerPool does, because that live try is the only way
-	// the tun probe can ever judge it. A passing retest just brings that moment forward.
 	p2.retestResult("ip", "b", true)
 	if !p2.advance() {
 		t.Fatal("after edge b healed, advance() must report a move again")
 	}
 
-	// A single-combo pool can never move.
 	p3 := newWSPool([]string{"a"}, snis("x"), "")
 	if p3.advance() {
 		t.Fatal("1x1 pool: advance() must report no move")
 	}
 
-	// An empty pool is not a move either (and must not panic).
 	p4 := newWSPool(nil, nil, "")
 	if p4.advance() {
 		t.Fatal("empty pool: advance() must report no move")
@@ -152,67 +133,60 @@ func TestPoolRotatesAllCombos(t *testing.T) {
 	}
 }
 
-// updateECH persists a self-healed ECH key onto the matching pool SNI and reports a real change
-// exactly once, so the self-heal event fires per rotation (first heal) not per reconnect (repeats).
 func TestPoolUpdateECHTransitionGate(t *testing.T) {
 	p := newWSPool([]string{"a"}, snis("x", "y"), "")
 	fresh := []byte{1, 2, 3}
-	// first heal on x: stored key (nil) differs -> change reported, key persisted
+
 	if !p.updateECH("x", fresh) {
 		t.Fatal("first updateECH should report a change")
 	}
 	if _, sni, _ := p.current(); string(sni.ech) != string(fresh) {
 		t.Fatalf("current() should carry the persisted key, got %v", sni.ech)
 	}
-	// same key again (next reconnect uses the fresh key, or a concurrent healer) -> no change, no event
+
 	if p.updateECH("x", fresh) {
 		t.Fatal("repeat updateECH with an unchanged key must report no change (suppresses repeat events)")
 	}
-	// a later rotation delivers a different key -> change reported again
+
 	if !p.updateECH("x", []byte{9, 9}) {
 		t.Fatal("updateECH with a rotated key should report a change")
 	}
-	// unknown host -> no change (never panics, never mislabels)
+
 	if p.updateECH("zzz", fresh) {
 		t.Fatal("updateECH for an absent host must report no change")
 	}
-	// the other SNI stays untouched
+
 	if p.snis[1].host != "y" || p.snis[1].ech != nil {
 		t.Fatalf("sibling SNI y should be untouched, got %#v", p.snis[1])
 	}
 }
 
-// A genuine pool down must be balanced by exactly one paired "up"/reconnect on the next
-// successful (re)connect, while the initial connect and plain rotations stay silent — so the panel
-// never shows an unbalanced "disconnected" for a tunnel that recovered.
 func TestPoolDownReconnectPairing(t *testing.T) {
 	p := newWSPool([]string{"a", "b"}, snis("x"), "")
 
-	p.setActive("a · x") // initial connect: no prior down -> silent
+	p.setActive("a · x")
 	if len(p.events) != 0 {
 		t.Fatalf("initial connect must emit no event, got %+v", p.events)
 	}
 
-	p.down("reset", "a · x") // genuine drop
-	p.setActive("b · x")     // reconnect on a new edge -> paired up
+	p.down("reset", "a · x")
+	p.setActive("b · x")
 	if len(p.events) != 2 || p.events[0].Kind != "down" || p.events[1].Kind != "up" || p.events[1].Code != "reconnect" {
 		t.Fatalf("want down then up/reconnect, got %+v", p.events)
 	}
 
-	p.setActive("a · x") // a plain rotation (no pending down) must NOT emit an up
+	p.setActive("a · x")
 	if len(p.events) != 2 {
 		t.Fatalf("rotation without a pending down must be silent, got %d events", len(p.events))
 	}
 
-	p.down("throttle", "a · x") // a second drop
-	p.setActive("a · x")        // reconnect on the SAME edge still pairs
+	p.down("throttle", "a · x")
+	p.setActive("a · x")
 	if len(p.events) != 4 || p.events[3].Kind != "up" {
 		t.Fatalf("a same-edge reconnect after a down must still emit up, got %+v", p.events)
 	}
 }
 
-// A verdict of IP_GUILTY (applied via markSuspect) moves a healthy IP into suspect, and
-// current() then skips it while a healthy alternative remains.
 func TestMarkSuspectPullsFromRotation(t *testing.T) {
 	p := newWSPool([]string{"a", "b"}, snis("x"), "")
 	p.markSuspect("ip", "a", "test")
@@ -228,16 +202,13 @@ func TestMarkSuspectPullsFromRotation(t *testing.T) {
 	}
 }
 
-// The suspect backoff walks the whole configured schedule (as nextRetest deltas), one step per failed
-// retest, then drops to dead when it runs off the end (the initial markSuspect is failure #1). Read off
-// suspectBackoff rather than its literals, so retuning the schedule cannot look like a regression here.
 func TestSuspectBackoffThenDead(t *testing.T) {
 	p, now := clockPool([]string{"a", "b"}, snis("x"), "")
 	p.markSuspect("ip", "a", "test")
 	if got := p.ipHealth.recs["a"].nextRetest; got != *now+suspectBackoff[0] {
 		t.Fatalf("entry retest should be now+%d, got %d (now=%d)", suspectBackoff[0], got, *now)
 	}
-	wantNext := suspectBackoff[1:] // deltas after each failed retest, up to the last step
+	wantNext := suspectBackoff[1:]
 	for i, w := range wantNext {
 		p.retestResult("ip", "a", false)
 		r := p.ipHealth.recs["a"]
@@ -251,13 +222,13 @@ func TestSuspectBackoffThenDead(t *testing.T) {
 			t.Fatalf("retest %d: nextRetest=%d, want %d", i+1, r.nextRetest, *now+w)
 		}
 	}
-	// One more failed retest runs off the end of the schedule -> dead on the slow interval.
+
 	p.retestResult("ip", "a", false)
 	r := p.ipHealth.recs["a"]
 	if r.state != stateDead || r.nextRetest != *now+deadRetest {
 		t.Fatalf("expected dead at now+%d, got state=%q next=%d", deadRetest, r.state, r.nextRetest)
 	}
-	// A dead entry's failed retest stays dead and reschedules on the slow interval from now.
+
 	*now = 5000
 	p.retestResult("ip", "a", false)
 	if r := p.ipHealth.recs["a"]; r.state != stateDead || r.nextRetest != 5000+deadRetest {
@@ -265,18 +236,12 @@ func TestSuspectBackoffThenDead(t *testing.T) {
 	}
 }
 
-// A background retest is no longer a verdict: it decides only WHEN an entry is next worth a live try. So a
-// passing one must not heal anything — the probe completes TCP, TLS and the WebSocket upgrade, and a path
-// that passes all three can still carry nothing, which is the exact signal this pool spent its history
-// mistaking for health. What it may do is make the entry DUE, so the rotation hands it real traffic and
-// the node's tun probe decides. The pool-level "the rotation can reach two edges again" transition is
-// still logged, because that is a fact about the POOL, not a claim about the edge.
 func TestARetestNeverHealsAnEdge(t *testing.T) {
 	p, _ := clockPool([]string{"a", "b"}, snis("x"), "")
-	p.markSuspect("ip", "a", "test") // emits burn + pool/degraded
+	p.markSuspect("ip", "a", "test")
 	base := len(p.events)
 
-	p.retestResult("ip", "a", false) // failed retest — nothing to say
+	p.retestResult("ip", "a", false)
 	if len(p.events) != base {
 		t.Fatalf("a failed retest must not emit an event, got %+v", p.events[base:])
 	}
@@ -299,7 +264,7 @@ func TestARetestNeverHealsAnEdge(t *testing.T) {
 		t.Fatalf("want exactly one pool/restored — the rotation can reach both edges again — got %+v",
 			p.events[base:])
 	}
-	// A repeat says nothing new: the entry was already due.
+
 	n := len(p.events)
 	p.retestResult("ip", "a", true)
 	if len(p.events) != n {
@@ -307,14 +272,10 @@ func TestARetestNeverHealsAnEdge(t *testing.T) {
 	}
 }
 
-// A successful retest does NOT heal. The probe completes the control path -- TCP, TLS, the WebSocket
-// upgrade -- and a path that passes all three can still carry nothing, which is the exact signal this
-// pool spent its history mistaking for health. So it only says "worth a live try": the entry stays
-// tracked and becomes DUE, current()'s pass 2 offers it real traffic, and the tun probe decides.
 func TestASuccessfulRetestOffersALiveTryItDoesNotHeal(t *testing.T) {
 	p, now := clockPool([]string{"a", "b"}, snis("x"), "")
 	p.markSuspect("ip", "a", "test")
-	p.retestResult("ip", "a", false) // suspect, fails=1 -> a longer wait
+	p.retestResult("ip", "a", false)
 	if p.ipHealth.due("a") {
 		t.Fatal("a FAILED retest must push the wait out, not leave it due")
 	}
@@ -326,7 +287,7 @@ func TestASuccessfulRetestOffersALiveTryItDoesNotHeal(t *testing.T) {
 	if !p.ipHealth.due("a") {
 		t.Fatal("a passing probe must leave the entry DUE, so current()'s pass 2 can offer it live traffic")
 	}
-	// ...and the ONLY thing that heals it is the node's verdict.
+
 	p.clearBurn("ip", "a")
 	if p.ipHealth.recs["a"] != nil {
 		t.Fatal("clearBurn is the tun probe's cmdOK path and must clear outright")
@@ -334,11 +295,9 @@ func TestASuccessfulRetestOffersALiveTryItDoesNotHeal(t *testing.T) {
 	_ = now
 }
 
-// current() never dead-ends: with nothing fully healthy it returns the least-bad combo —
-// suspect preferred over dead, then soonest nextRetest.
 func TestCurrentFallbackLeastBad(t *testing.T) {
 	p, _ := clockPool([]string{"a", "b"}, snis("x", "y"), "")
-	// a dead (sooner) vs b suspect (later); x suspect (later) vs y dead (sooner).
+
 	p.ipHealth.recs["a"] = &healthRec{state: stateDead, nextRetest: 1005}
 	p.ipHealth.recs["b"] = &healthRec{state: stateSuspect, nextRetest: 1100}
 	p.sniHealth.recs["x"] = &healthRec{state: stateSuspect, nextRetest: 1050}
@@ -350,7 +309,7 @@ func TestCurrentFallbackLeastBad(t *testing.T) {
 	if ip != "b" || sni.host != "x" {
 		t.Fatalf("least-bad should prefer suspect over dead: want b/x, got %s/%s", ip, sni.host)
 	}
-	// Within the same tier, the soonest nextRetest wins.
+
 	p.ipHealth.recs["a"] = &healthRec{state: stateSuspect, nextRetest: 1005}
 	p.ipHealth.recs["b"] = &healthRec{state: stateSuspect, nextRetest: 1100}
 	if ip, _, _ := p.current(); ip != "a" {
@@ -358,13 +317,11 @@ func TestCurrentFallbackLeastBad(t *testing.T) {
 	}
 }
 
-// The status snapshot carries the full per-entry FSM state — key/kind/state/fails/next_retest — which
-// is everything the node and panel read.
 func TestStatusSnapshotStates(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "st.json")
 	p, now := clockPool([]string{"a", "b"}, snis("x"), path)
-	p.current() // sets active
+	p.current()
 	p.markSuspect("ip", "a", "test")
 
 	data, err := os.ReadFile(path)
@@ -384,7 +341,7 @@ func TestStatusSnapshotStates(t *testing.T) {
 	if err := json.Unmarshal(data, &st); err != nil {
 		t.Fatalf("bad status json: %v", err)
 	}
-	got := map[string]string{} // key -> state
+	got := map[string]string{}
 	var aNext int64
 	for _, h := range st.Health {
 		got[h.Kind+":"+h.Key] = h.State
@@ -403,12 +360,9 @@ func TestStatusSnapshotStates(t *testing.T) {
 	}
 }
 
-// dueRetests reports only entries whose backoff has elapsed; once it has, the entry becomes due and is
-// paired with a healthy partner on the other axis. probeAllNow is the operator's way to pull that
-// forward (the panel's control arrives as a signal, which carries no key).
 func TestDueRetestsAndProbeAllNow(t *testing.T) {
 	p, now := clockPool([]string{"a", "b"}, snis("x", "y"), "")
-	p.markSuspect("ip", "a", "test") // due at now+30
+	p.markSuspect("ip", "a", "test")
 	if due := p.dueRetests(); len(due) != 0 {
 		t.Fatalf("nothing should be due yet, got %v", due)
 	}
@@ -423,7 +377,7 @@ func TestDueRetestsAndProbeAllNow(t *testing.T) {
 	if p.sniHealth.recs[due[0].sni.host] != nil {
 		t.Fatalf("retest partner SNI must be healthy, got %q", due[0].sni.host)
 	}
-	// After the backoff elapses on the clock, it is due with no operator action at all.
+
 	p2, now2 := clockPool([]string{"a"}, snis("x"), "")
 	p2.markSuspect("ip", "a", "test")
 	*now2 = *now + suspectBackoff[0] + 1
@@ -432,8 +386,6 @@ func TestDueRetestsAndProbeAllNow(t *testing.T) {
 	}
 }
 
-// altHealthy* feed the differential probe: they return a healthy partner on the other axis,
-// excluding the failed one, and report false when none exists.
 func TestAltHealthyLookups(t *testing.T) {
 	p := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
 	if s, ok := p.altHealthySNI("x"); !ok || s.host != "y" {
@@ -442,17 +394,15 @@ func TestAltHealthyLookups(t *testing.T) {
 	if ip, ok := p.altHealthyIP("a"); !ok || ip != "b" {
 		t.Fatalf("altHealthyIP(a) = %q ok=%v, want b", ip, ok)
 	}
-	p.markSuspect("sni", "y", "test") // now y is not healthy
+	p.markSuspect("sni", "y", "test")
 	if _, ok := p.altHealthySNI("x"); ok {
 		t.Fatal("no healthy SNI other than x should remain")
 	}
 }
 
-// selectEntry pins a specific edge: it moves the index onto that entry and clears any
-// suspect/dead mark so current() picks it, even if it was blocked a moment ago.
 func TestSelectEntryPinsAndClears(t *testing.T) {
 	p := newWSPool([]string{"a", "b"}, snis("x"), "")
-	p.markSuspect("ip", "b", "test") // b was blocked
+	p.markSuspect("ip", "b", "test")
 	if !p.selectEntry("ip", "b") {
 		t.Fatal("selectEntry should find b")
 	}
@@ -467,13 +417,9 @@ func TestSelectEntryPinsAndClears(t *testing.T) {
 	}
 }
 
-// TestPinOneShot locks down a pin as a ONE-SHOT exact jump: while it is in force it FORCES exactly the
-// chosen edge — no drift onto a neighbour, even across advance() or a suspect partner — and once the
-// core has disproven it, it clears so normal rotation resumes. It does NOT lock forever. A PROVEN burn of
-// the pinned edge is covered separately by TestPinReleasesOnProvenBlock.
 func TestPinOneShot(t *testing.T) {
 	p, _ := clockPool([]string{"a", "b", "c"}, snis("x", "y"), "")
-	p.markSuspect("sni", "x", "test") // messy partner axis
+	p.markSuspect("sni", "x", "test")
 	p.markSuspect("ip", "a", "test")
 	if !p.selectEntry("ip", "c") {
 		t.Fatal("selectEntry should find c")
@@ -481,9 +427,7 @@ func TestPinOneShot(t *testing.T) {
 	if !p.isPinned() {
 		t.Fatal("pool should report pinned right after selectEntry")
 	}
-	// Within the window: current() forces c every time, across rotation attempts — the pin does not
-	// drift onto a neighbour just because advance()/advanceIP() stepped the index or the partner axis
-	// is suspect. (Burning a DIFFERENT edge must also not move it off c.)
+
 	for i := 0; i < 6; i++ {
 		if ip, _, ok := p.current(); !ok || ip != "c" {
 			t.Fatalf("pin must force ip=c on dial %d, got %q ok=%v", i, ip, ok)
@@ -491,12 +435,11 @@ func TestPinOneShot(t *testing.T) {
 		p.advance()
 		p.advanceIP()
 	}
-	p.markSuspect("ip", "b", "test") // burning a non-pinned edge must not disturb the pin
+	p.markSuspect("ip", "b", "test")
 	if ip, _, _ := p.current(); ip != "c" {
 		t.Fatalf("a burn of a non-pinned edge must not override the pin, got %q", ip)
 	}
-	// It is not sticky-forever: without a land, the core's own failed attempts release it (c was never
-	// burned, so this is the cannot-land path; the proven-block one is TestPinReleasesOnProvenBlock).
+
 	for i := 1; i < pinFailRelease; i++ {
 		p.pinAttemptFailed("c", "")
 		if !p.isPinned() {
@@ -513,37 +456,29 @@ func TestPinOneShot(t *testing.T) {
 	}
 }
 
-// TestPinReleasesOnProvenBlock locks in the pin-safety rule at the POOL level: pinning an edge that
-// turns out to be genuinely blocked must not hang the tunnel for the whole pinTTL. WHEN that release
-// happens is the verdict path's call and is asserted in pin_is_a_preference_test.go (after
-// pinFailRelease proven-dead rounds, the same second opinion every other carrier asks for). What this
-// one pins is the release itself: both axes cleared, the fallback immediate, and exactly one event.
-//
-// It used to assert that markSuspect released the pin by itself, which made ONE measurement override the
-// operator while udp/raw/flux wanted two.
 func TestPinReleasesOnProvenBlock(t *testing.T) {
 	p, _ := clockPool([]string{"a", "b"}, snis("x"), "")
-	if !p.selectEntry("ip", "b") { // operator jumps onto b
+	if !p.selectEntry("ip", "b") {
 		t.Fatal("selectEntry should find b")
 	}
 	if ip, _, _ := p.current(); ip != "b" {
 		t.Fatalf("pin must force b, got %q", ip)
 	}
-	// A burn ALONE must not break the operator's pick any more.
+
 	p.markSuspect("ip", "b", "tun-probe")
 	if !p.isPinned() {
 		t.Fatal("one burn released the pin — the operator's pick costs a second opinion to override")
 	}
 
-	p.releasePin() // what the verdict path calls once the pin has absorbed its rounds
+	p.releasePin()
 	if p.isPinned() || p.pinIP != "" {
 		t.Fatalf("pin state not cleared: pinIP=%q", p.pinIP)
 	}
-	// Recovery is immediate: current() now returns the healthy edge a, not the blocked pinned b.
+
 	if ip, _, ok := p.current(); !ok || ip != "a" {
 		t.Fatalf("after the pin released, current() must fall back to healthy a, got %q ok=%v", ip, ok)
 	}
-	// The release is surfaced to the operator as a pool/pin_dropped event.
+
 	got := 0
 	p.mu.Lock()
 	for _, e := range p.events {
@@ -557,14 +492,12 @@ func TestPinReleasesOnProvenBlock(t *testing.T) {
 	}
 }
 
-// TestPinHeldOnGuiltyPartnerAxis proves the release is axis-precise: an IP-pin must SURVIVE a burn
-// of a guilty SNI (the free axis), so current() keeps the pinned IP and just heals the SNI around it.
 func TestPinHeldOnGuiltyPartnerAxis(t *testing.T) {
 	p, _ := clockPool([]string{"a", "b"}, snis("x", "y"), "")
 	if !p.selectEntry("ip", "b") {
 		t.Fatal("selectEntry should find b")
 	}
-	p.markSuspect("sni", "x", "sni_blocked") // the SNI is guilty, not the pinned IP
+	p.markSuspect("sni", "x", "sni_blocked")
 	if !p.isPinned() || p.pinIP != "b" {
 		t.Fatalf("burning the free (SNI) axis must not release an IP pin: pinIP=%q pinned=%v", p.pinIP, p.isPinned())
 	}
@@ -573,8 +506,6 @@ func TestPinHeldOnGuiltyPartnerAxis(t *testing.T) {
 	}
 }
 
-// TestAdvanceIPAndSNIIndependently checks the manual per-dimension "rotate now": advanceIP
-// steps the IP while the SNI stays put, and advanceSNI does the reverse.
 func TestAdvanceIPAndSNIIndependently(t *testing.T) {
 	p := newWSPool([]string{"a", "b", "c"}, snis("x", "y"), "")
 	ip0, sni0, _ := p.current()

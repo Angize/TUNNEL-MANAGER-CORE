@@ -5,17 +5,6 @@ import (
 	"time"
 )
 
-// TestEveryCarrierSharesOneDeadWindow pins the rule for every carrier that still HAS a dead window: ONE
-// multiplier over keepalive, the same number on both roles.
-//
-// It walks EVERY real constructor rather than the helper, and that is the point — the failure worth
-// catching is a construction site that resolves its own window, or forgets one and leaves a zero window,
-// which reaps a live connection on its first check. Two sites out of seven would have said nothing about
-// the other five.
-//
-// The datagram carriers are absent because they no longer enforce one at all: the window they had was
-// the session-stale clock, and the judge's ladder replaced it. dns is the other exception — high-loss,
-// so it floors at dnstun's own absolute window; TestDNSPublishesTheWindowTheSessionEnforces owns that.
 func TestEveryCarrierSharesOneDeadWindow(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 
@@ -25,8 +14,6 @@ func TestEveryCarrierSharesOneDeadWindow(t *testing.T) {
 			t.Fatalf("deadWindow(%v) = %v, want %v", ka, got, want)
 		}
 
-		// tcp/ws/http: the window IS the read deadline, and each end has one of its own. Every
-		// constructor, both roles — a new one that forgets `idle` fails here rather than in production.
 		streams := []struct {
 			name string
 			mk   func() (*TCP, error)

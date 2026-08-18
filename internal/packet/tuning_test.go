@@ -6,9 +6,6 @@ import (
 	"time"
 )
 
-// TestApplyTuning checks that non-zero config values override the defaults (clamped to range) while
-// zero/empty values leave the compiled-in default untouched. Globals are saved and restored so the
-// rest of the package's tests keep seeing the real defaults.
 func TestApplyTuning(t *testing.T) {
 	save := struct {
 		sb      []int64
@@ -22,13 +19,11 @@ func TestApplyTuning(t *testing.T) {
 		minLiveness, probeTimeout = save.ml, save.pto
 	}()
 
-	// A zero input must be a no-op: every default survives.
 	ApplyTuning(TuningInput{})
 	if deadRetest != save.dr || !reflect.DeepEqual(suspectBackoff, save.sb) {
 		t.Fatalf("zero input mutated a default: deadRetest=%d backoff=%v", deadRetest, suspectBackoff)
 	}
 
-	// Real values apply.
 	ApplyTuning(TuningInput{
 		SuspectBackoff: []int64{5, 10, 20}, DeadRetestSecs: 900,
 		DeadMult: 6, PingLossThreshold: 5,
@@ -46,7 +41,7 @@ func TestApplyTuning(t *testing.T) {
 	if minLiveness != 12*time.Second || probeTimeout != 7*time.Second {
 		t.Errorf("durations: minLiveness=%v probeTimeout=%v", minLiveness, probeTimeout)
 	}
-	// ONE multiplier, and both windows follow keepalive with no floor of their own to pin them.
+
 	for _, ka := range []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second} {
 		want := 6 * ka
 		if got := deadWindow(ka); got != want {
@@ -54,23 +49,17 @@ func TestApplyTuning(t *testing.T) {
 		}
 	}
 
-	// The multiplier floors at 2: keepaliveInterval stretches to 1.3×keepalive, so a 1× window would
-	// expire between two pings and kill a healthy idle carrier.
 	ApplyTuning(TuningInput{DeadMult: 1})
 	if deadMult != 2 {
 		t.Errorf("DeadMult=1 must clamp to 2, got %d", deadMult)
 	}
 
-	// Out-of-range values clamp instead of taking effect verbatim.
 	ApplyTuning(TuningInput{ProbeTimeoutSecs: 999999})
 	if probeTimeout != 120*time.Second {
 		t.Errorf("probeTimeout not clamped: %v", probeTimeout)
 	}
 }
 
-// TestDefaultLadderDeepens guards the SHAPE of the compiled-in retest schedule rather than its numbers:
-// each step must wait longer than the one before it, a DEAD entry must come back slower than a suspect
-// one, and every default must survive its own ApplyTuning clamp untouched.
 func TestDefaultLadderDeepens(t *testing.T) {
 	if len(suspectBackoff) == 0 {
 		t.Fatal("an empty suspect ladder leaves peer_pool indexing suspectBackoff[0] on nothing")
@@ -85,8 +74,6 @@ func TestDefaultLadderDeepens(t *testing.T) {
 		t.Errorf("deadRetest=%ds is shorter than the last suspect step (%ds): a DEAD endpoint would be retried sooner than a suspect one", deadRetest, last)
 	}
 
-	// Feeding the compiled-in defaults back through ApplyTuning must change nothing. A default outside
-	// its own clamp would mean the panel showing that value and saving it unchanged alters behaviour.
 	sb, dr := append([]int64(nil), suspectBackoff...), deadRetest
 	defer func() { suspectBackoff, deadRetest = sb, dr }()
 	ApplyTuning(TuningInput{SuspectBackoff: sb, DeadRetestSecs: dr})

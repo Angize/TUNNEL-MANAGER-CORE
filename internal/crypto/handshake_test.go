@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// doHandshake runs the full msg1/msg2 exchange and returns both ends' session
-// sealers, exactly as the carriers will.
 func doHandshake(t *testing.T, psk string) (client, server *Sealer) {
 	t.Helper()
 	ci, err := GenerateEphemeral()
@@ -15,7 +13,7 @@ func doHandshake(t *testing.T, psk string) (client, server *Sealer) {
 	}
 	msg1 := InitMsg(psk, ci)
 
-	eInit, err := ParseInit(psk, msg1) // server side
+	eInit, err := ParseInit(psk, msg1)
 	if err != nil {
 		t.Fatalf("ParseInit: %v", err)
 	}
@@ -29,7 +27,7 @@ func doHandshake(t *testing.T, psk string) (client, server *Sealer) {
 		t.Fatalf("server SessionSealer: %v", err)
 	}
 
-	eResp, err := ParseResp(psk, ci.Pub, msg2) // client side
+	eResp, err := ParseResp(psk, ci.Pub, msg2)
 	if err != nil {
 		t.Fatalf("ParseResp: %v", err)
 	}
@@ -62,7 +60,7 @@ func TestHandshakeWrongPSKRejected(t *testing.T) {
 }
 
 func TestHandshakeRespBinding(t *testing.T) {
-	// A msg2 built for one initiator key must not verify against a different one.
+
 	ci, _ := GenerateEphemeral()
 	other, _ := GenerateEphemeral()
 	sr, _ := GenerateEphemeral()
@@ -75,9 +73,6 @@ func TestHandshakeRespBinding(t *testing.T) {
 	}
 }
 
-// TestForwardSecrecyFreshKeys: two handshakes with the SAME PSK yield DIFFERENT session keys, from fresh
-// ephemerals, so a frame from one session cannot be opened by the other — a replayed old-session frame
-// is dead.
 func TestForwardSecrecyFreshKeys(t *testing.T) {
 	psk := "same-psk-two-sessions"
 	c1, _ := doHandshake(t, psk)

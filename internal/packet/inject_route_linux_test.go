@@ -9,8 +9,6 @@ import (
 	"testing"
 )
 
-// fakeResolver records every destination the injector asked a route for and hands back a canned
-// route, so the caching/invalidation logic is observable with no NIC, no root and no syscall.
 type fakeResolver struct {
 	mu   sync.Mutex
 	seen []string
@@ -33,38 +31,31 @@ func (f *fakeResolver) asked() []string {
 	return append([]string(nil), f.seen...)
 }
 
-// testInjector is an l2inject wired to a fake resolver and a CLOSED fd: the route resolution (the
-// behaviour under test) runs for real, then sendTo stops at the fd check instead of touching the
-// kernel. Callers ignore sendTo's error — decoys are best-effort — so this is exactly the shape the
-// production path sees.
 func testInjector(f *fakeResolver) *l2inject {
 	return &l2inject{fd: -1, resolve: f.resolve}
 }
 
-// TestL2InjectResolvesPerDestination pins the caching contract: the route is resolved once per
-// destination, reused while the destination is unchanged, and re-resolved the moment it moves.
 func TestL2InjectResolvesPerDestination(t *testing.T) {
 	f := &fakeResolver{}
 	inj := testInjector(f)
 	a, b := net.IPv4(203, 0, 113, 5), net.IPv4(198, 51, 100, 7)
 
 	_ = inj.sendTo(a, []byte{0x45})
-	_ = inj.sendTo(a, []byte{0x45}) // same destination: must NOT re-resolve
+	_ = inj.sendTo(a, []byte{0x45})
 	if got := f.asked(); len(got) != 1 || got[0] != a.String() {
 		t.Fatalf("resolver calls = %v, want exactly one for %s (the cache must hold)", got, a)
 	}
 
-	_ = inj.sendTo(b, []byte{0x45}) // destination moved: must re-resolve for b
+	_ = inj.sendTo(b, []byte{0x45})
 	if got := f.asked(); len(got) != 2 || got[1] != b.String() {
 		t.Fatalf("resolver calls = %v, want a second call for %s after the destination changed", got, b)
 	}
 
-	_ = inj.sendTo(a, []byte{0x45}) // back to a: the cache is for b now, so resolve again
+	_ = inj.sendTo(a, []byte{0x45})
 	if got := f.asked(); len(got) != 3 || got[2] != a.String() {
 		t.Fatalf("resolver calls = %v, want a re-resolve for %s", got, a)
 	}
 
-	// A failed resolve must not poison the cache with a route it never got.
 	f2 := &fakeResolver{err: errors.New("no next hop")}
 	inj2 := testInjector(f2)
 	if err := inj2.sendTo(a, []byte{0x45}); err == nil {
@@ -75,16 +66,12 @@ func TestL2InjectResolvesPerDestination(t *testing.T) {
 	}
 }
 
-// TestRawBadsumDecoyFollowsDestination drives the REAL path (Raw.sendFakes), not the injector helper:
-// the L2 route a bad-checksum decoy is framed for must be the destination the tunnel is on NOW. An
-// injector frozen at construction only re-resolves after a Sendto failure — which never comes, because
-// handing a frame to the NIC succeeds — so every decoy kept going to the first destination's next hop.
 func TestRawBadsumDecoyFollowsDestination(t *testing.T) {
 	f := &fakeResolver{}
 	r := &Raw{isClient: true, proto: protoBare, profile: "bare", fakeFd: -1}
 	r.link = &directLink{r: r}
 	r.localIP.Store(&net.IPAddr{IP: net.IPv4(192, 0, 2, 1)})
-	r.desync = newDesyncCfg(true, 4, 2, "badsum") // every decoy is badsum -> every one goes via the injector
+	r.desync = newDesyncCfg(true, 4, 2, "badsum")
 	r.inj = testInjector(f)
 
 	first := &net.IPAddr{IP: net.IPv4(203, 0, 113, 5)}
@@ -96,9 +83,6 @@ func TestRawBadsumDecoyFollowsDestination(t *testing.T) {
 		t.Fatalf("first handshake resolved %v, want %s", got, first.IP)
 	}
 
-	// A destination rotation: the tunnel moves, and the next decoy batch must be framed for the NEW
-	// next hop. (rotatePeerRaw is what moves r.peer in production; the decoy target is whatever
-	// sendFakes is handed, which is that same live peer — see the handshake caller.)
 	r.peer.Store(second)
 	r.sendFakes(second)
 	last := f.asked()
@@ -108,10 +92,6 @@ func TestRawBadsumDecoyFollowsDestination(t *testing.T) {
 	}
 }
 
-// TestRawBadsumDecoyFramesForTheRoutedPeer closes the whole class: whatever the link forges into the
-// decoy's IPv4 HEADER, the Ethernet frame it is injected in must be built for the address the tunnel
-// actually ROUTES to, as every other packet of the flow is. The matrix is over the FORGE axes, since
-// that is what decides whether header dst == to.IP. That the header still carries the decoy is header()'s.
 func TestRawBadsumDecoyFramesForTheRoutedPeer(t *testing.T) {
 	peer := &net.IPAddr{IP: net.IPv4(203, 0, 113, 5)}
 	decoy := net.IPv4(198, 51, 100, 200)
@@ -137,7 +117,7 @@ func TestRawBadsumDecoyFramesForTheRoutedPeer(t *testing.T) {
 			r := &Raw{isClient: true, proto: protoBare, profile: "bare", fakeFd: -1}
 			r.link = tc.link(r)
 			r.localIP.Store(&net.IPAddr{IP: net.IPv4(192, 0, 2, 1)})
-			r.desync = newDesyncCfg(true, 4, 2, "badsum") // every decoy is badsum -> every one goes via the injector
+			r.desync = newDesyncCfg(true, 4, 2, "badsum")
 			r.inj = testInjector(f)
 			r.peer.Store(peer)
 

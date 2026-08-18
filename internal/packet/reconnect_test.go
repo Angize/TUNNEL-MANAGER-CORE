@@ -8,10 +8,6 @@ import (
 	"time"
 )
 
-// TestUDPRotationKeepsStreamFlowing proves a proactive DESTINATION rotation re-handshakes onto the new
-// endpoint FAST — the init goes out immediately after the rotation, not after the 1s retransmit sleep. A
-// client streams a packet every 30ms across a pool rotating every 700ms between two live server IPs, and
-// the largest gap between packets reaching the server must stay well under a full retransmit interval.
 func TestUDPRotationKeepsStreamFlowing(t *testing.T) {
 	const psk = "rot-stream-psk-abcdefghijklmnop"
 	const cipher = "chacha20-poly1305"
@@ -35,14 +31,14 @@ func TestUDPRotationKeepsStreamFlowing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	cli.SetPeerPool(NewPeerPool([]string{a1, a2}, 700*time.Millisecond, "")) // rotate dest every 700ms
+	cli.SetPeerPool(NewPeerPool([]string{a1, a2}, 700*time.Millisecond, ""))
 	go srv.Run()
 	go cli.Run()
 	t.Cleanup(func() { cli.Close(); srv.Close() })
-	time.Sleep(400 * time.Millisecond) // let the initial handshake complete
+	time.Sleep(400 * time.Millisecond)
 
 	stop := make(chan struct{})
-	go func() { // stream a packet every 30ms
+	go func() {
 		pkt := bytes.Repeat([]byte{0xB7}, 120)
 		tk := time.NewTicker(30 * time.Millisecond)
 		defer tk.Stop()
@@ -60,12 +56,12 @@ func TestUDPRotationKeepsStreamFlowing(t *testing.T) {
 	var last time.Time
 	var maxGap time.Duration
 	buf := make([]byte, 2048)
-	end := time.Now().Add(2 * time.Second) // spans ~2-3 proactive rotations at 700ms
+	end := time.Now().Add(2 * time.Second)
 	for time.Now().Before(end) {
 		_ = srvCtrl.SetReadDeadline(time.Now().Add(1200 * time.Millisecond))
 		n, err := srvCtrl.Read(buf)
 		now := time.Now()
-		if err != nil { // >1.2s with no packet == the stream stalled (pre-fix ~1s+ sleep, or a hang)
+		if err != nil {
 			t.Fatalf("no packet for >1.2s — a rotation stalled the stream")
 		}
 		if n <= 0 {
@@ -80,16 +76,11 @@ func TestUDPRotationKeepsStreamFlowing(t *testing.T) {
 	}
 	_ = srvCtrl.SetReadDeadline(time.Time{})
 
-	// The re-handshake has to start immediately, so the worst gap is about one RTT. The bound below sits
-	// far above that and far below a rotation that waits out a retransmit interval before its first init.
 	if maxGap > 500*time.Millisecond {
 		t.Fatalf("largest stream gap across a rotation = %v, want < 500ms (rotation must not stall the stream)", maxGap)
 	}
 }
 
-// TestUDPReHandshakeOnReconnect proves a restarted client (fresh ephemeral) is
-// re-handshaked by a still-running server and the tunnel recovers — the path that
-// used to rely on the replay guard blindly adopting any new session.
 func TestUDPReHandshakeOnReconnect(t *testing.T) {
 	const psk = "reconnect-psk-abcdefghijklmnop"
 	const cipher = "chacha20-poly1305"
@@ -109,7 +100,7 @@ func TestUDPReHandshakeOnReconnect(t *testing.T) {
 			t.Fatal(err)
 		}
 		go cli.Run()
-		time.Sleep(300 * time.Millisecond) // let the handshake complete
+		time.Sleep(300 * time.Millisecond)
 		pkt := bytes.Repeat([]byte{0x77}, 180)
 		if _, err := cliCtrl.Write(pkt); err != nil {
 			t.Fatalf("%s inject: %v", tag, err)
@@ -123,6 +114,6 @@ func TestUDPReHandshakeOnReconnect(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	send("cli-first")  // initial handshake + data
-	send("cli-second") // NEW client, NEW ephemeral -> server must re-handshake
+	send("cli-first")
+	send("cli-second")
 }

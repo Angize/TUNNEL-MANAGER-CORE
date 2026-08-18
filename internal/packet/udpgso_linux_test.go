@@ -9,7 +9,6 @@ import (
 	"time"
 )
 
-// txTo opens a udpTx aimed at a real listening socket, and returns both ends.
 func txTo(t *testing.T) (*udpTx, *net.UDPConn, *net.UDPAddr) {
 	t.Helper()
 	srv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -29,11 +28,6 @@ func txTo(t *testing.T) (*udpTx, *net.UDPConn, *net.UDPAddr) {
 	return tx, srv, srv.LocalAddr().(*net.UDPAddr)
 }
 
-// frames of one size must arrive as that many SEPARATE datagrams, each whole.
-//
-// The failure this pins is silent and total: get the segment size or the buffer layout wrong and the
-// peer receives one giant datagram, or segments cut at the wrong offset. Every one then fails the AEAD
-// and is dropped without a word, so the tunnel simply carries nothing while every counter looks fine.
 func TestASegmentedSendArrivesAsSeparateWholeDatagrams(t *testing.T) {
 	tx, srv, to := txTo(t)
 	const n, size = 8, 200
@@ -73,7 +67,6 @@ func TestASegmentedSendArrivesAsSeparateWholeDatagrams(t *testing.T) {
 	}
 }
 
-// A run may end in ONE shorter frame, which is the kernel's rule and the common tail of a burst.
 func TestASegmentedSendAllowsOneShorterTail(t *testing.T) {
 	tx, srv, to := txTo(t)
 	tx.reset()
@@ -101,8 +94,6 @@ func TestASegmentedSendAllowsOneShorterTail(t *testing.T) {
 	}
 }
 
-// A LONGER frame after the first ends the run there: the kernel cuts every segment but the last to one
-// size, so letting a bigger one in would truncate it and hand the peer a frame that cannot open.
 func TestARunStopsAtTheFirstFrameThatWouldNotFit(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -128,8 +119,6 @@ func TestARunStopsAtTheFirstFrameThatWouldNotFit(t *testing.T) {
 	}
 }
 
-// Neither kernel limit may be crossed: past 64 KiB or 64 segments the write fails ENTIRELY rather than
-// sending what fits, so a burst that reached either would vanish.
 func TestARunStaysUnderTheKernelLimits(t *testing.T) {
 	tx, _, to := txTo(t)
 	tx.reset()
@@ -148,8 +137,6 @@ func TestARunStaysUnderTheKernelLimits(t *testing.T) {
 	}
 }
 
-// Whatever the run leaves behind must still go. A burst is only partly uniform far more often than not,
-// and frames silently dropped between the two paths are indistinguishable from network loss.
 func TestEveryFrameLeavesEvenWhenOnlyPartOfTheBurstIsUniform(t *testing.T) {
 	tx, srv, to := txTo(t)
 	tx.reset()

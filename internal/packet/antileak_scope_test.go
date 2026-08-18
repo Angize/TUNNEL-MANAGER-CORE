@@ -8,9 +8,6 @@ import (
 	"testing"
 )
 
-// scopeRecorder is an injectable antiLeaker installer that records the IP each rule set was scoped
-// to. antiLeaker.install is nil in a hand-built carrier precisely so a test never touches the host
-// firewall; this fills it in with a spy.
 type scopeRecorder struct {
 	mu  sync.Mutex
 	ips []string
@@ -34,10 +31,6 @@ func (s *scopeRecorder) last() string {
 	return s.ips[len(s.ips)-1]
 }
 
-// The anti-leak rules must stay scoped to the endpoint the tunnel is CURRENTLY using. The rule set is
-// single-scoped, so pointing it at one address takes it off the previous one — and a pooled client keeps
-// admitting the endpoint a rotation left, so a straggler frame must not drag the scope back onto it.
-// The synchronous scope calls on the rotate/pin paths are not at issue; this is the async hand-off.
 func TestAntiLeakScopeIsNotDraggedBackByAStragglerFrame(t *testing.T) {
 	const live, old = "203.0.113.20", "203.0.113.10"
 
@@ -47,15 +40,14 @@ func TestAntiLeakScopeIsNotDraggedBackByAStragglerFrame(t *testing.T) {
 		r.link = &directLink{r: r}
 		r.leak.install = rec.installer()
 		r.SetPeerPool(NewPeerPool([]string{old, live}, 0, ""))
-		r.peer.Store(&net.IPAddr{IP: net.ParseIP(live).To4()}) // where a rotation has put us
-		r.leak.scope(net.ParseIP(live).To4())                  // ...and the rules follow, as rotatePeerRaw does
+		r.peer.Store(&net.IPAddr{IP: net.ParseIP(live).To4()})
+		r.leak.scope(net.ParseIP(live).To4())
 		if got := rec.last(); got != live {
 			t.Fatalf("pre-scope landed on %q, want %s — the rest of this case would be vacuous", got, live)
 		}
 
-		// A frame still in flight from the endpoint we just left.
 		r.learnPeer(&net.IPAddr{IP: net.ParseIP(old).To4()})
-		r.leak.apply() // scopeAsync hands off to a goroutine; run the same work synchronously
+		r.leak.apply()
 
 		if got := rec.last(); got != live {
 			t.Errorf("a straggler from %s dragged the anti-leak rules onto it; they are now OFF %s, which is the endpoint carrying the tunnel — the kernel-answer leak, re-opened on every rotation", old, live)
@@ -79,8 +71,6 @@ func TestAntiLeakScopeIsNotDraggedBackByAStragglerFrame(t *testing.T) {
 		}
 	})
 
-	// ...and the case the hand-off EXISTS for must keep working: a server has no pool, learns its
-	// client from the frame, and must follow that client's source rotation.
 	t.Run("raw: a server still follows the client it just learned", func(t *testing.T) {
 		rec := &scopeRecorder{}
 		r := &Raw{isClient: false}
@@ -92,7 +82,7 @@ func TestAntiLeakScopeIsNotDraggedBackByAStragglerFrame(t *testing.T) {
 		if got := rec.last(); got != old {
 			t.Fatalf("a server did not scope to the client it learned: got %q, want %s", got, old)
 		}
-		// The client rotates its source; the server must follow.
+
 		r.learnPeer(&net.IPAddr{IP: net.ParseIP(live).To4()})
 		r.leak.apply()
 		if got := rec.last(); got != live {

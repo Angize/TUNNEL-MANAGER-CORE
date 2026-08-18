@@ -7,8 +7,6 @@ import (
 	"testing"
 )
 
-// resetCfgWarns puts the package-level sink back to its zero state, so one test's notes cannot leak
-// into the next. Registered with t.Cleanup by every test that touches it.
 func resetCfgWarns(t *testing.T) {
 	t.Helper()
 	cfgWarns.mu.Lock()
@@ -36,10 +34,6 @@ func statusEvents(t *testing.T, path string) []coreEvent {
 	return doc.Events
 }
 
-// TestAConfigWarningReachesTheStatusFile pins that a setting the host did not grant reaches the layer
-// the operator reads. A journal line does not: the node reads the core's journal only on the failure
-// branch after a build, so a core that started with clamped buffers reports nothing. The ORDER is the
-// difficulty, and why this is tested — sockets are sized before main wires the sink, so a note must wait.
 func TestAConfigWarningReachesTheStatusFile(t *testing.T) {
 	t.Run("raised before the status file exists", func(t *testing.T) {
 		resetCfgWarns(t)

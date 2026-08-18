@@ -8,10 +8,6 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// TestApexAnswersLookLikeAnOrdinaryNODATA pins the SHAPE of the apex answer, which the drain fix never
-// looked at: it reasoned only about not being SILENT and reached for write(), which always attaches a TXT
-// record — so `dig TXT <zone>` came back with a zero-length string at TTL 0, which essentially no real
-// zone does. It drives the REAL server and reads the packed message, since both shapes parse as empty.
 func TestApexAnswersLookLikeAnOrdinaryNODATA(t *testing.T) {
 	const zone = "t.example.com"
 	codec, err := NewCodec(zone)
@@ -60,8 +56,6 @@ func TestApexAnswersLookLikeAnOrdinaryNODATA(t *testing.T) {
 		return msg
 	}
 
-	// A NODATA is: NOERROR, authoritative, no answers, and the zone's SOA in AUTHORITY so a resolver
-	// can cache the negative. Anything in ANSWER is a record we are claiming to have.
 	wantNODATA := func(t *testing.T, what string, msg dnsmessage.Message) {
 		t.Helper()
 		if msg.Header.RCode != dnsmessage.RCodeSuccess {
@@ -81,21 +75,17 @@ func TestApexAnswersLookLikeAnOrdinaryNODATA(t *testing.T) {
 		}
 	}
 
-	// The probe the drain fix added its branch for.
 	wantNODATA(t, "TXT at the apex", askRaw(t, zone+".", dnsmessage.TypeTXT))
-	// ...and the non-TXT paths that already chose NODATA, so the two cannot drift apart again.
+
 	wantNODATA(t, "MX at the apex", askRaw(t, zone+".", dnsmessage.TypeMX))
 	wantNODATA(t, "A under the zone", askRaw(t, "probe."+zone+".", dnsmessage.TypeA))
 
-	// The positive half: a real record must still come back IN the answer section, or "no answers
-	// anywhere" would satisfy everything above.
 	soa := askRaw(t, zone+".", dnsmessage.TypeSOA)
 	if len(soa.Answers) != 1 || soa.Answers[0].Header.Type != dnsmessage.TypeSOA {
 		t.Fatalf("a direct SOA query returned %d answer(s); the apex must still serve its own records",
 			len(soa.Answers))
 	}
 
-	// ...and so must a real tunnel poll, which is the only TXT this zone genuinely has.
 	if err := tr.Send([]byte("downstream")); err != nil {
 		t.Fatalf("queue a downstream datagram: %v", err)
 	}

@@ -1,12 +1,7 @@
-// Forward error correction for the datagram carriers (udp / stun / raw / flux): a systematic Reed-Solomon
-// ERASURE code over GF(256). For every block of n data shards we emit k parity shards, and the receiver —
-// which knows exactly which shards are missing — reconstructs up to k of them WITHOUT a retransmit, so a
-// high-loss link is repaired locally instead of collapsing the inner TCP. This file is the pure codec.
 package packet
 
 import "errors"
 
-// GF(256) arithmetic with the standard AES/RS primitive polynomial 0x11d.
 var (
 	gfExp [512]byte
 	gfLog [256]byte
@@ -22,7 +17,7 @@ func init() {
 			x ^= 0x11d
 		}
 	}
-	for i := 255; i < 512; i++ { // duplicate so gfExp[a+b] never needs a mod
+	for i := 255; i < 512; i++ {
 		gfExp[i] = gfExp[i-255]
 	}
 }
@@ -34,28 +29,23 @@ func gmul(a, b byte) byte {
 	return gfExp[int(gfLog[a])+int(gfLog[b])]
 }
 
-func gdiv(a, b byte) byte { // b != 0
+func gdiv(a, b byte) byte {
 	if a == 0 {
 		return 0
 	}
 	return gfExp[int(gfLog[a])-int(gfLog[b])+255]
 }
 
-// fecCodec is a systematic Reed-Solomon codec for (n data, k parity) shards. The
-// parity rows come from a Cauchy matrix, so ANY n of the n+k rows form an
-// invertible matrix — i.e. any k erasures are recoverable.
 type fecCodec struct {
 	n, k   int
-	parity [][]byte // k rows × n cols: parity[i][j] = coefficient of data j in parity i
+	parity [][]byte
 }
 
-// newFECCodec builds a codec for n data + k parity shards. n>=1, k>=1, n+k<=256.
 func newFECCodec(n, k int) (*fecCodec, error) {
 	if n < 1 || k < 1 || n+k > 256 {
 		return nil, errors.New("fec: bad (n,k)")
 	}
-	// Cauchy matrix: rows x_i = n+i (i<k), cols y_j = j (j<n); all distinct, so
-	// C[i][j] = 1/(x_i XOR y_j) and every square submatrix is invertible.
+
 	p := make([][]byte, k)
 	for i := 0; i < k; i++ {
 		p[i] = make([]byte, n)
@@ -67,7 +57,6 @@ func newFECCodec(n, k int) (*fecCodec, error) {
 	return &fecCodec{n: n, k: k, parity: p}, nil
 }
 
-// Encode returns the k parity shards for the n equal-length data shards.
 func (c *fecCodec) Encode(data [][]byte) ([][]byte, error) {
 	if len(data) != c.n {
 		return nil, errors.New("fec: need exactly n data shards")
@@ -93,22 +82,16 @@ func (c *fecCodec) Encode(data [][]byte) ([][]byte, error) {
 	return out, nil
 }
 
-// Reconstruct recovers the n data shards from any n present shards. shards is
-// indexed 0..n+k-1 (0..n-1 data, n..n+k-1 parity); a missing shard is nil. All
-// present shards must share one length. Returns the n data shards (freshly filled
-// for the ones that were missing), or an error if fewer than n shards are present.
 func (c *fecCodec) Reconstruct(shards [][]byte) ([][]byte, error) {
 	if len(shards) != c.n+c.k {
 		return nil, errors.New("fec: shards must be length n+k")
 	}
-	// Fast path: all data shards present.
+
 	haveAllData := true
 	sz := 0
 	for i := 0; i < c.n+c.k; i++ {
 		if shards[i] != nil {
-			// All present shards must share one length; bail rather than read past a
-			// shorter shard in the XOR loops below (defence in depth against a decoder
-			// that ever admits mixed-length shards for one block).
+
 			if sz != 0 && len(shards[i]) != sz {
 				return nil, errors.New("fec: mixed shard lengths")
 			}
@@ -121,19 +104,18 @@ func (c *fecCodec) Reconstruct(shards [][]byte) ([][]byte, error) {
 	if haveAllData {
 		return shards[:c.n], nil
 	}
-	// Collect the first n present shards and the rows of the full encode matrix
-	// (identity for data, Cauchy for parity) that produced them.
-	rows := make([][]byte, 0, c.n) // n×n matrix (each present shard's encode row)
-	vals := make([][]byte, 0, c.n) // the present shard bytes, same order
+
+	rows := make([][]byte, 0, c.n)
+	vals := make([][]byte, 0, c.n)
 	for i := 0; i < c.n+c.k && len(rows) < c.n; i++ {
 		if shards[i] == nil {
 			continue
 		}
 		row := make([]byte, c.n)
 		if i < c.n {
-			row[i] = 1 // identity row for a data shard
+			row[i] = 1
 		} else {
-			copy(row, c.parity[i-c.n]) // Cauchy row for a parity shard
+			copy(row, c.parity[i-c.n])
 		}
 		rows = append(rows, row)
 		vals = append(vals, shards[i])
@@ -145,11 +127,11 @@ func (c *fecCodec) Reconstruct(shards [][]byte) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	// data = inv * vals  (matrix × shard-vector over GF(256), byte-wise)
+
 	data := make([][]byte, c.n)
 	for r := 0; r < c.n; r++ {
 		if shards[r] != nil {
-			data[r] = shards[r] // keep the original data shard untouched
+			data[r] = shards[r]
 			continue
 		}
 		out := make([]byte, sz)
@@ -165,25 +147,22 @@ func (c *fecCodec) Reconstruct(shards [][]byte) ([][]byte, error) {
 	return data, nil
 }
 
-// gfMulAddRow does dst[i] ^= coef·src[i] over GF(256) for the full length of dst (len(src) == len(dst)
-// at every call). The RS "multiply-accumulate row" primitive, shared by Encode / Reconstruct / gfInvert.
 func gfMulAddRow(dst, src []byte, coef byte) {
 	for i := range dst {
 		dst[i] ^= gmul(coef, src[i])
 	}
 }
 
-// gfInvert inverts an n×n GF(256) matrix via Gauss-Jordan elimination.
 func gfInvert(m [][]byte) ([][]byte, error) {
 	n := len(m)
-	a := make([][]byte, n) // working copy augmented with the identity
+	a := make([][]byte, n)
 	for i := range m {
 		a[i] = make([]byte, 2*n)
 		copy(a[i], m[i])
 		a[i][n+i] = 1
 	}
 	for col := 0; col < n; col++ {
-		// pivot
+
 		if a[col][col] == 0 {
 			sw := -1
 			for r := col + 1; r < n; r++ {
@@ -197,12 +176,12 @@ func gfInvert(m [][]byte) ([][]byte, error) {
 			}
 			a[col], a[sw] = a[sw], a[col]
 		}
-		// normalize pivot row
+
 		pv := a[col][col]
 		for x := 0; x < 2*n; x++ {
 			a[col][x] = gdiv(a[col][x], pv)
 		}
-		// eliminate other rows
+
 		for r := 0; r < n; r++ {
 			if r == col || a[r][col] == 0 {
 				continue

@@ -13,14 +13,11 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
-// pipeTransport is an in-memory WireTransport: Send delivers onto the peer's rx channel (dropping
-// a lossPct fraction to model an unreliable DNS channel), Recv reads this end's rx. A cross-wired
-// pair stands in for the real DNS transport so the session layer is testable without a resolver.
 type pipeTransport struct {
-	tx     chan []byte // datagrams this end sends (the peer's rx)
-	rx     chan []byte // datagrams this end receives
+	tx     chan []byte
+	rx     chan []byte
 	loss   int
-	mu     sync.Mutex // guards rng (math/rand/v2 is not concurrency-safe)
+	mu     sync.Mutex
 	rng    *mrand.Rand
 	closed chan struct{}
 	once   sync.Once
@@ -44,13 +41,13 @@ func (p *pipeTransport) Send(d []byte) error {
 	drop := p.loss > 0 && p.rng.IntN(100) < p.loss
 	p.mu.Unlock()
 	if drop {
-		return nil // lost in transit — kcp-go retransmits
+		return nil
 	}
 	cp := append([]byte(nil), d...)
 	select {
 	case p.tx <- cp:
 	case <-p.closed:
-	default: // peer not draining: drop
+	default:
 	}
 	return nil
 }
@@ -69,9 +66,6 @@ func (p *pipeTransport) Close() error {
 	return nil
 }
 
-// TestSessionOverLossyPipe is the Phase-A end-to-end proof: two sessions (dial + serve) complete
-// the X25519 handshake and exchange an AEAD-sealed, reliable byte stream IN BOTH DIRECTIONS over
-// a 15%-lossy transport — the whole session layer the DNS carrier rides on, minus the DNS codec.
 func TestSessionOverLossyPipe(t *testing.T) {
 	cliT, srvT := newPipePair(15)
 	cfg := SessionConfig{PSK: "correct-horse-battery-staple", Cipher: "chacha20-poly1305"}
@@ -99,8 +93,6 @@ func TestSessionOverLossyPipe(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Client writes upstream; a reader collects the echo. The write must start so the server's
-	// AcceptKCP (blocked on the first KCP datagram) returns.
 	go func() { _, _ = cli.Write(payload) }()
 
 	srv := <-srvCh
@@ -109,8 +101,6 @@ func TestSessionOverLossyPipe(t *testing.T) {
 	}
 	defer srv.Close()
 
-	// Server echoes full-duplex (separate concern from its own reads — one read loop that writes
-	// each chunk back; never io.Copy on the same session, which self-stalls half-duplex).
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -154,9 +144,6 @@ func TestSessionOverLossyPipe(t *testing.T) {
 	}
 }
 
-// TestSessionWrongPSKFails proves the handshake authenticates: a client with the wrong PSK cannot
-// establish a session — the server never MAC-verifies its init, so it never answers and the dial
-// times out (rather than silently forming an unauthenticated tunnel).
 func TestSessionWrongPSKFails(t *testing.T) {
 	orig := handshakeTimeout
 	handshakeTimeout = 1200 * time.Millisecond
@@ -171,10 +158,6 @@ func TestSessionWrongPSKFails(t *testing.T) {
 	}
 }
 
-// TestServeSessionRecoversFromVanishedClient proves the server's single session slot recovers PROMPTLY
-// from a client that arms it with a valid init and then vanishes before completing the KCP handshake. A
-// NEW client that fully dials and writes must be ADOPTED IN PLACE and served — the server reads its data
-// — with no reconnect and no re-init, in about one round trip rather than a KCP dead-link timeout.
 func TestServeSessionRecoversFromVanishedClient(t *testing.T) {
 	cliT, srvT := newPipePair(0)
 	cfg := SessionConfig{PSK: "recover-me", Cipher: "chacha20-poly1305"}
@@ -190,13 +173,12 @@ func TestServeSessionRecoversFromVanishedClient(t *testing.T) {
 		srvCh <- c
 	}()
 
-	// Client 1 arms the server with a valid init, then goes silent (never completes KCP).
 	ci1, err := crypto.GenerateEphemeralNoPad()
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = cliT.Send(append([]byte{kindHandshake}, crypto.InitMsg(cfg.PSK, ci1)...))
-	time.Sleep(200 * time.Millisecond) // let the server arm and enter AcceptKCP
+	time.Sleep(200 * time.Millisecond)
 
 	select {
 	case err := <-srvErr:
@@ -206,8 +188,6 @@ func TestServeSessionRecoversFromVanishedClient(t *testing.T) {
 	default:
 	}
 
-	// Client 2 fully dials with a fresh ephemeral over the SAME transport and writes — a real new
-	// client completing the KCP handshake. The server must adopt it in place and serve it.
 	cli2, err := DialSession(cliT, cfg)
 	if err != nil {
 		t.Fatalf("client 2 DialSession: %v", err)
@@ -234,10 +214,6 @@ func TestServeSessionRecoversFromVanishedClient(t *testing.T) {
 	}
 }
 
-// TestServeSessionIgnoresReplayedInit locks in the replayed-init DoS protection: once a client has
-// ESTABLISHED and data is flowing, a bare different-ephemeral init with NO follow-up data — exactly what
-// an on-path attacker replaying a captured init can produce — must NOT tear the live session down. Only
-// a data frame that actually opens under the staged keys may promote.
 func TestServeSessionIgnoresReplayedInit(t *testing.T) {
 	cliT, srvT := newPipePair(0)
 	cfg := SessionConfig{PSK: "no-teardown", Cipher: "chacha20-poly1305"}
@@ -258,7 +234,7 @@ func TestServeSessionIgnoresReplayedInit(t *testing.T) {
 		t.Fatalf("DialSession: %v", err)
 	}
 	defer cli.Close()
-	// Keep a steady trickle of data so the session establishes and stays demonstrably live.
+
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
@@ -286,24 +262,18 @@ func TestServeSessionIgnoresReplayedInit(t *testing.T) {
 		t.Fatalf("server first read (establish): %v", err)
 	}
 
-	// Inject a bare, DIFFERENT-ephemeral init (a replay) with no follow-up data frame.
 	attacker, err := crypto.GenerateEphemeralNoPad()
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = cliT.Send(append([]byte{kindHandshake}, crypto.InitMsg(cfg.PSK, attacker)...))
 
-	// The live session must keep working: the server keeps reading the real client's data.
 	_ = srv.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := srv.Read(buf); err != nil {
 		t.Fatalf("live session was disrupted by a bare replayed init: %v", err)
 	}
 }
 
-// TestServeSessionUnblocksOnTransportClose proves Close honors its contract even before a client
-// connects: with the server armed and parked in AcceptKCP, closing the transport (what the
-// carrier's Close does when no session is live yet) must unblock ServeSession — otherwise the
-// queue conn is never closed and the goroutines leak.
 func TestServeSessionUnblocksOnTransportClose(t *testing.T) {
 	cliT, srvT := newPipePair(0)
 	cfg := SessionConfig{PSK: "close-me", Cipher: "chacha20-poly1305"}
@@ -319,9 +289,9 @@ func TestServeSessionUnblocksOnTransportClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = cliT.Send(append([]byte{kindHandshake}, crypto.InitMsg(cfg.PSK, ci)...))
-	time.Sleep(200 * time.Millisecond) // arm + enter AcceptKCP
+	time.Sleep(200 * time.Millisecond)
 
-	_ = srvT.Close() // carrier Close with no live session tears down the transport
+	_ = srvT.Close()
 
 	select {
 	case err := <-srvErr:
@@ -333,10 +303,6 @@ func TestServeSessionUnblocksOnTransportClose(t *testing.T) {
 	}
 }
 
-// TestServeSessionStagedSetResistsEviction proves the bounded staged-candidate set: an on-path
-// attacker injecting several DISTINCT captured inits (each a bare init with no follow-up data — a
-// replay) cannot evict a legit client's staged session, so that client is still adopted and its data
-// flows. With the old single pend slot, ONE attacker init would have evicted the legit candidate.
 func TestServeSessionStagedSetResistsEviction(t *testing.T) {
 	cliT, srvT := newPipePair(0)
 	cfg := SessionConfig{PSK: "no-evict", Cipher: "chacha20-poly1305"}
@@ -352,7 +318,6 @@ func TestServeSessionStagedSetResistsEviction(t *testing.T) {
 		srvCh <- c
 	}()
 
-	// Client 1 arms the server, then vanishes before completing KCP.
 	ci1, err := crypto.GenerateEphemeralNoPad()
 	if err != nil {
 		t.Fatal(err)
@@ -360,15 +325,12 @@ func TestServeSessionStagedSetResistsEviction(t *testing.T) {
 	_ = cliT.Send(append([]byte{kindHandshake}, crypto.InitMsg(cfg.PSK, ci1)...))
 	time.Sleep(200 * time.Millisecond)
 
-	// The legit client fully dials (its init is staged as a candidate).
 	cli, err := DialSession(cliT, cfg)
 	if err != nil {
 		t.Fatalf("legit DialSession: %v", err)
 	}
 	defer cli.Close()
 
-	// The attacker floods maxStaged-1 further DISTINCT captured inits (bare, no data). Together with
-	// the legit candidate the set is exactly full, so FIFO keeps the legit (oldest-but-present) entry.
 	for i := 0; i < maxStaged-1; i++ {
 		atk, gerr := crypto.GenerateEphemeralNoPad()
 		if gerr != nil {
@@ -376,7 +338,7 @@ func TestServeSessionStagedSetResistsEviction(t *testing.T) {
 		}
 		_ = cliT.Send(append([]byte{kindHandshake}, crypto.InitMsg(cfg.PSK, atk)...))
 	}
-	time.Sleep(150 * time.Millisecond) // let the flood be staged before the legit client's data
+	time.Sleep(150 * time.Millisecond)
 
 	payload := []byte("survived the eviction flood")
 	go func() { _, _ = cli.Write(payload) }()
@@ -399,19 +361,14 @@ func TestServeSessionStagedSetResistsEviction(t *testing.T) {
 	}
 }
 
-// TestSessionKeepaliveReapsSilentPeer proves the client keepalive detects a peer that established but
-// then went silent (a restarted / mismatched server that can't produce a valid pong) and re-dials by
-// Closing the session so the carrier's Read errors — the only thing that recovers such a session, since
-// KCP's own dead-link never fires on a link that carries no data.
 func TestSessionKeepaliveReapsSilentPeer(t *testing.T) {
 	origKA, origFloor := defaultKeepalive, keepaliveDeadFloor
 	defaultKeepalive, keepaliveDeadFloor = 50*time.Millisecond, 250*time.Millisecond
 	defer func() { defaultKeepalive, keepaliveDeadFloor = origKA, origFloor }()
 
 	cliT, srvT := newPipePair(0)
-	cfg := SessionConfig{PSK: "reap-me", Cipher: "chacha20-poly1305"} // Keepalive 0 -> defaultKeepalive
+	cfg := SessionConfig{PSK: "reap-me", Cipher: "chacha20-poly1305"}
 
-	// Minimal server: answer the init once so the client establishes, then go silent — never pong.
 	go func() {
 		for {
 			d, err := srvT.Recv()
@@ -429,7 +386,7 @@ func TestSessionKeepaliveReapsSilentPeer(t *testing.T) {
 				}
 				_ = srvT.Send(append([]byte{kindHandshake}, crypto.RespMsg(cfg.PSK, e, sr)...))
 			}
-			// Everything else (the client's pings, KCP SYNs) is drained and ignored: no pong ever.
+
 		}
 	}()
 
@@ -455,7 +412,6 @@ func TestSessionKeepaliveReapsSilentPeer(t *testing.T) {
 	}
 }
 
-// TestSessionCloseIsIdempotent guards the teardown path (Close is called from multiple defers).
 func TestSessionCloseIsIdempotent(t *testing.T) {
 	cliT, srvT := newPipePair(0)
 	cfg := SessionConfig{PSK: "k", Cipher: "chacha20-poly1305"}
@@ -469,7 +425,7 @@ func TestSessionCloseIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialSession: %v", err)
 	}
-	go func() { _, _ = cli.Write([]byte("wake")) }() // unblock the server's AcceptKCP
+	go func() { _, _ = cli.Write([]byte("wake")) }()
 	time.Sleep(200 * time.Millisecond)
 	if err := cli.Close(); err != nil {
 		t.Fatalf("first Close: %v", err)

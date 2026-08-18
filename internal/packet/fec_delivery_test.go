@@ -7,10 +7,6 @@ import (
 	"time"
 )
 
-// fecEncodeBlock runs `count` frames through the REAL send path (addData -> fill-flush or the
-// fecFlushDelay timer -> emit) and returns the wire packets of the one block it flushed, in emit
-// order, plus the payloads that went in. Whatever parity the encoder chose to send is returned
-// as-is — no caller here may assume there are k of them.
 func fecEncodeBlock(t *testing.T, n, k, count int) (wire, payloads [][]byte) {
 	t.Helper()
 	var mu sync.Mutex
@@ -42,15 +38,13 @@ func fecEncodeBlock(t *testing.T, n, k, count int) (wire, payloads [][]byte) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	time.Sleep(4 * fecFlushDelay) // let the whole flush land before the caller reads it
+	time.Sleep(4 * fecFlushDelay)
 	mu.Lock()
 	wire = append([][]byte(nil), got...)
 	mu.Unlock()
 	return wire, payloads
 }
 
-// fecSplit sorts one block's wire packets into its data shards (indexed by their header idx) and
-// its parity shards.
 func fecSplit(wire [][]byte) (data, parity [][]byte) {
 	for _, p := range wire {
 		switch p[0] {
@@ -63,8 +57,6 @@ func fecSplit(wire [][]byte) (data, parity [][]byte) {
 	return data, parity
 }
 
-// fecCollect feeds the given wire packets to a fresh decoder and returns how many times each
-// payload was delivered, keyed by the payload text.
 func fecCollect(pkts [][]byte) map[string]int {
 	seen := map[string]int{}
 	d := newFecDecoder(func(frame []byte) { seen[string(frame)]++ })
@@ -74,17 +66,13 @@ func fecCollect(pkts [][]byte) map[string]int {
 	return seen
 }
 
-// TestFecDeliversTheShardsThatArrived: a block that cannot be reconstructed must not throw away the
-// intact data shards that DID arrive. With FEC on the decoder is the ONLY path those frames have, so
-// losing one shard past the repair budget cost the WHOLE block — at 10+3, ten real packets gone for
-// thirteen on the wire, which above ~17% loss makes FEC strictly worse than leaving it off.
 func TestFecDeliversTheShardsThatArrived(t *testing.T) {
 	wire, payloads := fecEncodeBlock(t, 10, 3, 10)
 	data, parity := fecSplit(wire)
 	if len(data) != 10 {
 		t.Fatalf("encoder emitted %d data shards, want 10", len(data))
 	}
-	// Lose 4 data shards AND every parity shard: 6 of 13 arrive, far past what 10+3 can repair.
+
 	var arrived [][]byte
 	lost := map[int]bool{1: true, 4: true, 6: true, 9: true}
 	for i, p := range data {
@@ -92,7 +80,7 @@ func TestFecDeliversTheShardsThatArrived(t *testing.T) {
 			arrived = append(arrived, p)
 		}
 	}
-	_ = parity // deliberately dropped in full
+	_ = parity
 
 	seen := fecCollect(arrived)
 	for i, p := range payloads {
@@ -110,9 +98,6 @@ func TestFecDeliversTheShardsThatArrived(t *testing.T) {
 	}
 }
 
-// TestFecDeliversWithoutWaitingForTheBlock pins the other half of the same property: a data shard
-// is handed over as it arrives, not held until its block can be reconstructed. Before, every
-// packet of a 10-shard block waited for the tenth — pure added latency even on a lossless link.
 func TestFecDeliversWithoutWaitingForTheBlock(t *testing.T) {
 	wire, payloads := fecEncodeBlock(t, 10, 3, 10)
 	data, _ := fecSplit(wire)
@@ -130,10 +115,6 @@ func TestFecDeliversWithoutWaitingForTheBlock(t *testing.T) {
 	}
 }
 
-// TestFecEveryErasurePatternDeliversWhatArrived closes the CLASS rather than one line: for a full 10+3
-// block it walks all 2^13 erasure patterns, and for a partial block every pattern over what the encoder
-// really emitted. Each must deliver every frame whose own data shard arrived, plus every frame of the
-// block once enough shards arrived to reconstruct — each exactly once, and never one it could not know.
 func TestFecEveryErasurePatternDeliversWhatArrived(t *testing.T) {
 	for _, tc := range []struct{ n, k, count int }{{10, 3, 10}, {10, 3, 4}} {
 		wire, payloads := fecEncodeBlock(t, tc.n, tc.k, tc.count)

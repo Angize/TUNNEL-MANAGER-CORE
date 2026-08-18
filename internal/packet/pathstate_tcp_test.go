@@ -5,16 +5,6 @@ import (
 	"testing"
 )
 
-// TestTCPLivePathReadsTheRealSocket.
-//
-// Every field of a stream carrier's key except the SNI comes out of the conn, and that conn is
-// wrapped — TLS, then the ws framing — before it reaches livePath. So this drives a REAL accepted
-// connection instead of a stub: if a wrapper ever stopped forwarding LocalAddr/RemoteAddr the key
-// would come back unnamed, the node would read a path it cannot judge, and failover would stop
-// without one error anywhere.
-//
-// It also pins the two gates around it: no conn is no path, and a conn that has not been adopted as
-// the tunnel is not ready.
 func TestTCPLivePathReadsTheRealSocket(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -49,8 +39,7 @@ func TestTCPLivePathReadsTheRealSocket(t *testing.T) {
 	if ready {
 		t.Error("a connection that has not been adopted as the tunnel must not read as ready")
 	}
-	// Ground truth from the kernel's own structs, NOT from addrParts — comparing the key against the
-	// helper it was built with would pass on any consistent nonsense.
+
 	local := conn.LocalAddr().(*net.TCPAddr)
 	remote := ln.Addr().(*net.TCPAddr)
 	if k.Src != local.IP.String() || k.Sport != uint16(local.Port) {

@@ -6,15 +6,12 @@ import (
 	"time"
 )
 
-// leakRecorder stands in for the real iptables installer (addFluxDrop / addRawDrop): it records
-// every install and every removal, in order, and can be made slow so a caller that waits for
-// iptables is visible as elapsed time. Nothing here reaches the host firewall.
 type leakRecorder struct {
 	mu     sync.Mutex
 	ev     []string
 	delay  time.Duration
 	tookTo chan struct{}
-	fail   bool // the next install reports the rules did NOT go in, as a contended iptables does
+	fail   bool
 }
 
 func (r *leakRecorder) install(peer net.IP) (func(), bool) {
@@ -45,7 +42,6 @@ func (r *leakRecorder) install(peer net.IP) (func(), bool) {
 	}, true
 }
 
-// setFail switches the recorder between installing and reporting failure.
 func (r *leakRecorder) setFail(v bool) {
 	r.mu.Lock()
 	r.fail = v

@@ -7,48 +7,23 @@ import (
 	"syscall"
 )
 
-// ipLink is the ONE thing that differs between an ordinary raw-IP carrier and a spoofing one: how a
-// wrapped packet reaches the wire, how frames are received, where a server answers, and whether the peer
-// source filter applies. Everything above it — framing, replay guard, handshake, keepalive, FEC, rotation
-// and the TUN plumbing — is shared Raw code and must never be forked.
-//
-//	directLink  sends and receives on the AF_INET raw socket, answers the packet's own source, and
-//	            filters by the peer source address. Nothing is forged.
-//	forgedLink  parametric, so one type covers every spoof combination: spoofFd >=0 builds the whole
-//	            IPv4 header and Sendtos it, pktFd >=0 receives decoy-dst frames via AF_PACKET,
-//	            fixedPeer is the reply address when the client forged its source, and spoofSrc/Dst
-//	            are the forged outer fields.
-//
-// A pure header() method returns the (src,dst) an outgoing packet should carry, so its full matrix is
-// unit-testable without CAP_NET_RAW.
 type ipLink interface {
-	// send ships one already-wrapped packet toward the real peer `to`.
 	send(pkt []byte, to *net.IPAddr)
-	// recvLoop runs the receive loop until the socket closes, handing each
-	// authenticated-candidate frame to r.handleRaw. Blocks; returns on error/close.
+
 	recvLoop() error
-	// replyTo is the address a server answers `src` from — the packet source
-	// normally, or the configured real peer when the client forged its source.
+
 	replyTo(src *net.IPAddr) *net.IPAddr
-	// filterSrc reports whether the peer source-address filter applies on receive.
-	// False when the source is forged/pinned (a forged source can't be filtered by;
-	// the AEAD still authenticates every frame).
+
 	filterSrc() bool
-	// pinsSource reports whether the outer source is a fixed forged decoy, so a
-	// source-rotation pool must not also drive it.
+
 	pinsSource() bool
-	// fakeFD is the IP_HDRINCL socket the fake-desync decoys may borrow (-1 if none,
-	// in which case SetDesync opens a dedicated one).
+
 	fakeFD() int
-	// header returns the outer (src,dst) an outgoing packet carries: the real
-	// addresses for a direct link, the forged ones where configured.
+
 	header(realSrc net.IP, to *net.IPAddr) (src, dst net.IP)
-	// close releases the link's own sockets and any kernel anti-leak rule. The
-	// caller (Raw.Close) has already flipped sendDown under sendMu.
+
 	close()
 }
-
-// --- directLink: the unforged raw carrier (today's default path) ---------------
 
 type directLink struct{ r *Raw }
 
@@ -64,34 +39,31 @@ func (l *directLink) header(realSrc net.IP, to *net.IPAddr) (net.IP, net.IP) {
 	return realSrc, to.IP
 }
 
-// --- forgedLink: any forged-outer-field / pinned-reply configuration -----------
-
 type forgedLink struct {
 	r         *Raw
-	spoofFd   int    // AF_INET SOCK_RAW + IP_HDRINCL sender (-1 => send on r.conn like a direct link)
-	pktFd     int    // AF_PACKET receiver for decoy-dst frames (-1 => receive on r.conn)
-	spoofSrc  net.IP // forged outer source (nil => real source)
-	spoofDst  net.IP // forged outer destination = the decoy, client side (nil => real destination)
-	decoy     net.IP // AF_PACKET receive filter: the decoy destination (server side)
-	fixedPeer net.IP // the client's real IP to answer, when its source is forged (nil => answer the packet source)
-	antiLeak  func() // removes the kernel anti-leak (iptables) rule on Close (nil if not installed)
+	spoofFd   int
+	pktFd     int
+	spoofSrc  net.IP
+	spoofDst  net.IP
+	decoy     net.IP
+	fixedPeer net.IP
+	antiLeak  func()
 }
 
 func (l *forgedLink) send(pkt []byte, to *net.IPAddr) {
 	r := l.r
-	if l.spoofFd < 0 { // forged reply address but no header forging (spoof-src-only server): plain conn send
+	if l.spoofFd < 0 {
 		sendViaConn(r, pkt, to)
 		return
 	}
 	src, dst := l.header(r.srcIP(), to)
 	out := buildIP4(src, dst, r.proto, pkt)
 	if out == nil {
-		return // oversize for the IPv4 length field (not reachable under normal MTUs)
+		return
 	}
 	var sa syscall.SockaddrInet4
 	copy(sa.Addr[:], to.IP.To4())
-	// Guard the bare-fd Sendto so Close() can wait for in-flight sends and flip sendDown
-	// before syscall.Close(spoofFd) — else a sibling goroutine could Sendto on a reused fd.
+
 	r.sendMu.RLock()
 	if !r.sendDown {
 		if err := syscall.Sendto(l.spoofFd, out, 0, &sa); err != nil {
@@ -102,24 +74,20 @@ func (l *forgedLink) send(pkt []byte, to *net.IPAddr) {
 }
 
 func (l *forgedLink) recvLoop() error {
-	if l.pktFd >= 0 { // decoy server: the real dst isn't local, so read raw frames off the wire
+	if l.pktFd >= 0 {
 		return l.afpacket()
 	}
 	return l.r.recvConnLoop()
 }
 
-// afpacket receives frames aimed at the decoy destination off the wire via AF_PACKET.
-// A decoy dst is not a local address, so the kernel would drop it before an AF_INET raw
-// socket; AF_PACKET taps the packet before the IP stack's dst check. SOCK_DGRAM strips
-// the link header, so each frame starts at the IP header.
 func (l *forgedLink) afpacket() error {
 	r := l.r
 	return afpacketLoop(l.pktFd, r.closeCh, func(pkt []byte, ihl int) {
 		if int(pkt[9]) != r.proto {
-			return // not our carrier protocol
+			return
 		}
 		if l.decoy != nil && !net.IP(pkt[16:20]).Equal(l.decoy) {
-			return // only frames aimed at our decoy destination
+			return
 		}
 		src := &net.IPAddr{IP: append(net.IP(nil), pkt[12:16]...)}
 		r.handleRaw(pkt[ihl:], src)
@@ -133,9 +101,6 @@ func (l *forgedLink) replyTo(src *net.IPAddr) *net.IPAddr {
 	return src
 }
 
-// filterSrc is off when the reply target is pinned (fixedPeer) or the server answers as a
-// decoy the client aims at (client + spoofDst), because in both cases the peer's on-wire
-// source is not the address to filter by — the AEAD authenticates every frame instead.
 func (l *forgedLink) filterSrc() bool {
 	return l.fixedPeer == nil && !(l.r.isClient && l.spoofDst != nil)
 }
@@ -166,23 +131,15 @@ func (l *forgedLink) close() {
 	}
 }
 
-// sendViaConn is the shared unforged send: pin the source via IP_PKTINFO when one is set
-// (a server's dialed-reply IP, or a client's source-pool IP), else let the kernel route.
-// Used by directLink and by a forgedLink that forges no header (a spoof-src-only server).
 func sendViaConn(r *Raw, pkt []byte, to *net.IPAddr) {
 	if src := r.pinnedSrc(); src != nil {
 		if _, _, err := r.conn.WriteMsgIP(pkt, r.srcOOB(src), to); err == nil {
 			return
 		} else {
-			// Degrade to a default-source send rather than dropping — but say so. The pinned source is normally
-			// one of our own local IPs, so this means it stopped being one mid-session; every reply then leaves
-			// from the host default, the peer's source filter drops it, and the tunnel blackholes.
+
 			r.sendErr.note("raw/pinned-source", err)
 			if rawChecksumBindsSource(r.profile) {
-				// ...except on udp/tcp, where the carrier header's checksum was computed over the pinned source.
-				// Sending those bytes from a different source puts a wrong-checksum segment on the wire on every
-				// packet: our own receiver would not notice, but a stateful firewall or NAT drops them, and a "TCP"
-				// flow whose every segment fails its checksum is about as clear a tunnel signature as there is.
+
 				return
 			}
 		}

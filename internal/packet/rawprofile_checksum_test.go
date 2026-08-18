@@ -6,10 +6,6 @@ import (
 	"testing"
 )
 
-// TestRawChecksumBindsSourceMatchesTheEncapsulation derives the answer from rawEncap instead of
-// restating a list: for every profile it builds the same frame twice, changing ONLY the source, and
-// requires rawChecksumBindsSource to agree with whether the bytes actually differ. That is the property
-// sendViaConn's fallback turns on, so a new profile whose header binds the source fails here.
 func TestRawChecksumBindsSourceMatchesTheEncapsulation(t *testing.T) {
 	body := []byte("a sealed core frame, long enough to checksum meaningfully 0123456789")
 	dst := net.IPv4(198, 51, 100, 20)
@@ -29,13 +25,9 @@ func TestRawChecksumBindsSourceMatchesTheEncapsulation(t *testing.T) {
 	}
 }
 
-// TestRawChecksumBindsSourceCoversEveryProfile: the switch keys off the protocol number, so a profile
-// name it does not know silently answers "independent" — the answer that lets a packet out. The two
-// lists below must between them name EVERY key of rawProfiles, so a newly registered profile fails this
-// test until someone states which side it is on. The silent default is the dangerous answer.
 func TestRawChecksumBindsSourceCoversEveryProfile(t *testing.T) {
-	bindsSource := []string{"udp", "tcp"} // L4 checksum folds in the IPv4 pseudo-header
-	// bytes do not depend on the source: none of these carries a checksum at all
+	bindsSource := []string{"udp", "tcp"}
+
 	independent := []string{"bare", "ipip", "gre", "icmp", "esp", "ah", "etherip", "ipcomp", "l2tpv3"}
 
 	classified := map[string]bool{}

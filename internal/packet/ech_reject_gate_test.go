@@ -14,7 +14,6 @@ import (
 	"time"
 )
 
-// selfSignedTLSCert mints a throwaway self-signed leaf usable by a crypto/tls server.
 func selfSignedTLSCert(t *testing.T, dnsName string) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -34,8 +33,6 @@ func selfSignedTLSCert(t *testing.T, dnsName string) tls.Certificate {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
 }
 
-// x25519Pub returns a REAL X25519 public key. The all-zero placeholder the parser tests use is a
-// low-order point that HPKE refuses, which would fail ECH setup before a handshake ever starts.
 func x25519Pub(t *testing.T) []byte {
 	t.Helper()
 	k, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -45,10 +42,6 @@ func x25519Pub(t *testing.T) []byte {
 	return k.PublicKey().Bytes()
 }
 
-// TestECHRejectionNeverYieldsAUsableConn drives the real uEdgeHandshake against a TLS 1.3 server with no
-// ECH keys — which IS a rejection — and asserts no usable connection comes back. This is the invariant
-// the reject-verify hook rests on: to surface the fresh RetryConfigList it accepts the outer certificate
-// UNVERIFIED, safe only because uTLS turns a rejected ECH into an error — not our fact, and bump-able.
 func TestECHRejectionNeverYieldsAUsableConn(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -64,8 +57,7 @@ func TestECHRejectionNeverYieldsAUsableConn(t *testing.T) {
 				return
 			}
 			go func() {
-				// A perfectly ordinary TLS 1.3 server. It knows nothing about ECH, so it echoes no
-				// acceptance — exactly what a stale ECH key looks like from the client's side.
+
 				tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13})
 				tc.SetDeadline(time.Now().Add(5 * time.Second))
 				_ = tc.Handshake()
@@ -74,9 +66,6 @@ func TestECHRejectionNeverYieldsAUsableConn(t *testing.T) {
 		}
 	}()
 
-	// BOTH fingerprints. The hook is installed from the ECH config, not from the parrot, so the browser
-	// path (ws / POST ladder) and the Go path (grpc) are equally exposed to it — and the grpc path is
-	// the newer one, so it is exactly the case a later change would forget.
 	for _, tc := range []struct {
 		name          string
 		alpn          []string

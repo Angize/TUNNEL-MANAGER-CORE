@@ -7,13 +7,11 @@ import (
 	"testing"
 )
 
-// prependIP4 builds a minimal 20-byte IPv4 header in front of l4, imitating what
-// a Linux raw ip4 socket hands back on read (header included).
 func prependIP4(src, dst net.IP, proto int, l4 []byte) []byte {
 	h := make([]byte, 20+len(l4))
-	h[0] = 0x45 // version 4, IHL 5
+	h[0] = 0x45
 	binary.BigEndian.PutUint16(h[2:4], uint16(len(h)))
-	h[8] = 64 // TTL
+	h[8] = 64
 	h[9] = byte(proto)
 	copy(h[12:16], src.To4())
 	copy(h[16:20], dst.To4())
@@ -27,21 +25,18 @@ var (
 )
 
 func TestRawProfileRoundTrip(t *testing.T) {
-	// A payload with a leading 0x4X byte would, if the IP header were mis-parsed,
-	// be corrupted — so this doubles as a regression guard for the strip logic.
+
 	payloads := [][]byte{
 		[]byte("the-sealed-aead-frame-goes-here-0123456789"),
-		{0x45, 0x00, 0x11, 0x22, 0x33}, // looks like the start of an IPv4 header
-		bytes.Repeat([]byte{0xAA}, 1),  // 1-byte payload
+		{0x45, 0x00, 0x11, 0x22, 0x33},
+		bytes.Repeat([]byte{0xAA}, 1),
 	}
 	for name := range rawProfiles {
 		proto, _ := rawProtoFor(name)
 		for i, pl := range payloads {
 			for _, client := range []bool{true, false} {
 				l4 := rawEncap(name, pl, testSrc, testDst, client, 0x1234, 0, 0, uint32(i+1), 0, 0x10203040, 0, 0, tcpPshAck)
-				// Two reads must both round-trip: one where the kernel included
-				// the outer IPv4 header, and one where it did not (both happen in
-				// the wild depending on platform).
+
 				withIP := prependIP4(testSrc, testDst, proto, l4)
 				for _, variant := range []struct {
 					name string
@@ -74,21 +69,21 @@ func TestRawProtoNumbers(t *testing.T) {
 }
 
 func TestRawEffProto(t *testing.T) {
-	// bare may take any 1..255; everything else keeps its native number.
+
 	cases := []struct {
 		profile  string
 		override int
 		want     int
 		wantOK   bool
 	}{
-		{"bare", 0, 253, true},   // unset -> native
-		{"bare", 58, 58, true},   // ICMPv6 override
-		{"bare", 255, 255, true}, // top of range
-		{"bare", 300, 253, true}, // out of range -> native
-		{"bare", -1, 253, true},  // negative -> native
-		{"gre", 58, 47, true},    // override ignored for a headered profile
-		{"udp", 99, 17, true},    // ignored
-		{"nope", 58, 0, false},   // unknown profile
+		{"bare", 0, 253, true},
+		{"bare", 58, 58, true},
+		{"bare", 255, 255, true},
+		{"bare", 300, 253, true},
+		{"bare", -1, 253, true},
+		{"gre", 58, 47, true},
+		{"udp", 99, 17, true},
+		{"nope", 58, 0, false},
 	}
 	for _, c := range cases {
 		got, ok := rawEffProto(c.profile, c.override)
@@ -99,12 +94,10 @@ func TestRawEffProto(t *testing.T) {
 }
 
 func TestRawBareCustomProtoRoundTrip(t *testing.T) {
-	// A bare carrier on a custom protocol number (e.g. 58) stays header-less and must
-	// round-trip: the outer IPv4's protocol byte carries the custom number, and decap
-	// keys the header stripping off the profile (bare -> bare), not the number.
+
 	pl := []byte("the-sealed-aead-frame")
 	const custom = 58
-	l4 := rawEncap("bare", pl, testSrc, testDst, true, 0, 0, 0, 0, 0, 0, 0, 0, tcpPshAck) // bare is bare -> l4 == pl
+	l4 := rawEncap("bare", pl, testSrc, testDst, true, 0, 0, 0, 0, 0, 0, 0, 0, tcpPshAck)
 	if !bytes.Equal(l4, pl) {
 		t.Fatalf("bare added a header: %x", l4)
 	}
@@ -112,7 +105,7 @@ func TestRawBareCustomProtoRoundTrip(t *testing.T) {
 		name string
 		pkt  []byte
 	}{
-		{"with-ip", prependIP4(testSrc, testDst, custom, l4)}, // kernel included the proto-58 IPv4 header
+		{"with-ip", prependIP4(testSrc, testDst, custom, l4)},
 		{"no-ip", l4},
 	} {
 		got, _, _, ok := rawDecap("bare", custom, variant.pkt)
@@ -136,19 +129,18 @@ func TestRawBipIpipHaveNoL4Header(t *testing.T) {
 }
 
 func TestRawChecksumsValid(t *testing.T) {
-	pl := bytes.Repeat([]byte{0x5A}, 41) // odd length exercises the checksum padding
-	// ICMP: recomputing the internet checksum over the whole L4 (checksum field
-	// in place) must fold to zero.
+	pl := bytes.Repeat([]byte{0x5A}, 41)
+
 	icmp := rawEncap("icmp", pl, testSrc, testDst, true, 0xABCD, 0, 0, 7, 0, 0, 0, 0, tcpPshAck)
 	if s := onesComplementSum(icmp); s != 0 {
 		t.Errorf("icmp checksum invalid: fold = %#x", s)
 	}
-	// TCP: pseudo-header checksum must fold to zero.
+
 	tcp := rawEncap("tcp", pl, testSrc, testDst, true, 0, 0, 0, 99, 0, 0, 0, 0, tcpPshAck)
 	if s := l4Checksum(testSrc, testDst, protoTCP, tcp); s != 0 {
 		t.Errorf("tcp checksum invalid: fold = %#x", s)
 	}
-	// UDP: folds to zero (0x0000 and 0xffff are equivalent in one's complement).
+
 	udp := rawEncap("udp", pl, testSrc, testDst, true, 0, 0, 0, 99, 0, 0, 0, 0, tcpPshAck)
 	if s := l4Checksum(testSrc, testDst, protoUDP, udp); s != 0 && s != 0xffff {
 		t.Errorf("udp checksum invalid: fold = %#x", s)
@@ -167,8 +159,7 @@ func TestRawICMPDirection(t *testing.T) {
 }
 
 func TestRawTCPLiveFlowFields(t *testing.T) {
-	// The tcp profile must carry the caller's sequence AND a non-zero acknowledgement plus a
-	// realistic window — an ACK-flagged segment with ack=0 / window=0xffff reads as forged.
+
 	tcp := rawEncap("tcp", []byte("data"), testSrc, testDst, true, 0, 0, 0, 0x11223344, 0x55667788, 0, 0, 0, tcpPshAck)
 	if got := binary.BigEndian.Uint32(tcp[4:8]); got != 0x11223344 {
 		t.Errorf("tcp seq = %#x, want %#x", got, 0x11223344)
@@ -185,8 +176,7 @@ func TestRawTCPLiveFlowFields(t *testing.T) {
 }
 
 func TestRawESPHeader(t *testing.T) {
-	// The esp profile must carry an 8-byte IPsec ESP header: SPI (4B) then sequence (4B),
-	// with the sealed frame as the "encrypted payload" — and round-trip back to the payload.
+
 	pl := []byte("the-sealed-aead-frame")
 	const spi, seq = 0x0A1B2C3D, 0x00000007
 	esp := rawEncap("esp", pl, testSrc, testDst, true, 0, 0, 0, seq, 0, spi, 0, 0, tcpPshAck)
@@ -217,7 +207,7 @@ func TestRawESPHeader(t *testing.T) {
 }
 
 func TestRawDecapRejectsShortCarrier(t *testing.T) {
-	// Profiles with a carrier header must reject a packet too short to hold it.
+
 	if _, _, _, ok := rawDecap("gre", protoGRE, []byte{0x00, 0x00}); ok {
 		t.Error("gre decap accepted fewer than 4 header bytes")
 	}
@@ -230,18 +220,16 @@ func TestRawDecapRejectsShortCarrier(t *testing.T) {
 	if _, _, _, ok := rawDecap("esp", protoESP, []byte{0x00, 0x00, 0x00, 0x01, 0x00, 0x00}); ok {
 		t.Error("esp decap accepted fewer than 8 header bytes")
 	}
-	// bare/ipip carry no header: any bytes are a valid (opaque) sealed frame.
+
 	if _, _, _, ok := rawDecap("bare", protoBare, []byte{0x01, 0x02}); !ok {
 		t.Error("bare decap should accept any bytes as the frame")
 	}
-	// A real IPv4-wrapped GRE packet with no room for the GRE header is rejected.
+
 	if _, _, _, ok := rawDecap("gre", protoGRE, prependIP4(testSrc, testDst, protoGRE, []byte{0x00})); ok {
 		t.Error("gre decap accepted an IPv4 packet too short for its GRE header")
 	}
 }
 
-// TestL4ChecksumSplitMatchesReference proves the in-place split l4Checksum (no per-packet pseudo-header
-// buffer) is byte-identical to the reference build-and-sum implementation across many lengths/contents.
 func TestL4ChecksumSplitMatchesReference(t *testing.T) {
 	ref := func(src, dst net.IP, proto int, l4 []byte) uint16 {
 		s, d := src.To4(), dst.To4()
@@ -254,9 +242,9 @@ func TestL4ChecksumSplitMatchesReference(t *testing.T) {
 		return onesComplementSum(pseudo)
 	}
 	for i := 0; i < 2000; i++ {
-		l4 := make([]byte, i%73) // vary length: 0, odd, even
+		l4 := make([]byte, i%73)
 		for j := range l4 {
-			l4[j] = byte(i*31 + j*17) // vary content
+			l4[j] = byte(i*31 + j*17)
 		}
 		src := net.IPv4(byte(i), byte(i>>8), 1, 2)
 		dst := net.IPv4(3, 4, byte(i>>4), byte(i))
@@ -268,9 +256,6 @@ func TestL4ChecksumSplitMatchesReference(t *testing.T) {
 	}
 }
 
-// TestEveryProfileHasAHeaderLen: rawEncap sizes its buffer from rawHeaderLens and rawDecap skips by it,
-// so a profile missing from that table encapsulates BARE — a silent wire-format break that decodes fine
-// against itself and against nothing else. Registering a profile must therefore register its size.
 func TestEveryProfileHasAHeaderLen(t *testing.T) {
 	for name := range rawProfiles {
 		if _, ok := rawHeaderLens[name]; !ok {
@@ -283,7 +268,7 @@ func TestEveryProfileHasAHeaderLen(t *testing.T) {
 			t.Errorf("rawHeaderLens carries %q, which is no longer a registered profile", name)
 		}
 	}
-	// And the size the table claims is the size rawEncap really adds.
+
 	for name := range rawProfiles {
 		pl := []byte("0123456789")
 		got := len(rawEncap(name, pl, testSrc, testDst, true, 1, 0, 0, 2, 3, 4, 0, 0, tcpPshAck)) - len(pl)

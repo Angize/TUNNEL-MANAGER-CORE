@@ -8,13 +8,6 @@ import (
 	"time"
 )
 
-// In production nothing drives a pool from one goroutine. The carrier's dial loop asks current(); the
-// 1s pin poll delivers the node's verdicts and the panel's pins; the rotation timer walks it; the retest
-// scheduler moves the ladder; and writeStatus runs from all of them. The pools carry their own mutexes,
-// so the question is not whether a field tears -- the race detector answers that -- but whether the
-// INVARIANTS still hold when those callers interleave, which no single-goroutine test can ask.
-
-// TestPeerPoolUnderConcurrentDrivers hammers one direct pool from every caller it really has.
 func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
 	p := NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(t.TempDir(), "d.json"))
@@ -36,22 +29,21 @@ func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 		}()
 	}
 
-	run(func() { p.current() })                 // the dial loop
-	run(func() { p.fail() })                    // a carrier-driven failover
-	run(func() { p.rotateOnce() })              // the proactive timer
-	run(func() { p.selectEntry("d2") })         // the panel's pin
-	run(func() { p.pinLandedOn("d1") })         // a carrier landing somewhere the pin did not ask for
-	run(func() { p.pinAttemptFailed("d2") })    // the pin's own evidence
-	run(func() { p.clearBurn("d3") })           // a tun-probe OK
-	run(func() { p.probeAllNow() })             // the panel's "probe now"
-	run(func() { _ = p.eligibleCount() })       // the odometer's lap sizing
-	run(func() { p.keepCursorOn(p.current()) }) // make-before-break putting the cursor back
+	run(func() { p.current() })
+	run(func() { p.fail() })
+	run(func() { p.rotateOnce() })
+	run(func() { p.selectEntry("d2") })
+	run(func() { p.pinLandedOn("d1") })
+	run(func() { p.pinAttemptFailed("d2") })
+	run(func() { p.clearBurn("d3") })
+	run(func() { p.probeAllNow() })
+	run(func() { _ = p.eligibleCount() })
+	run(func() { p.keepCursorOn(p.current()) })
 
 	time.Sleep(400 * time.Millisecond)
 	close(stop)
 	wg.Wait()
 
-	// The pool must still be internally consistent, whatever order those landed in.
 	got := p.current()
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -80,8 +72,6 @@ func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 	}
 }
 
-// TestEdgePoolUnderConcurrentDrivers is the same storm on the two-axis pool, where the verdict path, the
-// rotation timer and the operator's pin move the SAME cursor from different goroutines.
 func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
 	p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))

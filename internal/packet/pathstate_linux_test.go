@@ -8,16 +8,10 @@ import (
 	"testing"
 )
 
-// TestRawLivePathIsTheBytesOnTheWire.
-//
-// livePath names the path a verdict is keyed on. Checking it against rawPorts would prove nothing —
-// that is the very call it makes. The claim worth pinning is that the key matches the BYTES rawEncap
-// puts in the header, so a future change to either one that does not move the other fails here rather
-// than in a misattributed burn.
 func TestRawLivePathIsTheBytesOnTheWire(t *testing.T) {
 	src, dst := net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2)
 	for _, profile := range []string{"tcp", "udp"} {
-		for _, cport := range []uint32{0, 41207} { // the fixed default, and a rolled port
+		for _, cport := range []uint32{0, 41207} {
 			r := &Raw{profile: profile, isClient: true, port: 8443}
 			r.cliPort.Store(cport)
 			r.peer.Store(&net.IPAddr{IP: dst})
@@ -41,11 +35,6 @@ func TestRawLivePathIsTheBytesOnTheWire(t *testing.T) {
 	}
 }
 
-// TestPortlessRawProfileHasNoPortsInItsPath.
-//
-// icmp and bare put no ports on the wire, so ports are not part of their path. Reporting the fixed
-// defaults there would invent an axis the carrier does not have — and rawPorts answers whether or not
-// the profile uses the answer.
 func TestPortlessRawProfileHasNoPortsInItsPath(t *testing.T) {
 	for _, profile := range []string{"icmp", "bare"} {
 		r := &Raw{profile: profile, isClient: true, port: 8443}
@@ -59,16 +48,10 @@ func TestPortlessRawProfileHasNoPortsInItsPath(t *testing.T) {
 	}
 }
 
-// TestFluxLivePathIsTheBytesOnTheWire.
-//
-// flux derives its whole 4-tuple from (PSK, epoch) and redraws it every rotation, so the key must come
-// from the SAME shape carrierSeg frames the packet with. Checked against the BYTES: the shape is the
-// one thing on this carrier that moves with nothing announcing it, which is exactly what the epoch is
-// there to catch, and a key reading a different shape than the wire would catch nothing.
 func TestFluxLivePathIsTheBytesOnTheWire(t *testing.T) {
 	src, dst := net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 0, 2)
 	carriersDiffered := false
-	for _, epoch := range []int64{41, 42, 43} { // several, so the shape has to follow rather than stick
+	for _, epoch := range []int64{41, 42, 43} {
 		for _, carrier := range []string{"udp", "stun"} {
 			f := &Flux{carrier: carrier, isClient: true}
 			sh := deriveFluxShape("lab-psk", epoch, "random")

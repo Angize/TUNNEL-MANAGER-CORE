@@ -7,9 +7,6 @@ import (
 	"testing"
 )
 
-// wsVerdict writes one command file exactly as the node does, then runs the poll that reads it. It goes
-// through pollWsCmd on purpose: the keying this file is about lives in that switch, not in any pool
-// method, so a test that called the pool directly would pass while the wire stayed broken.
 func wsVerdict(t *testing.T, b *TCP, c poolCmd) {
 	t.Helper()
 	data, err := json.Marshal(c)
@@ -34,8 +31,6 @@ func wsBurned(p *wsPool, kind string) map[string]bool {
 	return out
 }
 
-// newVerdictPool is a client whose pool publishes an active combo, so activeCombo() answers the way it
-// does in production (setActive is what the dial path calls once a connection is up).
 func newVerdictPool(t *testing.T, ips, hosts []string) *TCP {
 	t.Helper()
 	p := newWSPool(ips, snis(hosts...), filepath.Join(t.TempDir(), "status.json"))
@@ -47,18 +42,13 @@ func newVerdictPool(t *testing.T, ips, hosts []string) *TCP {
 	return &TCP{pool: p}
 }
 
-// TestWSFailBurnsWhatItMeasured is the whole class, and the exact mirror of the direct pool's
-// TestAStaleFailBurnsWhatItMeasured. Between the node measuring and this core reading the command the
-// carrier's OWN rotation can move — the probe takes seconds and the poller is a one-second ticker — so
-// an unkeyed verdict would condemn the combo the rotation just arrived at and advance off it, dropping
-// the tunnel straight back onto the one the probe actually found dead.
 func TestWSFailBurnsWhatItMeasured(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2"})
 
-	measuredIP, measuredSNI := b.pool.activeCombo() // where the node's probe found nothing crossing
+	measuredIP, measuredSNI := b.pool.activeCombo()
 	b.pool.advance()
 	ip, sni, _ := b.pool.current()
-	b.pool.setActive(activeLabel(ip, sni.host)) // the carrier moved on its own timer, under the verdict
+	b.pool.setActive(activeLabel(ip, sni.host))
 	if sni.host == measuredSNI {
 		t.Fatalf("advance() did not change the SNI (%s) — the test cannot show the stale case", sni.host)
 	}
@@ -77,9 +67,6 @@ func TestWSFailBurnsWhatItMeasured(t *testing.T) {
 	}
 }
 
-// TestWSVerdictWalksTheMatrix is the odometer: each fail on the live combo burns the SNI, and only once
-// every SNI that could be tried on this edge has been does the EDGE move. Convicting the edge on the
-// first failure would throw away a perfectly good one whenever a single SNI is the blocked thing.
 func TestWSVerdictWalksTheMatrix(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2", "s3"})
 	startIP, _, _ := b.pool.current()
@@ -97,9 +84,6 @@ func TestWSVerdictWalksTheMatrix(t *testing.T) {
 	}
 }
 
-// TestWSOKClearsBothAxes: a probe that finds traffic crossing proves the whole combo, so both halves go
-// healthy at once. Without this a burned entry the rotation later lands on stays condemned while it is
-// visibly carrying, until its retest ladder happens to lapse.
 func TestWSOKClearsBothAxes(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2"})
 	b.pool.markSuspect("ip", "e1", "test")
@@ -115,8 +99,6 @@ func TestWSOKClearsBothAxes(t *testing.T) {
 	}
 }
 
-// TestWSStaleOKClearsOnlyWhatItMeasured: the heal is keyed too. A green verdict that crossed with a
-// rotation must not clear the burn on an entry the tunnel has already moved onto and never measured.
 func TestWSStaleOKClearsOnlyWhatItMeasured(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2"})
 	b.pool.markSuspect("sni", "s1", "test")
@@ -132,8 +114,6 @@ func TestWSStaleOKClearsOnlyWhatItMeasured(t *testing.T) {
 	}
 }
 
-// TestWSPinStillWorks: pin and verdict share one command file, and the fail arm deliberately sits in the
-// same switch case as the burn. A pin must still reach SelectEdge rather than being eaten by it.
 func TestWSPinStillWorks(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2"})
 

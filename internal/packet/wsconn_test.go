@@ -9,9 +9,6 @@ import (
 	"time"
 )
 
-// End-to-end WebSocket carrier over a real loopback socket: client upgrade ↔ server
-// upgrade, then a stream round-trip in both directions. Exercises masking (client
-// masks, server does not) and the stream de-framing the connFramer relies on.
 func TestWSConnRoundTrip(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -67,16 +64,14 @@ func TestWSConnRoundTrip(t *testing.T) {
 	}
 }
 
-// A stream larger than one Read call must reassemble correctly (the connFramer does
-// io.ReadFull for exact byte counts across frame boundaries).
 func TestWSConnStreamsAcrossReads(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()
 	defer b.Close()
-	// Drive the framing directly (no handshake) — client writes, server reads.
+
 	cw := &wsConn{Conn: a, r: bufio.NewReader(a), client: true}
 	sr := &wsConn{Conn: b, r: bufio.NewReader(b), client: false}
-	payload := bytes.Repeat([]byte("xy"), 5000) // 10000 bytes, forces 16-bit length
+	payload := bytes.Repeat([]byte("xy"), 5000)
 	go func() { _, _ = cw.Write(payload) }()
 	got := make([]byte, len(payload))
 	if _, err := io.ReadFull(sr, got); err != nil {
@@ -87,27 +82,22 @@ func TestWSConnStreamsAcrossReads(t *testing.T) {
 	}
 }
 
-// TestWSConnRejectsMalformedFrames locks in the hardening: a hostile/broken peer that sends a
-// reserved opcode or an oversized control frame must DROP the connection (error), not be silently
-// skipped or echoed back as a big pong.
 func TestWSConnRejectsMalformedFrames(t *testing.T) {
 	check := func(name string, frame []byte) {
 		a, b := net.Pipe()
 		defer a.Close()
 		defer b.Close()
-		rc := &wsConn{Conn: b, r: bufio.NewReader(b), client: true} // reads server->client (unmasked) frames
+		rc := &wsConn{Conn: b, r: bufio.NewReader(b), client: true}
 		go func() { _, _ = a.Write(frame); a.Close() }()
 		buf := make([]byte, 256)
 		if _, err := rc.Read(buf); err == nil {
 			t.Fatalf("%s: Read returned nil error, want the connection dropped", name)
 		}
 	}
-	check("reserved opcode 0x3", []byte{0x83, 0x00})                            // FIN|0x3, unmasked, 0-length
-	check("oversized ping", append([]byte{0x89, 126, 0x00, 200}, make([]byte, 200)...)) // FIN|0x9, 16-bit len=200 (>125)
+	check("reserved opcode 0x3", []byte{0x83, 0x00})
+	check("oversized ping", append([]byte{0x89, 126, 0x00, 200}, make([]byte, 200)...))
 }
 
-// A non-WebSocket request (a probe/scanner/browser) must get a 404 and errNotWS,
-// so the port looks like an ordinary idle web endpoint, not a tunnel.
 func TestWSServerRejectsNonWS(t *testing.T) {
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	defer ln.Close()

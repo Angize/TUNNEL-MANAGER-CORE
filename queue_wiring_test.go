@@ -9,13 +9,6 @@ import (
 	"testing"
 )
 
-// queueingCarrier decides how many TUN queues get OPENED. Nothing in the shape of the code makes the
-// carrier's constructor receive them, and a queue nobody reads is a blackhole: the kernel steers egress
-// onto every queue the interface has, so those packets are simply gone. The tunnel does not run slow —
-// it half-works, or never comes up at all when the handshake hashes to a dead queue.
-//
-// So this asserts the two halves against each other: every carrier admitted by queueingCarrier must
-// have every one of its constructors handed devs[1:].
 func TestEveryQueueingCarrierIsHandedItsQueues(t *testing.T) {
 	fset := token.NewFileSet()
 	carriers := queueingCarrierNames(t, fset)
@@ -51,8 +44,6 @@ func TestEveryQueueingCarrierIsHandedItsQueues(t *testing.T) {
 	}
 }
 
-// queueingCarrierNames reads the carrier names out of queueingCarrier's own body, so widening it
-// without wiring the new carrier turns this red.
 func queueingCarrierNames(t *testing.T, fset *token.FileSet) []string {
 	t.Helper()
 	f, err := parser.ParseFile(fset, "config.go", nil, 0)
@@ -77,8 +68,6 @@ func queueingCarrierNames(t *testing.T, fset *token.FileSet) []string {
 	return out
 }
 
-// transportCases returns the clauses of the switch on cfg.Transport, keyed by carrier name, plus its
-// default clause.
 func transportCases(t *testing.T, fset *token.FileSet) (map[string]*ast.CaseClause, *ast.CaseClause) {
 	t.Helper()
 	f, err := parser.ParseFile(fset, "main.go", nil, 0)
@@ -117,7 +106,6 @@ func transportCases(t *testing.T, fset *token.FileSet) (map[string]*ast.CaseClau
 	return byName, dflt
 }
 
-// isCarrierCtor matches the packet.Listen*/packet.Dial* calls that build a carrier.
 func isCarrierCtor(call *ast.CallExpr) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
@@ -133,7 +121,6 @@ func ctorName(call *ast.CallExpr) string {
 	return "packet." + call.Fun.(*ast.SelectorExpr).Sel.Name
 }
 
-// passesExtraQueues reports whether the call ends in devs[1:]... — every queue but the reader's own.
 func passesExtraQueues(call *ast.CallExpr) bool {
 	if !call.Ellipsis.IsValid() || len(call.Args) == 0 {
 		return false

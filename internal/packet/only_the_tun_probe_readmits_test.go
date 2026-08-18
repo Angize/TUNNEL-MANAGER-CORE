@@ -5,20 +5,6 @@ import (
 	"testing"
 )
 
-// An edge is readmitted by DATA CROSSING and by nothing else. That one sentence has two halves, and the
-// pool used to have only the first: it knew how to condemn an edge, and then leaned on a control-path
-// retest -- TCP, TLS, the WebSocket upgrade -- to declare it well again. All three can complete on an edge
-// that carries nothing, which is precisely the failure this whole pool exists to survive.
-//
-// Taking that away leaves a hole that has to be filled deliberately, and it is the part that is easy to
-// miss: the tun probe can only judge an edge that is CARRYING, and the walk only ever selected healthy
-// combinations, so a burned edge would never carry again as long as one healthy edge remained. Condemned
-// once, condemned for the life of the pool. The proactive rotation is what closes it -- it steps onto
-// entries whose backoff has ELAPSED, exactly as the direct pool's rotation already did.
-
-// TestAProactiveRotationHandsADueEdgeLiveTraffic is that hole, end to end on the pool: the wait is
-// honoured, then the rotation spends a real connection on the burned edge, and current() must not walk
-// back off it before the probe has had its say.
 func TestAProactiveRotationHandsADueEdgeLiveTraffic(t *testing.T) {
 	p, now := clockPool([]string{"e1", "e2"}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
 	if ip, _, _ := p.current(); ip != "e1" {
@@ -34,7 +20,7 @@ func TestAProactiveRotationHandsADueEdgeLiveTraffic(t *testing.T) {
 		t.Fatalf("the walk moved onto a waiting edge: %q", ip)
 	}
 
-	*now += suspectBackoff[0] // its wait elapsed: the ladder itself says "try this again"
+	*now += suspectBackoff[0]
 	if !p.advance() {
 		t.Fatal("e2 came due and the rotation still would not go there — a burned edge that is never " +
 			"selected can never be proven to have recovered, so it stays condemned forever")
@@ -44,16 +30,12 @@ func TestAProactiveRotationHandsADueEdgeLiveTraffic(t *testing.T) {
 		t.Fatalf("the rotation stepped onto e2 and current() resolved back to %q — the walk must not "+
 			"re-select past the combination it deliberately moved onto", ip)
 	}
-	// ...and it keeps resolving there, because the carrier asks again on every dial.
+
 	if ip2, _, _ := p.current(); ip2 != "e2" {
 		t.Fatalf("the second ask gave %q — the commitment did not hold for the life of the attempt", ip2)
 	}
 }
 
-// TestOnlyTheTunProbeEndsTheTry is the other side of that live try: whatever the pool learns from it, it
-// learns from the node's verdict. A FAIL must also cost e2 a ladder step, or it stays due and the very
-// next rotation tick walks straight back onto it: the dead edge coming back every cycle, which is what
-// the operator watched happen on a live tunnel.
 func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 	t.Run("fail: burned again, and further down the ladder", func(t *testing.T) {
 		p, now := clockPool([]string{"e1", "e2"}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
@@ -67,7 +49,7 @@ func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 		p.setActive(activeLabel(ip, sni.host))
 
 		b := &TCP{pool: p}
-		if !b.burnAdvanceWS(ip, sni.host) { // one SNI: the EDGE is the axis that varied
+		if !b.burnAdvanceWS(ip, sni.host) {
 			t.Fatal("the verdict did nothing")
 		}
 		if p.ipHealth.due("e2") {
@@ -95,24 +77,19 @@ func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 	})
 }
 
-// TestTheLadderStillDeepensWhenEverythingIsBurned is the case that "a verdict only counts against an
-// entry the pool actually TRIED" could have frozen. With nothing healthy and nothing due, the pool still
-// has to hand something back rather than dead-end the tunnel — and the carrier then spends a real
-// connection on it. That try has to count, or every endpoint sits at its first backoff step forever and
-// the carrier hammers the whole pool at the shortest interval the ladder has.
 func TestTheLadderStillDeepensWhenEverythingIsBurned(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
-	p.fail() // burns a, moves to b
-	p.fail() // burns b — now nothing is healthy and nothing is due
+	p.fail()
+	p.fail()
 
-	addr := p.current() // the least-bad, handed out anyway
+	addr := p.current()
 	p.mu.Lock()
 	before := *p.health.rec(addr)
 	p.mu.Unlock()
 
-	p.fail() // ...and the carrier failed on it
+	p.fail()
 	p.mu.Lock()
 	after := *p.health.rec(addr)
 	p.mu.Unlock()
@@ -123,9 +100,6 @@ func TestTheLadderStillDeepensWhenEverythingIsBurned(t *testing.T) {
 	}
 }
 
-// TestAPinIsNotAProactiveRotation guards the seam the commitment opened: advance() now moves the walk on
-// its own, so it has to refuse while an operator pin is in force, or the timer silently steals the jump
-// the operator asked for.
 func TestAPinIsNotAProactiveRotation(t *testing.T) {
 	p := newWSPool([]string{"e1", "e2", "e3"}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
 	if !p.selectEntry("ip", "e3") {

@@ -6,8 +6,6 @@ import (
 	"time"
 )
 
-// Queue bounds. A full queue DROPS the datagram rather than blocking — the correct
-// backpressure for a slow, lossy DNS channel, because kcp-go retransmits anything lost.
 const (
 	sendQueueSize = 1024
 	recvQueueSize = 1024
@@ -18,10 +16,6 @@ type taggedPacket struct {
 	addr net.Addr
 }
 
-// QueuePacketConn is a net.PacketConn backed by in-memory channels instead of a socket, so kcp-go can run
-// over a transport that is not one — here, DNS request/response. kcp-go WriteTo()s a datagram the DNS
-// transport drains with OutgoingQueue; inbound it calls QueueIncoming and kcp-go ReadFrom()s it. addr is
-// a logical peer identity, NOT a UDP address, so a session survives the resolver's source changing.
 type QueuePacketConn struct {
 	local     net.Addr
 	recvQueue chan taggedPacket
@@ -31,7 +25,6 @@ type QueuePacketConn struct {
 	closed    chan struct{}
 }
 
-// NewQueuePacketConn builds an empty queue-backed PacketConn with local as its LocalAddr.
 func NewQueuePacketConn(local net.Addr) *QueuePacketConn {
 	return &QueuePacketConn{
 		local:     local,
@@ -41,7 +34,6 @@ func NewQueuePacketConn(local net.Addr) *QueuePacketConn {
 	}
 }
 
-// sendQueue returns the per-peer outgoing channel for addr, creating it on first use.
 func (c *QueuePacketConn) sendQueue(addr net.Addr) chan []byte {
 	key := addr.String()
 	c.mu.Lock()
@@ -54,24 +46,18 @@ func (c *QueuePacketConn) sendQueue(addr net.Addr) chan []byte {
 	return q
 }
 
-// OutgoingQueue is the transport's read side of the datagrams kcp-go wants sent to addr.
 func (c *QueuePacketConn) OutgoingQueue(addr net.Addr) <-chan []byte { return c.sendQueue(addr) }
 
-// QueueIncoming hands a datagram the transport received (from logical peer addr) to kcp-go.
-// It copies p (the caller may reuse its buffer) and drops silently on a full queue or after
-// Close, so a stalled reader or a torn-down session never blocks the transport.
 func (c *QueuePacketConn) QueueIncoming(p []byte, addr net.Addr) {
 	buf := make([]byte, len(p))
 	copy(buf, p)
 	select {
 	case <-c.closed:
 	case c.recvQueue <- taggedPacket{buf, addr}:
-	default: // full: drop (kcp-go retransmits)
+	default:
 	}
 }
 
-// ReadFrom returns the next datagram queued by the transport. It blocks until one arrives
-// or the conn closes (then net.ErrClosed, which stops kcp-go's read loop cleanly).
 func (c *QueuePacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	select {
 	case <-c.closed:
@@ -81,8 +67,6 @@ func (c *QueuePacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	}
 }
 
-// WriteTo queues a datagram kcp-go wants sent to addr. It copies p, never blocks (a full
-// per-peer queue drops), and reports the full length so kcp-go treats the send as done.
 func (c *QueuePacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	select {
 	case <-c.closed:
@@ -93,25 +77,20 @@ func (c *QueuePacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	copy(buf, p)
 	select {
 	case c.sendQueue(addr) <- buf:
-	default: // full: drop (kcp-go retransmits)
+	default:
 	}
 	return len(p), nil
 }
 
-// Close unblocks any ReadFrom and marks the conn dead. Idempotent.
 func (c *QueuePacketConn) Close() error {
 	c.closeOnce.Do(func() { close(c.closed) })
 	return nil
 }
 
-// Closed exposes the done channel so a transport loop can stop when the conn closes.
 func (c *QueuePacketConn) Closed() <-chan struct{} { return c.closed }
 
-// LocalAddr implements net.PacketConn.
 func (c *QueuePacketConn) LocalAddr() net.Addr { return c.local }
 
-// Deadlines are no-ops: kcp-go over an external PacketConn drives its own timers and never
-// relies on the underlying conn's deadlines, so a nil (accepting) result is correct here.
 func (c *QueuePacketConn) SetDeadline(time.Time) error      { return nil }
 func (c *QueuePacketConn) SetReadDeadline(time.Time) error  { return nil }
 func (c *QueuePacketConn) SetWriteDeadline(time.Time) error { return nil }
