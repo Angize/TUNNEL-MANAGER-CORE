@@ -2004,7 +2004,7 @@ func (b *TCP) dialLoop() {
 					// fact repeated. event() rather than down(), like every other deliberate move -- the
 					// carrier is re-dialling either way, so arming a paired "up" would invent a self-heal.
 					if youngDeaths == 0 {
-						b.pool.event("down", "edge-walk", label)
+						b.pool.event("down", "edge-walk", "ws")
 					}
 					youngDeaths++
 				}
