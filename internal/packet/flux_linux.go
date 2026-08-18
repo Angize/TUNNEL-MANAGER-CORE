@@ -71,7 +71,6 @@ type Flux struct {
 	staged   []*stagedBox // server: bounded set of sessions staged by recent inits, each promoted only once a frame opens under it
 	hsCache  initCache    // server: recent inits -> responses (compute-DoS replay cache; receive-goroutine-only)
 	ci       atomic.Pointer[crypto.Ephemeral]
-	lastRx   atomic.Int64 // unix-nano of the last authenticated frame (client staleness)
 	// peerAnswered gates the clear-mode heal: set when the CURRENT endpoint replies, cleared on
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
 	peerAnswered atomic.Bool
@@ -601,16 +600,14 @@ func (f *Flux) handleCrypto(body []byte, addr *net.IPAddr) {
 		if len(body) < 2 || body[0] != magic {
 			return
 		}
-		f.markRx()            // the peer is answering (clear mode has no session to prove it)
-		f.provenFrom(addr.IP) // ...and, unless it came from an endpoint we left, the current one is alive
+		f.provenFrom(addr.IP) // unless it came from an endpoint we left, the current one is alive
 		f.learnPeer(addr)
 		f.dispatch(body[1], iff(body[1] == typeData, body[2:], nil), addr)
 		return
 	}
 	if s := f.sealer(); s != nil {
 		if typ, session, seq, payload, oerr := f.openWith(s, body); oerr == nil && f.rp.ok(session, seq) {
-			f.markRx()            // the session is answering
-			f.provenFrom(addr.IP) // ...and, unless it came from an endpoint we left, the current one is alive
+			f.provenFrom(addr.IP) // unless it came from an endpoint we left, the current one is alive
 			f.learnPeer(addr)
 			f.dispatch(typ, payload, addr)
 			return
@@ -626,7 +623,6 @@ func (f *Flux) handleCrypto(body []byte, addr *net.IPAddr) {
 			f.fecDec.reset() // a fresh session: the peer may have restarted its block numbering
 			f.rp = st.rp
 			f.staged = nil
-			f.markRx() // a pending session promoted -> genuine inbound
 			f.learnPeer(addr)
 			f.dispatch(typ, payload, addr)
 			return
@@ -698,8 +694,7 @@ func (f *Flux) tryHandshake(body []byte, addr *net.IPAddr) {
 		// instead of re-parsing and wiping the fresh anti-replay window. A legitimate
 		// re-handshake regenerates a fresh ci in sendInit (ci==nil path).
 		f.ci.Store(nil)
-		f.markRx()               // server RESP arrived: genuine inbound (green on a real connect)
-		f.provenFrom(addr.IP)    // ...and it answered the endpoint we are addressing
+		f.provenFrom(addr.IP)    // the server RESP answered the endpoint we are addressing
 		f.st.reconnected("flux") // recovery after a self-heal (nil-safe; silent on first connect)
 		return
 	}
@@ -778,11 +773,9 @@ func (f *Flux) livePath() (pathKey, bool) {
 	return k, f.sealer() != nil // config rejects a flux tunnel without crypto, so there is no other session
 }
 
-// deadWin is the session-stale window this carrier enforces.
-func (f *Flux) deadWin() time.Duration { return deadWindow(f.keepalive) }
-
 // dropSession gives up the crypto session so the client loop handshakes again, and reports whether
-// there was one to give up — the ladder's rung one. See the udp twin for why it wakes the loop.
+// there was one to give up — the ladder's rung one, and the only thing that re-handshakes this
+// carrier. See the udp twin for why it wakes the loop.
 func (f *Flux) dropSession() bool {
 	if f.sealer() == nil {
 		return false // a handshake already in flight is not a step
@@ -792,18 +785,6 @@ func (f *Flux) dropSession() bool {
 	f.st.down("rehandshake", "flux")
 	wakeLoop(f.wake)
 	return true
-}
-
-// sessionStale mirrors Raw.sessionStale: if the client has heard nothing
-// authenticated for deadWin() the server probably restarted, so the client drops
-// the dead session and re-handshakes rather than pinging forever under a key the
-// fresh server cannot open.
-func (f *Flux) sessionStale() bool { return staleSince(f.lastRx.Load(), f.deadWin()) }
-
-// markRx stamps a genuine inbound frame onto the failover clock. Failover-clock seeds
-// (connect / rotation) call lastRx.Store directly, so this stays the one PROVEN-inbound stamp.
-func (f *Flux) markRx() {
-	f.lastRx.Store(time.Now().UnixNano())
 }
 
 // provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for
@@ -950,9 +931,8 @@ func (f *Flux) rotatePeerFlux(proactive bool) {
 	// Refresh the status descriptor to the NEW peer so "active" doesn't stay pinned to the dialed IP
 	// SetStatusPath baked in — same "flux:<carrier> · <peer>" format (nil-safe when status is off).
 	f.st.setActive("flux:" + f.carrier + " · " + ip.String())
-	// Fresh staleness window + unproven mark for the jumped-to endpoint, so a proactive jump onto a dead
-	// endpoint fails over within the dead window instead of stranding (clear mode). Mirrors rotatePeerUDP.
-	f.lastRx.Store(time.Now().UnixNano())
+	// The jumped-to endpoint has proven nothing yet, and the session survives a proactive jump, so
+	// nothing else would say so. Mirrors rotatePeerUDP.
 	f.peerAnswered.Store(false)
 	log.Printf("flux: rotated destination to %s", addr)
 	if proactive {
@@ -984,13 +964,11 @@ func (f *Flux) adoptPeerFlux() {
 	// Refresh the status descriptor to the pinned peer so "active" tracks the current destination
 	// (same "flux:<carrier> · <peer>" format as SetStatusPath; nil-safe when status is off).
 	f.st.setActive("flux:" + f.carrier + " · " + ip.String())
-	// The same two resets rotatePeerFlux performs, and for the same reason: a pin jumps to an endpoint
-	// that has proven NOTHING yet. Leaving peerAnswered true from the PREVIOUS endpoint lets the very
-	// next loop tick treat the newly pinned one as proven — clearing its burn, emitting a false heal,
-	// and releasing the pin through pinLanded() before it had actually landed, which resumes normal
-	// rotation and defeats the operator pick. lastRx likewise stayed recent from the old endpoint, so
-	// the dead window for the new one was measured from a frame it never sent.
-	f.lastRx.Store(time.Now().UnixNano())
+	// The same reset rotatePeerFlux performs, and for the same reason: a pin jumps to an endpoint that
+	// has proven NOTHING yet. Leaving peerAnswered true from the PREVIOUS endpoint lets the very next
+	// loop tick treat the newly pinned one as proven — clearing its burn, emitting a false heal, and
+	// releasing the pin through pinLanded() before it had actually landed, which resumes normal
+	// rotation and defeats the operator pick.
 	f.peerAnswered.Store(false)
 	log.Printf("flux: pinned destination to %s", ip)
 	// "Make this active" is a deliberate operator jump — SILENT, like udp/tcp and the ws edge pool: only
@@ -1040,23 +1018,7 @@ func (f *Flux) clientLoop() {
 	if rc.polls() {
 		go f.pinPollLoop(rc)
 	}
-	// Seed the staleness baseline NOW (clear mode). Without it, sessionStale() returns false while
-	// lastRx==0, so a clear-mode failover-only pool whose first endpoint is dead never fires. Mirrors UDP.
-	f.lastRx.Store(time.Now().UnixNano())
 	for {
-		if f.cryptoOn && f.sealer() != nil && f.sessionStale() {
-			f.session.Store(nil)
-			f.ci.Store(nil)
-			log.Print("flux: no reply from the peer's session — re-handshaking (peer likely restarted)")
-			f.st.down("stale", "flux") // precise reason for the panel log (nil-safe when off)
-		}
-		// Clear mode has no handshake whose failure would drive failover, so a dead pool endpoint would
-		// otherwise strand the tunnel forever. Use receive-staleness (the peer pongs our pings). Mirrors UDP.
-		if !f.cryptoOn && f.sessionStale() {
-			f.lastRx.Store(time.Now().UnixNano()) // fresh window even if the pool couldn't move (single endpoint / source-only)
-			f.peerAnswered.Store(false)           // stale -> the current endpoint is no longer proven answering
-			f.st.down("stale", "flux")
-		}
 		if f.cryptoOn && f.sealer() == nil {
 			unproven = false // keep re-initing this endpoint; moving off it is the node's call, not ours
 			f.sendInit()
@@ -1083,8 +1045,7 @@ func (f *Flux) clientLoop() {
 			// The endpoint a timed rotation just jumped to has proven NOTHING, and because the session
 			// survives, no handshake failure will ever say so. Count unanswered ticks here — AFTER the
 			// jump, so the very next wait is already the 1s probe interval — on the same threshold the
-			// handshake path uses. Checking before the rotation cost a full keepalive first, which let
-			// sessionStale (a whole dead window) win the race and turned a blocked IP into a ~30s hole.
+			// handshake path uses.
 			if unproven = f.cryptoOn && rc.active() && !f.peerAnswered.Load(); unproven {
 				if failN++; failN >= peerFailThreshold {
 					f.session.Store(nil) // not answering: drop back to the handshake path and re-init there

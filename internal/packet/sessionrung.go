@@ -14,10 +14,9 @@ import "sync"
 // first already answered; if the first did not bring the tunnel back, the session was not what was
 // wrong.
 //
-// This is not a replacement for the carrier's own staleness clock. A tunnel with no pool never starts
-// the verdict poller and is sent no verdicts, so it has no ladder at all — that clock is still its only
-// way back. What this changes is the ORDER for a carrier that does have one: the cheap, blameless step
-// happens before a destination is condemned, instead of forty-five seconds after.
+// It is also the ONLY thing that re-handshakes: no carrier gives its session up on a clock any more.
+// Every client has a verdict mailbox, so the step runs on the judge's evidence — which measures where
+// the payload travels — rather than on a timer measuring our own keepalives coming back.
 type sessionRung struct {
 	mu sync.Mutex
 	// drop tears down the session so the client loop re-handshakes, and reports whether there was one

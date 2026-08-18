@@ -13,7 +13,9 @@ import (
 // every tunnel has when the operator picked one destination and one source, which is most of them. Only
 // the status file is wired, because that is what the verdict mailbox hangs off. It returns once the peer
 // has answered, so a test that then asserts something about a live tunnel really has one.
-func poollessClient(t *testing.T, ka time.Duration, tag string) (cli *UDP, ctrl *os.File) {
+//
+// The server comes back too, for the tests that need it to stop answering.
+func poollessClient(t *testing.T, ka time.Duration, tag string) (cli, server *UDP, ctrl *os.File) {
 	t.Helper()
 	srvDev, _ := tunPair(t, tag+"s")
 	cliDev, cc := tunPair(t, tag+"c")
@@ -45,7 +47,7 @@ func poollessClient(t *testing.T, ka time.Duration, tag string) (cli *UDP, ctrl 
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return cli, cc
+	return cli, srv, cc
 }
 
 // TestAPoolLessTunnelHearsTheJudge is the class, driven end to end through Run(): a client with no pool
@@ -58,7 +60,7 @@ func poollessClient(t *testing.T, ka time.Duration, tag string) (cli *UDP, ctrl 
 func TestAPoolLessTunnelHearsTheJudge(t *testing.T) {
 	const ka = 6 * time.Second
 	const budget = 4 * time.Second
-	cli, _ := poollessClient(t, ka, "ungate")
+	cli, _, _ := poollessClient(t, ka, "ungate")
 
 	for cli.sealer() == nil {
 		time.Sleep(20 * time.Millisecond)
