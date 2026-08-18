@@ -127,14 +127,10 @@ func TestPeerPoolInvariantsUnderRandomSequences(t *testing.T) {
 					log = append(log, "releasePin")
 					p.releasePin()
 				case 6:
-					// Only ever with a key the pool has MOVED OFF, because that is the only way pollPins
-					// reaches it: the matching arm calls fail(), which absorbs a pin's second opinion.
-					// Driving it with the live key instead would "find" a pinned endpoint being burned
-					// with no second opinion — a state no caller can produce.
-					if k := pick(); k != p.current() {
-						log = append(log, "burnNamed:"+k)
-						p.burnNamed(k)
-					}
+					// The dial loop asking where to go. It SELECTS — re-picking by health and committing
+					// the cursor — so it belongs in the mix as a mutation, not as a read.
+					log = append(log, "current")
+					p.current()
 				case 7:
 					k := pick()
 					log = append(log, "clearBurn:"+k)

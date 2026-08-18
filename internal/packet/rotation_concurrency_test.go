@@ -43,7 +43,6 @@ func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 	run(func() { p.pinLandedOn("d1") })         // a carrier landing somewhere the pin did not ask for
 	run(func() { p.pinAttemptFailed("d2") })    // the pin's own evidence
 	run(func() { p.clearBurn("d3") })           // a tun-probe OK
-	run(func() { p.burnNamed("d3") })           // a keyed tun-probe fail
 	run(func() { p.probeAllNow() })             // the panel's "probe now"
 	run(func() { _ = p.eligibleCount() })       // the odometer's lap sizing
 	run(func() { p.keepCursorOn(p.current()) }) // make-before-break putting the cursor back
