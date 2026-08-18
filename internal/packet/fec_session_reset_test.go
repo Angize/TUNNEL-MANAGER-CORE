@@ -3,6 +3,7 @@ package packet
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -107,6 +108,10 @@ func TestUDPFecDecoderResetAfterClientRestart(t *testing.T) {
 // TestUDPFecDecoderResetAfterServerRestart is the mirror: the SERVER restarts, so it is the CLIENT's
 // decoder that still holds the dead session's blocks when the fresh server starts numbering from zero.
 // This covers the client-side install site, reached from the handshake RESP.
+//
+// The re-handshake is the JUDGE's, which is why the status file is wired: a client cannot tell a peer
+// that restarted from one that is merely quiet, so it is told. This is therefore also the end-to-end
+// proof that a real pair recovers from a real server restart with no clock involved.
 func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
 	srv1Dev, srv1Ctrl := tunPair(t, "frsrv1")
 	srv2Dev, srv2Ctrl := tunPair(t, "frsrv2")
@@ -122,6 +127,7 @@ func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
+	cli.SetStatusPath(filepath.Join(t.TempDir(), "core.json")) // the verdict mailbox hangs off it
 	go srv1.Run()
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
@@ -139,6 +145,9 @@ func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
 	}
 	go srv2.Run()
 	t.Cleanup(func() { srv2.Close() })
+	// What the node's probe would say: nothing is crossing. udp declares no source-port axis, so rung
+	// zero is not there to spend and this lands straight on the handshake.
+	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail})
 	waitUntil(t, "the client to re-handshake with the restarted server", 10*time.Second,
 		func() bool { return srv2.sealer() != nil && srv2.peer.Load() != nil })
 
