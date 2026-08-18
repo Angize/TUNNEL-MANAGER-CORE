@@ -2151,7 +2151,7 @@ func (b *TCP) peerPinPollLoop() {
 			// The verdict is about the TUNNEL and arrives in the tunnel's own mailbox; the pin below is
 			// about a pool ENTRY and arrives in that pool's. Consumed even with no destination pool, so
 			// a tunnel this carrier can do nothing for does not leave a verdict lying on disk.
-			if cmd, ok := readPoolCmd(b.st.verdictPath()); ok && b.pp != nil {
+			if cmd, ok := readPoolCmd(b.st.verdictPath()); ok {
 				epoch := b.st.pathEpoch()
 				switch {
 				case staleVerdict(cmd, epoch):
@@ -2162,30 +2162,24 @@ func (b *TCP) peerPinPollLoop() {
 				case cmd.Cmd == cmdOK:
 					// Both ends of the pair the probe measured are proven; keyed, so a verdict that
 					// crossed with a re-dial cannot clear an endpoint the tunnel has already left.
-					if cmd.Key != "" && b.pp.clearBurn(cmd.Key) {
+					if b.pp != nil && cmd.Key != "" && b.pp.clearBurn(cmd.Key) {
 						b.st.event("heal", "peer-retest", "ip:"+cmd.Key)
 					}
 					if b.sp != nil && cmd.Src != "" && b.sp.clearBurn(cmd.Src) {
 						b.st.event("heal", "src-retest", "ip:"+cmd.Src)
 					}
-				case cmd.Cmd == cmdFail && cmd.Key == b.pp.current():
-					// Same burn the carrier does on a dead peer; burnAdvance leaves the event to its
-					// caller, so publish here and drop so dialLoop re-dials on the new destination.
-					// The event names the KEY, never burnAdvance's return: that is where the pool
-					// moved TO, and blaming the replacement is the mis-target one step later.
+				case cmd.Cmd == cmdFail:
+					// No key comparison, for the reason the datagram twin gives: the epoch settled which
+					// path this judged, and current() is a selection whose asking moves the cursor.
+					// burnAdvance leaves the event to its caller, so publish here and drop so dialLoop
+					// re-dials. It names the KEY, never burnAdvance's return: that is where the pool
+					// moved TO, and blaming the replacement is the mis-target one step later. With no
+					// destination pool it walks the source instead, and there is no endpoint to name.
 					gone := cmd.Key
 					if addr, moved := b.burnAdvance(true); moved {
 						log.Printf("core/tcp: destination %s failed by the node's tun probe — burning and advancing to %s", gone, addr)
 						b.st.event("burn", "tun-probe", "ip:"+gone)
 						drop()
-					}
-				case cmd.Cmd == cmdFail:
-					// The rotation moved between the measurement and this read (this ticker is 1s and
-					// the probe ahead of it takes most of a second). Burn what was MEASURED and leave
-					// the connection alone — it is already somewhere no verdict covers.
-					if b.pp.burnNamed(cmd.Key) {
-						log.Printf("core/tcp: destination %s failed by the node's tun probe, but the rotation has since moved to %s — burning what was measured, staying put", cmd.Key, b.pp.current())
-						b.st.event("burn", "tun-probe", "ip:"+cmd.Key)
 					}
 				}
 			}

@@ -357,29 +357,6 @@ func (p *PeerPool) clearBurn(addr string) bool {
 	return cleared
 }
 
-// burnNamed walks the named endpoint one step down the health FSM WITHOUT moving the cursor, and
-// reports whether it did. It is the other keyed half of clearBurn: what a fail verdict does once the
-// pool's own rotation has moved out from under it, so the endpoint the probe MEASURED is the one that
-// answers for it. An address the pool does not hold is a no-op.
-func (p *PeerPool) burnNamed(addr string) bool {
-	p.mu.Lock()
-	known := false
-	for _, a := range p.addrs {
-		if a == addr {
-			known = true
-			break
-		}
-	}
-	if known {
-		p.burnLocked(addr)
-	}
-	p.mu.Unlock()
-	if known {
-		p.writeStatus()
-	}
-	return known
-}
-
 // probeAllNow pulls EVERY suspect/dead endpoint's retest forward to now, so the rotation may select
 // them again at once instead of waiting out the backoff — and the tun probe then judges them. The
 // node fires it itself after walking the whole destination x source matrix with the tunnel STILL dead;
@@ -805,34 +782,16 @@ func (c *rotationController) judge(cmd poolCmd, rotDst, rotSrc func(proactive bo
 		if c.src != nil && cmd.Src != "" && c.src.clearBurn(cmd.Src) && ev != nil {
 			ev("heal", "src-retest", cmd.Src)
 		}
-	case cmd.Cmd == cmdFail && c.dst == nil:
-		// No destination pool: there is no endpoint to name and none to advance onto, so the free
-		// rungs ARE the whole ladder. fail() spends them in order and, with a source pool, walks that
-		// once they are gone.
-		c.fail(rotDst, rotSrc)
 	case cmd.Cmd == cmdFail:
-		// The verdict names the endpoint it was MEASURED on, and that name is the whole guard.
-		// This poll is a one-second ticker and the probe ahead of it takes most of a second, so
-		// the proactive timer can move the pool in between; current() would then condemn an
-		// endpoint the probe never tested AND drop the tunnel back onto the one it did.
-		if addr := c.dst.current(); cmd.Key == addr {
-			// Still where it was measured: burn and advance, so a node-driven failover and a
-			// carrier-driven one are the same move. The endpoint is captured BEFORE the move,
-			// while we still know which one goes, but announced only if it really was charged —
-			// a verdict the ladder answered with a free step, or one a pin absorbed, condemns
-			// nobody, and saying otherwise puts a burn card on the operator's log for an address
-			// that is still healthy.
-			if c.fail(rotDst, rotSrc) {
-				log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", addr)
-				if ev != nil {
-					ev("burn", "tun-probe", "ip:"+addr)
-				}
-			}
-		} else if c.dst.burnNamed(cmd.Key) {
-			// It moved under the verdict. Burn what was measured and stay put: the rotation has
-			// already advanced, and nothing has measured where it went.
-			log.Printf("core: destination %s failed by the node's tun probe, but the rotation has "+
-				"since moved to %s — burning what was measured, staying put", cmd.Key, addr)
+		// There is nothing left to key on: the epoch above settled that the carrier is still on the
+		// path this judged, so cmd.Key names where it is. The pool must not be ASKED which one that
+		// is — current() is a selection that commits the cursor to what it picks, so the question
+		// would move the tunnel's own record of where it is. See TestTheCursorCannotOutrunTheEpoch.
+		condemned := c.fail(rotDst, rotSrc)
+		// Announced only if an endpoint really was charged: a free rung, a pin, or no pool at all
+		// leaves nobody to blame, and a burn card for a healthy address is worse than none.
+		if condemned && c.dst != nil {
+			log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", cmd.Key)
 			if ev != nil {
 				ev("burn", "tun-probe", "ip:"+cmd.Key)
 			}
