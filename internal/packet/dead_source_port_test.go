@@ -318,16 +318,13 @@ func TestTheLadderRollsOncePerWindowOnADeadPath(t *testing.T) {
 
 // A destination-rotation pool keeps ONE session across every endpoint, so a frame from the endpoint we
 // are NOT on opens under that session and is genuinely inbound. It proves the session is alive. It
-// proves nothing about the tuple we are on, and the two must not share a clock.
+// proves nothing about the tuple we are on, and only the tuple's own clock may hear it.
 func TestOnlyTheCurrentDestinationAnswersForItsOwnTuple(t *testing.T) {
 	cur, other := net.IPv4(10, 20, 0, 2), net.IPv4(10, 20, 0, 3)
 	r := &Raw{isClient: true, keepalive: 10 * time.Second}
 	r.peer.Store(&net.IPAddr{IP: cur})
 
 	r.markRx(other)
-	if r.lastRx.Load() == 0 {
-		t.Error("a pool endpoint's reply did not move the failover clock -- the session IS answering")
-	}
 	if r.lastRxCur.Load() != 0 {
 		t.Fatal("a reply from the endpoint we are NOT on answered on behalf of the tuple we are on")
 	}

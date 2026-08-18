@@ -452,11 +452,11 @@ func (b *UDP) livePath() (pathKey, bool) {
 func (b *UDP) deadWin() time.Duration { return deadWindow(b.keepalive) }
 
 // dropSession gives up the crypto session so the client loop handshakes again, and reports whether
-// there was one to give up. This is the ladder's rung one; sessionStale does the same thing on its own
-// clock, for a carrier that has no ladder at all.
+// there was one to give up. The ladder's rung one, and the ONLY thing that re-handshakes a crypto
+// client: a peer that restarted is found by the judge, which measures where the payload travels,
+// instead of by a clock that could only measure our own keepalives coming back.
 //
-// The wake matters here and not there: the staleness path runs INSIDE the loop and re-decides its
-// interval at once, but this is called from the pin poller while the loop may be asleep on a whole
+// It wakes the loop because it runs on the pin poller, which may find the loop asleep on a whole
 // keepalive.
 func (b *UDP) dropSession() bool {
 	if !b.cryptoOn || b.sealer() == nil {
@@ -469,10 +469,9 @@ func (b *UDP) dropSession() bool {
 	return true
 }
 
-// sessionStale reports that the client has heard nothing it could authenticate for long enough that the
-// peer has most likely restarted with a fresh session, so the client drops its now-useless session and
-// re-handshakes. Without it a SERVER restart wedges the tunnel: the client keeps pinging under a key the
-// fresh server cannot open. A false positive costs one harmless re-handshake. Crypto only.
+// sessionStale reports that nothing the client could authenticate has arrived for the dead window.
+// CLEAR MODE only, and udp is the one datagram carrier config lets run clear. All it drives now is the
+// `stale` event and the re-baseline beside it; the crypto half of it is the ladder's rung one.
 func (b *UDP) sessionStale() bool { return staleSince(b.lastRx.Load(), b.deadWin()) }
 
 // markRx stamps a genuine inbound frame onto the failover clock. Seeds that only re-baseline that clock
@@ -1113,12 +1112,6 @@ func (b *UDP) clientLoop() {
 	// Starting the clock at connect makes a from-start-dead endpoint fail over after the dead window.
 	b.lastRx.Store(time.Now().UnixNano())
 	for {
-		if b.cryptoOn && b.sealer() != nil && b.sessionStale() {
-			b.session.Store(nil) // server likely restarted — drop the dead session so we re-handshake
-			b.ci.Store(nil)
-			log.Print("core: no reply from the peer's session — re-handshaking (peer likely restarted)")
-			b.st.down("stale", "udp") // precise reason for the panel log (nil-safe when off)
-		}
 		// Clear mode has no handshake whose failure would drive failover, so use receive-staleness instead:
 		// the peer pongs our keepalive pings, so once lastRx ages past the dead window, burn and advance the
 		// pool. The baseline is seeded at connect and reset on every rotation, so a fresh tunnel or a

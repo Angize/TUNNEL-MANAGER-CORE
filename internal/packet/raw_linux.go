@@ -91,10 +91,9 @@ type Raw struct {
 	tsBase  atomic.Uint32
 	tsStart atomic.Int64 // unix nanos; both are re-drawn with the flow, so both must be atomic
 	tsEcr   atomic.Uint32
-	lastRx  atomic.Int64 // unix-nano of the last authenticated frame (client staleness)
-	// lastRxCur is that stamp narrowed to the CURRENT destination. A rotation pool keeps ONE session
-	// across every endpoint, so a reply from the endpoint we are not on proves the session is alive --
-	// and nothing at all about whether the tuple we ARE on still carries.
+	// lastRxCur is the unix-nano of the last authenticated frame from the CURRENT destination. A
+	// rotation pool keeps ONE session across every endpoint, so a reply from the endpoint we are not on
+	// proves the session is alive -- and nothing at all about whether the tuple we ARE on still carries.
 	lastRxCur atomic.Int64
 	// lastAsk: unix-nano of the last frame this client sent that the peer OWES an answer to -- a
 	// keepalive ping, or a handshake init. Older than lastRxCur means everything asked has been
@@ -849,13 +848,12 @@ func (r *Raw) replyPort(sport uint16) uint16 {
 }
 
 // portSilence is how long an unanswered ask condemns the current source port: half a keepalive, but
-// never under the largest inbound gap a normally-carrying tunnel was measured to have, and always well
-// inside the dead window, so a blackholed 4-tuple is discarded long before the session is declared
-// stale over it.
+// never under the largest inbound gap a normally-carrying tunnel was measured to have, and always
+// well inside the shared dead window.
 //
-// ZERO when those cannot both hold. At a short enough keepalive the gap floor runs past the dead window
-// itself, and a window that condemns a tuple no earlier than the session is given up on buys nothing
-// while still rolling the port on ordinary jitter. The scheduled roll then owns it alone, as before.
+// ZERO when those cannot both hold. At a short enough keepalive the gap floor runs past that bound,
+// and a window that wide condemns a tuple on ordinary jitter rather than on silence. The scheduled
+// roll then owns the port alone.
 func portSilence(keepalive time.Duration) time.Duration {
 	ps := keepalive / 2
 	if ps < 3*time.Second {
@@ -1375,11 +1373,9 @@ func (r *Raw) livePath() (pathKey, bool) {
 	return k, r.sealer() != nil // config rejects a raw tunnel without crypto, so there is no other session
 }
 
-// deadWin is the session-stale window this carrier enforces.
-func (r *Raw) deadWin() time.Duration { return deadWindow(r.keepalive) }
-
 // dropSession gives up the crypto session so the client loop handshakes again, and reports whether
-// there was one to give up — the ladder's rung one. See the udp twin for why it wakes the loop.
+// there was one to give up — the ladder's rung one, and the only thing that re-handshakes this
+// carrier. See the udp twin for why it wakes the loop.
 func (r *Raw) dropSession() bool {
 	if r.sealer() == nil {
 		return false // a handshake already in flight is not a step
@@ -1391,33 +1387,23 @@ func (r *Raw) dropSession() bool {
 	return true
 }
 
-// sessionStale reports that the client has heard nothing authenticated from the server for long
-// enough that the peer most likely restarted with a fresh session, so the client should drop its
-// dead session and re-handshake. Without it a SERVER restart wedges the tunnel: the client keeps
-// pinging under a key the fresh server can't open and never re-initiates. See UDP.sessionStale.
-func (r *Raw) sessionStale() bool { return staleSince(r.lastRx.Load(), r.deadWin()) }
-
-// markRx stamps a genuine inbound frame onto the failover clock. Failover-clock seeds
-// (connect / rotation) go through seedRx, so this stays the one PROVEN-inbound stamp.
+// markRx stamps a genuine inbound frame onto the per-tuple receive clock the source-port roll reads.
+// Seeds (connect / rotation) go through seedRx, so this stays the one PROVEN-inbound stamp.
 //
-// from is the address the frame arrived from: only the CURRENT destination's reply advances the
-// per-tuple clock the source-port roll reads, or a pool probing its other endpoints would answer
-// on their behalf and the dead tuple could never be condemned.
+// from is the address the frame arrived from: only the CURRENT destination's reply advances that
+// clock, or a pool probing its other endpoints would answer on their behalf and the dead tuple could
+// never be condemned.
 func (r *Raw) markRx(from net.IP) {
-	now := time.Now().UnixNano()
-	r.lastRx.Store(now)
 	if p := r.peer.Load(); p != nil && from != nil && p.IP.Equal(from) {
-		r.lastRxCur.Store(now)
+		r.lastRxCur.Store(time.Now().UnixNano())
 	}
 }
 
-// seedRx re-bases both receive clocks on a destination nothing has been heard from yet. Both, or an
+// seedRx re-bases the receive clock on a destination nothing has been heard from yet — without it, an
 // ask the endpoint we just left never answered would date the fresh tuple's silence and condemn its
 // source port before it has had a chance to reply.
 func (r *Raw) seedRx() {
-	now := time.Now().UnixNano()
-	r.lastRx.Store(now)
-	r.lastRxCur.Store(now)
+	r.lastRxCur.Store(time.Now().UnixNano())
 }
 
 // provenFrom marks the CURRENT destination as answering. A timed rotation keeps the session, so for
@@ -1575,9 +1561,8 @@ func (r *Raw) rotatePeerRaw(proactive bool) {
 		r.session.Store(nil) // the endpoint failed — force a fresh handshake to the next one
 		r.ci.Store(nil)
 	}
-	// Give the jumped-to endpoint a FRESH staleness window and mark it unproven, so a proactive jump
-	// onto a dead endpoint fails over within the dead window instead of stranding (clear mode), and its
-	// burn isn't healed until it actually replies. Mirrors rotatePeerUDP.
+	// Date the new tuple's silence from the jump, not from an ask the endpoint we left never answered,
+	// and mark it unproven so its burn is not healed until it actually replies. Mirrors rotatePeerUDP.
 	r.seedRx()
 	r.peerAnswered.Store(false)
 	log.Printf("raw: rotated destination to %s", addr)
@@ -1674,16 +1659,10 @@ func (r *Raw) clientLoop() {
 	if rc.polls() {
 		go r.pinPollLoop(rc)
 	}
-	// Seed the staleness baseline NOW: sessionStale() reads false while lastRx==0, and the first thing
-	// the loop below does is ask it.
+	// Seed the tuple's receive clock NOW: portDead compares it against the first ask, which the loop
+	// below is about to send.
 	r.seedRx()
 	for {
-		if r.sealer() != nil && r.sessionStale() {
-			r.session.Store(nil) // server likely restarted — drop the dead session so we re-handshake
-			r.ci.Store(nil)
-			log.Print("raw: no reply from the peer's session — re-handshaking (peer likely restarted)")
-			r.st.down("stale", "raw") // precise reason for the panel log (nil-safe when off)
-		}
 		if r.sealer() == nil {
 			unproven = false // keep re-initing this endpoint; moving off it is the node's call, not ours
 			r.sendInit()
