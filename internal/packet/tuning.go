@@ -29,7 +29,8 @@ var (
 	// int32 so it compares directly against the atomic.Int32 unanswered-ping counter.
 	pingLossThreshold int32 = 3
 	// minLiveness (pool client) is the shortest a carrier may live and still count as a healthy
-	// session; a handshake-then-quick-death is charged to the edge as a data-plane fault instead.
+	// session. A death sooner than this condemns nobody — only the tun probe does that — but it ends no
+	// round, and on a ws pool it spends one step of the free walk.
 	minLiveness = 20 * time.Second
 	// probeTimeout bounds a single differential/retest edge probe (TCP dial + TLS, no WS, no data).
 	probeTimeout = 5 * time.Second

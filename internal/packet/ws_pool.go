@@ -479,6 +479,14 @@ func (p *wsPool) snisCount() int {
 	return len(p.snis)
 }
 
+// comboCount is how many (IP × SNI) combinations a walk could reach — one lap. The same bound
+// stepToEligibleLocked scans, so a caller that spends one step per combination has tried them all.
+func (p *wsPool) comboCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.ips) * len(p.snis)
+}
+
 // eligibleSNIs is how many SNIs the rotation could actually try right now. Read BEFORE a burn to size one
 // lap of the matrix — a condemned SNI cannot be tried, so counting the raw list would call a lap complete
 // that never happened and walk the edge off an SNI that never varied.

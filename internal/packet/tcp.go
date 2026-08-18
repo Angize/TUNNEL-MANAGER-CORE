@@ -1704,10 +1704,14 @@ func (b *TCP) takeWarm() *warmDial {
 	}
 }
 
-// dialLoop (client) keeps a connection to the server alive, retrying on drop. For a
-// ws pool it rotates edges: each attempt uses the pool's current (IP × SNI), a
-// failure burns the offending IP/SNI (establishWS), and a proactive timer tears the
-// connection down after b.rotate so the client moves before the edge is fingerprinted.
+// dialLoop (client) keeps a connection to the server alive, retrying on drop. For a ws pool it rotates
+// edges: each attempt uses the pool's current (IP × SNI), an attempt that never comes up steps the
+// cursor to another one, and a proactive timer tears the connection down after b.rotate so the client
+// moves before the edge is fingerprinted.
+//
+// Nothing in here CONDEMNS an edge — only the node's tun probe does, through pollWsCmd. What it may do
+// is STEP the cursor, which burns nothing: for an attempt that never came up, and for one bounded lap
+// when carriers keep dying too young for the probe to judge them.
 func (b *TCP) dialLoop() {
 	b.warmNext = make(chan *warmDial, 1)
 	defer func() {
@@ -1718,6 +1722,10 @@ func (b *TCP) dialLoop() {
 	// reconnect backoff: grows on each failed dial/handshake, resets on a successful connect, so a
 	// dead/blocked destination is re-probed with an exponential backoff instead of a fixed-1s beacon.
 	backoff := time.Duration(0)
+	// youngDeaths counts consecutive carriers that came up and died too fast for the tun probe to have
+	// judged them. It is the budget for the free walk below — one lap of the pool, refilled by a session
+	// that lasts. Loop-local: dialLoop is the only reader and the only writer.
+	youngDeaths := 0
 	for {
 		if b.closed.Load() {
 			return
@@ -1963,40 +1971,43 @@ func (b *TCP) dialLoop() {
 		// ourselves — an operator pin/rotate, or a scheduled proactive rotation — is NOT a failure
 		// and is not logged as "down". A genuine death records a precise core-observed "down" reason.
 		deliberate := false // a proactive rotation / operator pin that WE induced — re-dial at once, no backoff
-		if b.pool != nil && !b.closed.Load() {
-			cause := b.takeLastErr()
+		// ONE policy for both kinds of pool: the ws EDGE pool and the direct peer/source pools reach this
+		// on the same questions. They cannot both be wired — SetPeerPool/SetSourcePool refuse a ws
+		// carrier — so which one is present only decides who writes the event and who owns a walk.
+		if (b.pool != nil || b.pp != nil || b.sp != nil) && !b.closed.Load() {
+			// The edge pool is also this client's event writer, so it consumes the cause whatever the
+			// death was — leaving it would let a deliberate rotation hand a stale reason to the NEXT
+			// genuine death. A direct pool leaves it for the coreStatus writer below.
+			var cause string
+			if b.pool != nil {
+				cause = b.takeLastErr()
+			}
 			if b.manualSwitch.Swap(false) || rotated.Load() {
 				deliberate = true
 				b.endRound()
 			} else {
-				b.pool.down(classifyErr(cause), label) // arms the paired "up" the next reconnect emits
-				if time.Since(connectedAt) < minLiveness {
-					// A short-lived carrier is NOT a verdict on this edge — the tun probe decides that,
-					// the same way it does for the direct pools. Still move off it though: a dial that
-					// succeeds puts no sleep on the path, so re-dialing the same edge spins
-					// connect -> die -> reconnect with nothing slowing it down.
-					b.pool.advance()
-				} else {
-					b.endRound() // a sustained session ends the round: the counters it fed are stale
+				if b.pool != nil {
+					b.pool.down(classifyErr(cause), label) // arms the paired "up" the next reconnect emits
+				}
+				// Too young for the probe to have judged it: a sub-second measurement cannot span a
+				// carrier that dies this fast, so holding still for a verdict here strands the tunnel on
+				// a combination that will never hold still long enough to be condemned. Step the cursor —
+				// free, and it condemns nobody — but only for ONE lap. Past that every combination has
+				// been tried, the fault is in none of them, and walking on only denies the probe a path
+				// that stays put long enough to measure. A step that did not MOVE (pinned, or nothing
+				// else eligible) is not a step, or a pin would drain the whole budget on nothing.
+				if time.Since(connectedAt) >= minLiveness {
+					youngDeaths = 0 // a session that lasted is the proof that refills the walk
+					b.endRound()
+				} else if b.pool != nil && youngDeaths < b.pool.comboCount() && b.pool.advance() {
+					youngDeaths++
 				}
 			}
-		} else if (b.pp != nil || b.sp != nil) && !b.closed.Load() {
-			// Direct-tcp peer/source pool: a proactive rotation or an operator jump is deliberate — clear
-			// transient burns, no fault, no "down". A death sooner than minLiveness means the endpoint connected
-			// but could not carry data (throttle/blackhole), so burn+advance off it. A death after a healthy
-			// lifetime is an ordinary drop: keep the endpoints and clear stale burns.
-			if b.manualSwitch.Swap(false) || rotated.Load() {
-				deliberate = true
-				b.endRound()
-			} else if time.Since(connectedAt) < minLiveness {
-				// a short-lived carrier is not a verdict on this endpoint; the tun probe decides
-			} else {
-				b.endRound()
-			}
 		}
-		// Single-edge (non-pool) status file: surface a GENUINE carrier loss as a precise "down", paired with
-		// the "up" the next successful dial emits. b.st is only ever wired on a non-pool carrier; nil-safe,
-		// and skipped for a deliberate switch or Close. The branches above do not consume takeLastErr.
+		// Single-edge (non-pool) status file: surface a GENUINE carrier loss as a precise "down", paired
+		// with the "up" the next successful dial emits. Skipped for a deliberate switch or Close.
+		// SetStatusPath refuses a carrier that has an edge pool, so the cause the block above consumed
+		// belongs to a carrier whose b.st is nil and can never be the one this reads.
 		if b.st != nil && !deliberate && !b.closed.Load() {
 			b.st.down(classifyErr(b.takeLastErr()), label)
 		}
