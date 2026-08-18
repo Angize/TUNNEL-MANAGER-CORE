@@ -25,7 +25,11 @@ type portRung struct {
 	// roll redraws the port and reports whether it moved. nil on a carrier with no port axis — a
 	// portless raw profile, or one whose ports are derived rather than chosen — which leaves the ladder
 	// starting where it always did.
-	roll  func() bool
+	//
+	// step says whether this redraw is a ladder STEP — local evidence, or a verdict spending the rung —
+	// rather than the scheduled refresh, which moves the port of a tunnel that is carrying perfectly
+	// well and is therefore not an event about anything.
+	roll  func(step bool) bool
 	spent int
 	// dead reports that the CURRENT 4-tuple has stopped carrying — the carrier's own evidence, which is
 	// rung zero's other trigger. ready reports a session on that path. every is the scheduled re-roll
@@ -37,7 +41,7 @@ type portRung struct {
 }
 
 // setRoll installs the carrier's redraw. A carrier that never calls this has no port axis.
-func (p *portRung) setRoll(roll func() bool) {
+func (p *portRung) setRoll(roll func(step bool) bool) {
 	p.mu.Lock()
 	p.roll = roll
 	p.mu.Unlock()
@@ -90,7 +94,7 @@ func (p *portRung) tick(now time.Time, judged bool) {
 		p.next = now.Add(jitterFrac(every))
 	}
 	p.mu.Unlock()
-	roll()
+	roll(reactive)
 }
 
 // armed reports that the ladder has a port to drive on its own beat. The poller asks so it starts for
@@ -121,7 +125,7 @@ func (p *portRung) try() bool {
 	p.spent++
 	p.mu.Unlock()
 
-	if roll() {
+	if roll(true) { // a verdict spending the rung is a step, whatever the local evidence says
 		return true
 	}
 	p.mu.Lock() // nothing drawn: the axis exists but could not move, so it was not a step

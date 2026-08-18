@@ -2000,6 +2000,12 @@ func (b *TCP) dialLoop() {
 					youngDeaths = 0 // a session that lasted is the proof that refills the walk
 					b.endRound()
 				} else if b.pool != nil && youngDeaths < b.pool.comboCount() && b.pool.advance() {
+					// ONCE per outage, on the step that starts the walk: the lap that follows is the same
+					// fact repeated. event() rather than down(), like every other deliberate move -- the
+					// carrier is re-dialling either way, so arming a paired "up" would invent a self-heal.
+					if youngDeaths == 0 {
+						b.pool.event("down", "edge-walk", label)
+					}
 					youngDeaths++
 				}
 			}
