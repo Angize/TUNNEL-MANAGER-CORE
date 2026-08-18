@@ -5,10 +5,12 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type PeerPool struct {
+	burns      atomic.Uint64
 	mu         sync.Mutex
 	writeMu    sync.Mutex
 	addrs      []string
@@ -129,9 +131,11 @@ func (p *PeerPool) bestIdxLocked(except int) int {
 	return best
 }
 
-func (p *PeerPool) burnLocked(addr string) {
-	p.health.burn(addr)
+func (p *PeerPool) burnLocked(addr string) bool {
+	return p.health.burn(addr)
 }
+
+func (p *PeerPool) burnCount() uint64 { return p.burns.Load() }
 
 func retestBackoff(r *healthRec, now int64) {
 	if r.state == stateDead {
@@ -190,7 +194,9 @@ func (p *PeerPool) fail() (addr string, moved bool) {
 		return a, false
 	}
 	prev := p.cur
-	p.burnLocked(p.addrs[p.cur])
+	if p.burnLocked(p.addrs[p.cur]) {
+		p.burns.Add(1)
+	}
 	p.advanceFailLocked()
 	a := p.addrs[p.cur]
 	moved = p.cur != prev
@@ -451,7 +457,7 @@ func (c *rotationController) pinned() bool {
 	return (c.dst != nil && c.dst.isPinned()) || (c.src != nil && c.src.isPinned())
 }
 
-func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (condemned bool) {
+func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurned bool) {
 
 	if c.port.try() {
 		return false
@@ -482,15 +488,15 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (condemne
 	if c.dst != nil {
 
 		lap := c.od.failed(c.dst.eligibleCount)
+		before := c.dst.burnCount()
 		rotDst(false)
 		if c.src != nil && lap {
 			rotSrc(false)
 		}
-		return true
+		return c.dst.burnCount() != before
 	}
 	if c.src != nil {
 		rotSrc(false)
-		return true
 	}
 	return false
 }
@@ -569,9 +575,9 @@ func (c *rotationController) judge(cmd poolCmd, rotDst, rotSrc func(proactive bo
 		}
 	case cmd.Cmd == cmdFail:
 
-		condemned := c.fail(rotDst, rotSrc)
+		dstBurned := c.fail(rotDst, rotSrc)
 
-		if condemned && c.dst != nil {
+		if dstBurned {
 			log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", cmd.Key)
 			if ev != nil {
 				ev("burn", "tun-probe", "ip:"+cmd.Key)
