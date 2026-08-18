@@ -40,6 +40,19 @@ func liveEdge(cli *TCP) string {
 	return ""
 }
 
+// poolEvents counts the pool's recorded events carrying `code`.
+func poolEvents(p *wsPool, code string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, e := range p.events {
+		if e.Code == code {
+			n++
+		}
+	}
+	return n
+}
+
 // TestAYoungDeathWalksOneLapAndStops bounds the free walk.
 //
 // A carrier that comes up and dies too fast for the node's probe to have judged it may step the cursor
@@ -94,6 +107,11 @@ func TestAYoungDeathWalksOneLapAndStops(t *testing.T) {
 	}
 	if tail == 0 {
 		t.Fatal("the walk was still moving on the last death — it never settled for the probe to measure")
+	}
+	// ...and it says so ONCE. A line per step would put a whole lap in the panel's 500-event ring for
+	// one outage, which is the same noise the port roll's latch exists to prevent.
+	if n := poolEvents(pool, "edge-walk"); n != 1 {
+		t.Errorf("the walk wrote %d edge-walk events for one outage (%d steps), want exactly 1", n, changes)
 	}
 }
 

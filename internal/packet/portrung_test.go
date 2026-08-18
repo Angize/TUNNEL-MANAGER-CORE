@@ -16,7 +16,7 @@ func rungHarness(t *testing.T, withRung bool) (rc *rotationController, rolls *in
 	rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
 	rolls, burns = new(int), new(int)
 	if withRung {
-		rc.port.setRoll(func() bool { *rolls++; return true })
+		rc.port.setRoll(func(bool) bool { *rolls++; return true })
 	}
 	return rc, rolls, burns
 }
@@ -78,7 +78,7 @@ func TestACarrierWithNoPortAxisWalksImmediately(t *testing.T) {
 // never actually moved the tunnel.
 func TestADrawThatDidNotMoveIsNotAStep(t *testing.T) {
 	rc, rolls, burns := rungHarness(t, true)
-	rc.port.setRoll(func() bool { *rolls++; return false })
+	rc.port.setRoll(func(bool) bool { *rolls++; return false })
 
 	rc.failCounting(burns)
 	if *burns == 0 {

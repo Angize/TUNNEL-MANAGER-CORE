@@ -17,7 +17,7 @@ func beatHarness(t *testing.T) (beat func(), rolls *int, dead, ready *bool, verd
 	verdict = filepath.Join(dir, "core.json.verdict")
 	rc.setVerdict(verdict)
 	rolls, dead, ready = new(int), new(bool), new(bool)
-	rc.port.setRoll(func() bool { *rolls++; return true })
+	rc.port.setRoll(func(bool) bool { *rolls++; return true })
 	// A nanosecond schedule: due on every beat after the first, so the test is about the GATES and
 	// never about waiting for a clock.
 	rc.port.setRefresh(func(time.Time) bool { return *dead }, func() bool { return *ready }, time.Nanosecond)

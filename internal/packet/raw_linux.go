@@ -99,6 +99,10 @@ type Raw struct {
 	// keepalive ping, or a handshake init. Older than lastRxCur means everything asked has been
 	// answered. Stamped only where those are sent, never on the data path.
 	lastAsk atomic.Int64
+	// portRolling latches the ONE event a rolling source port writes per outage. A roll clears lastAsk
+	// and sends a fresh ask, so portDead reads false again for a whole window and reports nothing about
+	// recovery -- only the tuple ANSWERING does, which is why markRx re-arms this and nothing else can.
+	portRolling atomic.Bool
 	// peerAnswered marks an endpoint PROVEN answering: set when the CURRENT endpoint replies, cleared on
 	// rotation, so a just-jumped-to (unproven) endpoint's burn is never falsely cleared. Mirrors UDP.
 	peerAnswered atomic.Bool
@@ -886,6 +890,9 @@ func (r *Raw) portDead(now time.Time) bool {
 // once. Reports whether it MOVED — a draw that failed has not stepped, and the ladder must not count
 // it as one.
 //
+// step separates a ladder STEP from the scheduled refresh. Only a step is worth an event: the refresh
+// moves the port of a tunnel that is carrying perfectly well, which is not news about anything.
+//
 // Every caller reaches this through the ladder's rung, which is wired only under sportRandom, so there
 // is no check for it here.
 //
@@ -896,7 +903,7 @@ func (r *Raw) portDead(now time.Time) bool {
 // silence. And the ping goes out immediately because until a packet carrying the new port reaches the
 // server its downstream is still stamped for the old one — on a download-only flow, waiting for
 // whatever the client sends next makes that window a whole keepalive instead of half a round trip.
-func (r *Raw) rollSourcePort() bool {
+func (r *Raw) rollSourcePort(step bool) bool {
 	p := rawRollSport()
 	if p == 0 {
 		return false
@@ -906,6 +913,12 @@ func (r *Raw) rollSourcePort() bool {
 	r.lastAsk.Store(0)
 	if peer := r.peer.Load(); peer != nil {
 		r.send(typePing, nil, peer)
+	}
+	// ONCE per outage. The rung rolls every portSilence for as long as the tuple stays dead, and a line
+	// per roll would bury the burn and the re-handshake that follow it. Announced through event() rather
+	// than down(): nothing was torn down, so arming a paired "up" would invent a self-heal.
+	if step && !r.portRolling.Swap(true) {
+		r.st.event("down", "port-roll", "raw")
 	}
 	return true
 }
@@ -1396,6 +1409,9 @@ func (r *Raw) dropSession() bool {
 func (r *Raw) markRx(from net.IP) {
 	if p := r.peer.Load(); p != nil && from != nil && p.IP.Equal(from) {
 		r.lastRxCur.Store(time.Now().UnixNano())
+		if r.portRolling.Load() { // guarded: this runs per authenticated frame, and the latch is normally clear
+			r.portRolling.Store(false)
+		}
 	}
 }
 
