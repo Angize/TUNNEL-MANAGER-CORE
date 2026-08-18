@@ -112,7 +112,7 @@ const (
 
 // rawSportEvery is the middle of the re-roll interval; each wait is jittered around it (jitterFrac),
 // because a port that changes on an exact clock is itself the period a DPI would lock onto. A var so a
-// test can drive the real sportLoop instead of imitating it.
+// test can drive the real refresh instead of imitating it.
 var rawSportEvery = 60 * time.Second
 
 // rawPorts returns the (source, destination) port pair THIS end stamps on a tcp/udp carrier packet. A

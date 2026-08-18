@@ -616,9 +616,11 @@ func (c *rotationController) active() bool { return c != nil && (c.dst != nil ||
 // setVerdict installs the judge's mailbox. A carrier that never calls this hears no verdicts.
 func (c *rotationController) setVerdict(path string) { c.verdict = path }
 
-// polls reports whether the poll loop has anything to read: a pool whose pin file to watch, or a
-// judge to hear from. Neither means a ticker over two paths that do not exist.
-func (c *rotationController) polls() bool { return c != nil && (c.active() || c.verdict != "") }
+// polls reports whether the poll loop has anything to do: a pool whose pin file to watch, a judge to
+// hear from, or a source port to drive. None of the three means a ticker over nothing.
+func (c *rotationController) polls() bool {
+	return c != nil && (c.active() || c.verdict != "" || c.port.armed())
+}
 
 // pinned reports whether either pool currently holds an operator pin (rotation is frozen).
 func (c *rotationController) pinned() bool {
@@ -739,9 +741,14 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 // written to a file nothing read.
 func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc func(proactive bool),
 	ev func(kind, code, detail string), pathEpoch func() int64) {
+	judged := false
 	if cmd, ok := readPoolCmd(c.verdict); ok {
 		c.judge(cmd, rotDst, rotSrc, ev, pathEpoch())
+		judged = true
 	}
+	// The ladder's own hand on the source port, on the same beat as everything else it drives — so
+	// nothing self-timed moves the path while the judge is measuring it.
+	c.port.tick(time.Now(), judged)
 	if c.dst != nil {
 		if cmd, ok := c.dst.readCmd(); ok && cmd.Key != "" && c.dst.selectEntry(cmd.Key) {
 			applyDst()
