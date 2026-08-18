@@ -5,14 +5,17 @@ import (
 	"time"
 )
 
-// TestEveryCarrierSharesOneDeadWindow pins the rule the whole self-heal story now rests on: ONE
-// multiplier over keepalive, the same number on every carrier and on BOTH roles.
+// TestEveryCarrierSharesOneDeadWindow pins the rule for every carrier that still HAS a dead window: ONE
+// multiplier over keepalive, the same number on both roles.
 //
 // It walks EVERY real constructor rather than the helper, and that is the point — the failure worth
 // catching is a construction site that resolves its own window, or forgets one and leaves a zero window,
-// which calls every session stale on its first check. Two sites out of nine would have said nothing
-// about the other seven. dns is the deliberate exception: high-loss, so it floors at dnstun's own
-// absolute window; TestDNSPublishesTheWindowTheSessionEnforces owns that rule.
+// which reaps a live connection on its first check. Two sites out of seven would have said nothing about
+// the other five.
+//
+// The datagram carriers are absent because they no longer enforce one at all: the window they had was
+// the session-stale clock, and the judge's ladder replaced it. dns is the other exception — high-loss,
+// so it floors at dnstun's own absolute window; TestDNSPublishesTheWindowTheSessionEnforces owns that.
 func TestEveryCarrierSharesOneDeadWindow(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 
@@ -62,24 +65,5 @@ func TestEveryCarrierSharesOneDeadWindow(t *testing.T) {
 			b.Close()
 		}
 
-		// udp: the same window, resolved as the session-stale deadline instead of a read deadline.
-		ucli, err := Dial("203.0.113.9:9000", nil, ka, false, false, psk, "aes-256-gcm", false, 0, 0)
-		if err != nil {
-			t.Fatalf("Dial: %v", err)
-		}
-		usrv, err := Listen([]string{"127.0.0.1:0"}, nil, ka, false, false, psk, "aes-256-gcm", false, 0, 0)
-		if err != nil {
-			t.Fatalf("Listen: %v", err)
-		}
-		for _, c := range []struct {
-			role string
-			win  time.Duration
-		}{{"client", ucli.deadWin()}, {"server", usrv.deadWin()}} {
-			if c.win != want {
-				t.Errorf("ka=%v: udp %s dead window = %v, want %v", ka, c.role, c.win, want)
-			}
-		}
-		ucli.Close()
-		usrv.Close()
 	}
 }

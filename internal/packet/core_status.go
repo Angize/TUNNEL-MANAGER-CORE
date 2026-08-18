@@ -211,9 +211,3 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) {
 // statusWriteLog throttles the status-file write errors: one line per sendErrEvery, shared by all three
 // writers, so a filesystem that fails every write names itself once instead of per snapshot.
 var statusWriteLog sendErrLog
-
-// staleSince reports whether last (unix-nano of the last inbound frame) has aged past window. A zero last
-// means "no baseline yet" -> not stale.
-func staleSince(last int64, window time.Duration) bool {
-	return last != 0 && time.Since(time.Unix(0, last)) > window
-}
