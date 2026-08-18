@@ -458,9 +458,6 @@ func (r *Raw) Run() error {
 	if r.isClient {
 		r.st.trackPath(r.livePath, r.closeCh)
 		go r.clientLoop()
-		if r.sportRandom {
-			go r.sportLoop()
-		}
 	}
 	return <-errc
 }
@@ -887,41 +884,12 @@ func (r *Raw) portDead(now time.Time) bool {
 	return now.Sub(time.Unix(0, ask)) > ps
 }
 
-// sportLoop re-rolls the client's carrier source port for the life of the tunnel. There is nothing to
-// tear down or re-handshake: the port lives only in the forged header, no socket binds it (the carrier
-// socket is opened on a PROTOCOL NUMBER), and the peer picks the new one up from the next authenticated
-// frame. A roll that fails to draw simply keeps the current port.
-func (r *Raw) sportLoop() {
-	next := time.Now().Add(jitterFrac(rawSportEvery))
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
-	for {
-		select {
-		case <-r.closeCh:
-			return
-		case <-tick.C:
-		}
-		now := time.Now()
-		// Two reasons to roll. The scheduled one keeps the tuple moving; the reactive one gets off a
-		// tuple whose RETURN direction has gone. Measured on the live fleet: about one rolled port in
-		// eight has its downstream blackholed while every packet the client sends still arrives, so the
-		// peer answers into a hole and the client hears nothing at all. Waiting out the schedule leaves
-		// the tunnel one-way dead for the rest of the interval, which is what carries it past the dead
-		// window and into a re-handshake -- on the same dead tuple, which cannot recover either.
-		if !now.After(next) && !r.portDead(now) {
-			continue
-		}
-		next = now.Add(jitterFrac(rawSportEvery))
-		r.rollSourcePort()
-	}
-}
-
 // rollSourcePort redraws the source port this client's forged header carries and asks its question at
 // once. Reports whether it MOVED — a draw that failed has not stepped, and the ladder must not count
 // it as one.
 //
-// Both callers gate on sportRandom before they can reach this — sportLoop is only started under it and
-// the ladder's rung is only wired under it — so there is no check for it here.
+// Every caller reaches this through the ladder's rung, which is wired only under sportRandom, so there
+// is no check for it here.
 //
 // The three lines after the draw are not decoration. A new 4-tuple is a new flow, so it starts a new
 // flow's numbers: rolling only the port left the first segment carrying a sequence mid-stream and a
@@ -1697,6 +1665,10 @@ func (r *Raw) clientLoop() {
 	// forges no port, or whose operator left the port fixed, simply has no rung zero.
 	if r.sportRandom {
 		rc.port.setRoll(r.rollSourcePort)
+		// The two reasons the port used to move on a goroutine of its own: the tuple's return direction
+		// going quiet, and the schedule that keeps a carrying tuple from being a fixed one. Both now run
+		// on the ladder's beat -- see portRung.tick.
+		rc.port.setRefresh(r.portDead, func() bool { return r.sealer() != nil }, rawSportEvery)
 	}
 	rc.setVerdict(r.st.verdictPath())
 	if rc.polls() {

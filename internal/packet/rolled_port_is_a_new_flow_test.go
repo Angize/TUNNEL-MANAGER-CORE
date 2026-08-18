@@ -14,7 +14,7 @@ import (
 // and whose TSval carried straight on from the old series. Anything watching both tuples can join them
 // on that, which is the one thing the roll exists to prevent.
 //
-// Driven through the REAL sportLoop — a test that re-draws the flow itself says nothing about the loop
+// Driven through the ladder's REAL beat — a test that re-draws the flow itself says nothing about what
 // that has to, which is exactly how a fix like this gets lost.
 func TestARolledSourcePortStartsANewFlow(t *testing.T) {
 	defer func(d time.Duration) { rawSportEvery = d }(rawSportEvery)
@@ -40,11 +40,11 @@ func TestARolledSourcePortStartsANewFlow(t *testing.T) {
 	time.Sleep(30 * time.Millisecond)
 	mark := time.Now().UnixNano()
 
-	done := make(chan struct{})
-	go func() { r.sportLoop(); close(done) }()
+	greenSession(t, r) // the scheduled refresh is taken only on a green tunnel
+	wait := ladderBeat(r)
 	waitFor(t, 5*time.Second, "the source port rolled", func() bool { return r.cport() != portBefore })
 	close(r.closeCh)
-	<-done // the loop sends its own keepalive ping on every roll; let it stop before sampling the wire
+	wait() // the roll sends its own keepalive ping; let the beat stop before sampling the wire
 	if r.tsStart.Load() < mark {
 		t.Error("the timestamp clock still counts from when the session opened, so the new tuple's TSval " +
 			"is the old one's series read at a different offset")

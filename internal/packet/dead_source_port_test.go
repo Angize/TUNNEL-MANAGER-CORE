@@ -6,6 +6,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
 // About one rolled source port in eight has its RETURN direction blackholed: every packet the client
@@ -124,20 +126,53 @@ func TestAskOnlyCountsWhenThereIsSomeoneToAnswer(t *testing.T) {
 	}
 }
 
+// ladderBeat runs the ladder's REAL poller over a raw client's port rung, wired exactly as clientLoop
+// wires it, and returns a func that waits for it to stop (the caller closes r.closeCh).
+//
+// The port used to move on a goroutine of the carrier's own. It does not any more, so a test that drove
+// that loop would be describing a program that no longer exists -- this drives the one that does.
+func ladderBeat(r *Raw) (wait func()) {
+	rc := newRotationController(nil, nil)
+	rc.port.setRoll(r.rollSourcePort)
+	rc.port.setRefresh(r.portDead, func() bool { return r.sealer() != nil }, rawSportEvery)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runPinPoll(rc, r.closeCh, func() {}, func() {}, func(bool) {}, func(bool) {}, nil, func() int64 { return 0 })
+	}()
+	return func() { <-done }
+}
+
+// greenSession gives a bare test carrier a real session, so `ready` is true and the SCHEDULED refresh
+// is allowed to fire. Without one only the reactive trigger can move the port.
+func greenSession(t *testing.T, r *Raw) {
+	t.Helper()
+	sl, err := crypto.NewSealer(crypto.CipherChaCha, "port-refresh-psk-0123456789abcdef", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.session.Store(&sealerBox{s: sl})
+	if r.link == nil {
+		// With a session the post-roll ping really is sealed and sent, so it needs somewhere to go.
+		r.link = &capturingLink{r: r}
+	}
+}
+
 // The reactive roll must never CONDEMN a carrying tuple -- it may only add a reason to roll, never
 // remove one. A source port that changed only when something broke would stop moving on a healthy
 // tunnel, which is the fixed 4-tuple the rotation exists to avoid.
 //
-// Driven through the REAL sportLoop, because the condition and the loop that reads it are two different
-// things and only one of them is the subject: a loop that ignored portDead, or one that rolled on every
-// tick, both pass a check written against portDead alone.
-func TestTheLoopRollsOnScheduleAndOnlyAddsTheReactiveReason(t *testing.T) {
+// Driven through the ladder's REAL beat, because the condition and the code that reads it are two
+// different things and only one of them is the subject: a beat that ignored portDead, or one that
+// rolled every tick, both pass a check written against portDead alone.
+func TestTheLadderRollsOnScheduleAndOnlyAddsTheReactiveReason(t *testing.T) {
 	defer func(d time.Duration) { rawSportEvery = d }(rawSportEvery)
-	rawSportEvery = 3 * time.Second // the loop ticks at 1s, so this is a few scheduled rolls in the run
+	rawSportEvery = 3 * time.Second // the beat ticks at 1s, so this is a few scheduled rolls in the run
 
 	r := &Raw{isClient: true, keepalive: 10 * time.Second, profile: "tcp", sportRandom: true, closeCh: make(chan struct{})}
 	r.peer.Store(&net.IPAddr{IP: testDst})
 	r.cliPort.Store(40000)
+	greenSession(t, r) // the scheduled refresh is taken only on a green tunnel
 	// A tuple that is carrying: every ask answered, so portDead is false for the whole run.
 	go func() {
 		for {
@@ -153,8 +188,7 @@ func TestTheLoopRollsOnScheduleAndOnlyAddsTheReactiveReason(t *testing.T) {
 		}
 	}()
 
-	done := make(chan struct{})
-	go func() { defer close(done); r.sportLoop() }()
+	wait := ladderBeat(r)
 	seen := map[uint32]bool{}
 	deadline := time.Now().Add(7 * time.Second)
 	for time.Now().Before(deadline) {
@@ -162,8 +196,7 @@ func TestTheLoopRollsOnScheduleAndOnlyAddsTheReactiveReason(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	close(r.closeCh)
-	<-done // the loop still READS rawSportEvery, and the deferred restore WRITES it: -race calls that
-	// what it is. A solo run passed six times in a row before the broad run caught it.
+	wait()
 
 	if len(seen) < 2 {
 		t.Fatalf("a carrying tuple never rolled in 7s with a %v schedule: the reactive check "+
@@ -217,7 +250,7 @@ func TestADeadPathCondemnsOneTuplePerWindow(t *testing.T) {
 		t.Fatal("a whole window of unanswered asks did not condemn the tuple")
 	}
 
-	// The roll clears it, exactly as sportLoop does, and the fresh tuple gets its own full window --
+	// The roll clears it, exactly as the ladder's beat does, and the fresh tuple gets its own full window --
 	// even though no ping could go out to re-stamp it (no session).
 	r.lastAsk.Store(0)
 	if r.portDead(base.Add(ps + 2*time.Second)) {
@@ -230,12 +263,13 @@ func TestADeadPathCondemnsOneTuplePerWindow(t *testing.T) {
 	}
 }
 
-// The same claim, through the REAL sportLoop. The case above pins the semantics by hand, so it stays
-// green if the loop never applies them -- and the loop is where both mistakes actually live.
+// The same claim, through the ladder's REAL beat. The case above pins the semantics by hand, so it
+// stays green if the beat never applies them -- and the beat is where both mistakes actually live.
 //
-// A client re-handshaking on a dead path: no session, so the loop's post-roll ping cannot go out, and
-// only the ~1s init retransmit re-stamps. Rolls must come one per window, not one per tick.
-func TestTheLoopRollsOncePerWindowOnADeadPath(t *testing.T) {
+// A client re-handshaking on a dead path: no session, so the post-roll ping cannot go out and only the
+// ~1s init retransmit re-stamps. No session also means the SCHEDULE is off, which is the point here --
+// every roll below is the reactive one. Rolls must come one per window, not one per tick.
+func TestTheLadderRollsOncePerWindowOnADeadPath(t *testing.T) {
 	defer func(d time.Duration) { rawSportEvery = d }(rawSportEvery)
 	rawSportEvery = time.Hour // the SCHEDULED roll must not fire: every roll here is the reactive one
 
@@ -257,8 +291,7 @@ func TestTheLoopRollsOncePerWindowOnADeadPath(t *testing.T) {
 		}
 	}()
 
-	done := make(chan struct{})
-	go func() { defer close(done); r.sportLoop() }()
+	wait := ladderBeat(r)
 
 	seen := map[uint32]bool{}
 	deadline := time.Now().Add(12 * time.Second)
@@ -268,7 +301,7 @@ func TestTheLoopRollsOncePerWindowOnADeadPath(t *testing.T) {
 	}
 	close(stop)
 	close(r.closeCh)
-	<-done
+	wait()
 
 	// 12s at one roll per 5s window: the starting port plus two, maybe three. A loop that condemns the
 	// fresh tuple on the old one's evidence rolls every tick and lands near a dozen; one whose clock is
@@ -305,7 +338,7 @@ func TestOnlyTheCurrentDestinationAnswersForItsOwnTuple(t *testing.T) {
 	}
 }
 
-// ...and the same claim through the REAL sportLoop, which is where it decides anything. A tuple whose
+// ...and the same claim through the ladder's REAL beat, which is where it decides anything. A tuple whose
 // return direction is gone, while the pool goes on proving its OTHER endpoint alive, must still be
 // condemned. One shared clock made the reactive roll unreachable on precisely the tunnels that have
 // somewhere else to roll to.
@@ -333,8 +366,7 @@ func TestAPoolProbingItsOtherEndpointDoesNotSaveADeadTuple(t *testing.T) {
 		}
 	}()
 
-	done := make(chan struct{})
-	go func() { defer close(done); r.sportLoop() }()
+	wait := ladderBeat(r)
 
 	seen := map[uint32]bool{}
 	deadline := time.Now().Add(12 * time.Second)
@@ -344,7 +376,7 @@ func TestAPoolProbingItsOtherEndpointDoesNotSaveADeadTuple(t *testing.T) {
 	}
 	close(stop)
 	close(r.closeCh)
-	<-done
+	wait()
 
 	if len(seen) < 2 {
 		t.Fatalf("%d port(s) in 12s: the other endpoint's replies answered for the dead tuple, so the "+
