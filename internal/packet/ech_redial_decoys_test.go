@@ -17,9 +17,6 @@ import (
 	"golang.org/x/crypto/cryptobyte"
 )
 
-// caSignedTLSCert mints a throwaway CA and a leaf for dnsName, returning the leaf as a usable server
-// certificate plus a pool that trusts the CA. makeLeaf next door returns only the parsed certificate,
-// with no private key, so it cannot serve TLS.
 func caSignedTLSCert(t *testing.T, dnsName string) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -58,12 +55,10 @@ func caSignedTLSCert(t *testing.T, dnsName string) (tls.Certificate, *x509.CertP
 	return tls.Certificate{Certificate: [][]byte{leafDER, caDER}, PrivateKey: leafKey}, roots
 }
 
-// echServerConfig marshals ONE ECHConfig (not a list) for crypto/tls's EncryptedClientHelloKeys:
-// X25519 + HKDF-SHA256/AES-128-GCM, the suite uTLS offers.
 func echServerConfig(pub []byte, publicName string) []byte {
 	var c cryptobyte.Builder
-	c.AddUint8(1)       // config_id
-	c.AddUint16(0x0020) // kem_id: X25519-HKDF-SHA256
+	c.AddUint8(1)
+	c.AddUint16(0x0020)
 	c.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddBytes(pub) })
 	c.AddUint16LengthPrefixed(func(b *cryptobyte.Builder) { b.AddUint16(1); b.AddUint16(1) })
 	c.AddUint8(64)
@@ -76,10 +71,6 @@ func echServerConfig(pub []byte, publicName string) []byte {
 	return one.BytesOrPanic()
 }
 
-// Every TCP connection the ws carrier dials must get exactly one pass of desync decoys, on the bare
-// 4-tuple, before any of our own bytes flow. establishWS injects on the conn IT dialled, and tlsToEdge
-// then closes that one on an ECH rejection and dials a BRAND NEW one — the connection that actually
-// carries the tunnel. The whole path here is real, and the decoys are observed through the dsWatch seam.
 func TestEveryDialledConnectionGetsDecoysAcrossTheECHRedial(t *testing.T) {
 	leaf, caPool := caSignedTLSCert(t, "public.example")
 
@@ -121,15 +112,12 @@ func TestEveryDialledConnectionGetsDecoysAcrossTheECHRedial(t *testing.T) {
 		}
 	}()
 
-	// The client holds a STALE config: same public name, a key the server cannot decrypt with.
 	staleKey, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("x25519: %v", err)
 	}
 	stale := buildECHConfigListN(t, echTestConfig{name: "public.example", key: staleKey.PublicKey().Bytes()})
 
-	// The redial is only reachable through a rejection whose outer certificate verifies, so point the
-	// ECH verification at this test's CA (nil = the system store in production).
 	prevRoots := echVerifyRoots
 	echVerifyRoots = caPool
 	t.Cleanup(func() { echVerifyRoots = prevRoots })
@@ -145,8 +133,6 @@ func TestEveryDialledConnectionGetsDecoysAcrossTheECHRedial(t *testing.T) {
 		mu.Unlock()
 	}
 
-	// It must FAIL — the leaf chains to a private CA the uTLS handshake does not trust — but it must
-	// fail having walked the self-heal, which is what puts a second connection on the wire.
 	if conn, _, _, eerr := b.establishWS(); eerr == nil {
 		conn.Close()
 		t.Fatal("establishWS succeeded against a privately-signed edge; the self-heal path was not exercised")

@@ -2,15 +2,6 @@ package main
 
 import "testing"
 
-// TestAPoolIsSomethingToRotate is what wantsDestPool/wantsSourcePool decide.
-//
-// The two gates differ on purpose. A DESTINATION pool is only worth building to rotate between
-// entries, and one entry can neither be burned nor advanced off. A SOURCE pool of one is a fixed
-// source that supersedes bind_ip, so the gate there is >=1 and a lone entry is the whole point.
-//
-// Neither of them gates the JUDGE any more. The node's verdict arrives in the tunnel's own mailbox
-// (coreStatus.verdictPath), so a client with no pool at all still hears it and still spends the
-// ladder's free rungs on it; a source pool with no destination pool is judged like any other.
 func TestAPoolIsSomethingToRotate(t *testing.T) {
 	for _, c := range []struct {
 		name         string

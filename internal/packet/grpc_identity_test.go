@@ -11,10 +11,6 @@ import (
 	"time"
 )
 
-// TestGrpcRequestIsNotABrowser drives a REAL grpc-mode tunnel and inspects the request that actually
-// reached the origin, not the helper that builds the headers. A request claiming Chrome while carrying
-// Content-Type: application/grpc and TE: trailers is a browser making a call no browser can make, which
-// is what a gRPC-aware WAF keys on. The TLS half is TestGrpcPathUsesTheGoFingerprint; both must hold.
 func TestGrpcRequestIsNotABrowser(t *testing.T) {
 	const psk = "grpc-identity-psk-abcdefghijklmno"
 	const cipher = "aes-256-gcm"
@@ -41,9 +37,7 @@ func TestGrpcRequestIsNotABrowser(t *testing.T) {
 	ts.EnableHTTP2 = true
 	ts.StartTLS()
 	go srv.Run()
-	// Core server FIRST: httptest.Server.Close waits for outstanding handlers, and the downstream
-	// handler parks on <-s.done until the core session ends. Closing ts first waits out the server's
-	// whole idle window before that ever happens.
+
 	t.Cleanup(func() { srv.Close(); ts.Close() })
 
 	cli, err := DialHTTPC(ts.Listener.Addr().String(), cliDev, ka, false, true, psk, cipher, "", "/", true, nil, "grpc")
@@ -59,16 +53,13 @@ func TestGrpcRequestIsNotABrowser(t *testing.T) {
 		defer mu.Unlock()
 		return seen != nil
 	})
-	// The first request reaches the handler BEFORE the core handshake completes, so wait for the
-	// carrier to actually be live before injecting — otherwise tunLoop drops the packet on the floor
-	// and the round-trip times out under load.
+
 	waitFor(t, 6*time.Second, "the tunnel came up", func() bool { return cli.cur.Load() != nil })
-	httpcInject(t, cliCtrl, srvCtrl) // the identity change must not break the carrier it dresses
+	httpcInject(t, cliCtrl, srvCtrl)
 	mu.Lock()
 	h := seen
 	mu.Unlock()
 
-	// It must look like the gRPC client it is.
 	if ua := h.Get("User-Agent"); !strings.HasPrefix(ua, "grpc-go/") {
 		t.Errorf("User-Agent = %q, want a grpc-go client on a request carrying application/grpc", ua)
 	}
@@ -82,22 +73,17 @@ func TestGrpcRequestIsNotABrowser(t *testing.T) {
 		t.Error("grpc-accept-encoding is missing — every real gRPC client advertises one")
 	}
 
-	// ...and it must NOT carry a single header a browser would add. These are the tell.
 	for _, banned := range []string{"Accept-Language", "Cache-Control", "Accept-Encoding"} {
 		if v := h.Get(banned); v != "" {
 			t.Errorf("a gRPC request carries %s: %q — no gRPC client sends that, and no browser can send application/grpc", banned, v)
 		}
 	}
-	// grpc-go sets grpc-encoding only when it is actually compressing, so "identity" is its own tell.
+
 	if v := h.Get("Grpc-Encoding"); v != "" {
 		t.Errorf("grpc-encoding: %q is set with no compression in use; grpc-go omits the header entirely", v)
 	}
 }
 
-// TestCarrierWiresTheRightFingerprint covers the WIRING, not the switch: a correct goFingerprint branch
-// in uEdgeHandshake proves nothing if establishHTTPC passes the wrong flag. It drives the real
-// establishHTTPC over real TLS into a server that records the ClientHello it parsed. The handshake fails
-// on the self-signed certificate — by then the hello is already on the wire, which is all this is about.
 func TestCarrierWiresTheRightFingerprint(t *testing.T) {
 	for _, tc := range []struct {
 		mode        string
@@ -167,9 +153,6 @@ func TestCarrierWiresTheRightFingerprint(t *testing.T) {
 	}
 }
 
-// TestPostLadderStaysBrowserShaped is the other side of the same coin: the POST ladder's requests
-// really are shaped like page fetches, so they must KEEP the browser identity that matches the Chrome
-// ClientHello on that path. A fix that made every mode look like grpc-go would break this.
 func TestPostLadderStaysBrowserShaped(t *testing.T) {
 	const psk = "post-identity-psk-abcdefghijklmno"
 	const cipher = "aes-256-gcm"
@@ -194,9 +177,7 @@ func TestPostLadderStaysBrowserShaped(t *testing.T) {
 	})
 	ts := httptest.NewServer(mux)
 	go srv.Run()
-	// Core server FIRST: httptest.Server.Close waits for outstanding handlers, and the downstream
-	// handler parks on <-s.done until the core session ends. Closing ts first waits out the server's
-	// whole idle window before that ever happens.
+
 	t.Cleanup(func() { srv.Close(); ts.Close() })
 
 	cli, err := DialHTTPC(ts.Listener.Addr().String(), cliDev, ka, false, true, psk, cipher, "", "/", false, nil, "post")

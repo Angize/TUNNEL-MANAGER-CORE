@@ -7,7 +7,6 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/packet"
 )
 
-// splitCfg is a minimal valid ws client with SNI splitting on.
 func splitCfg(mode string, ttl int) *Config {
 	return &Config{
 		Role: "client", Mode: "packet", Profile: "core", Transport: "ws",
@@ -21,9 +20,6 @@ func splitCfg(mode string, ttl int) *Config {
 	}
 }
 
-// TestSplitTTLIsCappedAtTheHopBudget: a disorder head whose TTL can reach the server arrives whole,
-// which turns sni_mode=disorder into a plain split while every layer still reports disorder. The
-// config must refuse the value rather than accept a knob that cannot do what it says.
 func TestSplitTTLIsCappedAtTheHopBudget(t *testing.T) {
 	for _, ttl := range []int{0, 1, 4, packet.MaxHopBudget} {
 		if err := splitCfg("disorder", ttl).validate(); err != nil {
@@ -45,9 +41,6 @@ func TestSplitTTLIsCappedAtTheHopBudget(t *testing.T) {
 	}
 }
 
-// TestHopBudgetIsOneNumber: fake_ttl and split_ttl both mean "must die in transit", so they must not
-// drift apart. The inject clamp is what fake_ttl is held to; MaxHopBudget is what split_ttl is held
-// to, and the panel reads the same constant.
 func TestHopBudgetIsOneNumber(t *testing.T) {
 	if packet.MaxHopBudget <= 0 || packet.MaxHopBudget >= 64 {
 		t.Fatalf("MaxHopBudget=%d is not a plausible in-transit hop budget: at or above a normal "+

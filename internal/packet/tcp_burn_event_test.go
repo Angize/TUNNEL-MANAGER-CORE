@@ -7,11 +7,6 @@ import (
 	"time"
 )
 
-// TestTCPTunProbeBurnNamesTheEndpointItBurned drives the node's failover command through the real
-// cmd-file path a direct-tcp client polls, and asserts the event it publishes names the endpoint the
-// node condemned. burnAdvance returns where the pool moved TO, so publishing that made the panel's
-// system log blame the healthy replacement for the fault of the one it replaced — the datagram twin
-// (pollPins) reads current() before the burn precisely to avoid this.
 func TestTCPTunProbeBurnNamesTheEndpointItBurned(t *testing.T) {
 	dir := t.TempDir()
 	st := newCoreStatus(filepath.Join(dir, "core.json"), "tcp · lab")

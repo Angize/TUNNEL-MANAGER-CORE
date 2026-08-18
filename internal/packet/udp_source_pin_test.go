@@ -6,10 +6,6 @@ import (
 	"testing"
 )
 
-// udp is the last carrier where a source IP the host cannot bind was accepted in silence. rebindSourceTo
-// reports failure honestly and both callers threw the answer away: the operator jump left the pin LIVE,
-// to be released later as though it had landed, and the initial bind logged and stopped, leaving the pool
-// publishing an Active entry nothing had marked bad. 192.0.2.0/24 is on no interface here.
 func TestUDPRefusesASourceThisHostCannotBind(t *testing.T) {
 	t.Run("a pin onto an unbindable source is abandoned, not consumed", func(t *testing.T) {
 		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0, "")
@@ -48,7 +44,6 @@ func TestUDPRefusesASourceThisHostCannotBind(t *testing.T) {
 		}
 	})
 
-	// ...and a source that DOES bind must be unaffected, or "burn everything" would pass the above.
 	t.Run("a bindable source is neither burned nor un-pinned", func(t *testing.T) {
 		sp := NewPeerPool([]string{usableLoopbackIP, "127.0.0.2"}, 0, "")
 		b := &UDP{isClient: true}

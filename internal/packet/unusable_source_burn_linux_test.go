@@ -7,15 +7,10 @@ import (
 	"time"
 )
 
-// TestUnbindableSourceLeavesRotation pins ONE rule across every carrier and every shape of the same
-// event: a source IP the kernel will not let this host send from leaves rotation. Behavioural check:
-// after the path has seen it, a rotate must not land there.
 func TestUnbindableSourceLeavesRotation(t *testing.T) {
-	const gone = "203.0.113.9" // TEST-NET-3: never a local address
+	const gone = "203.0.113.9"
 	const good = "127.0.0.1"
 
-	// newPool builds a source pool with the cursor already on the unusable entry, which is where a
-	// rotation (or a jump) leaves it before the carrier tries to adopt it.
 	newPool := func(t *testing.T) *PeerPool {
 		t.Helper()
 		sp := NewPeerPool([]string{good, gone}, 0, "")
@@ -32,7 +27,7 @@ func TestUnbindableSourceLeavesRotation(t *testing.T) {
 		{"tcp dial", func(t *testing.T, sp *PeerPool) {
 			b := &TCP{isClient: true}
 			b.SetSourcePool(sp)
-			_ = b.dialer(time.Second) // sourceIP -> canBindSource -> dropUnusableSource
+			_ = b.dialer(time.Second)
 			if s := b.lastSourceUsed(); s != "" {
 				t.Fatalf("dialer reported binding %q, but that IP is not on this host", s)
 			}
@@ -40,7 +35,7 @@ func TestUnbindableSourceLeavesRotation(t *testing.T) {
 		{"raw seed", func(t *testing.T, sp *PeerPool) {
 			r := &Raw{isClient: true, fakeFd: -1}
 			r.link = &directLink{r: r}
-			r.SetSourcePool(sp) // seeds localIP from sp.current(), or burns it
+			r.SetSourcePool(sp)
 			if ip := r.localIP.Load(); ip != nil && ip.IP.String() == gone {
 				t.Fatalf("the raw seed stamped %s, which this host cannot send from", gone)
 			}

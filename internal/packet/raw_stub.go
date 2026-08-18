@@ -1,8 +1,5 @@
 //go:build !linux
 
-// The raw and spoof transports use Linux raw IPv4 sockets (CAP_NET_RAW). On other
-// platforms the constructors fail cleanly so the rest of the core still builds
-// and runs (the raw profile codec in rawprofile.go stays portable and tested).
 package packet
 
 import (
@@ -12,8 +9,6 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
 
-// Raw is unavailable off Linux; the type exists only so the constructors share a
-// signature with the Linux build.
 type Raw struct{}
 
 var errRawUnsupported = errors.New("raw transport requires Linux (raw IPv4 sockets)")
@@ -37,7 +32,6 @@ func ListenSpoof(string, *tun.Device, time.Duration, bool, string, string, strin
 	return nil, errRawUnsupported
 }
 
-// ProbeSpoof reports no capability off Linux (the raw/spoof transports are Linux-only).
 func ProbeSpoof() SpoofProbe {
 	return SpoofProbe{Reason: "raw transport requires Linux (raw IPv4 sockets)"}
 }

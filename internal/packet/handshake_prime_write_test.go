@@ -7,10 +7,6 @@ import (
 	"time"
 )
 
-// TestHandshakeAndPrimeFailsWhenThePrimeWriteFails pins that the client handshake path still has a
-// CHECKED write on it. sendSalt only fills saltPend now, so the prime ping is the only I/O left — and a
-// discarded error would return SUCCESS for a connection whose first byte never left, which the caller
-// then adopts as the live carrier. crypto and obfs are off, so the ping is the only thing this does.
 func TestHandshakeAndPrimeFailsWhenThePrimeWriteFails(t *testing.T) {
 	b := &TCP{isClient: true, cryptoOn: false, obfs: false}
 
@@ -42,7 +38,7 @@ func TestHandshakeAndPrimeFailsWhenThePrimeWriteFails(t *testing.T) {
 
 	t.Run("write fails", func(t *testing.T) {
 		cli, srv := net.Pipe()
-		srv.Close() // the peer end is gone: every write on cli fails at once
+		srv.Close()
 		defer cli.Close()
 
 		cf, err := b.handshakeAndPrime(cli)

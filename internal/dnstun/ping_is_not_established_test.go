@@ -11,10 +11,6 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
-// TestOneKeepalivePingDoesNotBlockTheAdoptInPlaceRecovery is TestServeSessionRecoversFromVanishedClient
-// with ONE difference: the client sends a keepalive first. A ping is a sealed keepalive one layer BELOW
-// KCP and establishes nothing, so it must not set liveProven — otherwise any client that lived long
-// enough to ping leaves the server unable to adopt anyone afterwards. The ping goes through sendKind.
 func TestOneKeepalivePingDoesNotBlockTheAdoptInPlaceRecovery(t *testing.T) {
 	cliT, srvT := newPipePair(0)
 	cfg := SessionConfig{PSK: "a-ping-is-not-a-session", Cipher: "chacha20-poly1305"}
@@ -30,9 +26,6 @@ func TestOneKeepalivePingDoesNotBlockTheAdoptInPlaceRecovery(t *testing.T) {
 		srvCh <- c
 	}()
 
-	// Client 1 completes the crypto handshake — so the server's LIVE sealer is its — and then sends
-	// one keepalive ping. It never writes, so KCP is never established: exactly the state
-	// adopt-in-place exists for.
 	cli1, err := DialSession(cliT, cfg)
 	if err != nil {
 		t.Fatalf("client 1 DialSession: %v", err)
@@ -43,7 +36,7 @@ func TestOneKeepalivePingDoesNotBlockTheAdoptInPlaceRecovery(t *testing.T) {
 			"the client's keepalive loop sends, so it must not report success", cli1)
 	}
 	sc1.sendKind(kindPing)
-	time.Sleep(200 * time.Millisecond) // let the server's recvPump take the ping
+	time.Sleep(200 * time.Millisecond)
 
 	select {
 	case err := <-srvErr:
@@ -53,8 +46,6 @@ func TestOneKeepalivePingDoesNotBlockTheAdoptInPlaceRecovery(t *testing.T) {
 	default:
 	}
 
-	// Client 1 is now gone as far as the tunnel is concerned. Client 2 fully dials over the SAME
-	// transport and writes — a real new client completing the KCP handshake.
 	cli2, err := DialSession(cliT, cfg)
 	if err != nil {
 		t.Fatalf("client 2 DialSession: %v", err)
@@ -84,10 +75,6 @@ func TestOneKeepalivePingDoesNotBlockTheAdoptInPlaceRecovery(t *testing.T) {
 	}
 }
 
-// TestDataStillProvesTheSessionIsEstablished is the other half, and it is what stops the fix above from
-// becoming "never tear down": a client that has really carried DATA has an established conv-0 KCP
-// session, which cannot be retrofitted, so a later client must NOT be adopted in place. Without it,
-// deleting liveProven from the data case too would leave both tests green over a corrupted session.
 func TestDataStillProvesTheSessionIsEstablished(t *testing.T) {
 	cliT, srvT := newPipePair(0)
 	cfg := SessionConfig{PSK: "data-does-prove-it", Cipher: "chacha20-poly1305"}
@@ -120,8 +107,6 @@ func TestDataStillProvesTheSessionIsEstablished(t *testing.T) {
 		t.Fatalf("server read from the established client: %v", err)
 	}
 
-	// A second client arrives. The live session is ESTABLISHED, so the server must tear down and let
-	// the carrier re-accept — never splice the newcomer into the running KCP conversation.
 	ci2, err := crypto.GenerateEphemeralNoPad()
 	if err != nil {
 		t.Fatal(err)
@@ -133,10 +118,6 @@ func TestDataStillProvesTheSessionIsEstablished(t *testing.T) {
 		go func() { _, _ = cli2.Write([]byte("from the second client")) }()
 	}
 
-	// The assertion must be that WE tore the conn down, not merely that a Read failed. `err != nil` and
-	// os.ErrDeadlineExceeded both pass on the broken code, because "no data arrived" has several spellings:
-	// adopt-in-place yields io.ErrClosedPipe, the tear-down yields net.ErrClosed. net.ErrClosed is the
-	// sentinel qpc.Close() raises, so it names the tear-down itself rather than one of its symptoms.
 	_ = srv.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 64)
 	_, err = srv.Read(buf)

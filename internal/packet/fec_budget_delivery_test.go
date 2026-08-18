@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// fecBlockOf splits a captured encoder emission stream into the packets of one block id, in the
-// order the encoder produced them (data shards first, then parity).
 func fecBlockOf(pkts [][]byte, blk uint32) [][]byte {
 	var out [][]byte
 	for _, p := range pkts {
@@ -18,31 +16,25 @@ func fecBlockOf(pkts [][]byte, blk uint32) [][]byte {
 	return out
 }
 
-// TestFecDeliversAnArrivedShardOverTheByteBudget pins the file-header promise — nothing a receiver
-// physically got is held hostage to the rest of its block — where the decoder's anti-amplification byte
-// budget is exhausted. A data shard IS its payload, so handing it on needs no storage; only RETAINING it
-// does. Real encoder, real input(); only the budget is lowered so the arithmetic fits in a test.
 func TestFecDeliversAnArrivedShardOverTheByteBudget(t *testing.T) {
 	var wire [][]byte
 	enc, err := newFecEncoder(5, 2, func(p []byte) { wire = append(wire, append([]byte(nil), p...)) })
 	if err != nil {
 		t.Fatalf("newFecEncoder: %v", err)
 	}
-	// Every payload is the same size, so every block's shardLen is 98+2 = 100.
+
 	pay := func(tag byte) []byte { return bytes.Repeat([]byte{tag}, 98) }
 
-	// flush ends the block early: n is 5 and no block here carries 5 frames, so without it the
-	// encoder would sit on the 15 ms partial-block timer.
 	flush := func() { enc.mu.Lock(); enc.flushLocked(); enc.mu.Unlock() }
-	// block 0: the filler that will hold the budget down, then be evicted to make room later.
+
 	enc.addData(pay(0xF0))
 	flush()
-	// block 1: the block under test — three data shards, so it needs parity to complete.
+
 	enc.addData(pay(0xB0))
 	enc.addData(pay(0xB1))
 	enc.addData(pay(0xB2))
 	flush()
-	// block 2: its arrival is what triggers the eviction that frees room again.
+
 	enc.addData(pay(0xC0))
 	enc.addData(pay(0xC1))
 	enc.addData(pay(0xC2))
@@ -55,14 +47,13 @@ func TestFecDeliversAnArrivedShardOverTheByteBudget(t *testing.T) {
 
 	var got [][]byte
 	d := newFecDecoder(func(p []byte) { got = append(got, append([]byte(nil), p...)) })
-	// shardLen 100: block 0 reserves (5-1)*100 = 400 pad, blocks 1 and 2 reserve (5-3)*100 = 200.
-	// 900 makes block 1's THIRD data shard the first one over the budget.
+
 	d.maxBytes = 900
 
-	d.input(f[0]) // block 0: 400 pad + 100 = 500
-	d.input(b[0]) // block 1: +200 pad +100 = 800
-	d.input(b[1]) // +100 = 900, exactly at the budget
-	d.input(b[2]) // +100 would be 1000: OVER BUDGET — this is the shard the old code threw away
+	d.input(f[0])
+	d.input(b[0])
+	d.input(b[1])
+	d.input(b[2])
 	seenBeforeParity := len(got)
 
 	if seenBeforeParity != 4 {
@@ -73,17 +64,13 @@ func TestFecDeliversAnArrivedShardOverTheByteBudget(t *testing.T) {
 		t.Fatalf("the 4th delivered frame was %x…, want the over-budget data shard", got[3][:4])
 	}
 
-	// Now let the block complete. Block 2's arrival evicts block 0 (oldest by arrival), which frees
-	// enough room for block 1's parity to be retained; that is the 5th shard, so it reconstructs.
 	d.input(c[0])
-	d.input(b[3]) // first parity shard of block 1
+	d.input(b[3])
 
 	if blk := d.blocks[1]; blk == nil || !blk.done {
 		t.Fatalf("block 1 did not reconstruct, so the exactly-once half of this test proved nothing (block=%+v)", blk)
 	}
-	// deliver's contract is "each sealed frame, exactly once". The recovered-shard loop must skip the
-	// slot that was already handed over while over budget, or the peer sees that frame twice — which
-	// with crypto off means a duplicate packet injected into the TUN.
+
 	dupes := 0
 	for _, g := range got {
 		if bytes.Equal(g, pay(0xB2)) {

@@ -7,16 +7,8 @@ import (
 	"testing"
 )
 
-// TestRawPortReachesBothTheWireAndTheAntiLeakRule.
-//
-// The udp profile's forged header said :443 — QUIC's port — so a path that drops UDP/443 wholesale
-// dropped the entire carrier, and the only "plausible" shape it had was the filtered one. raw_port
-// moves that number. What makes it a knob and not a decoration is that it has to land in TWO places at
-// once: the bytes on the wire, and the OUTPUT rule that stops our own kernel answering those packets
-// with an ICMP port-unreachable. Set one and forget the other and the tunnel leaks a reply per packet
-// to the peer, which is worse than the port it was trying to escape.
 func TestRawPortReachesBothTheWireAndTheAntiLeakRule(t *testing.T) {
-	const custom = 51820 // WireGuard's port: an ordinary thing to see, unlike QUIC on a filtered path
+	const custom = 51820
 
 	for _, profile := range []string{"udp", "tcp"} {
 		for _, isClient := range []bool{true, false} {
@@ -39,8 +31,6 @@ func TestRawPortReachesBothTheWireAndTheAntiLeakRule(t *testing.T) {
 		}
 	}
 
-	// The tcp anti-leak rule matches OUR kernel's RST, whose ports are the pair we send on. It must be
-	// built from the same number, or the rule stops matching the moment the port is changed.
 	for _, isClient := range []bool{true, false} {
 		got := rawDropMatches(testDst, "tcp", custom, isClient, false, false)
 		if len(got) != 1 {
@@ -57,7 +47,6 @@ func TestRawPortReachesBothTheWireAndTheAntiLeakRule(t *testing.T) {
 		}
 	}
 
-	// 0 and out-of-range mean "unset": the profile default, not a zero port on the wire.
 	for _, bad := range []int{0, -1, 65536, 1 << 20} {
 		if got := rawPortOr(bad); got != 0 {
 			t.Errorf("rawPortOr(%d) = %d, want 0 so rawPorts falls back to the default", bad, got)
@@ -67,7 +56,6 @@ func TestRawPortReachesBothTheWireAndTheAntiLeakRule(t *testing.T) {
 		t.Errorf("an unset port must keep the default pair, got %d->%d", s, d)
 	}
 
-	// A profile that forges no ports has nothing to override, and config validation leans on this.
 	for p := range rawProfiles {
 		want := p == "udp" || p == "tcp"
 		if got := RawProfileHasPorts(p); got != want {

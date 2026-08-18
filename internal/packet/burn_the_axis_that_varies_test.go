@@ -5,18 +5,6 @@ import (
 	"testing"
 )
 
-// The probe sees SILENCE, and silence names the COMBINATION. The only thing that can be told apart is
-// the axis the walk is CHANGING between combinations — so that is the axis a verdict may blame.
-//
-// This was read as "always burn the SNI", which is right only while there is more than one of them.
-
-// TestASingleSNIPoolBurnsTheEdge is the case the operator hit, on a live tunnel with one domain and
-// three CDN edges, one of them dead.
-//
-// With one SNI, burning the SNI was worse than useless: the lap is one beat long, so
-// advanceEdgeFreshRow cleared the row on the very next line and the burn was undone as fast as it was
-// made. NO edge was ever blacklisted. A pool sold as «چرخش + بلک‌لیست» only rotated — the dead edge came
-// back every cycle, dropped the tunnel for a few seconds, and was walked off again, forever.
 func TestASingleSNIPoolBurnsTheEdge(t *testing.T) {
 	p := newWSPool([]string{"e1", "e2", "e3"}, snis("only.example"), filepath.Join(t.TempDir(), "st.json"))
 	b := &TCP{pool: p}
@@ -46,9 +34,6 @@ func TestASingleSNIPoolBurnsTheEdge(t *testing.T) {
 	}
 }
 
-// TestAMultiSNIPoolStillBurnsTheSNI is the other half: with a real SNI axis the walk varies the SNI, so
-// that is what a verdict names, and the edge is convicted only by a whole ROW failing on it. Losing this
-// would make one bad domain condemn a perfectly good edge on its first beat.
 func TestAMultiSNIPoolStillBurnsTheSNI(t *testing.T) {
 	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2", "s3"), filepath.Join(t.TempDir(), "st.json"))
 	b := &TCP{pool: p}
@@ -72,10 +57,6 @@ func TestAMultiSNIPoolStillBurnsTheSNI(t *testing.T) {
 	}
 }
 
-// TestASingleDestinationDirectPoolBurnsNothing is the same question asked of the direct pool, and there
-// the answer is already right: failWith refuses to burn when there is nothing to rotate to. A lone
-// destination never varies either, and unlike a CDN edge the axis above it is a LOCAL source, which a tun
-// probe is not allowed to blame at all — so the correct move is to burn nothing and walk the source.
 func TestASingleDestinationDirectPoolBurnsNothing(t *testing.T) {
 	dir := t.TempDir()
 	b := &TCP{

@@ -13,9 +13,6 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// startLossyRelay stands in for a marginal domestic resolver: it forwards each datagram (client->server
-// and server->client) only with probability passRate, dropping the rest. It returns its front address
-// for the client to point at. Independent PRNGs per direction keep it goroutine-safe.
 func startLossyRelay(t *testing.T, server *net.UDPAddr, passRate float64, seed int64) string {
 	t.Helper()
 	front, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -31,7 +28,7 @@ func startLossyRelay(t *testing.T, server *net.UDPAddr, passRate float64, seed i
 	var mu sync.Mutex
 	var client *net.UDPAddr
 
-	go func() { // client -> server
+	go func() {
 		rng := mrand.New(mrand.NewSource(seed))
 		buf := make([]byte, dnsReadBuf)
 		for {
@@ -47,7 +44,7 @@ func startLossyRelay(t *testing.T, server *net.UDPAddr, passRate float64, seed i
 			}
 		}
 	}()
-	go func() { // server -> client
+	go func() {
 		rng := mrand.New(mrand.NewSource(seed + 1))
 		buf := make([]byte, dnsReadBuf)
 		for {
@@ -66,10 +63,6 @@ func startLossyRelay(t *testing.T, server *net.UDPAddr, passRate float64, seed i
 	return front.LocalAddr().String()
 }
 
-// TestDNSCarrierSurvivesLossyResolver is the hardening proof: with a resolver that drops ~40% of
-// datagrams in each direction (as the domestic smart-DNS resolvers this carrier must use do), the
-// session must still converge and move data — carried by the per-query nonce, the reply-on-init hold
-// (so the handshake needs one surviving round-trip, not two), and KCP retransmission.
 func TestDNSCarrierSurvivesLossyResolver(t *testing.T) {
 	origPoll, origTO, origHold := pollInterval, queryTimeout, serverHold
 	pollInterval, queryTimeout, serverHold = 3*time.Millisecond, 300*time.Millisecond, 5*time.Millisecond
@@ -109,8 +102,6 @@ func TestDNSCarrierSurvivesLossyResolver(t *testing.T) {
 	}
 	defer cli.Close()
 
-	// Write BEFORE receiving the server conn: the client's first KCP datagram is what unblocks the
-	// server's AcceptKCP (and thus ServeSession); waiting on srvCh first would deadlock.
 	payload := []byte("hardened DNS carrier surviving a lossy smart-DNS resolver")
 	go func() { _, _ = cli.Write(payload) }()
 
@@ -120,7 +111,7 @@ func TestDNSCarrierSurvivesLossyResolver(t *testing.T) {
 	}
 	defer srv.Close()
 
-	go func() { // server echoes
+	go func() {
 		buf := make([]byte, 2048)
 		for {
 			n, e := srv.Read(buf)
@@ -162,9 +153,6 @@ func TestDNSCarrierSurvivesLossyResolver(t *testing.T) {
 	}
 }
 
-// TestDNSClientRotatesResolvers verifies the client spreads its queries across ALL configured
-// resolvers (round-robin), so heavy loss on any one is covered by the others. Three blackhole
-// listeners (they never answer) each must receive at least one query.
 func TestDNSClientRotatesResolvers(t *testing.T) {
 	origPoll, origTO := pollInterval, queryTimeout
 	pollInterval, queryTimeout = 2*time.Millisecond, 25*time.Millisecond
@@ -200,7 +188,7 @@ func TestDNSClientRotatesResolvers(t *testing.T) {
 	}
 	defer tr.Close()
 
-	time.Sleep(600 * time.Millisecond) // several poll rotations
+	time.Sleep(600 * time.Millisecond)
 	for i := range counts {
 		if counts[i].Load() == 0 {
 			t.Errorf("resolver %d received no query — client did not rotate across all resolvers", i)
@@ -209,8 +197,7 @@ func TestDNSClientRotatesResolvers(t *testing.T) {
 }
 
 func TestDNSMessageHelpersRoundTrip(t *testing.T) {
-	// A query built by the client must parse back to the same id+name on the server, and a TXT
-	// response must parse back to the same bytes on the client.
+
 	name := "abcd.ef23.t.example.com."
 	q, err := buildQuery(0x1234, name)
 	if err != nil {
@@ -230,8 +217,7 @@ func TestDNSMessageHelpersRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The authoritative bit must be set (recursive resolvers reject a non-authoritative answer
-	// from the zone's own nameserver) and recursion-available must be clear.
+
 	var hp dnsmessage.Parser
 	rh, err := hp.Start(resp)
 	if err != nil {
@@ -255,8 +241,6 @@ func TestDNSMessageHelpersRoundTrip(t *testing.T) {
 	}
 }
 
-// buildTypedQuery packs a query for an arbitrary type (the client only ever asks TXT, so the
-// helper in production hardcodes it; resolvers probing the zone ask SOA/NS/A/etc.).
 func buildTypedQuery(id uint16, name string, qtype dnsmessage.Type) []byte {
 	n, err := dnsmessage.NewName(name)
 	if err != nil {
@@ -273,10 +257,6 @@ func buildTypedQuery(id uint16, name string, qtype dnsmessage.Type) []byte {
 	return b
 }
 
-// TestDNSServerAuthoritativeBehavior drives the server transport the way a real recursive resolver does —
-// probing the zone with SOA/NS/A queries and minimizing intermediate names — and asserts the replies are
-// authoritative (AA set), echo the queried type, carry SOA/NS at the apex, and return an authoritative
-// NODATA everywhere else. Without AA and the echoed type, resolvers reject the zone as lame.
 func TestDNSServerAuthoritativeBehavior(t *testing.T) {
 	codec, err := NewCodec("t.example.com")
 	if err != nil {
@@ -333,8 +313,6 @@ func TestDNSServerAuthoritativeBehavior(t *testing.T) {
 		t.Fatalf("apex NS: expected one NS answer, got %+v", ns.Answers)
 	}
 
-	// A/NS at the apex or a minimized sub-name that we don't publish: authoritative NODATA, not a
-	// referral or SERVFAIL — this keeps a QNAME-minimizing resolver advancing to the TXT query.
 	for _, tc := range []struct {
 		name  string
 		qtype dnsmessage.Type
@@ -349,8 +327,6 @@ func TestDNSServerAuthoritativeBehavior(t *testing.T) {
 		}
 	}
 
-	// A non-TXT query for a name outside the zone is dropped, not answered: an authoritative server
-	// must not claim a zone it doesn't serve.
 	if _, err := conn.Write(buildTypedQuery(0x4242, "elsewhere.example.org.", dnsmessage.TypeA)); err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +335,6 @@ func TestDNSServerAuthoritativeBehavior(t *testing.T) {
 		t.Fatalf("out-of-zone A query got a %d-byte response; expected silent drop", n)
 	}
 
-	// A TXT query still carries the tunnel: it delivers its upstream datagram and gets a TXT reply.
 	payload := []byte("hello-upstream")
 	qname, err := codec.EncodeName(payload, newNonce())
 	if err != nil {
@@ -378,11 +353,8 @@ func TestDNSServerAuthoritativeBehavior(t *testing.T) {
 	}
 }
 
-// TestDNSCarrierEndToEnd is the Phase-B proof: a real client transport (DNS queries over UDP) and a
-// real server transport (authoritative responder) carry the full session layer — handshake + AEAD
-// + KCP — and tunnel a byte stream in both directions over actual DNS message exchanges.
 func TestDNSCarrierEndToEnd(t *testing.T) {
-	// Snappy polling for the test; restore afterwards.
+
 	origPoll, origTO, origHold := pollInterval, queryTimeout, serverHold
 	pollInterval, queryTimeout, serverHold = 3*time.Millisecond, 2*time.Second, 5*time.Millisecond
 	defer func() { pollInterval, queryTimeout, serverHold = origPoll, origTO, origHold }()
@@ -394,8 +366,6 @@ func TestDNSCarrierEndToEnd(t *testing.T) {
 	mtu := codec.MaxUpstream() - SessionOverhead
 	cfg := SessionConfig{PSK: "dns-carrier-psk", Cipher: "chacha20-poly1305", MTU: mtu}
 
-	// Server transport binds an ephemeral UDP port (stands in for :53); the client dials it
-	// directly (standing in for a recursive resolver forwarding to our authoritative NS).
 	srvT, srvAddr, err := NewDNSServerTransport("127.0.0.1:0", codec)
 	if err != nil {
 		t.Fatal(err)
@@ -435,7 +405,7 @@ func TestDNSCarrierEndToEnd(t *testing.T) {
 	}
 	defer srv.Close()
 
-	go func() { // server echoes full-duplex
+	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, rerr := srv.Read(buf)

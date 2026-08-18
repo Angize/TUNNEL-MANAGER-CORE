@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// rungHarness builds a real controller with both pools and a rung whose redraw is counted rather than
-// performed, so a test can watch the ORDER the ladder spends its steps in.
 func rungHarness(t *testing.T, withRung bool) (rc *rotationController, rolls *int, burns *int) {
 	t.Helper()
 	dir := t.TempDir()
@@ -26,12 +24,6 @@ func (c *rotationController) failCounting(burns *int) {
 	c.fail(rot, rot)
 }
 
-// TestNothingIsCondemnedWhileTheCheapStepRemains.
-//
-// The blocking this exists for is keyed on (destination, source port), so a tunnel dies with no
-// endpoint at fault. A walk that starts at the destination answers by burning a healthy server — and
-// the port that actually did it gets redrawn minutes later on an unrelated schedule, which reads as
-// the destination change having worked. So every free draw is spent before anything is condemned.
 func TestNothingIsCondemnedWhileTheCheapStepRemains(t *testing.T) {
 	rc, rolls, burns := rungHarness(t, true)
 
@@ -55,11 +47,6 @@ func TestNothingIsCondemnedWhileTheCheapStepRemains(t *testing.T) {
 	}
 }
 
-// TestACarrierWithNoPortAxisWalksImmediately.
-//
-// A profile that forges no port, or a carrier whose ports are derived rather than chosen, has no rung
-// zero. It must behave exactly as it did before this existed — the axis it does not have cannot delay
-// the one it does.
 func TestACarrierWithNoPortAxisWalksImmediately(t *testing.T) {
 	rc, rolls, burns := rungHarness(t, false)
 	rc.failCounting(burns)
@@ -71,11 +58,6 @@ func TestACarrierWithNoPortAxisWalksImmediately(t *testing.T) {
 	}
 }
 
-// TestADrawThatDidNotMoveIsNotAStep.
-//
-// The redraw can fail — the random source runs dry, or the profile turns out to forge no port after
-// all. Counting that as a step would spend the budget on nothing and delay the walk for a rung that
-// never actually moved the tunnel.
 func TestADrawThatDidNotMoveIsNotAStep(t *testing.T) {
 	rc, rolls, burns := rungHarness(t, true)
 	rc.port.setRoll(func(bool) bool { *rolls++; return false })
@@ -89,10 +71,6 @@ func TestADrawThatDidNotMoveIsNotAStep(t *testing.T) {
 	}
 }
 
-// TestTrafficCrossingRefillsTheDraws.
-//
-// The budget is per OUTAGE. A tunnel that came back settles the question this rung was asking, so the
-// next one starts with the full allowance rather than the remainder of the last.
 func TestTrafficCrossingRefillsTheDraws(t *testing.T) {
 	rc, rolls, burns := rungHarness(t, true)
 	rc.failCounting(burns)
@@ -100,9 +78,6 @@ func TestTrafficCrossingRefillsTheDraws(t *testing.T) {
 		t.Fatalf("expected one draw spent, got %d", *rolls)
 	}
 
-	// Traffic CROSSING is what settles the outage, and it arrives as the judge's cmdOK. Driven through
-	// that real path: the carrier answering its OWN frames deliberately refills nothing, because in the
-	// failure this ladder exists for those frames keep coming back while nothing crosses.
 	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdOK, Key: rc.dst.current()})
 	rc.pollPins(func() {}, func() {}, func(bool) {}, func(bool) {}, nil, atPathEpoch)
 
@@ -118,12 +93,6 @@ func TestTrafficCrossingRefillsTheDraws(t *testing.T) {
 	}
 }
 
-// TestAPinnedTunnelStillRedrawsAndKeepsItsAllowance.
-//
-// A pin says "stay on this endpoint". A redraw does exactly that — it moves nothing — so it is the one
-// step that is always compatible with the operator's pick, and a round spent on it is no evidence
-// against the pinned endpoint. Spending the pin's allowance on it would break the pick on measurements
-// that never tested it.
 func TestAPinnedTunnelStillRedrawsAndKeepsItsAllowance(t *testing.T) {
 	rc, rolls, burns := rungHarness(t, true)
 	if !rc.dst.selectEntry("d2") {

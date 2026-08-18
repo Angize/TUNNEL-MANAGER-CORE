@@ -13,8 +13,6 @@ import (
 	"golang.org/x/net/dns/dnsmessage"
 )
 
-// swapLogOutput points the process logger at sink (timestamps off so a Contains assertion is stable)
-// and returns the restore func.
 func swapLogOutput(sink *syncBuf) func() {
 	oldOut, oldFlags := log.Writer(), log.Flags()
 	log.SetFlags(0)
@@ -22,7 +20,6 @@ func swapLogOutput(sink *syncBuf) func() {
 	return func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) }
 }
 
-// syncBuf is a log sink several goroutines may write to at once.
 type syncBuf struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -40,8 +37,6 @@ func (s *syncBuf) String() string {
 	return s.b.String()
 }
 
-// rejectResponse packs an answer-less response carrying an RCode — what a rate-limiting, refusing or
-// non-recursing resolver really sends: Response set, the id echoed, no TXT records.
 func rejectResponse(id uint16, qn dnsmessage.Name, rc dnsmessage.RCode) []byte {
 	msg := dnsmessage.Message{
 		Header: dnsmessage.Header{ID: id, Response: true, RCode: rc},
@@ -56,10 +51,6 @@ func rejectResponse(id uint16, qn dnsmessage.Name, rc dnsmessage.RCode) []byte {
 	return b
 }
 
-// rcodeResolver is a fake recursive resolver that answers TXT queries with a real payload until the
-// test flips `rejecting`, and rejects every query with rc after that. The flip is a switch rather than
-// a count so the two phases are separable: with a count, loopback answers all 16 in-flight queries fast
-// enough that the window could open and collapse between two polls of the test.
 func rcodeResolver(t *testing.T, rejecting *atomic.Bool, rc dnsmessage.RCode) string {
 	t.Helper()
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -96,10 +87,6 @@ func rcodeResolver(t *testing.T, rejecting *atomic.Bool, rc dnsmessage.RCode) st
 	return pc.LocalAddr().String()
 }
 
-// A resolver that REJECTS every query must be said out loud and must be counted. parseResponseTXT has an
-// RCode check so a rejection stops looking like a healthy empty answer, and its only caller threw that
-// error away: nothing named the cause, and the `continue` skipped the accounting, so `active` stayed true
-// and fill() kept a full window in flight against a resolver refusing everything.
 func TestRejectedAnswersAreLoggedAndCollapseTheWindow(t *testing.T) {
 	for _, rc := range []dnsmessage.RCode{dnsmessage.RCodeServerFailure, dnsmessage.RCodeRefused, dnsmessage.RCodeNameError} {
 		t.Run(rc.String(), func(t *testing.T) {
@@ -123,7 +110,6 @@ func TestRejectedAnswersAreLoggedAndCollapseTheWindow(t *testing.T) {
 				t.Fatalf("transport is %T, not *dnsClient", tr)
 			}
 
-			// The healthy answers have to land first, or "collapsed" proves nothing — it was never open.
 			deadline := time.Now().Add(10 * time.Second)
 			for !c.active.Load() && time.Now().Before(deadline) {
 				time.Sleep(5 * time.Millisecond)
@@ -132,7 +118,6 @@ func TestRejectedAnswersAreLoggedAndCollapseTheWindow(t *testing.T) {
 				t.Fatal("the pipeline window never went active on healthy answers — the rest of this test would be vacuous")
 			}
 
-			// Now every query is rejected. collapseEmpties of them must age the window back down.
 			rejecting.Store(true)
 			for c.active.Load() && time.Now().Before(deadline) {
 				time.Sleep(5 * time.Millisecond)

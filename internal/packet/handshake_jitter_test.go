@@ -7,8 +7,6 @@ import (
 	"time"
 )
 
-// TestHandshakeRetransmitIsJittered pins the shape of the only clock an unestablished datagram carrier
-// sends on. A fixed value there is a 1 Hz beacon for as long as the tunnel cannot come up.
 func TestHandshakeRetransmitIsJittered(t *testing.T) {
 	const draws = 500
 	lo, hi := time.Duration(float64(handshakeRetransmit)*0.7), time.Duration(float64(handshakeRetransmit)*1.3)
@@ -27,9 +25,6 @@ func TestHandshakeRetransmitIsJittered(t *testing.T) {
 	}
 }
 
-// TestNoCarrierRetransmitsOnAFixedClock is the half that closes the class: the jitter is applied at
-// three separate call sites, one per datagram carrier, and a fourth carrier would be written by
-// copying one of them. Assert on the source so a re-introduced literal fails here instead of shipping.
 func TestNoCarrierRetransmitsOnAFixedClock(t *testing.T) {
 	for _, f := range []string{"udp.go", "raw_linux.go", "flux_linux.go"} {
 		src, err := os.ReadFile(f)

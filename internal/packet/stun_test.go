@@ -8,10 +8,6 @@ import (
 	"testing"
 )
 
-// buildSTUN must produce a structurally valid STUN message (magic cookie, a
-// 4-byte-aligned message length that covers exactly one attribute) and parseSTUN
-// must recover the exact payload for any length — including ones not a multiple of
-// four, where the attribute is padded on the wire.
 func TestSTUNRoundTrip(t *testing.T) {
 	for _, n := range []int{0, 1, 2, 3, 4, 5, 41, 180, 1400} {
 		payload := bytes.Repeat([]byte{0xC3}, n)
@@ -47,8 +43,6 @@ func TestSTUNRoundTrip(t *testing.T) {
 	}
 }
 
-// A datagram without the magic cookie (or too short to hold the header+attribute)
-// must be rejected before the AEAD ever sees it.
 func TestSTUNRejectsNonSTUN(t *testing.T) {
 	if _, ok := parseSTUN(bytes.Repeat([]byte{0x00}, 24)); ok {
 		t.Error("parseSTUN accepted a datagram with no magic cookie")
@@ -56,9 +50,9 @@ func TestSTUNRejectsNonSTUN(t *testing.T) {
 	if _, ok := parseSTUN(bytes.Repeat([]byte{0x00}, 10)); ok {
 		t.Error("parseSTUN accepted a datagram too short for the STUN + attribute header")
 	}
-	// A valid header whose attribute length runs past the buffer must be rejected.
+
 	msg := buildSTUN([]byte("hello"))
-	binary.BigEndian.PutUint16(msg[22:24], uint16(len(msg))) // absurd attribute length
+	binary.BigEndian.PutUint16(msg[22:24], uint16(len(msg)))
 	if _, ok := parseSTUN(msg); ok {
 		t.Error("parseSTUN accepted an attribute length past the buffer end")
 	}

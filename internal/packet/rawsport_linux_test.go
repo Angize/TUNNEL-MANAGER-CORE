@@ -12,14 +12,6 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
-// The client's forged source port may rotate for the life of the tunnel. Four things have to hold, and
-// three of them are only visible on a real code path rather than in rawPorts alone:
-//
-//  1. a rolled port is inside Linux's ephemeral range, and the draw is not skewed to one end of it;
-//  2. the port the CLIENT stamps as source is the one the SERVER stamps as destination;
-//  3. the server adopts it only from an AUTHENTICATED frame -- the ports are attacker-controlled bytes;
-//  4. the anti-leak rule covers every port the rotation can draw, with ONE rule that outlives them all.
-
 func TestRolledSportIsInTheEphemeralRangeAndSpreads(t *testing.T) {
 	const draws = 4000
 	lowHalf, seen := 0, map[uint16]bool{}
@@ -37,8 +29,7 @@ func TestRolledSportIsInTheEphemeralRangeAndSpreads(t *testing.T) {
 			lowHalf++
 		}
 	}
-	// A modulo over a 16-bit draw would bias the low ports; a histogram skewed to one end is itself a
-	// tell. Allow generous slack — this is a bias check, not a randomness test.
+
 	if lowHalf < draws*2/5 || lowHalf > draws*3/5 {
 		t.Errorf("%d/%d draws in the low half — the draw is skewed, so the port distribution is a tell",
 			lowHalf, draws)
@@ -48,8 +39,6 @@ func TestRolledSportIsInTheEphemeralRangeAndSpreads(t *testing.T) {
 	}
 }
 
-// setSportMode must refuse to arm on a profile with no ports, whatever it is told: there is nothing to
-// roll, and arming would widen the anti-leak rule to a range the rule has no use for.
 func TestSportModeOnlyArmsWhereThereArePorts(t *testing.T) {
 	for _, profile := range RawProfileNames() {
 		r := &Raw{profile: profile, isClient: true}
@@ -68,8 +57,6 @@ func TestSportModeOnlyArmsWhereThereArePorts(t *testing.T) {
 	}
 }
 
-// The pair must REVERSE across the two ends. This is the property that makes the flow read as one
-// conversation to a middlebox, and it is what breaks if either end forgets to carry the client's port.
 func TestTheServerStampsBackTheClientsRolledPort(t *testing.T) {
 	cli := &Raw{profile: "tcp", isClient: true}
 	cli.setSportMode(true)
@@ -95,8 +82,6 @@ func TestTheServerStampsBackTheClientsRolledPort(t *testing.T) {
 	}
 }
 
-// A CLIENT must never adopt the peer's source port: on the client the field is its OWN rolling port,
-// and the frames it receives carry the server's :443. Adopting it would make the client stamp 443->443.
 func TestTheClientNeverAdoptsThePeersPort(t *testing.T) {
 	cli := &Raw{profile: "tcp", isClient: true}
 	cli.setSportMode(true)
@@ -108,8 +93,6 @@ func TestTheClientNeverAdoptsThePeersPort(t *testing.T) {
 	}
 }
 
-// A profile that forges no ports has no port to learn either: rawDecap reports 0 for it, and storing a 0
-// would be harmless, but storing anything from a headerless carrier means reading bytes that are payload.
 func TestNoPortIsLearnedWhereThereIsNoHeader(t *testing.T) {
 	for _, profile := range RawProfileNames() {
 		if RawProfileHasPorts(profile) {
@@ -123,8 +106,6 @@ func TestNoPortIsLearnedWhereThereIsNoHeader(t *testing.T) {
 	}
 }
 
-// rawDecap is where the port is read, and it must read it from the SAME bytes the header actually
-// occupies -- including the case where the read came with an IPv4 header still attached.
 func TestDecapReadsTheSourcePortTheEncapWrote(t *testing.T) {
 	const cport, srv = 45678, 8443
 	for _, profile := range []string{"tcp", "udp"} {
@@ -149,7 +130,7 @@ func TestDecapReadsTheSourcePortTheEncapWrote(t *testing.T) {
 			}
 		}
 	}
-	// ...and reports 0 for every profile that forges no ports, so nothing is learned from payload bytes.
+
 	for _, profile := range RawProfileNames() {
 		if RawProfileHasPorts(profile) {
 			continue
@@ -162,9 +143,6 @@ func TestDecapReadsTheSourcePortTheEncapWrote(t *testing.T) {
 	}
 }
 
-// The rule must cover EVERY port the rotation can draw, and it must be ONE rule: re-installing it on
-// each roll would leave a window with no rule at all, in which the kernel answers the peer -- the exact
-// leak the rule exists to stop.
 func TestTheAntiLeakRuleCoversTheWholeRotation(t *testing.T) {
 	rng := strconv.Itoa(rawSportLo) + ":" + strconv.Itoa(rawSportHi)
 	for _, isClient := range []bool{true, false} {
@@ -173,7 +151,7 @@ func TestTheAntiLeakRuleCoversTheWholeRotation(t *testing.T) {
 			t.Fatalf("isClient=%v: %d rules, want exactly 1", isClient, len(got))
 		}
 		rule := strings.Join(got[0], " ")
-		// The CLIENT's port is our SOURCE on the client and our DESTINATION on the server.
+
 		wantFlag := "--dport"
 		if isClient {
 			wantFlag = "--sport"
@@ -186,8 +164,7 @@ func TestTheAntiLeakRuleCoversTheWholeRotation(t *testing.T) {
 			t.Errorf("isClient=%v: rule %q still pins the fixed client port", isClient, rule)
 		}
 	}
-	// Fixed mode keeps the exact match: a range there would swallow our own RSTs to that peer from any
-	// ephemeral port, which is broader than this rule has any business being.
+
 	for _, isClient := range []bool{true, false} {
 		rule := strings.Join(rawDropMatches(testDst, "tcp", 0, isClient, false, false)[0], " ")
 		if strings.Contains(rule, ":") {
@@ -197,7 +174,7 @@ func TestTheAntiLeakRuleCoversTheWholeRotation(t *testing.T) {
 			t.Errorf("isClient=%v: fixed mode lost the client port: %q", isClient, rule)
 		}
 	}
-	// udp's rule is ICMP port-unreachable and carries no port at all, so rotation cannot affect it.
+
 	for _, random := range []bool{false, true} {
 		for _, isClient := range []bool{true, false} {
 			got := rawDropMatches(testDst, "udp", 0, isClient, false, random)
@@ -208,13 +185,6 @@ func TestTheAntiLeakRuleCoversTheWholeRotation(t *testing.T) {
 	}
 }
 
-// The handshake RESP is the FIRST thing a server sends, and it goes out BEFORE any data frame has
-// authenticated. If the server has not learned the client's rolled port by then it stamps the fixed
-// default, and on a path with a stateful box that reply is an unsolicited flow that gets dropped -- the
-// handshake never completes and the tunnel never comes up at all.
-//
-// A netns lab cannot see this: there is no stateful box between two namespaces, so the mis-addressed
-// reply arrives anyway and the tunnel looks healthy. This drives the real tryHandshake instead.
 func TestTheHandshakeReplyGoesToTheRolledPort(t *testing.T) {
 	const psk = "tVYafNLrHaId1AaEM80YebyPzXThOEr2adA27E6mbRc="
 	const rolled = 54321
@@ -239,23 +209,18 @@ func TestTheHandshakeReplyGoesToTheRolledPort(t *testing.T) {
 	if len(cap.sent) != 1 {
 		t.Fatalf("expected one handshake reply, got %d", len(cap.sent))
 	}
-	// The reply's forged header must be addressed to the port the init came from.
+
 	dport := binary.BigEndian.Uint16(cap.sent[0][2:4])
 	if dport != rolled {
 		t.Errorf("handshake reply is stamped for port %d, but the client sent from %d — a stateful box "+
 			"drops that as an unsolicited flow and the tunnel never comes up", dport, rolled)
 	}
-	// A REPLAYED init served from the cache must NOT be able to steer where we send: it re-serves a
-	// cached response without proving anything new.
+
 	srv.tryHandshake(crypto.InitMsg(psk, ci), &net.IPAddr{IP: testSrc}, 40000)
 	if srv.cport() != rolled {
 		t.Errorf("a replayed init moved the learned port to %d", srv.cport())
 	}
-	// ...but it must still be ANSWERED where it came from. A client whose port rolls mid-handshake
-	// retransmits the identical init (sendInit reuses the ephemeral, so the bytes do not change), which
-	// means every retransmit lands on this same cached branch. Answering it at the learned port sends
-	// the reply to a port the client has left; a stateful box drops that, the client never completes,
-	// and it retransmits forever — measured live at 9h48m of a tunnel that could not recover on its own.
+
 	if len(cap.sent) != 2 {
 		t.Fatalf("expected the cached reply to be sent too, got %d frame(s)", len(cap.sent))
 	}
@@ -265,9 +230,6 @@ func TestTheHandshakeReplyGoesToTheRolledPort(t *testing.T) {
 	}
 }
 
-// The same property, stated on its own so it cannot be lost when the test above is edited: a handshake
-// answer is addressed at the sender, whatever the data path currently points at. The udp profile is the
-// one this was found on (a fake-WireGuard carrier), and it exercises a different header layout.
 func TestAHandshakeAnswerGoesToTheSenderNotTheDataPath(t *testing.T) {
 	const psk = "tVYafNLrHaId1AaEM80YebyPzXThOEr2adA27E6mbRc="
 
@@ -284,8 +246,7 @@ func TestAHandshakeAnswerGoesToTheSenderNotTheDataPath(t *testing.T) {
 			t.Fatal(err)
 		}
 		init := crypto.InitMsg(psk, ci)
-		// Three retransmits of the IDENTICAL init from three different rolled ports, exactly what a
-		// client does while its handshake is unanswered.
+
 		ports := []uint16{33016, 46649, 52384}
 		for _, p := range ports {
 			srv.tryHandshake(init, &net.IPAddr{IP: testSrc}, p)
@@ -298,15 +259,13 @@ func TestAHandshakeAnswerGoesToTheSenderNotTheDataPath(t *testing.T) {
 				t.Errorf("%s: reply %d went to port %d, want %d", profile, i+1, got, want)
 			}
 		}
-		// The data path stays where the FIRST authenticated init put it: only that one proved anything.
+
 		if srv.cport() != ports[0] {
 			t.Errorf("%s: a retransmit steered the data path to %d, want %d", profile, srv.cport(), ports[0])
 		}
 	}
 }
 
-// capturingLink is a directLink that records what would go on the wire instead of opening a socket.
-// The interface is the seam, so no production hook is needed to see the bytes a handshake sends.
 type capturingLink struct {
 	r    *Raw
 	sent [][]byte

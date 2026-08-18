@@ -8,69 +8,40 @@ import (
 	"time"
 )
 
-// PeerPool rotates a client's DESTINATION endpoint (or, as a second instance, its SOURCE IP) across a
-// list of candidates, so one blocked IP does not kill the tunnel. It shares the ws edge pool's health
-// primitives (ws_pool.go) — the same healthy → suspect → dead FSM — but has NO prober of its own, and
-// takes no health opinion of its own either. On the direct carriers the node's tun probe is the SOLE
-// judge: it burns the endpoint it names (cmdFail) and it clears the one it names (cmdOK),
-// and nothing else in this file may. A handshake an endpoint answers, or a frame that comes back from
-// it, says nothing about whether the tunnel CARRIES — which is the only question worth asking, and the
-// one the tun probe is the only thing positioned to answer. A burned endpoint is retried the only way
-// it can really be tested: by being selected again once its backoff has elapsed.
 type PeerPool struct {
 	mu         sync.Mutex
-	writeMu    sync.Mutex    // serializes the status file write+rename so concurrent writers don't race the shared .tmp
-	addrs      []string      // candidate endpoints ("ip" or "ip:port"), in operator order
-	health     healthSet     // absent == healthy; only suspect/dead entries are tracked
-	cur        int           // index of the active endpoint
-	rotate     time.Duration // proactive rotation interval (0 = failover-only)
-	statusPath string        // status file the panel reads (empty = off; also gates the pin cmd file)
-	// pinKey backs the panel's "make this active" button — a MOMENTARY jump, NOT a lock. It RELEASES on
-	// EVIDENCE and never on a clock: the instant the carrier lands on it, or once enough proven-dead
-	// rounds say it cannot. A clock could only ever guess, and every carrier already reports both outcomes.
-	pinKey   string // operator "make active" endpoint; current() forces it until it lands or is disproven
-	pinTries int    // failed attempts on the pinned endpoint; at pinFailRelease the pin goes
-	// pinTook holds the health record the pin CLEARED, so a pin that never lands puts the pool back
-	// exactly as it found it. Clearing is the operator saying "try this one again", not a verdict.
+	writeMu    sync.Mutex
+	addrs      []string
+	health     healthSet
+	cur        int
+	rotate     time.Duration
+	statusPath string
+
+	pinKey   string
+	pinTries int
+
 	pinTook *healthRec
-	// chosen is the endpoint an ADVANCE deliberately moved onto, which currentLocked returns instead of
-	// re-selecting: the two follow different rules on purpose, and a reader must not overrule the rotation.
-	// Maintained only by commitLocked/pickLocked, so it can never point somewhere cur is not.
+
 	chosen string
-	now    func() int64 // injectable clock (unix seconds); overridden in tests
+	now    func() int64
 }
 
-// NewPeerPool builds a pool from the candidate endpoints. addrs must be non-empty (the caller only
-// builds a pool when rotation is on with >1 endpoint; a 1-endpoint pool is harmless — it never
-// rotates). rotate is the proactive interval.
 func NewPeerPool(addrs []string, rotate time.Duration, statusPath string) *PeerPool {
 	cp := make([]string, len(addrs))
 	copy(cp, addrs)
 	p := &PeerPool{addrs: cp, rotate: rotate,
 		statusPath: statusPath, now: func() int64 { return time.Now().Unix() }}
 	p.health = newHealthSet(&p.now)
-	p.writeStatus() // publish the initial state so the panel sees the pool immediately
+	p.writeStatus()
 	return p
 }
 
-// current returns the active endpoint (never empty for a non-empty pool). It prefers a fully-HEALTHY
-// endpoint (scanning forward from cur for variety), then a DUE burned one (its backoff elapsed — the
-// live data plane retries it), then the least-bad. A fresh pin forces the pinned endpoint. current()
-// commits cur to what it returns, so a subsequent fail() burns the endpoint that was actually used.
 func (p *PeerPool) current() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.currentLocked()
 }
 
-// commitLocked moves cur to idx as a DELIBERATE choice — an advance, or a rejected candidate being
-// undone — so currentLocked hands that endpoint back instead of re-selecting (see the chosen field).
-// pickLocked is the same move WITHOUT the commit, for currentLocked's own passes and for a pin. Every
-// write to p.cur goes through one of the two, so chosen can never go stale.
-//
-// Both mark the endpoint TRIED, because that is what handing it to the carrier means. Both can land on a
-// burned endpoint whose wait has NOT elapsed — there is no dead-end, so with the whole pool burned the
-// least-bad is handed out anyway — and the verdict that comes back has to be allowed to walk its ladder.
 func (p *PeerPool) commitLocked(idx int) string {
 	p.cur = idx
 	p.chosen = p.addrs[idx]
@@ -92,70 +63,53 @@ func (p *PeerPool) currentLocked() string {
 				return p.pickLocked(idx)
 			}
 		}
-		p.pinKey = "" // pinned endpoint was removed from the pool -> forget it
+		p.pinKey = ""
 	}
 	n := len(p.addrs)
-	// Pass 0: the endpoint an advance deliberately chose. The passes below re-select under DIFFERENT rules,
-	// so without this a reader walks straight back off the rotation's choice — a failover lands on a DUE
-	// burned endpoint that pass 1 refuses while anything healthy exists, and steps OFF what it just burned
-	// where pass 3 does not. udp/raw/flux use nextEndpoint's address; tcp re-asks current().
+
 	if p.chosen != "" && p.addrs[p.cur] == p.chosen {
 		return p.chosen
 	}
-	// Pass 1: a fully-healthy endpoint, scanning forward from cur (consecutive picks vary).
+
 	for k := 0; k < n; k++ {
 		idx := (p.cur + k) % n
 		if p.health.healthy(p.addrs[idx]) {
 			return p.pickLocked(idx)
 		}
 	}
-	// Pass 2: none healthy — a DUE burned endpoint (its retest time arrived) gets a live retry.
+
 	for k := 0; k < n; k++ {
 		idx := (p.cur + k) % n
 		if p.health.due(p.addrs[idx]) {
 			return p.pickLocked(idx)
 		}
 	}
-	// Pass 3: nothing healthy or due — the least-bad endpoint (never dead-end).
+
 	return p.pickLocked(p.bestIdxLocked(-1))
 }
 
-// eligibleCount is how many endpoints the rotation could actually pick right now: the healthy ones
-// plus the burned ones whose backoff has elapsed. It is what "a full lap" and "every destination has
-// been tried" both have to mean — the raw list length counts endpoints the rotation cannot reach, so
-// with one destination condemned it declares a lap after two asks that both landed on the same one.
 func (p *PeerPool) eligibleCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.health.countEligible(p.addrs)
 }
 
-// activeIdx is the cursor's current index — read before and after a rotate to tell whether the pool
-// actually advanced, without every carrier's swap func having to report it.
 func (p *PeerPool) activeIdx() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.cur
 }
 
-// size is the number of endpoints in the pool. It is fixed at construction, so no lock is needed.
 func (p *PeerPool) size() int { return len(p.addrs) }
 
-// all returns every endpoint the pool was built with, burned or not. addrs is fixed at construction
-// (burning only marks health), so the list is stable for the pool's lifetime.
 func (p *PeerPool) all() []string {
 	out := make([]string, len(p.addrs))
 	copy(out, p.addrs)
 	return out
 }
 
-// tierLocked ranks an endpoint for the least-bad fallback: 0 healthy, 1 suspect, 2 dead, with its
-// nextRetest as the tiebreak within a tier. Caller holds the lock.
 func (p *PeerPool) tierLocked(addr string) (tier int, next int64) { return p.health.tier(addr) }
 
-// bestIdxLocked returns the index of the least-bad endpoint (healthy < suspect < dead, soonest
-// nextRetest breaking ties), optionally excluding one index (so fail() always MOVES off the endpoint
-// it just burned). Caller holds the lock; addrs is non-empty.
 func (p *PeerPool) bestIdxLocked(except int) int {
 	best := -1
 	var bt int
@@ -169,20 +123,16 @@ func (p *PeerPool) bestIdxLocked(except int) int {
 			best, bt, bn = i, t, n
 		}
 	}
-	if best == -1 { // every candidate was excluded (single-endpoint pool) — stay put
+	if best == -1 {
 		return except
 	}
 	return best
 }
 
-// burnLocked moves the endpoint's health FSM on a failure: healthy → suspect, or one step further down
-// the backoff toward dead if it is already tracked. Caller holds the lock.
 func (p *PeerPool) burnLocked(addr string) {
 	p.health.burn(addr)
 }
 
-// retestBackoff walks a failing endpoint's suspect->dead backoff FSM: healthy/suspect steps down the
-// backoff schedule, dead resets to the slow retest. Shared verbatim by PeerPool and wsPool.
 func retestBackoff(r *healthRec, now int64) {
 	if r.state == stateDead {
 		r.nextRetest = now + deadRetest
@@ -197,34 +147,25 @@ func retestBackoff(r *healthRec, now int64) {
 	r.nextRetest = now + suspectBackoff[r.fails]
 }
 
-// advanceFailLocked moves cur OFF the just-failed endpoint to the best next one to try: a healthy
-// endpoint if any, else a due burned one, else the least-bad OTHER endpoint (never re-sticks on the
-// endpoint we just burned). Caller holds the lock; addrs has >=2 entries.
 func (p *PeerPool) advanceFailLocked() {
 	n := len(p.addrs)
-	for k := 1; k <= n; k++ { // healthy, starting past cur so we move off it
+	for k := 1; k <= n; k++ {
 		idx := (p.cur + k) % n
 		if p.health.healthy(p.addrs[idx]) {
 			p.commitLocked(idx)
 			return
 		}
 	}
-	for k := 1; k <= n; k++ { // else a due burned endpoint
+	for k := 1; k <= n; k++ {
 		idx := (p.cur + k) % n
 		if p.health.due(p.addrs[idx]) {
 			p.commitLocked(idx)
 			return
 		}
 	}
-	p.commitLocked(p.bestIdxLocked(p.cur)) // else least-bad among the others
+	p.commitLocked(p.bestIdxLocked(p.cur))
 }
 
-// advanceEligibleLocked moves cur to another ELIGIBLE endpoint (healthy, or burned with its backoff
-// elapsed) for a proactive rotate, returning whether it moved. A DUE burned endpoint is eligible on
-// purpose: the only way to test a destination is to use it, so the ladder decides WHEN to try again and
-// the node's tun probe decides what happens next. It never takes one whose backoff is still running,
-// and stays put when nothing else is eligible, so the timer never tears a working connection down for
-// nothing. Caller holds the lock; addrs has >=2 entries.
 func (p *PeerPool) advanceEligibleLocked() bool {
 	n := len(p.addrs)
 	for k := 1; k <= n; k++ {
@@ -240,16 +181,10 @@ func (p *PeerPool) advanceEligibleLocked() bool {
 	return false
 }
 
-// fail reports that the active endpoint looks dead: it is walked down the health FSM
-// (healthy→suspect→…→dead) and the pool advances to the next endpoint to try, which it returns (plus
-// whether it actually moved).
 func (p *PeerPool) fail() (addr string, moved bool) {
 	p.mu.Lock()
-	// A live operator pin freezes failover ATOMICALLY — checked under the same p.mu that selectEntry
-	// takes — so an in-flight fail() racing a just-set pin can't burn or advance off the pinned endpoint
-	// (current() forces it until it lands or its TTL lapses). This is the authoritative guard; the
-	// rotationController's pinned() check is only a fast path.
-	if len(p.addrs) < 2 || p.pinnedLocked() { // nothing to rotate to, or a pin holds it
+
+	if len(p.addrs) < 2 || p.pinnedLocked() {
 		a := p.addrs[p.cur]
 		p.mu.Unlock()
 		return a, false
@@ -264,12 +199,9 @@ func (p *PeerPool) fail() (addr string, moved bool) {
 	return a, moved
 }
 
-// rotateOnce advances to another ELIGIBLE endpoint WITHOUT burning (the proactive-timer path). Returns
-// the new endpoint and whether it moved (a 1-endpoint pool, or one where every alternative is burned and
-// not yet due, does not move).
 func (p *PeerPool) rotateOnce() (addr string, moved bool) {
 	p.mu.Lock()
-	if len(p.addrs) < 2 || p.pinnedLocked() { // a pin freezes proactive rotation too (atomic under p.mu)
+	if len(p.addrs) < 2 || p.pinnedLocked() {
 		a := p.addrs[p.cur]
 		p.mu.Unlock()
 		return a, false
@@ -283,9 +215,6 @@ func (p *PeerPool) rotateOnce() (addr string, moved bool) {
 	return a, moved
 }
 
-// nextEndpoint picks the endpoint a carrier should jump to now: a proactive timed rotate (rotateOnce,
-// no burn) or a failover burn+advance (fail). Both return (addr, moved) with identical meaning, so the
-// four direct carriers share this one dispatch instead of each open-coding the proactive branch.
 func (p *PeerPool) nextEndpoint(proactive bool) (addr string, moved bool) {
 	if proactive {
 		return p.rotateOnce()
@@ -293,10 +222,6 @@ func (p *PeerPool) nextEndpoint(proactive bool) (addr string, moved bool) {
 	return p.fail()
 }
 
-// keepCursorOn puts cur back on addr — the endpoint the carrier is REALLY using — after a rotation that
-// did not take. It exists for make-before-break: when a warm build fails the live connection stays put,
-// while fail() has already advanced cur and would publish Active as an endpoint the tunnel was never on.
-// The burn fail() recorded is kept; only the cursor goes back. Nil-safe (a source-only rotation beat).
 func (p *PeerPool) keepCursorOn(addr string) {
 	if p == nil || addr == "" {
 		return
@@ -306,7 +231,7 @@ func (p *PeerPool) keepCursorOn(addr string) {
 	if p.addrs[p.cur] != addr {
 		for idx, a := range p.addrs {
 			if a == addr {
-				p.commitLocked(idx) // a DELIBERATE choice: staying put is the outcome of the failed attempt
+				p.commitLocked(idx)
 				moved = true
 				break
 			}
@@ -318,25 +243,14 @@ func (p *PeerPool) keepCursorOn(addr string) {
 	}
 }
 
-// rejectCandidate UNDOES a rotation whose target the carrier could not actually adopt — the udp source
-// rebind failed because the new source IP is not on this host. nextEndpoint has already advanced cur onto
-// it, but the socket never left prev: so burn the unbindable candidate and put cur back on prev. It never
-// burns prev.
-//
-// It does not touch prev's HEALTH either. "Some other IP would not bind" is not evidence about this one,
-// and on the proactive path nothing had burned prev this round anyway — the clear could only erase a
-// ladder an earlier verdict earned, and hand back a source reading healthy that nothing has measured.
-// prev is committed instead, which is what keeps the pool naming the source the socket is really on:
-// currentLocked's pass 0 returns a deliberate choice whatever its health says, so a burned live source
-// is reported honestly without stranding the tunnel.
 func (p *PeerPool) rejectCandidate(prev string) {
 	p.mu.Lock()
 	if bad := p.addrs[p.cur]; bad != prev {
-		p.burnLocked(bad) // the candidate can't bind on this host — pull it from rotation
+		p.burnLocked(bad)
 	}
 	for idx, a := range p.addrs {
 		if a == prev {
-			p.commitLocked(idx) // the socket never left prev, so prev IS the deliberate endpoint
+			p.commitLocked(idx)
 			break
 		}
 	}
@@ -344,9 +258,6 @@ func (p *PeerPool) rejectCandidate(prev string) {
 	p.writeStatus()
 }
 
-// clearBurn drops the burn on addr — the ladder with it — because the node's tun probe reported that
-// this endpoint is CARRYING. Keyed, so a verdict that crossed with a rotation cannot clear an endpoint
-// the tunnel has already left. Returns true only on the transition, so the carrier emits one event.
 func (p *PeerPool) clearBurn(addr string) bool {
 	p.mu.Lock()
 	cleared := p.health.clear(addr)
@@ -357,10 +268,6 @@ func (p *PeerPool) clearBurn(addr string) bool {
 	return cleared
 }
 
-// probeAllNow pulls EVERY suspect/dead endpoint's retest forward to now, so the rotation may select
-// them again at once instead of waiting out the backoff — and the tun probe then judges them. The
-// node fires it itself after walking the whole destination x source matrix with the tunnel STILL dead;
-// the panel offers it as "probe now" (a signal, which carries no key — hence all of them).
 func (p *PeerPool) probeAllNow() {
 	p.mu.Lock()
 	p.health.probeAllNow()
@@ -368,25 +275,19 @@ func (p *PeerPool) probeAllNow() {
 	p.writeStatus()
 }
 
-// selectEntry PINS a specific endpoint as the active one: current() forces it until the carrier lands on
-// it (pinLandedOn clears the pin) or the evidence disproves it. So it is "jump exactly here and keep
-// trying until connected" — it survives a transient outage but self-releases on success and cannot
-// strand the tunnel on a dead endpoint. It also clears any suspect/dead mark. False if key is unknown.
 func (p *PeerPool) selectEntry(key string) bool {
 	p.mu.Lock()
 	ok := false
 	for idx, a := range p.addrs {
 		if a == key {
-			// A second pin ABANDONS the first, which never landed -- so put back what that one took before
-			// taking anything new. Without this the operator changing their mind mid-jump leaves the first
-			// target reading healthy forever: nothing ever tried it, so nothing ever measured it.
+
 			if p.pinKey != "" && p.pinKey != key {
 				p.restorePinTookLocked()
 			}
 			p.pinKey, p.pinTries = key, 0
-			p.pinTook = p.health.rec(key) // kept, so an abandoned pin can put it back
-			p.health.clear(key)           // the operator picked this one deliberately: burn and condemnation both
-			p.pickLocked(idx)             // the pin key governs while it is live
+			p.pinTook = p.health.rec(key)
+			p.health.clear(key)
+			p.pickLocked(idx)
 			ok = true
 			break
 		}
@@ -398,18 +299,11 @@ func (p *PeerPool) selectEntry(key string) bool {
 	return ok
 }
 
-// pinLandedOn releases a live manual pin ONLY when the carrier really came up on the pinned endpoint.
-// tcp needs the comparison because dialLoop can adopt a carrier the rotation timer PRE-BUILT, whose
-// endpoint was resolved before the pin existed — releasing then reports the operator's jump as complete
-// while the tunnel sits somewhere else, and resumes rotation as if the pick had been honoured.
 func (p *PeerPool) pinLandedOn(addr string) {
 	p.mu.Lock()
 	changed := p.pinnedLocked() && p.pinKey == addr
 	if changed {
-		// It landed ON the pin, so the endpoint proved itself: the clear stands and the count is spent.
-		// Everything here is inside the comparison. A landing on some OTHER endpoint is exactly the case
-		// the comparison exists for, and settling the pin's memory for it wiped the burn the pin was
-		// holding (laundering a dead endpoint) and reset the count that is the pin's only way to end.
+
 		p.pinKey, p.pinTries, p.pinTook = "", 0, nil
 	}
 	p.mu.Unlock()
@@ -418,13 +312,6 @@ func (p *PeerPool) pinLandedOn(addr string) {
 	}
 }
 
-// restorePinTookLocked puts back the health record the LIVE pin cleared. Called only when that pin is
-// abandoned WITHOUT landing: the clear was the operator asking for a fresh try, and a try that never
-// happened must not leave the pool believing a dead endpoint recovered. A landed pin keeps the clear --
-// there the endpoint really did prove itself.
-//
-// It reads the key off the pin itself rather than taking one, so it can only ever put a record back where
-// it came from. Caller holds the lock, and must call this BEFORE clearing pinKey.
 func (p *PeerPool) restorePinTookLocked() {
 	if p.pinTook != nil && p.pinKey != "" {
 		p.health.recs[p.pinKey] = p.pinTook
@@ -432,10 +319,6 @@ func (p *PeerPool) restorePinTookLocked() {
 	p.pinTook = nil
 }
 
-// pinAttemptFailed is the remote twin of pinCannotLand: that one fires on a LOCAL impossibility (a source
-// the host cannot bind), this one on a remote attempt that did not come up. At pinFailRelease the pin is
-// released so normal rotation resumes. It is the core's own evidence, which is why a pin needs no clock.
-// A no-op unless the pin targets what just failed.
 func (p *PeerPool) pinAttemptFailed(addr string) {
 	p.mu.Lock()
 	released := false
@@ -452,15 +335,11 @@ func (p *PeerPool) pinAttemptFailed(addr string) {
 	}
 }
 
-// pinCannotLand is pinLandedOn's opposite: the jump's endpoint turned out to be unusable outright — a
-// source IP not configured on this host, which no number of retries can fix — so it clears the pin and
-// the pool moves on at once. A pick that MIGHT still connect keeps the pin; once "cannot be
-// used at all" is settled there is nothing to wait for. Keyed, so it never cancels a re-aimed jump.
 func (p *PeerPool) pinCannotLand(key string) bool {
 	p.mu.Lock()
 	cleared := p.pinnedLocked() && p.pinKey == key
 	if cleared {
-		p.restorePinTookLocked() // abandoned without landing -- see restorePinTookLocked
+		p.restorePinTookLocked()
 		p.pinKey = ""
 	}
 	p.mu.Unlock()
@@ -470,14 +349,11 @@ func (p *PeerPool) pinCannotLand(key string) bool {
 	return cleared
 }
 
-// releasePin drops a manual pin whose endpoint has been PROVEN blocked (repeated failovers that never
-// landed), so current() stops forcing the dead endpoint and the tunnel recovers
-// on a live one at once. A transient outage heals before the fail threshold and never reaches here.
 func (p *PeerPool) releasePin() {
 	p.mu.Lock()
 	changed := p.pinKey != ""
 	if changed {
-		p.restorePinTookLocked() // abandoned without landing -- see restorePinTookLocked
+		p.restorePinTookLocked()
 		p.pinKey = ""
 	}
 	p.mu.Unlock()
@@ -486,20 +362,14 @@ func (p *PeerPool) releasePin() {
 	}
 }
 
-// pinnedLocked reports whether a manual pin is still in its force window. Caller holds p.mu.
 func (p *PeerPool) pinnedLocked() bool { return p.pinKey != "" }
 
-// isPinned reports whether a manual pin is still in its force window, during which failover and
-// proactive rotation are held off so the jump lands exactly. After the window it returns false and
-// normal rotation resumes.
 func (p *PeerPool) isPinned() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.pinnedLocked()
 }
 
-// cmdPath is the sidecar file the node writes a "select endpoint" request into (JSON {key}). Empty when
-// the pool has no status path (nothing to poll).
 func (p *PeerPool) cmdPath() string {
 	if p.statusPath == "" {
 		return ""
@@ -507,40 +377,21 @@ func (p *PeerPool) cmdPath() string {
 	return p.statusPath + ".cmd"
 }
 
-// poolCmd is one request from the node, read out of a pool's sidecar file. Cmd names an action and the
-// rest says which entries it is about; with no Cmd it is the panel's pin button, and Key alone is the
-// entry to pin.
-//
-// One shape for both pools. They ask the same two questions of the same judge and differ only in how
-// many axes they name: the direct pool's endpoints are Key (destination) and Src (source), the CDN edge
-// pool's are IP (edge) and SNI, with Kind saying which axis a PIN is for. Every field is optional on the
-// wire, so each writer sends only what its pool has.
 type poolCmd struct {
-	Cmd  string `json:"cmd"`  // "" = a pin; otherwise cmdOK | cmdFail
-	Key  string `json:"key"`  // a pin's entry; on a DIRECT verdict, the destination it was measured on
-	Src  string `json:"src"`  // direct cmdOK only: the source it was measured on
-	Kind string `json:"kind"` // edge-pool pin only: which axis, "ip" | "sni"
-	IP   string `json:"ip"`   // edge-pool verdict: the EDGE it was measured on
-	SNI  string `json:"sni"`  // edge-pool verdict: the SNI it was measured with
-	// Epoch is the path the verdict MEASURED, read from the status file either side of the probe. See
-	// staleVerdict.
+	Cmd  string `json:"cmd"`
+	Key  string `json:"key"`
+	Src  string `json:"src"`
+	Kind string `json:"kind"`
+	IP   string `json:"ip"`
+	SNI  string `json:"sni"`
+
 	Epoch int64 `json:"epoch"`
 }
 
-// staleVerdict reports that this command judged a path the carrier has already left, so acting on it
-// would charge the silence to whatever the tunnel moved onto. One definition for all three consumers
-// (the datagram poller, the edge poller, the direct-tcp poller): three copies of a guard is how two of
-// them end up disagreeing about what "current" means.
-//
-// A pin carries no epoch and is never stale — the operator is naming an entry, not reporting a
-// measurement.
 func staleVerdict(c poolCmd, epoch int64) bool {
 	return (c.Cmd == cmdOK || c.Cmd == cmdFail) && c.Epoch != epoch
 }
 
-// readPoolCmd consumes a pending command file and returns what it held. The file is REMOVED once read,
-// so a command fires exactly once — a reader that left it would re-apply the same verdict every tick.
-// ok=false when there is no file, it cannot be parsed, or it names neither an action nor an entry.
 func readPoolCmd(path string) (c poolCmd, ok bool) {
 	if path == "" {
 		return c, false
@@ -556,42 +407,20 @@ func readPoolCmd(path string) (c poolCmd, ok bool) {
 	return c, true
 }
 
-// cmdFail is the node asking us to treat the endpoint it names as dead: burn it and advance, the same
-// move a peer that stopped answering triggers here. The node sends it when its own probe finds nothing
-// crossing the TUN, which is a signal this side cannot see — our carrier only knows whether frames it
-// can authenticate arrive, and on a crypto tunnel that takes the stale window plus a full run of failed
-// handshakes to conclude. Keyed like cmdOK, and for the mirror reason: a verdict that crossed with a
-// rotation must not condemn an endpoint the tunnel had already left.
-// The FSM stays owned here: the node asks, this file decides what it means.
 const cmdFail = "fail"
 
-// cmdOK is the other half of the same verdict: the node's tun probe reports that traffic is CROSSING,
-// so the endpoints the tunnel is on right now have proven themselves and their burns go. It carries
-// both keys, read from the two status files, so a verdict that crossed with a rotation cannot clear an
-// endpoint the tunnel has already left. Without it "good" would have to be inferred from silence — and
-// silence also means the node is inside its post-walk cooldown, where it says nothing about anything.
 const cmdOK = "ok"
 
-// readCmd consumes this pool's pending command, if any.
 func (p *PeerPool) readCmd() (poolCmd, bool) { return readPoolCmd(p.cmdPath()) }
 
-// rotationController couples a client carrier's DESTINATION pool with an optional SOURCE pool and
-// centralizes the failover/proactive policy, so every carrier drives rotation identically — it decides
-// WHEN, the carrier's own funcs do the swapping. Policy: burn and advance the destination on a dead
-// peer, walk the SOURCE once every destination has been tried against it, and freeze both under a pin.
 type rotationController struct {
-	// mu guards every counter below. They are written from TWO goroutines -- the carrier's client loop
-	// calls success() and proactive(), while the pin-poll loop reaches fail() through pollPins -- and
-	// nothing synchronised them, so a lap could be counted twice or not at all and the source convicted
-	// early or late. The rot*/apply* callbacks never reach back into the controller, so holding this
-	// across them cannot invert against the pools' own locks.
 	mu       sync.Mutex
 	dst, src *PeerPool
-	verdict  string      // the judge's mailbox for this tunnel; "" = no judge, so no ladder
-	port     portRung    // rung zero: redraw the source port before anything is condemned
-	session  sessionRung // rung one: handshake again before anything is condemned
-	od       odometer    // destination is the low digit, source the high one
-	pinFails int         // consecutive proven-dead rounds while a pin is in force -> auto-release at pinFailRelease
+	verdict  string
+	port     portRung
+	session  sessionRung
+	od       odometer
+	pinFails int
 	rotate   time.Duration
 	rotateAt time.Time
 }
@@ -610,49 +439,31 @@ func newRotationController(dst, src *PeerPool) *rotationController {
 	return c
 }
 
-// active reports whether any rotation is wired (either pool present).
 func (c *rotationController) active() bool { return c != nil && (c.dst != nil || c.src != nil) }
 
-// setVerdict installs the judge's mailbox. A carrier that never calls this hears no verdicts.
 func (c *rotationController) setVerdict(path string) { c.verdict = path }
 
-// polls reports whether the poll loop has anything to do: a pool whose pin file to watch, a judge to
-// hear from, or a source port to drive. None of the three means a ticker over nothing.
 func (c *rotationController) polls() bool {
 	return c != nil && (c.active() || c.verdict != "" || c.port.armed())
 }
 
-// pinned reports whether either pool currently holds an operator pin (rotation is frozen).
 func (c *rotationController) pinned() bool {
 	return (c.dst != nil && c.dst.isPinned()) || (c.src != nil && c.src.isPinned())
 }
 
-// fail is called when the current peer looks dead. rotDst/rotSrc are the carrier's swap funcs. While an
-// operator pin is in force it holds off failover until pinFailRelease proven-dead rounds auto-release it.
-// It reports whether the verdict was CHARGED to an endpoint. A free step answered it, or a pin
-// absorbed it, and nothing was condemned — the caller must not announce a burn that did not happen.
 func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (condemned bool) {
-	// Rung zero, ahead of everything: redraw the source port and let the next measurement judge that
-	// combination instead. It moves no endpoint — the tunnel stays exactly where it is, INCLUDING on a
-	// pinned one — so a round spent here is not evidence about any endpoint and must spend neither a
-	// burn nor the pin's allowance.
-	//
-	// Outside c.mu on purpose: the rung carries its own lock, and the redraw puts a packet on the wire.
+
 	if c.port.try() {
 		return false
 	}
-	// Rung one, on the same terms: a handshake moves the tunnel nowhere either, so it comes before any
-	// burn and before the pin's allowance is touched. A peer that restarted makes a good path carry
-	// nothing, and without this the walk answers that by condemning a healthy destination.
+
 	if c.session.try() {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.pinned() {
-		// A pinned endpoint proven blocked auto-releases so the tunnel recovers NOW instead of freezing on it
-		// indefinitely. Each call here is already a proven-dead round, so a transient blip never
-		// reaches even one; only after pinFailRelease decisive rounds does the pin drop and failover resume.
+
 		c.pinFails++
 		if c.pinFails < pinFailRelease {
 			return false
@@ -664,16 +475,16 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (condemne
 		if c.src != nil {
 			c.src.releasePin()
 		}
-		// pins cleared — fall through and burn+advance off the blocked endpoint this round
+
 	} else {
-		c.pinFails = 0 // not pinned -> reset so a later pin starts its release count fresh
+		c.pinFails = 0
 	}
 	if c.dst != nil {
-		// ELIGIBLE, not the raw list, and counted before the burn — see odometer.failed for both halves.
+
 		lap := c.od.failed(c.dst.eligibleCount)
 		rotDst(false)
 		if c.src != nil && lap {
-			rotSrc(false) // every destination that could be tried has been — move the source
+			rotSrc(false)
 		}
 		return true
 	}
@@ -684,28 +495,14 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (condemne
 	return false
 }
 
-// success resets the counters a live carrier invalidates: the dest-cycle count that drives source
-// attribution, and the proven-dead rounds that auto-release a pin. It clears NO burn — only the node's
-// tun probe does that, through cmdOK — and it releases no pin, which the carriers do themselves on the
-// endpoint they are PROVEN up on (see the clientLoops).
 func (c *rotationController) success() {
-	// The rungs are NOT refilled here. This runs off peerAnswered — the carrier's own frames coming
-	// back — and that proves an endpoint answered US, never that the tunnel carries. In the exact
-	// failure this ladder exists for, the carrier answers while nothing crosses, so refilling here
-	// would hand the budget back on every loop and the walk would never be reached. Only the judge's
-	// cmdOK settles it; see pollPins.
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.od.restart()
 	c.pinFails = 0
 }
 
-// proactive fires the timed rotation when due. The two pools are an ODOMETER, not two clocks: each
-// beat advances the DESTINATION, and the SOURCE moves only when the destination has been all the way
-// round — or cannot move at all, which is the same thing with one destination left. Moving both on
-// every beat is what the old code did, and with two of each it only ever produced two of the four
-// combinations: (src1,dst1) and (src2,dst2), the other pair never seen. Held off under a pin so the
-// manual switch is not overridden.
 func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -713,11 +510,11 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 		return
 	}
 	if c.pinned() {
-		c.rotateAt = now.Add(c.rotate) // keep the schedule ticking; just skip this beat
+		c.rotateAt = now.Add(c.rotate)
 		return
 	}
 	c.rotateAt = now.Add(c.rotate)
-	if c.dst == nil { // source-only pool: every beat is its beat
+	if c.dst == nil {
 		if c.src != nil {
 			rotSrc(true)
 		}
@@ -730,15 +527,6 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 	}
 }
 
-// pollPins reads this tunnel's verdict mailbox and each pool's pin file, applying whatever is pending:
-// the judge drives the ladder, a pin pins the requested endpoint and calls the carrier's apply func
-// (which re-points the live dataplane via the pool's current()). Carriers run this on a ~1s ticker so a
-// manual switch is prompt.
-//
-// Three separate files, because they are three separate questions and the pools are optional. A verdict
-// that had to arrive through the destination pool's file was heard only by a tunnel that HAD one, which
-// left every single-endpoint tunnel with no ladder at all — and a source-pooled one with its verdicts
-// written to a file nothing read.
 func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc func(proactive bool),
 	ev func(kind, code, detail string), pathEpoch func() int64) {
 	judged := false
@@ -746,8 +534,7 @@ func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc 
 		c.judge(cmd, rotDst, rotSrc, ev, pathEpoch())
 		judged = true
 	}
-	// The ladder's own hand on the source port, on the same beat as everything else it drives — so
-	// nothing self-timed moves the path while the judge is measuring it.
+
 	c.port.tick(time.Now(), judged)
 	if c.dst != nil {
 		if cmd, ok := c.dst.readCmd(); ok && cmd.Key != "" && c.dst.selectEntry(cmd.Key) {
@@ -755,34 +542,25 @@ func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc 
 		}
 	}
 	if c.src != nil {
-		// The source pool takes pins only. A tun probe cannot tell a bad SOURCE from a bad DESTINATION,
-		// and the controller already walks the source once every destination has been tried against it.
+
 		if cmd, ok := c.src.readCmd(); ok && cmd.Key != "" && c.src.selectEntry(cmd.Key) {
 			applySrc()
 		}
 	}
 }
 
-// judge applies one verdict from the node's tun probe: the only evidence that says whether this tunnel
-// carries, and therefore the only thing allowed to spend a rung or condemn an endpoint.
 func (c *rotationController) judge(cmd poolCmd, rotDst, rotSrc func(proactive bool),
 	ev func(kind, code, detail string), epoch int64) {
 	switch {
 	case staleVerdict(cmd, epoch):
-		// It judged a path the carrier has already left. Acting on it would charge that silence
-		// to whatever the tunnel moved onto.
+
 		log.Printf("core: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
 			cmd.Epoch, epoch)
 	case cmd.Cmd == cmdOK:
-		// Traffic is CROSSING, so the outage the ladder was working through is over and its free
-		// steps are refilled. This is the only evidence that settles it: the carrier's own frames
-		// coming back would not, because in the failure this ladder exists for they keep coming
-		// back while nothing crosses — and a budget refilled on that never runs out.
+
 		c.port.restart()
 		c.session.restart()
-		// Both ends of the pair the probe measured are proven, so both burns go. Keyed on each
-		// side separately: a source rotation is seamless and can slide under a verdict. A pool-less
-		// tunnel names neither and has nothing to clear — the refill above was the whole message.
+
 		if c.dst != nil && cmd.Key != "" && c.dst.clearBurn(cmd.Key) && ev != nil {
 			ev("heal", "peer-retest", cmd.Key)
 		}
@@ -790,13 +568,9 @@ func (c *rotationController) judge(cmd poolCmd, rotDst, rotSrc func(proactive bo
 			ev("heal", "src-retest", cmd.Src)
 		}
 	case cmd.Cmd == cmdFail:
-		// There is nothing left to key on: the epoch above settled that the carrier is still on the
-		// path this judged, so cmd.Key names where it is. The pool must not be ASKED which one that
-		// is — current() is a selection that commits the cursor to what it picks, so the question
-		// would move the tunnel's own record of where it is. See TestTheCursorCannotOutrunTheEpoch.
+
 		condemned := c.fail(rotDst, rotSrc)
-		// Announced only if an endpoint really was charged: a free rung, a pin, or no pool at all
-		// leaves nobody to blame, and a burn card for a healthy address is worse than none.
+
 		if condemned && c.dst != nil {
 			log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", cmd.Key)
 			if ev != nil {
@@ -806,9 +580,6 @@ func (c *rotationController) judge(cmd poolCmd, rotDst, rotSrc func(proactive bo
 	}
 }
 
-// peerPoolStatus is the pool state written to the status file the node/panel read. Health carries the
-// full per-endpoint FSM (state/fails/next_retest), which is what every reader uses; Pin is the
-// operator-pinned endpoint (empty = none).
 type peerPoolStatus struct {
 	Active  string         `json:"active"`
 	Addrs   []string       `json:"addrs"`
@@ -817,17 +588,11 @@ type peerPoolStatus struct {
 	Updated int64          `json:"updated_unix"`
 }
 
-// writeStatus snapshots the pool's live state to statusPath (best effort) so the panel can show which
-// endpoint is active, which are burned (and how — suspect vs dead, with the retest countdown), and any
-// pin, and can drive the pool via the cmd file. A write error is non-fatal (the dataplane keeps running).
 func (p *PeerPool) writeStatus() {
 	if p.statusPath == "" {
 		return
 	}
-	// Hold writeMu across BOTH the snapshot and the file write, so concurrent writers can't snapshot in
-	// one order and win the write in the other — an older snapshot must never overwrite a newer file
-	// (writes are change-driven; there is no periodic re-write to self-correct a stale one). p.mu is
-	// always released before any caller reaches writeStatus, so writeMu→p.mu never inverts a lock order.
+
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 	p.mu.Lock()

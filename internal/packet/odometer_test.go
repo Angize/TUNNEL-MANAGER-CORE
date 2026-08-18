@@ -2,15 +2,10 @@ package packet
 
 import "testing"
 
-// TestTheLapIsSizedOnceAndNotReReadAsItShrinks.
-//
-// Every round burns one entry, so the eligible count falls as the walk proceeds. Sizing the lap again
-// on each round compares against a number that is one smaller every time, and three entries declare a
-// full lap after two — convicting the high axis a round early, on evidence that was never gathered.
 func TestTheLapIsSizedOnceAndNotReReadAsItShrinks(t *testing.T) {
 	var o odometer
 	left := 3
-	shrinking := func() int { n := left; left--; return n } // what a burn per round looks like
+	shrinking := func() int { n := left; left--; return n }
 
 	for round := 1; round <= 2; round++ {
 		if o.failed(shrinking) {
@@ -25,13 +20,6 @@ func TestTheLapIsSizedOnceAndNotReReadAsItShrinks(t *testing.T) {
 	}
 }
 
-// TestNothingEligibleStillCountsAsOneRound.
-//
-// With every entry condemned the walk has nothing to try, but the entry it is sitting on is still the
-// experiment, so one round completes the lap and the high axis moves.
-//
-// This does NOT cover the "floor the lap at one" branch the three copies carried: that branch cannot
-// change any outcome — 1 >= 0 and 1 >= 1 are both true — which is why it is gone rather than pinned.
 func TestNothingEligibleStillCountsAsOneRound(t *testing.T) {
 	var o odometer
 	if !o.failed(func() int { return 0 }) {
@@ -42,24 +30,18 @@ func TestNothingEligibleStillCountsAsOneRound(t *testing.T) {
 	}
 }
 
-// TestAProactiveLapRestartsTheFailoverRound.
-//
-// The failover count means "every low entry tried against THIS high one", so it cannot survive the
-// high one moving. One of the three copies this replaces reset it here and the other left it to a
-// teardown path that a failed warm build never reaches — so the count carried over onto a source the
-// walk had not tested, and the next round could convict it early.
 func TestAProactiveLapRestartsTheFailoverRound(t *testing.T) {
 	var o odometer
 	three := func() int { return 3 }
 
-	if o.failed(three) { // one failover round banked against the current high entry
+	if o.failed(three) {
 		t.Fatal("one of three rounds must not complete the lap")
 	}
 	if o.rot != 1 {
 		t.Fatalf("expected one round banked, rot=%d", o.rot)
 	}
 
-	if !o.beat(false, three) { // the low axis could not move: a lap, so the high one follows
+	if !o.beat(false, three) {
 		t.Fatal("a low axis that cannot move has been all the way round")
 	}
 	if o.rot != 0 {
@@ -68,10 +50,6 @@ func TestAProactiveLapRestartsTheFailoverRound(t *testing.T) {
 	}
 }
 
-// TestABeatOnAnImmovableAxisAsksNothing.
-//
-// `eligible` takes the pool's lock, and a low axis that did not move is already a lap whatever the
-// count says. Reading it anyway is a lock taken to answer a question with only one answer.
 func TestABeatOnAnImmovableAxisAsksNothing(t *testing.T) {
 	var o odometer
 	asked := 0
@@ -83,16 +61,11 @@ func TestABeatOnAnImmovableAxisAsksNothing(t *testing.T) {
 	}
 }
 
-// TestRestartClearsTheRoundAndLeavesTheSchedule.
-//
-// A live carrier invalidates the failover round — whatever it proved is stale. The proactive beat is
-// not a round though, it is a schedule, and resetting it here would stretch the interval every time a
-// tunnel recovered.
 func TestRestartClearsTheRoundAndLeavesTheSchedule(t *testing.T) {
 	var o odometer
 	three := func() int { return 3 }
 	o.failed(three)
-	o.beat(true, three) // one beat banked, not yet a lap
+	o.beat(true, three)
 
 	tick := o.tick
 	if tick == 0 {

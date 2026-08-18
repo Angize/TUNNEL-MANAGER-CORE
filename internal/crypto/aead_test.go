@@ -5,9 +5,6 @@ import (
 	"testing"
 )
 
-// pair builds the two ends of a tunnel: a client sealer (seals c→s, opens s→c)
-// and a server sealer (the reverse), so client.Seal round-trips through
-// server.Open and vice-versa.
 func pair(t *testing.T, cipher, psk string) (client, server *Sealer) {
 	t.Helper()
 	c, err := NewSealer(cipher, psk, true)
@@ -28,7 +25,7 @@ func TestSealOpenRoundTripAllCiphers(t *testing.T) {
 		if c.Name != name {
 			t.Fatalf("resolved name %q != %q", c.Name, name)
 		}
-		// client -> server
+
 		ct, err := c.Seal(pt, nil)
 		if err != nil {
 			t.Fatalf("%s: seal: %v", name, err)
@@ -39,7 +36,7 @@ func TestSealOpenRoundTripAllCiphers(t *testing.T) {
 		if _, _, got, err := s.Open(ct, nil); err != nil || !bytes.Equal(got, pt) {
 			t.Fatalf("%s: c->s round trip: err=%v", name, err)
 		}
-		// server -> client (opposite direction key)
+
 		ct2, _ := s.Seal(pt, nil)
 		if _, _, got, err := c.Open(ct2, nil); err != nil || !bytes.Equal(got, pt) {
 			t.Fatalf("%s: s->c round trip: err=%v", name, err)
@@ -52,8 +49,7 @@ func TestResolveCipher(t *testing.T) {
 		"": CipherAES256, "auto": CipherAES256, "AES-256-GCM": CipherAES256,
 		CipherAES128: CipherAES128, CipherChaCha: CipherChaCha, CipherXChaCha: CipherXChaCha,
 	}
-	// The short-form aliases were removed: nothing in the fleet can emit one, and an unknown name
-	// must fall through unchanged so NewSealer rejects it rather than silently picking a cipher.
+
 	if got := ResolveCipher("chacha"); got != "chacha" {
 		t.Fatalf("removed alias %q should pass through unchanged, got %q", "chacha", got)
 	}
@@ -76,12 +72,9 @@ func TestNonceIsFresh(t *testing.T) {
 	}
 }
 
-// TestPerDirectionKeys is the #5 fix: each sealing key is used by exactly one
-// sealer, so a client cannot open another client's (same-direction) frame — only
-// the server (the opposite end) can. This is what removes the shared-key reuse.
 func TestPerDirectionKeys(t *testing.T) {
 	c1, s := pair(t, "aes-256-gcm", "dir-psk")
-	c2, _ := NewSealer("aes-256-gcm", "dir-psk", true) // a second client
+	c2, _ := NewSealer("aes-256-gcm", "dir-psk", true)
 	ct, _ := c1.Seal([]byte("secret"), nil)
 	if _, _, _, err := c2.Open(ct, nil); err == nil {
 		t.Fatal("a client opened another client's same-direction frame (keys not direction-separated)")
@@ -91,14 +84,10 @@ func TestPerDirectionKeys(t *testing.T) {
 	}
 }
 
-// TestNoZeroNonceSignature is the #2 fix: the old wire left the AEAD nonce's high
-// counter bytes fixed at zero at a constant offset — a stateless DPI signature.
-// With the wire mask, no fixed-offset zero window survives across many frames.
 func TestNoZeroNonceSignature(t *testing.T) {
 	c, _ := pair(t, "chacha20-poly1305", "mask-psk-000")
 	const N = 512
-	// The old signature sat at nonce[4:8]; after masking the same wire offset is
-	// maskSaltLen+4 .. maskSaltLen+8. It must NOT be all-zero on ~every frame.
+
 	zeroRuns := 0
 	saltsSeen := map[[maskSaltLen]byte]bool{}
 	for i := 0; i < N; i++ {
@@ -111,18 +100,17 @@ func TestNoZeroNonceSignature(t *testing.T) {
 		copy(salt[:], ct[:maskSaltLen])
 		saltsSeen[salt] = true
 	}
-	if zeroRuns > 4 { // random chance of 4 zero bytes is ~N/2^32 ≈ 0
+	if zeroRuns > 4 {
 		t.Fatalf("zero-nonce DPI signature still present in %d/%d frames", zeroRuns, N)
 	}
-	if len(saltsSeen) < N { // salts must be unique/random per frame
+	if len(saltsSeen) < N {
 		t.Fatalf("per-frame salt not unique: %d distinct over %d frames", len(saltsSeen), N)
 	}
 }
 
-// TestAADAuthenticated: the frame header passed as aad is authenticated, so flipping it makes Open fail.
 func TestAADAuthenticated(t *testing.T) {
 	c, s := pair(t, "chacha20-poly1305", "aad-psk")
-	ct, _ := c.Seal([]byte("payload"), []byte{0x00}) // typeData
+	ct, _ := c.Seal([]byte("payload"), []byte{0x00})
 	if _, _, _, err := s.Open(ct, []byte{0x01}); err == nil {
 		t.Fatal("a flipped aad (type byte) opened without error")
 	}
@@ -152,7 +140,7 @@ func TestCipherMismatchFails(t *testing.T) {
 func TestTamperFails(t *testing.T) {
 	c, s := pair(t, "xchacha20-poly1305", "k")
 	ct, _ := c.Seal([]byte("secret"), nil)
-	ct[len(ct)-1] ^= 0x01 // flip a masked tag bit
+	ct[len(ct)-1] ^= 0x01
 	if _, _, _, err := s.Open(ct, nil); err == nil {
 		t.Fatal("open of tampered ciphertext should fail")
 	}
@@ -165,8 +153,6 @@ func TestShortInputFails(t *testing.T) {
 	}
 }
 
-// TestSeqIncrementsMonotonically checks the counter nonce advances by exactly 1
-// per Seal (anti-replay sequence) and never repeats within a process.
 func TestSeqIncrementsMonotonically(t *testing.T) {
 	for _, name := range Supported {
 		c, s := pair(t, name, "seq-psk")
@@ -190,8 +176,6 @@ func TestSeqIncrementsMonotonically(t *testing.T) {
 	}
 }
 
-// TestSessionDiffersPerProcess checks two client sealers (same psk) pick distinct
-// random prefixes, so a restarted sender's frames carry a fresh session id.
 func TestSessionDiffersPerProcess(t *testing.T) {
 	a, s := pair(t, "aes-256-gcm", "same-psk-both-ends")
 	b, _ := NewSealer("aes-256-gcm", "same-psk-both-ends", true)

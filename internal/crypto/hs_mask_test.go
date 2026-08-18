@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// The masked+padded handshake must round-trip: Init->ParseInit and Resp->ParseResp recover the exact
-// public keys, and a wrong PSK fails after unmasking. Messages are at least HandshakeCoreSize bytes.
 func TestHandshakeMaskRoundTrip(t *testing.T) {
 	psk := "a-preshared-key"
 	ci, err := GenerateEphemeral()
@@ -43,9 +41,6 @@ func TestHandshakeMaskRoundTrip(t *testing.T) {
 	}
 }
 
-// A raw X25519 public value is a canonical curve point, so the top bit of its last wire byte (bit 255)
-// is ALWAYS 0 — a bias a passive classifier can aggregate per-IP. After masking, that same on-wire
-// position must vary ~uniformly across handshakes, proving the point structure is hidden.
 func TestHandshakeWireHidesPointBias(t *testing.T) {
 	const N = 3000
 	psk := "psk"
@@ -56,7 +51,7 @@ func TestHandshakeWireHidesPointBias(t *testing.T) {
 			t.Fatal(err)
 		}
 		msg := InitMsg(psk, e)
-		// last byte of the 32-byte public-value region (which carries bit 255 of the point).
+
 		if msg[hsNonceLen+hsPadLenLen+ephPubLen-1]&0x80 != 0 {
 			highSet++
 		}
@@ -66,8 +61,6 @@ func TestHandshakeWireHidesPointBias(t *testing.T) {
 	}
 }
 
-// The message LENGTH must vary across handshakes (random pad), so the opening has no fixed byte-count
-// signature to key on. Require many distinct sizes and a wide spread over many handshakes.
 func TestHandshakeSizeVaries(t *testing.T) {
 	const N = 2000
 	psk := "psk"
@@ -98,8 +91,6 @@ func TestHandshakeSizeVaries(t *testing.T) {
 	}
 }
 
-// ReadHandshake must recover the fixed core from a STREAM carrying core||pad, consuming the trailing
-// pad so the next read starts cleanly, and the recovered core must ParseInit to the same key.
 func TestReadHandshakeStream(t *testing.T) {
 	psk := "psk"
 	e, err := GenerateEphemeral()
@@ -120,7 +111,7 @@ func TestReadHandshakeStream(t *testing.T) {
 	if got != e.Pub {
 		t.Fatal("public key mismatch after stream read")
 	}
-	// The pad must have been fully consumed: what's left is exactly the trailer.
+
 	rest := make([]byte, len(trailer))
 	if _, err := io.ReadFull(stream, rest); err != nil {
 		t.Fatalf("read trailer after handshake: %v", err)

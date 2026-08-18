@@ -8,11 +8,6 @@ import (
 	"time"
 )
 
-// The rule set is scoped to ONE address, and a rotation removed the old one the moment the new one
-// went in. That is a hole exactly where the traffic still is: SetPeerPool deliberately keeps admitting
-// the endpoint the rotation just left, for the frames already in flight from it, and with no rule the
-// kernel answers precisely those — an echo-reply on icmp, a port-unreachable on udp, a RST on tcp. One
-// RTT of the leak the rules exist to stop, once per rotation, on every pooled tunnel.
 func TestTheAntiLeakLingersOnTheAddressItJustLeft(t *testing.T) {
 	defer func(d time.Duration) { antiLeakLinger = d }(antiLeakLinger)
 	antiLeakLinger = 150 * time.Millisecond
@@ -49,7 +44,7 @@ func TestTheAntiLeakLingersOnTheAddressItJustLeft(t *testing.T) {
 
 		leak.scope(net.ParseIP(first).To4())
 		leak.scope(net.ParseIP(second).To4())
-		leak.scope(net.ParseIP(first).To4()) // back inside the linger
+		leak.scope(net.ParseIP(first).To4())
 		ev := rec.events()
 		adds := 0
 		for _, e := range ev {
@@ -64,7 +59,7 @@ func TestTheAntiLeakLingersOnTheAddressItJustLeft(t *testing.T) {
 		if evIndex(ev, "del "+first) >= 0 {
 			t.Errorf("the rule we rotated back onto was removed anyway: %v", ev)
 		}
-		// ...and the one we left this time still goes, on its own timer.
+
 		waitFor(t, 5*time.Second, "the rule for the address left behind was removed",
 			func() bool { return evIndex(rec.events(), "del "+second) >= 0 })
 	})
@@ -86,7 +81,6 @@ func TestTheAntiLeakLingersOnTheAddressItJustLeft(t *testing.T) {
 		}
 	})
 
-	// A carrier rotating faster than the linger must not pile the host's chain up.
 	t.Run("the left-behind rules are bounded", func(t *testing.T) {
 		rec := &leakRecorder{}
 		closeCh := make(chan struct{})
@@ -113,7 +107,7 @@ func TestTheAntiLeakLingersOnTheAddressItJustLeft(t *testing.T) {
 				gone++
 			}
 		}
-		if live-gone > antiLeakMaxLinger+1 { // the current scope, plus at most the bound
+		if live-gone > antiLeakMaxLinger+1 {
 			t.Errorf("%d rule sets are installed on the host after 12 rotations", live-gone)
 		}
 

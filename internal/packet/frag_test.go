@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// captureConn is a net.Conn that records each Write as a separate segment so a test can assert how
-// the first write was fragmented.
 type captureConn struct {
 	net.Conn
 	writes [][]byte
@@ -20,14 +18,13 @@ func (c *captureConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// The embedded net.Conn is nil, so override the addr accessors the fake/disorder paths probe.
 func (c *captureConn) LocalAddr() net.Addr  { return nil }
 func (c *captureConn) RemoteAddr() net.Addr { return nil }
 
 func TestFragConnAutoSplitsInsideHostname(t *testing.T) {
 	cap := &captureConn{}
-	f := newFragConn(cap, "cdn.spacefly.ir", 0, "split", 0, false, nil) // auto: split in the middle of the hostname
-	// a ClientHello-shaped buffer with the cleartext SNI embedded
+	f := newFragConn(cap, "cdn.spacefly.ir", 0, "split", 0, false, nil)
+
 	hello := append([]byte{0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00}, []byte("....cdn.spacefly.ir....rest....")...)
 	if _, err := f.Write(hello); err != nil {
 		t.Fatalf("write: %v", err)
@@ -35,7 +32,7 @@ func TestFragConnAutoSplitsInsideHostname(t *testing.T) {
 	if len(cap.writes) != 2 {
 		t.Fatalf("first write should split into 2 segments, got %d", len(cap.writes))
 	}
-	// Neither segment may contain the full hostname; concatenation must equal the original.
+
 	for i, w := range cap.writes {
 		if bytes.Contains(w, []byte("cdn.spacefly.ir")) {
 			t.Fatalf("segment %d still contains the full hostname", i)
@@ -44,7 +41,7 @@ func TestFragConnAutoSplitsInsideHostname(t *testing.T) {
 	if got := append(append([]byte{}, cap.writes[0]...), cap.writes[1]...); !bytes.Equal(got, hello) {
 		t.Fatalf("reassembled bytes differ from the original ClientHello")
 	}
-	// Subsequent writes pass through unsplit.
+
 	if _, err := f.Write([]byte("data")); err != nil {
 		t.Fatalf("write2: %v", err)
 	}
@@ -55,7 +52,7 @@ func TestFragConnAutoSplitsInsideHostname(t *testing.T) {
 
 func TestFragConnExplicitPos(t *testing.T) {
 	cap := &captureConn{}
-	f := newFragConn(cap, "example.com", 4, "split", 0, false, nil) // explicit offset overrides auto
+	f := newFragConn(cap, "example.com", 4, "split", 0, false, nil)
 	if _, err := f.Write([]byte("ABCDEFGH")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -66,7 +63,7 @@ func TestFragConnExplicitPos(t *testing.T) {
 
 func TestFragConnNoSplitWhenHostAbsent(t *testing.T) {
 	cap := &captureConn{}
-	f := newFragConn(cap, "hidden.example", 0, "split", 0, false, nil) // ECH-like: hostname not in cleartext
+	f := newFragConn(cap, "hidden.example", 0, "split", 0, false, nil)
 	if _, err := f.Write([]byte("no matching host here")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -77,7 +74,7 @@ func TestFragConnNoSplitWhenHostAbsent(t *testing.T) {
 
 func TestFragConnOutOfRangePos(t *testing.T) {
 	cap := &captureConn{}
-	f := newFragConn(cap, "", 999, "split", 0, false, nil) // pos past the buffer -> write whole
+	f := newFragConn(cap, "", 999, "split", 0, false, nil)
 	if _, err := f.Write([]byte("short")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -87,7 +84,7 @@ func TestFragConnOutOfRangePos(t *testing.T) {
 }
 
 func TestFragConnDisorderFallsBackToSplit(t *testing.T) {
-	cap := &captureConn{} // no SyscallConn -> disorder can't set a per-segment TTL, must still split
+	cap := &captureConn{}
 	f := newFragConn(cap, "cdn.spacefly.ir", 0, "disorder", 4, false, nil)
 	hello := append([]byte{0x16, 0x03, 0x01}, []byte("xxcdn.spacefly.iryy")...)
 	if _, err := f.Write(hello); err != nil {
@@ -102,7 +99,7 @@ func TestFragConnDisorderFallsBackToSplit(t *testing.T) {
 }
 
 func TestFragConnFakeFallsBackToSplit(t *testing.T) {
-	cap := &captureConn{} // no *net.TCPAddr / no raw fd -> fake can't inject, must still split
+	cap := &captureConn{}
 	f := newFragConn(cap, "cdn.spacefly.ir", 0, "fake", 4, false, nil)
 	hello := append([]byte{0x16, 0x03, 0x01}, []byte("xxcdn.spacefly.iryy")...)
 	if _, err := f.Write(hello); err != nil {
@@ -123,7 +120,7 @@ func TestBadTCPChecksum(t *testing.T) {
 	if seg[16] == 0x12 && seg[17] == 0x34 {
 		t.Fatal("badTCPChecksum must change the TCP checksum field so the server drops the fake")
 	}
-	badTCPChecksum([]byte{1, 2, 3}) // too short -> safe no-op, must not panic
+	badTCPChecksum([]byte{1, 2, 3})
 }
 
 func TestDecoySNISameLength(t *testing.T) {

@@ -6,10 +6,6 @@ import (
 	"testing"
 )
 
-// TestOnePoolCmdReadsBothWriters is the compatibility this merge rests on. The node writes these files,
-// and it writes a DIFFERENT set of keys for each pool: {cmd,key,src} for a direct pool, {cmd,ip,sni} for
-// the edge pool, {key} or {kind,key} for a pin. One struct now reads all of them, and every field is
-// optional on the wire — so this drives the exact JSON each writer produces, byte for byte.
 func TestOnePoolCmdReadsBothWriters(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cmd.json")
@@ -51,9 +47,6 @@ func TestOnePoolCmdReadsBothWriters(t *testing.T) {
 	}
 }
 
-// TestPoolCmdFiresExactlyOnce: the file is the whole handshake, so it must be removed as it is read.
-// Left behind, the same verdict would be re-applied on every tick of a one-second poller — one probe
-// result would walk the entire pool.
 func TestPoolCmdFiresExactlyOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cmd.json")
 	if err := os.WriteFile(path, []byte(`{"cmd":"fail","key":"a"}`), 0o644); err != nil {
@@ -67,9 +60,6 @@ func TestPoolCmdFiresExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestPoolCmdRejectsNothingBurgers: a file that names neither an action nor an entry is not a command.
-// Accepting one would hand the switch above it an empty key, and an empty key matches no entry — the
-// verdict would land on whatever the fallback picks.
 func TestPoolCmdRejectsNothingBurgers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cmd.json")
 	for _, js := range []string{`{}`, `{"src":"192.168.1.1"}`, `not json`, `{"ip":"1.1.1.1"}`} {
@@ -85,9 +75,6 @@ func TestPoolCmdRejectsNothingBurgers(t *testing.T) {
 	}
 }
 
-// TestWSPoolPinDefaultsToTheEdgeAxis: the panel's pin button has always meant "activate this EDGE", and
-// an unset axis must keep meaning that. Left empty it would look the key up in the SNI map, find nothing,
-// and the operator's pick would silently do nothing.
 func TestWSPoolPinDefaultsToTheEdgeAxis(t *testing.T) {
 	p := newWSPool([]string{"e1"}, snis("s1"), filepath.Join(t.TempDir(), "status.json"))
 	if err := os.WriteFile(p.cmdPath(), []byte(`{"key":"e1"}`), 0o644); err != nil {

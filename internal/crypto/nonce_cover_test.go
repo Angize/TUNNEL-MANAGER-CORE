@@ -6,16 +6,6 @@ import (
 	"testing"
 )
 
-// The frame is salt || mask(nonce) || ciphertext || tag, and the nonce is the only part with structure:
-// a per-session constant prefix followed by a counter that steps by exactly one. Everything after it is
-// AEAD output, indistinguishable from random without the key.
-//
-// The failure this file exists for is the one that leaves a WORKING tunnel: drop the mask and every
-// frame still seals, opens and carries traffic, while the wire grows a constant field and a counter a
-// watcher can lock onto. Nothing errors, nothing logs, throughput is unchanged. So the tests do not ask
-// whether it works -- they look at the bytes that go out.
-
-// wireNonce is the nonce field as it appears on the wire.
 func wireNonce(t *testing.T, s *Sealer, frame []byte) []byte {
 	t.Helper()
 	return frame[maskSaltLen : maskSaltLen+s.sendAEAD.NonceSize()]
@@ -31,7 +21,7 @@ func TestTheNonceNeverGoesOutInTheClear(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				// what the nonce WOULD look like unmasked, rebuilt from the sealer's own state
+
 				plain := make([]byte, ns)
 				copy(plain, cli.prefix)
 				binary.BigEndian.PutUint64(plain[ns-8:], uint64(i))
@@ -44,9 +34,6 @@ func TestTheNonceNeverGoesOutInTheClear(t *testing.T) {
 	}
 }
 
-// The prefix half of the nonce is CONSTANT for the life of a session. Unmasked, every frame of a
-// session would carry the same bytes at the same offset -- the single easiest thing for a filter to
-// key on. Masked with a fresh salt each frame, they must all differ.
 func TestTheSessionPrefixIsNotAConstantFieldOnTheWire(t *testing.T) {
 	cli, _ := ends(t, CipherAES256)
 	ns := cli.sendAEAD.NonceSize()
@@ -65,9 +52,6 @@ func TestTheSessionPrefixIsNotAConstantFieldOnTheWire(t *testing.T) {
 	}
 }
 
-// And the counter half must not step by one on the wire. A masked counter walks at random; an unmasked
-// one differs from its predecessor by exactly 1 every single time, which is a stronger signature than
-// the constant prefix because it survives any per-frame randomisation of the rest.
 func TestTheCounterDoesNotStepByOneOnTheWire(t *testing.T) {
 	cli, _ := ends(t, CipherAES256)
 	ns := cli.sendAEAD.NonceSize()
@@ -85,17 +69,13 @@ func TestTheCounterDoesNotStepByOneOnTheWire(t *testing.T) {
 		}
 		prev = cur
 	}
-	// a masked counter lands on prev+1 by chance with probability 2^-64 per frame
+
 	if steps > 0 {
 		t.Fatalf("the wire counter stepped by exactly one %d times in %d frames: it is not masked",
 			steps, frames)
 	}
 }
 
-// The bytes AFTER the nonce are the AEAD's own output and must be passed through untouched. Masking
-// them as well is the cost this change removes; masking them by accident on ONE side only would break
-// every frame, which the round trip catches -- but masking them on BOTH sides would work and simply
-// burn the cpu again, so check the actual bytes.
 func TestTheCiphertextIsNotMasked(t *testing.T) {
 	cli, srv := ends(t, CipherAES256)
 	ns := cli.sendAEAD.NonceSize()
@@ -104,9 +84,7 @@ func TestTheCiphertextIsNotMasked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Recover the nonce the way the receiver does, then re-seal the same plaintext under it: the
-	// ciphertext must come out byte-identical to what is on the wire, which is only true if the wire
-	// copy was never masked.
+
 	body := make([]byte, len(frame)-maskSaltLen)
 	copy(body, frame[maskSaltLen:])
 	if err := mask(srv.recvMask, frame[:maskSaltLen], body[:ns]); err != nil {
@@ -118,8 +96,6 @@ func TestTheCiphertextIsNotMasked(t *testing.T) {
 	}
 }
 
-// Both ends must cover the same region. If they ever disagree the frame simply fails to authenticate,
-// which is loud -- but this pins the pair so a change to one side cannot be made alone.
 func TestBothEndsCoverTheSameBytes(t *testing.T) {
 	for _, name := range ciphers {
 		t.Run(name, func(t *testing.T) {

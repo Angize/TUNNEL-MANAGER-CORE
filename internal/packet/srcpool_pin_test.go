@@ -7,12 +7,8 @@ import (
 	"testing"
 )
 
-// The carrier half of the bind_ip chain (main.pinSource is the other): a ONE-ENTRY source pool must
-// actually pin the source, on every carrier that has no separate bind. This is what lets bind_ip be
-// honoured on udp/raw/flux at all — the pool's gate is len>=1 precisely so a lone entry is a fixed
-// source. If any of these stopped seeding from the pool, bind_ip would be a silent no-op there again.
 func TestOneEntrySourcePoolPinsTheSource(t *testing.T) {
-	// A loopback address, so udp's real bind can succeed on any host.
+
 	const pin = "127.0.0.1"
 
 	t.Run("raw stamps the crafted header from it", func(t *testing.T) {
@@ -46,9 +42,6 @@ func TestOneEntrySourcePoolPinsTheSource(t *testing.T) {
 		}
 	})
 
-	// A fixed source must never be burned or rotated away: it is the only entry, so burning it would
-	// leave the pool with nothing and a rotation has nowhere to go. Both are the <2-entry guard in
-	// fail()/rotateOnce, and main.pinSource builds it with rotate 0 on top of that.
 	t.Run("it never moves", func(t *testing.T) {
 		p := NewPeerPool([]string{pin}, 0, "")
 		if addr, moved := p.nextEndpoint(true); moved {

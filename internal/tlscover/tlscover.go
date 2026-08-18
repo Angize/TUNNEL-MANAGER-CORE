@@ -1,16 +1,3 @@
-// Package tlscover gives a core TCP connection a REALITY-style TLS cover, so it not only looks like
-// HTTPS to passive DPI but survives ACTIVE probing — the censor connecting to the server itself and
-// comparing. The client speaks a Chrome-fingerprinted ClientHello (uTLS) with a PSK-authenticated token
-// hidden in the 32-byte legacy session id, which is normally random and therefore invisible:
-//
-//	token valid (our client)   the server terminates TLS itself and the core/PSK handshake runs inside
-//	token absent or invalid    the server transparently PROXIES the whole connection to the REAL
-//	                           dest:443 and relays bytes, so the prober gets that site's genuine
-//	                           certificate and real response
-//
-// So dest MUST be a real, reachable, unblocked HTTPS site — it is the cover the server borrows. Replays
-// are neutralised by a timestamp window plus a seen-ClientHello cache, and cannot complete the inner
-// PSK handshake anyway.
 package tlscover
 
 import (
@@ -38,16 +25,14 @@ import (
 )
 
 const (
-	authMagic  = "TNLR"            // 4 bytes; marks a genuine token after decryption
-	authWindow = 120               // seconds a token stays valid (replay bound)
-	maxRelays  = 256               // concurrent probe→dest relays cap
-	maxWaiting = 256               // probes queued for a relay slot
-	relayWait  = 10 * time.Second  // how long a queued probe waits for a slot
-	relayIdle  = 120 * time.Second // no byte either way for this long ⇒ tear the relay down
+	authMagic  = "TNLR"
+	authWindow = 120
+	maxRelays  = 256
+	maxWaiting = 256
+	relayWait  = 10 * time.Second
+	relayIdle  = 120 * time.Second
 )
 
-// ErrProbe means the connection was not an authenticated client and has been
-// handed off to the dest-proxy relay; the caller must abandon it (do not close).
 var ErrProbe = errors.New("tlscover: probe proxied to dest")
 
 var (
@@ -60,10 +45,6 @@ func authKey(psk string) []byte {
 	return k[:]
 }
 
-// sealToken builds the 32-byte session-id token: a fresh 8-byte random nonce carried in the
-// clear, followed by AEAD(magic4 || ts32) keyed by the PSK. The nonce is random per seal —
-// deriving it from the ClientHello random (as before) gave no per-message uniqueness guarantee
-// for the fixed-key AEAD. Layout: 8 nonce + (8 pt + 16 tag) = 32 bytes.
 func sealToken(psk string, ts int64) ([]byte, error) {
 	a, err := chacha20poly1305.New(authKey(psk))
 	if err != nil {
@@ -81,10 +62,6 @@ func sealToken(psk string, ts int64) ([]byte, error) {
 	return append(nonce8, a.Seal(nil, nonce[:], pt, nil)...), nil
 }
 
-// AuthWindowSecs is the clock skew the auth token tolerates, in seconds. Exported so the carrier can
-// name the real number when it reports the one symptom a skewed clock produces: a TLS handshake that
-// succeeds into the REAL cover site (the server's answer to an unopenable token, and to a probe)
-// while the core handshake behind it fails with nothing pointing at the clock.
 func AuthWindowSecs() int { return authWindow }
 
 func openToken(psk string, sid []byte) bool {
@@ -106,8 +83,6 @@ func openToken(psk string, sid []byte) bool {
 	return ts >= now-authWindow && ts <= now+authWindow
 }
 
-// ClientConn performs the Chrome-mimicking TLS handshake, embedding the auth
-// token so the server terminates locally instead of proxying us to dest.
 func ClientConn(raw net.Conn, sni, psk string, deadline time.Time) (net.Conn, error) {
 	if !deadline.IsZero() {
 		_ = raw.SetDeadline(deadline)
@@ -133,33 +108,23 @@ func ClientConn(raw net.Conn, sni, psk string, deadline time.Time) (net.Conn, er
 	return u, nil
 }
 
-// Server is the REALITY-style responder: it authenticates clients by the token
-// in their ClientHello and proxies everyone else to the real dest.
 type Server struct {
 	cert  *tls.Certificate
 	psk   string
-	dest  string // host:port of the real site to borrow
+	dest  string
 	relay chan struct{}
 	queue chan struct{}
-	idle  time.Duration // relay idle bound; a field only so tests can shorten it
+	idle  time.Duration
 
 	mu   sync.Mutex
-	seen map[[32]byte]int64 // session-id token -> expiry (anti-replay)
+	seen map[[32]byte]int64
 
-	// A dest we cannot reach makes the cover a LIE: every probe gets a bare close where a real site would
-	// have answered, which is the distinguisher the whole mechanism exists to remove. It used to fail
-	// silently, and on an Iran-side server an unreachable foreign cover domain is the normal case.
-	dialFail atomic.Int64 // unix nanos of the last line emitted
-	dialN    atomic.Int64 // failures accumulated since then
+	dialFail atomic.Int64
+	dialN    atomic.Int64
 }
 
-const dialFailEvery = 60 * time.Second // one line per minute, however fast the probes arrive
+const dialFailEvery = 60 * time.Second
 
-// noteDialFail throttles the "cover unreachable" line: a censor scanning the port makes this fail at probe
-// rate, and one line per failure would bury the journal that has to carry it.
-//
-// It re-implements internal/packet's sendErrLog on purpose: packet imports THIS package, so importing it
-// back would be an import cycle. Do not "de-duplicate" these two.
 func (sv *Server) noteDialFail(err error) {
 	sv.dialN.Add(1)
 	now := time.Now().UnixNano()
@@ -168,7 +133,7 @@ func (sv *Server) noteDialFail(err error) {
 		return
 	}
 	if !sv.dialFail.CompareAndSwap(prev, now) {
-		return // another goroutine is emitting this round
+		return
 	}
 	n := sv.dialN.Swap(0)
 	more := ""
@@ -179,8 +144,6 @@ func (sv *Server) noteDialFail(err error) {
 		"bare close instead of that site's real answer, so the cover proves nothing", sv.dest, err, more)
 }
 
-// NewServer builds a cover server that borrows destHost (its :443 is proxied to
-// for any non-authenticated connection). It does no I/O: see WarnIfDestUnreachable.
 func NewServer(psk, destHost string) (*Server, error) {
 	cert, err := SelfSignedCert(destHost)
 	if err != nil {
@@ -191,17 +154,8 @@ func NewServer(psk, destHost string) (*Server, error) {
 		idle: relayIdle, seen: map[[32]byte]int64{}}, nil
 }
 
-// WarnIfDestUnreachable probes dest once, in the background, and warns if it cannot be reached — so the
-// operator learns while they are still watching the tunnel come up instead of never.
-//
-// It is the CALLER's call and not part of NewServer, because only the caller knows dest is final: the
-// constructor doing it read sv.dest from a goroutine while a caller was still replacing that field, which
-// is a real data race (the tests inject a local dest exactly that way).
-//
-// A failure is NOT fatal. The carrier still carries real traffic; what is gone is the probe resistance, and
-// a cover site that is merely slow at boot must not stop a tunnel from starting.
 func (sv *Server) WarnIfDestUnreachable() {
-	dest := sv.dest // read on the CALLER's goroutine, before the probe one exists
+	dest := sv.dest
 	go func() {
 		c, err := net.DialTimeout("tcp", dest, 8*time.Second)
 		if err != nil {
@@ -214,24 +168,18 @@ func (sv *Server) WarnIfDestUnreachable() {
 	}()
 }
 
-// Handle reads the ClientHello and either returns a TLS conn (authenticated
-// client) or proxies the connection to dest and returns ErrProbe.
 func (sv *Server) Handle(raw net.Conn, deadline time.Time) (net.Conn, error) {
 	if !deadline.IsZero() {
 		_ = raw.SetDeadline(deadline)
 	}
-	// readClientHello returns the bytes it consumed even on error, so hello is
-	// always safe to replay to dest below.
+
 	hello, sid, err := readClientHello(raw)
 	if err == nil && openToken(sv.psk, sid) && sv.firstSight(sid) {
 		if !deadline.IsZero() {
 			_ = raw.SetDeadline(time.Time{})
 		}
 		pc := &prefixConn{Conn: raw, pre: hello}
-		// Pin TLS 1.3: our Chrome-fingerprinted client always offers it, and in
-		// 1.3 the server Certificate message is encrypted — so the throwaway
-		// self-signed cert is never visible to a passive observer (only the real
-		// dest's genuine cert, for proxied probes, is ever seen on the wire).
+
 		s := tls.Server(pc, &tls.Config{Certificates: []tls.Certificate{*sv.cert}, MinVersion: tls.VersionTLS13})
 		if !deadline.IsZero() {
 			_ = s.SetDeadline(deadline)
@@ -242,18 +190,11 @@ func (sv *Server) Handle(raw net.Conn, deadline time.Time) (net.Conn, error) {
 		_ = s.SetDeadline(time.Time{})
 		return s, nil
 	}
-	// Everything that is not a successfully-authenticated token — an unreadable hello (fragmented,
-	// multi-record, oversized, or non-TLS), an absent or invalid token, or a replay — MUST be proxied to
-	// dest, replaying whatever bytes we consumed. Dropping the connection here would hand a censor a
-	// distinguisher; a probe or a real browser has to see the genuine dest site instead.
+
 	sv.proxyToDest(raw, hello)
 	return nil, ErrProbe
 }
 
-// firstSight records a token (the ClientHello session-id) and reports whether it is new (a
-// replay — the same token in ANY hello, since the token now carries its own nonce rather than
-// binding to the hello random — returns false → the caller proxies it to dest, so a replayer
-// sees the real site rather than our termination).
 func (sv *Server) firstSight(token []byte) bool {
 	var k [32]byte
 	copy(k[:], token)
@@ -272,10 +213,6 @@ func (sv *Server) firstSight(token []byte) bool {
 	return true
 }
 
-// proxyToDest relays raw<->dest (prepending the buffered ClientHello) in a detached goroutine, bounded
-// by the relay cap. A full relay pool must NOT close the connection on the spot: an instant FIN straight
-// after the ClientHello is exactly the distinguisher Handle refuses to hand a censor. So a probe QUEUES
-// for a slot, and the relays are bounded by an IDLE timeout so slots recycle instead of being pinned.
 func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 	select {
 	case sv.queue <- struct{}{}:
@@ -284,10 +221,7 @@ func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 		return
 	}
 	go func() {
-		// LEAVE THE WAITING ROOM ON ENTERING SERVICE. Holding the queue token for the goroutine's whole life
-		// makes the queue inert: every relaying goroutine also holds one, so with both caps equal the queue is
-		// full exactly when the relay pool is, and a new probe is CLOSED ON THE SPOT — the instant FIN this
-		// exists to remove. The two semaphores only bound different things if a conn holds one at a time.
+
 		queued := true
 		leaveQueue := func() {
 			if queued {
@@ -308,14 +242,11 @@ func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 		defer func() { <-sv.relay }()
 		dst, err := net.DialTimeout("tcp", sv.dest, 8*time.Second)
 		if err != nil {
-			sv.noteDialFail(err) // the cover is only a cover while dest answers; say so instead of dying quiet
+			sv.noteDialFail(err)
 			raw.Close()
 			return
 		}
-		// Both legs re-arm their deadline before every read and write, so this is an IDLE bound and never a
-		// lifetime cap — a slow real download through the cover is untouched, while a silent connection
-		// releases its slot instead of waiting on dest's keepalive to decide for us. It also supersedes the
-		// handshake deadline Handle left on raw.
+
 		ri, di := &idleConn{Conn: raw, idle: sv.idle}, &idleConn{Conn: dst, idle: sv.idle}
 		if _, err := di.Write(hello); err != nil {
 			dst.Close()
@@ -331,9 +262,6 @@ func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 	}()
 }
 
-// idleConn re-arms its deadline before each operation. It embeds the net.Conn
-// INTERFACE on purpose: that keeps ReadFrom/WriteTo off the wrapper, so io.Copy
-// cannot splice past these methods and skip the deadlines.
 type idleConn struct {
 	net.Conn
 	idle time.Duration
@@ -349,19 +277,15 @@ func (c *idleConn) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 
-// readClientHello reads exactly one TLS handshake record (the ClientHello),
-// returns the raw bytes (for replay) plus the client random and session id.
 func readClientHello(c net.Conn) (buf, sid []byte, err error) {
-	// buf always holds every byte consumed from c, including on the error paths
-	// below, so the caller can replay them verbatim to dest (a rejected hello must
-	// still be proxied, never dropped).
+
 	hdr := make([]byte, 5)
 	n, err := io.ReadFull(c, hdr)
 	buf = hdr[:n]
 	if err != nil {
 		return buf, nil, err
 	}
-	if hdr[0] != 0x16 { // TLS handshake content type
+	if hdr[0] != 0x16 {
 		return buf, nil, errNotTLS
 	}
 	recLen := int(hdr[3])<<8 | int(hdr[4])
@@ -374,8 +298,7 @@ func readClientHello(c net.Conn) (buf, sid []byte, err error) {
 	if err != nil {
 		return buf, nil, err
 	}
-	// body: hs_type(1) hs_len(3) client_version(2) random(32) sid_len(1) sid...
-	// (the 32-byte random at body[6:38] is no longer consumed — sealToken uses a fresh per-seal nonce.)
+
 	if len(body) < 39 || body[0] != 0x01 {
 		return buf, nil, errBadHello
 	}
@@ -387,7 +310,6 @@ func readClientHello(c net.Conn) (buf, sid []byte, err error) {
 	return buf, sid, nil
 }
 
-// prefixConn replays pre before delegating reads to the wrapped conn.
 type prefixConn struct {
 	net.Conn
 	pre []byte
@@ -402,8 +324,6 @@ func (p *prefixConn) Read(b []byte) (int, error) {
 	return p.Conn.Read(b)
 }
 
-// SelfSignedCert makes a throwaway ECDSA certificate for host. Only our own
-// client (which does not verify) ever sees it; probes get the real dest's cert.
 func SelfSignedCert(host string) (*tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

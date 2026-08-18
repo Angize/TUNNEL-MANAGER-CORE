@@ -8,7 +8,6 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
-// mustPair returns the two ends of a tunnel (client seals c→s, server opens it).
 func mustPair(t *testing.T, psk string) (client, server Sealer) {
 	t.Helper()
 	c, err := crypto.NewSealer(crypto.CipherChaCha, psk, true)
@@ -45,8 +44,7 @@ func TestObfsSealOpenRoundTrip(t *testing.T) {
 }
 
 func TestObfsNoConstantPrefix(t *testing.T) {
-	// The whole sealed frame must look random: sealing the SAME plaintext twice
-	// must differ (advancing nonce + fresh mask salt), and no fixed leading byte.
+
 	c, _ := mustPair(t, "prefix-psk-abcdefabcdef")
 	a, _ := obfsSeal(c, typeData, []byte("hello"), 0)
 	b, _ := obfsSeal(c, typeData, []byte("hello"), 0)
@@ -61,7 +59,7 @@ func TestObfsNoConstantPrefix(t *testing.T) {
 func TestObfsTamperFails(t *testing.T) {
 	c, s := mustPair(t, "tamper-psk-0987654321")
 	sealed, _ := obfsSeal(c, typeData, []byte("secret payload"), 0)
-	sealed[len(sealed)-1] ^= 0xFF // flip a tag byte
+	sealed[len(sealed)-1] ^= 0xFF
 	if _, _, _, _, err := obfsOpen(s, sealed); err == nil {
 		t.Fatal("tampered frame opened without error")
 	}
@@ -77,7 +75,7 @@ func TestObfsWrongPSKFails(t *testing.T) {
 }
 
 func TestObfsPaddingVaries(t *testing.T) {
-	// Control frames get random padding, so sealed sizes should not be constant.
+
 	c, _ := mustPair(t, "pad-psk-777777777777")
 	sizes := map[int]bool{}
 	for i := 0; i < 64; i++ {
@@ -89,8 +87,6 @@ func TestObfsPaddingVaries(t *testing.T) {
 	}
 }
 
-// TestObfsOpenReportsSeq checks obfsOpen surfaces the sender's monotonically
-// increasing sequence number so the carrier can feed it to the replay window.
 func TestObfsOpenReportsSeq(t *testing.T) {
 	c, s := mustPair(t, "seq-obfs-psk-000000")
 	var prev uint64
@@ -108,9 +104,7 @@ func TestObfsOpenReportsSeq(t *testing.T) {
 }
 
 func TestObfsLengthKeystreamSymmetry(t *testing.T) {
-	// Masking a length with the sender's keystream and unmasking with a reader
-	// keystream seeded by the SAME salt must recover the original length, and
-	// the mask must actually change the bytes.
+
 	psk := "ks-psk-555555555555"
 	salt := bytes.Repeat([]byte{0x11}, obfsSaltLen)
 	w, err := newObfsStream(psk, salt)
@@ -132,8 +126,6 @@ func TestObfsLengthKeystreamSymmetry(t *testing.T) {
 	}
 }
 
-// TestRandUintBoundsAndUniformity checks the rejection-sampling helper stays in
-// range and is roughly uniform (no modulo bias toward the low end).
 func TestRandUintBoundsAndUniformity(t *testing.T) {
 	if v, _ := randUint(0); v != 0 {
 		t.Fatalf("randUint(0) = %d, want 0", v)
@@ -151,8 +143,7 @@ func TestRandUintBoundsAndUniformity(t *testing.T) {
 		}
 		counts[v]++
 	}
-	// Every bucket should be populated and near the expected mean; a modulo-biased
-	// generator would leave the top buckets measurably light. Allow a wide band.
+
 	exp := float64(N) / float64(max+1)
 	for i, c := range counts {
 		if float64(c) < exp*0.7 || float64(c) > exp*1.3 {

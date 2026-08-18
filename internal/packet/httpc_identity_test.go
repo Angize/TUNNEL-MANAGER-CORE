@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// TestPostLadderSendsChromesAcceptEncoding is the regression test for the POST ladder contradicting its
-// own fingerprint. The request claims Chrome twice over — the User-Agent and the uTLS JA3 — and then
-// offered `Accept-Encoding: gzip`, which Go's transport adds when the header is unset. No browser has
-// sent gzip alone in a decade, and cross-checking the two is exactly what CDN bot management does.
 func TestPostLadderSendsChromesAcceptEncoding(t *testing.T) {
 	var got http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -30,7 +26,6 @@ func TestPostLadderSendsChromesAcceptEncoding(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// What the SERVER saw, not what we set — Go's transport is what added the old value.
 	if ae := got.Get("Accept-Encoding"); ae != chromeAcceptEncoding {
 		t.Fatalf("the edge saw Accept-Encoding %q; want Chrome's %q. Go adds its own \"gzip\" whenever the "+
 			"header is unset, which contradicts the Chrome UA and JA3 on the same request", ae, chromeAcceptEncoding)
@@ -48,10 +43,6 @@ func TestPostLadderSendsChromesAcceptEncoding(t *testing.T) {
 	}
 }
 
-// TestDownstreamGetSendsNoOrigin is the other half. Chrome appends Origin for a CORS request and
-// otherwise only for methods other than GET and HEAD, so it sends it on the POST above and NEVER on a
-// same-origin GET. Setting it on both puts a combination no Chrome produces on the most distinctive
-// request this carrier makes — one long-lived GET per session, right beside Sec-Fetch-Site: same-origin.
 func TestDownstreamGetSendsNoOrigin(t *testing.T) {
 	var got http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +66,7 @@ func TestDownstreamGetSendsNoOrigin(t *testing.T) {
 		t.Fatalf("the edge saw Origin=%q on a same-origin GET — no Chrome sends that, and this is the "+
 			"one request per session that stays open", o)
 	}
-	// The rest of the identity must still be there: this is not a licence to drop the block.
+
 	if got.Get("User-Agent") != chromeUA {
 		t.Fatalf("User-Agent = %q, want %q", got.Get("User-Agent"), chromeUA)
 	}
@@ -89,10 +80,6 @@ func TestDownstreamGetSendsNoOrigin(t *testing.T) {
 	}
 }
 
-// TestClientHintsMatchTheUA keeps the two halves of one identity in step. A sec-ch-ua brand list
-// naming a different Chrome major than the User-Agent — or a platform that disagrees with it — is a
-// fresh contradiction in place of the one being fixed, and it is the same class of drift
-// TestUserAgentMatchesTLSParrot exists to catch on the TLS side.
 func TestClientHintsMatchTheUA(t *testing.T) {
 	major := chromeUA[strings.Index(chromeUA, "Chrome/")+len("Chrome/"):]
 	major = major[:strings.Index(major, ".")]
@@ -108,7 +95,7 @@ func TestClientHintsMatchTheUA(t *testing.T) {
 	if !strings.Contains(hints["sec-ch-ua"], `"Chromium";v="`+major+`"`) {
 		t.Fatalf("sec-ch-ua %q must name the same Chromium major, %s", hints["sec-ch-ua"], major)
 	}
-	// chromeUA says Windows NT 10.0; the platform hint has to agree.
+
 	if strings.Contains(chromeUA, "Windows NT") != (hints["sec-ch-ua-platform"] == `"Windows"`) {
 		t.Fatalf("sec-ch-ua-platform %q disagrees with the platform in the User-Agent %q",
 			hints["sec-ch-ua-platform"], chromeUA)
@@ -118,9 +105,6 @@ func TestClientHintsMatchTheUA(t *testing.T) {
 	}
 }
 
-// TestGrpcModeStillSendsNoBrowserHeaders pins that the block above did not leak into grpc mode. A
-// gRPC call is not something a browser can make, so Chrome client hints on an application/grpc
-// request would be the same lie told the other way round.
 func TestGrpcModeStillSendsNoBrowserHeaders(t *testing.T) {
 	req, err := http.NewRequest("POST", "https://edge.example/x", nil)
 	if err != nil {
@@ -141,10 +125,6 @@ func TestGrpcModeStillSendsNoBrowserHeaders(t *testing.T) {
 	}
 }
 
-// TestIdentityEncodingIsNotAFailure pins the downstream Content-Encoding guard from both sides. The
-// guard is necessary — setting Accept-Encoding by hand turns off Go's transparent decompression, and the
-// downstream body IS the data plane — but "identity" is the spec's own name for "not encoded", so
-// refusing it turns a legal, perfectly decodable response into a tunnel that will not come up.
 func TestIdentityEncodingIsNotAFailure(t *testing.T) {
 	for _, ok := range []string{"", "identity", "IDENTITY", " identity ", "Identity"} {
 		if downstreamUnusable(ok) {

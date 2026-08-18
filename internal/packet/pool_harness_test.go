@@ -12,10 +12,6 @@ import (
 
 const probePSK = "probe-shared-pre-shared-key-1234567890"
 
-// probePair brings up a REAL udp client/server pair bound on two loopback IPs at one port, with a
-// destination rotation pool on the client (a1, a2, then any extra entries). The client dials a1, so
-// everything past it is an endpoint the live carrier is not on. It returns only once the peer has
-// answered, so a test that then asserts something about a live tunnel really has one.
 func probePair(t *testing.T, ka time.Duration, tag string, extra ...string) (cli, srv *UDP, a1, a2 string, cliCtrl, srvCtrl *os.File) {
 	t.Helper()
 	srvDev, sc := tunPair(t, tag+"s")

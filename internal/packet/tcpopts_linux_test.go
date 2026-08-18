@@ -10,12 +10,8 @@ import (
 	"testing"
 )
 
-// liveTCPConn returns a connected loopback *net.TCPConn with data already exchanged, so the socket is
-// ESTABLISHED and its TCP_INFO reports the options the handshake actually negotiated.
 func liveTCPConn(t *testing.T) *net.TCPConn { return liveTCPConnRcvBuf(t, 0) }
 
-// liveTCPConnRcvBuf is liveTCPConn with an explicit SO_RCVBUF, which is what decides the window scale
-// the client announces in its SYN and the size of the window it then advertises.
 func liveTCPConnRcvBuf(t *testing.T, rcvbuf int) *net.TCPConn {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -65,7 +61,6 @@ func liveTCPConnRcvBuf(t *testing.T, rcvbuf int) *net.TCPConn {
 	return c.(*net.TCPConn)
 }
 
-// socketTSVal reads the TSval the kernel would stamp on conn's next segment.
 func socketTSVal(t *testing.T, conn *net.TCPConn) (uint32, bool) {
 	t.Helper()
 	raw, err := conn.SyscallConn()
@@ -81,8 +76,6 @@ func socketTSVal(t *testing.T, conn *net.TCPConn) (uint32, bool) {
 	return uint32(v), ok
 }
 
-// socketWindow reads, independently of tcpDecoyShape, the window field the kernel would stamp on conn's
-// next segment: its advertised receive window shifted down by the scale the peer applies to it.
 func socketWindow(t *testing.T, conn *net.TCPConn) (uint16, bool) {
 	t.Helper()
 	raw, err := conn.SyscallConn()
@@ -108,11 +101,6 @@ func socketWindow(t *testing.T, conn *net.TCPConn) (uint16, bool) {
 	return win, ok
 }
 
-// TestTCPFakeSegsCarryTheConnectionsOptions drives the REAL decoy builder on a REAL established socket
-// and inspects the bytes it would inject. Linux stamps NOP,NOP,Timestamp on every data segment of a
-// timestamped connection and a window that moves with its receive buffer, so a decoy forged on that same
-// 4-tuple must do both: a bare 20-byte header beside the kernel's 32-byte ones, or a constant 0xffff
-// window beside a real one, separates decoy from real on header shape alone.
 func TestTCPFakeSegsCarryTheConnectionsOptions(t *testing.T) {
 	conn := liveTCPConn(t)
 	before, ok := socketTSVal(t, conn)
@@ -148,8 +136,7 @@ func TestTCPFakeSegsCarryTheConnectionsOptions(t *testing.T) {
 		} else if win == 0xffff {
 			t.Fatalf("decoy %d: window is the 0xffff maximum, so this test cannot tell the fix from the bug", i)
 		}
-		// The socket's own clock, read either side of the build: a decoy stamped with anything else
-		// would sit outside the millisecond window the real segments of this burst carry.
+
 		if tsval := binary.BigEndian.Uint32(opts[4:8]); tsval-before > after-before {
 			t.Fatalf("decoy %d: TSval %d is outside the connection's own clock window [%d,%d] — the decoy "+
 				"must carry this socket's timestamp, not an invented one", i, tsval, before, after)
@@ -157,7 +144,7 @@ func TestTCPFakeSegsCarryTheConnectionsOptions(t *testing.T) {
 		if binary.BigEndian.Uint32(opts[8:12]) == 0 {
 			t.Fatalf("decoy %d: TSecr is zero, which no data segment of an established connection sends", i)
 		}
-		// The checksum has to cover the options too, or the decoy is dropped before any DPI reads it.
+
 		if s := l4Checksum(net.IP(ip[12:16]), net.IP(ip[16:20]), protoTCP, seg); s != 0 {
 			t.Fatalf("decoy %d: TCP checksum does not verify (%#04x) over the 32-byte header", i, s)
 		}
@@ -167,9 +154,6 @@ func TestTCPFakeSegsCarryTheConnectionsOptions(t *testing.T) {
 	}
 }
 
-// TestTCPDecoyShapeWithoutASocket covers the fallback the builder needs when the connection has no
-// reachable fd: httpc hands sendTCPFakes a synthetic conn. Nothing can be learned about the real
-// segments there, so no options and the maximum window are all that is left.
 func TestTCPDecoyShapeWithoutASocket(t *testing.T) {
 	c1, c2 := net.Pipe()
 	defer c1.Close()
@@ -183,11 +167,6 @@ func TestTCPDecoyShapeWithoutASocket(t *testing.T) {
 	}
 }
 
-// TestTCPDecoyShapeIsPerConnection pins that the window is READ, not substituted: two connections dialled
-// with very different receive buffers must get different decoy windows, and neither may be the 0xffff
-// constant. It does NOT settle which nibble of the byte holding tcpi_snd_wscale:4 / tcpi_rcv_wscale:4 is
-// the receive scale — every in-process check of that is circular, since the only other reader of the
-// field is this package. The wire is the arbiter there, and the PR carries the capture.
 func TestTCPDecoyShapeIsPerConnection(t *testing.T) {
 	if _, ok := socketWindow(t, liveTCPConn(t)); !ok {
 		t.Skip("this kernel reports no receive window")
@@ -204,9 +183,6 @@ func TestTCPDecoyShapeIsPerConnection(t *testing.T) {
 	}
 }
 
-// TestRawTCPProfileCarriesLiveFlowShape pins the wire shape the raw carrier now presents: a real
-// timestamped flow and a SYN opener, instead of the old optionless 20-byte data segment with no
-// handshake. A regression toward that bare header should turn THIS red.
 func TestRawTCPProfileCarriesLiveFlowShape(t *testing.T) {
 	src, dst := net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 1, 2)
 	const tsval, tsecr = 0x01020304, 0x0a0b0c0d
@@ -231,9 +207,6 @@ func TestRawTCPProfileCarriesLiveFlowShape(t *testing.T) {
 	}
 }
 
-// TestBuildTCPSegRejectsAMalformedOptionBlock pins the safety rule: the data offset must always describe
-// the bytes actually behind it. A block that is not a whole number of words, or longer than the field can
-// address, is dropped whole rather than stamped into a header that lies about its own length.
 func TestBuildTCPSegRejectsAMalformedOptionBlock(t *testing.T) {
 	src, dst := net.IPv4(10, 0, 0, 1), net.IPv4(10, 0, 1, 2)
 	for _, tc := range []struct {

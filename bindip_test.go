@@ -6,23 +6,16 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/packet"
 )
 
-// pinsByBind is a tcp/ws/http-shaped carrier: it pins a source itself.
 type pinsByBind struct{ got string }
 
 func (p *pinsByBind) SetSourceIP(ip string) { p.got = ip }
 
-// pinsByPool is a udp/raw/flux-shaped carrier: no separate bind, only a source pool.
 type pinsByPool struct{ got *packet.PeerPool }
 
 func (p *pinsByPool) SetSourcePool(sp *packet.PeerPool) { p.got = sp }
 
-// pinsNothing is a dns-shaped carrier: it can pin no source at all.
 type pinsNothing struct{}
 
-// bind_ip must reach EVERY carrier that can honour it. It was implemented only for the TCP family: the
-// type assertion had no else and the "binding outbound source IP" log line lived inside its successful
-// branch, so on udp/raw/flux the knob was a silent no-op while the panel showed the node's registered
-// address. The node stamps bind_ip from local_ip on every client core tunnel.
 func TestBindIPReachesEveryCarrierThatCanHonourIt(t *testing.T) {
 	const ip = "203.0.113.9"
 
@@ -44,8 +37,7 @@ func TestBindIPReachesEveryCarrierThatCanHonourIt(t *testing.T) {
 		if c.got == nil {
 			t.Fatal("no source pool was installed, so the kernel still chooses the source")
 		}
-		// That a one-entry pool really pins the source on udp/raw/flux is the carrier's half of the
-		// chain: packet.TestOneEntrySourcePoolPinsTheSource.
+
 	})
 
 	t.Run("an explicit src_ips pool supersedes it", func(t *testing.T) {

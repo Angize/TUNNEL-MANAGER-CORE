@@ -18,8 +18,6 @@ import (
 	"golang.org/x/net/http2"
 )
 
-// echoHTTPC is a minimal http-carrier server: it reassembles the client's seq-tagged upstream POSTs
-// into an ordered byte stream and echoes it back on the session's long-lived downstream GET.
 func echoHTTPC() *httptest.Server {
 	type sess struct {
 		pr   *io.PipeReader
@@ -67,7 +65,7 @@ func echoHTTPC() *httptest.Server {
 		fl := w.(http.Flusher)
 		w.WriteHeader(200)
 		fl.Flush()
-		go func() { <-r.Context().Done(); s.pw.Close() }() // client gone -> unblock the read loop
+		go func() { <-r.Context().Done(); s.pw.Close() }()
 		buf := make([]byte, 4096)
 		for {
 			n, e := s.pr.Read(buf)
@@ -83,15 +81,11 @@ func echoHTTPC() *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
-// TestHTTPCProbeUsesRealEstablish locks in the HTTP-carrier probe fix: probeEdgeFull must run a REAL
-// httpc session, which validates the origin's 200, not a TLS-only reachability check. A CDN terminates
-// TLS for any of its anycast IPs, so a dead origin behind it completes TCP+TLS yet 502s the establish —
-// which a TLS-only probe falsely heals. Plain HTTP isolates it: front reachable, origin dead.
 func TestHTTPCProbeUsesRealEstablish(t *testing.T) {
 	good := echoHTTPC()
 	defer good.Close()
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway) // reachable front (TCP+TLS OK), dead origin (502 on establish)
+		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer bad.Close()
 
@@ -107,8 +101,6 @@ func TestHTTPCProbeUsesRealEstablish(t *testing.T) {
 	}
 }
 
-// TestHTTPCGrpcProbeHealthyOnRealOrigin proves the same real-establish probe reports healthy for a
-// LIVE grpc origin — the exact carrier the operator runs — so the fix doesn't over-burn a good grpc edge.
 func TestHTTPCGrpcProbeHealthyOnRealOrigin(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	srvDev, _ := tunPair(t, "xhgprobe")
@@ -141,7 +133,6 @@ func TestHTTPCCarrierRoundTrip(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// write several framed-ish chunks upstream; expect them echoed (in order) on the downstream.
 	msgs := [][]byte{[]byte("hello http"), []byte("second frame"), make([]byte, 5000)}
 	for i := range msgs[2] {
 		msgs[2][i] = byte(i)
@@ -169,8 +160,6 @@ func TestHTTPCCarrierRoundTrip(t *testing.T) {
 	t.Logf("httpc round-tripped %d bytes both ways", len(got))
 }
 
-// httpcInject drives one packet each way through a live httpc tunnel and asserts it arrives
-// intact — the same end-to-end path a node runs (handshake, seal/open, TUN both directions).
 func httpcInject(t *testing.T, cliCtrl, srvCtrl *os.File) {
 	t.Helper()
 	pkt1 := bytes.Repeat([]byte{0xC1}, 200)
@@ -196,13 +185,8 @@ func httpcInject(t *testing.T, cliCtrl, srvCtrl *os.File) {
 	}
 }
 
-// TestTunnelHTTPCPost runs a full server<->client httpc tunnel in POST-ladder mode over a real plain
-// HTTP/1.1 socket and asserts a packet traverses each way. It is the regression test for the server
-// running wsServerHandshake on an HTTP-carrier conn (b.ws is set for httpc): the client speaks core
-// frames directly over the GET/POST pair, so a WS handshake there connects but passes no data.
 func TestTunnelHTTPCPost(t *testing.T) { testTunnelHTTPC(t, "post", false) }
 
-// TestTunnelHTTPCPostObfs is the same with the length-mask obfs handshake in play.
 func TestTunnelHTTPCPostObfs(t *testing.T) { testTunnelHTTPC(t, "post", true) }
 
 func testTunnelHTTPC(t *testing.T, mode string, obfs bool) {
@@ -217,7 +201,7 @@ func testTunnelHTTPC(t *testing.T, mode string, obfs bool) {
 	if err != nil {
 		t.Fatalf("ListenHTTPC: %v", err)
 	}
-	// single-edge http client over plain HTTP; host defaults to the dial addr.
+
 	cli, err := DialHTTPC(addr, cliDev, ka, obfs, true, psk, cipher, "", "/", false, nil, mode)
 	if err != nil {
 		t.Fatalf("DialHTTPC: %v", err)
@@ -229,9 +213,6 @@ func testTunnelHTTPC(t *testing.T, mode string, obfs bool) {
 	httpcInject(t, cliCtrl, srvCtrl)
 }
 
-// TestGrpcFraming round-trips payloads through the gRPC message framing (writer -> reader) with a
-// small read buffer, so it exercises the deframer's leftover-buffer path (a message split across
-// several Reads) and the Hunk wrap/unwrap.
 func TestGrpcFraming(t *testing.T) {
 	var buf bytes.Buffer
 	w := &grpcFramingWriter{w: &buf}
@@ -245,7 +226,7 @@ func TestGrpcFraming(t *testing.T) {
 	}
 	r := &grpcDeframingReader{r: &buf}
 	got := make([]byte, 0, len(want))
-	tmp := make([]byte, 128) // small on purpose: forces a 5000-byte payload across many reads
+	tmp := make([]byte, 128)
 	for len(got) < len(want) {
 		n, err := r.Read(tmp)
 		got = append(got, tmp[:n]...)
@@ -258,9 +239,6 @@ func TestGrpcFraming(t *testing.T) {
 	}
 }
 
-// TestTunnelHTTPCGrpc runs a full tunnel in grpc mode: one full-duplex request presenting as a
-// gRPC call (Content-Type application/grpc + gRPC framing) over an HTTP/2 TLS edge. Proves the
-// gRPC-framed stream round-trips a packet each way.
 func TestTunnelHTTPCGrpc(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"
@@ -291,9 +269,6 @@ func TestTunnelHTTPCGrpc(t *testing.T) {
 	httpcInject(t, cliCtrl, srvCtrl)
 }
 
-// TestHTTPCServerH2C verifies the HTTP-carrier server accepts an HTTP/2 cleartext (h2c) connection — the
-// leg a CDN uses to reach the origin for gRPC. A prior-knowledge h2c client sends a probe (bad
-// sid) and must get an HTTP/2 404 back, proving h2c is served on the plain listener.
 func TestHTTPCServerH2C(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	srvDev, _ := tunPair(t, "h2csrv")
@@ -306,9 +281,9 @@ func TestHTTPCServerH2C(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	hc := &http.Client{Transport: &http2.Transport{
-		AllowHTTP: true, // permit http:// (cleartext) with prior-knowledge h2c
+		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, network, addr) // plaintext, no TLS
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		},
 	}}
 	resp, err := hc.Get("http://" + srv.ln.Addr().String() + "/?s=notavalidsessionid")
@@ -324,9 +299,6 @@ func TestHTTPCServerH2C(t *testing.T) {
 	}
 }
 
-// TestSourceIPBind proves the client dialer binds its outbound socket to the configured source
-// IP: a server on 127.0.0.1 must see the connection arrive FROM 127.0.0.2 (a loopback alias),
-// not from 127.0.0.1. This is what pins egress to a node's own IP on a multi-IP host.
 func TestSourceIPBind(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -344,7 +316,7 @@ func TestSourceIPBind(t *testing.T) {
 		c.Close()
 	}()
 	b := &TCP{bindIP: "127.0.0.2"}
-	c, err := b.dialer(2 * time.Second).Dial("tcp", ln.Addr().String())
+	c, err := b.dialer(2*time.Second).Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("dial with bound source: %v", err)
 	}
@@ -359,12 +331,8 @@ func TestSourceIPBind(t *testing.T) {
 	}
 }
 
-// TestDoWithHeaderTimeout covers the establishment header-wait bound added for the pool-freeze fix:
-// a server that stalls before sending headers must make doWithHeaderTimeout give up after ~d and
-// return the timeout error (not block forever, which is what froze rotation and manual pin), while
-// a server that responds immediately returns the real response verbatim.
 func TestDoWithHeaderTimeout(t *testing.T) {
-	// fast path: an immediate response returns with no error.
+
 	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
@@ -379,8 +347,6 @@ func TestDoWithHeaderTimeout(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// stall path: the handler never writes headers (holds until the client goes away). The bound
-	// must fire after ~d and surface the timeout error, not hang.
 	served := make(chan struct{})
 	stall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(served)
@@ -399,8 +365,8 @@ func TestDoWithHeaderTimeout(t *testing.T) {
 	if el := time.Since(start); el > 2*time.Second {
 		t.Fatalf("stall path took %v (should be ~200ms)", el)
 	}
-	<-served     // the request did reach the server before we bailed
-	cancel()     // release the parked handler + the buffered background Do goroutine (no leak)
+	<-served
+	cancel()
 }
 
 func TestHTTPCConnReadDeadline(t *testing.T) {
@@ -409,7 +375,7 @@ func TestHTTPCConnReadDeadline(t *testing.T) {
 	c.SetReadDeadline(time.Now().Add(80 * time.Millisecond))
 	start := time.Now()
 	buf := make([]byte, 8)
-	_, err := c.Read(buf) // pipe never fed; the idle timer must close it and unblock
+	_, err := c.Read(buf)
 	if err == nil {
 		t.Fatal("expected read error after deadline")
 	}

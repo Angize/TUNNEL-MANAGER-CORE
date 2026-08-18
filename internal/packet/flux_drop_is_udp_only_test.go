@@ -8,14 +8,6 @@ import (
 	"testing"
 )
 
-// A flux anti-leak rule is a DROP in the `raw` table's PREROUTING chain — the first kernel hook, ahead
-// of every socket. So whatever it matches is black-holed for the WHOLE host, not just for flux, and a
-// co-located tunnel to the same peer whose traffic falls inside that match silently carries nothing:
-// no event, no log, no probe reason, on a network that measures healthy.
-//
-// The only shape that cannot do that is "UDP on a port from flux's own pool", because no other
-// transport receives on those. This asserts that shape directly for every carrier, so a match that
-// widens to a bare protocol number, an all-ports UDP rule, or a rule with no source scope cannot ship.
 func TestFluxDropRulesMatchOnlyItsOwnUDPPorts(t *testing.T) {
 	peer := net.ParseIP("203.0.113.9")
 	for _, c := range []struct {
@@ -41,11 +33,6 @@ func TestFluxDropRulesMatchOnlyItsOwnUDPPorts(t *testing.T) {
 	}
 }
 
-// The pools themselves are the other half: a rule is only safe because the port it drops is one no
-// other tunnel receives on. The panel hands core/fou/l2tpv3 tunnels 20000+id, vxlan 4789, and the dns
-// transport is fixed at 53 — a pool entry inside any of those would black-hole a real tunnel through
-// the very same PREROUTING rule. An empty pool is the opposite failure: zero rules installed, so the
-// kernel port-unreachables every frame flux receives.
 func TestFluxPortPoolsCannotCollideWithATunnelPort(t *testing.T) {
 	for name, pool := range map[string][]uint16{"udp": fluxDportPool, "stun": fluxStunDports} {
 		if len(pool) == 0 {

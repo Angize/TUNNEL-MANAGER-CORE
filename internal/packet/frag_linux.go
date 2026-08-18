@@ -8,29 +8,19 @@ import (
 	"syscall"
 )
 
-// disorderTTL is the default TTL for a disorder/fake head or decoy segment when none is configured:
-// low enough to expire before the server (so the on-path DPI, not the server, ingests it) yet high
-// enough to pass the first few hops where a DPI usually sits.
 const disorderTTL = 4
 
-// TCP_REPAIR socket options (stable Linux ABI). They let us READ the connection's current send/recv
-// sequence numbers without disturbing it — needed so a fake segment can overlap the real ClientHello
-// at the exact sequence a stateful DPI reassembles on. We only read; we never rewind or write.
 const (
-	optTCPRepair      = 19 // TCP_REPAIR
-	optTCPRepairQueue = 20 // TCP_REPAIR_QUEUE
-	optTCPQueueSeq    = 21 // TCP_QUEUE_SEQ
-	queueRecv         = 1  // TCP_RECV_QUEUE (kernel enum: NO_QUEUE=0, RECV=1, SEND=2)
-	queueSend         = 2  // TCP_SEND_QUEUE
+	optTCPRepair      = 19
+	optTCPRepairQueue = 20
+	optTCPQueueSeq    = 21
+	queueRecv         = 1
+	queueSend         = 2
 
-	// The two ways OUT of repair mode, which the kernel does NOT treat alike:
-	repairOff        = 0  // TCP_REPAIR_OFF — also sends a window probe (a bare ACK) right away
-	repairOffNoProbe = -1 // TCP_REPAIR_OFF_NO_WP — same, minus the probe. What we want; see readSeqs.
+	repairOff        = 0
+	repairOffNoProbe = -1
 )
 
-// ttlOpt returns the (level, option) pair for the hop-limit socket option of the connection's
-// address family: IP_TTL for IPv4, IPV6_UNICAST_HOPS for IPv6. Using the IPv4 pair on an AF_INET6
-// socket fails, which would silently disable disorder on an IPv6 edge.
 func (f *fragConn) ttlOpt() (int, int) {
 	if ra, ok := f.Conn.RemoteAddr().(*net.TCPAddr); ok && ra.IP.To4() == nil && ra.IP.To16() != nil {
 		return syscall.IPPROTO_IPV6, syscall.IPV6_UNICAST_HOPS
@@ -38,10 +28,6 @@ func (f *fragConn) ttlOpt() (int, int) {
 	return syscall.IPPROTO_IP, syscall.IP_TTL
 }
 
-// writeDisorder sends the HEAD segment at a low TTL so it dies in transit — an on-path DPI ingests it but
-// the server never does; the kernel then retransmits it at the normal TTL, so the server reassembles the
-// real ClientHello while the DPI saw the segments out of order. It reaches under the TLS conn to the raw
-// fd to set the hop limit per segment. Falls back to a plain split when the raw fd is unavailable.
 func (f *fragConn) writeDisorder(p []byte, at int) (int, error) {
 	sc, ok := f.Conn.(syscall.Conn)
 	if !ok {
@@ -65,12 +51,12 @@ func (f *fragConn) writeDisorder(p []byte, at int) (int, error) {
 		}
 		syscall.SetsockoptInt(int(fd), level, opt, ttl)
 	}); cerr != nil {
-		f.degraded("setsockopt(TTL): " + cerr.Error()) // e.g. a container without the capability
-		return f.writeSplit(p, at)                     // at least split
+		f.degraded("setsockopt(TTL): " + cerr.Error())
+		return f.writeSplit(p, at)
 	}
-	n1, werr := f.Conn.Write(p[:at]) // head flushed at the low TTL -> expires before the server
+	n1, werr := f.Conn.Write(p[:at])
 	_ = raw.Control(func(fd uintptr) {
-		syscall.SetsockoptInt(int(fd), level, opt, orig) // restore for the tail + retransmit
+		syscall.SetsockoptInt(int(fd), level, opt, orig)
 	})
 	if werr != nil {
 		return n1, werr
@@ -79,20 +65,13 @@ func (f *fragConn) writeDisorder(p []byte, at int) (int, error) {
 	return n1 + n2, werr
 }
 
-// readSeqs briefly enters TCP_REPAIR mode on the (idle, established) socket at the ClientHello point
-// to read the send and receive sequence numbers, then leaves it. Returns ok=false if any step
-// fails. Read-only: it never changes a queue's contents or sequence, so it does not disturb the
-// connection (this is the CRIU checkpoint path, done here on a connection with no in-flight data).
 func readSeqs(raw syscall.RawConn) (snd, rcv uint32, ok bool) {
 	_ = raw.Control(func(fd uintptr) {
 		f := int(fd)
 		if syscall.SetsockoptInt(f, syscall.IPPROTO_TCP, optTCPRepair, 1) != nil {
 			return
 		}
-		// -1, not 0. The kernel treats them differently on the way OUT of repair mode: 0 also calls
-		// tcp_send_window_probe(), which on an ESTABLISHED socket transmits a bare ACK — an extra exchange
-		// between the handshake and the ClientHello, on exactly the connections trying not to stand out.
-		// Falling back to 0 if -1 is refused is still right: only this call takes the socket out of repair.
+
 		defer func() {
 			if syscall.SetsockoptInt(f, syscall.IPPROTO_TCP, optTCPRepair, repairOffNoProbe) != nil {
 				syscall.SetsockoptInt(f, syscall.IPPROTO_TCP, optTCPRepair, repairOff)
@@ -113,22 +92,13 @@ func readSeqs(raw syscall.RawConn) (snd, rcv uint32, ok bool) {
 	return
 }
 
-// writeFake injects a fake ClientHello — a copy of the real one with the SNI overwritten by a decoy — as
-// a raw TCP segment at the SAME sequence, with a deliberately BAD TCP checksum so the server drops it. A
-// reassembling DPI resolves the overlap to the decoy and clears the flow; the server gets the real one,
-// written right after. AF_PACKET frames carry CHECKSUM_NONE, so TX offload cannot repair the checksum.
 func (f *fragConn) writeFake(p []byte, at int) (int, error) {
-	// Build the decoy FIRST: it depends on nothing about the socket, and the one case that cannot
-	// produce a decoy at all should not poke TCP_REPAIR or open an AF_PACKET socket on the way to
-	// finding that out.
+
 	fake := make([]byte, len(p))
 	copy(fake, p)
 	i := bytes.Index(fake, []byte(f.host))
 	if i < 0 {
-		// The hostname is not in the ClientHello in cleartext. With nothing to overwrite, the "decoy" would be
-		// a BYTE-IDENTICAL copy injected at the same sequence with a corrupt checksum: zero benefit, and a
-		// duplicate segment with a bad checksum is itself a signature. f.ech separates the two causes — under
-		// ECH there is nothing left to hide, without it the real SNI is on the wire.
+
 		why := "the hostname is not in the ClientHello in cleartext"
 		if f.ech {
 			why += " (ECH encrypts it)"
@@ -148,7 +118,7 @@ func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 		return f.writeDisorder(p, at)
 	}
 	src, dst := la.IP.To4(), ra.IP.To4()
-	if src == nil || dst == nil { // IPv6 -> the raw injector can't build it; disorder is the next best
+	if src == nil || dst == nil {
 		f.fakeDegraded("the edge is IPv6 and the decoy injector builds IPv4 only")
 		return f.writeDisorder(p, at)
 	}
@@ -164,8 +134,7 @@ func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 	}
 	snd, rcv, ok := readSeqs(raw)
 	if !ok {
-		// TCP_REPAIR needs CAP_NET_ADMIN. Without the sequence numbers the decoy cannot be placed at
-		// the same offset as the real ClientHello, which is the whole mechanism.
+
 		f.fakeDegraded("TCP_REPAIR could not read the connection's sequence numbers (needs CAP_NET_ADMIN)")
 		return f.writeDisorder(p, at)
 	}
@@ -175,14 +144,12 @@ func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 		return f.writeDisorder(p, at)
 	}
 	defer inj.close()
-	// The kernel writes the real ClientHello through this same socket a few lines down, so the decoy has
-	// to carry the header shape that segment will carry, or the two are told apart on data offset and on
-	// a window no real segment holds constant.
+
 	opts, window := tcpDecoyShape(f.Conn)
 	seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), snd, rcv, tcpPshAck, window, opts, fake)
-	badTCPChecksum(seg) // the SERVER drops the fake (bad L4 checksum); the DPI still ingests it
+	badTCPChecksum(seg)
 	if ip := buildIP4Ext(src, dst, protoTCP, f.fakeSegTTL(), false, seg); ip != nil {
 		f.dsSend.note("tcp/sni-fake", inj.sendTo(dst, ip))
 	}
-	return f.Conn.Write(p) // the real ClientHello, whole, at the same sequence (socket untouched)
+	return f.Conn.Write(p)
 }

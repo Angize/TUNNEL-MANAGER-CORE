@@ -8,7 +8,6 @@ import (
 	"testing"
 )
 
-// TestNewDesyncCfgDefaults locks in the defaulting (mirrors the node/panel defaults).
 func TestNewDesyncCfgDefaults(t *testing.T) {
 	if d := newDesyncCfg(false, 9, 9, "both"); d.on {
 		t.Fatal("off flag must yield the zero (off) config regardless of other args")
@@ -25,8 +24,6 @@ func TestNewDesyncCfgDefaults(t *testing.T) {
 	}
 }
 
-// TestDesyncSpecs checks the per-decoy header knobs for each mode: a ttl decoy keeps a live
-// checksum + the low TTL; a badsum decoy keeps a normal TTL; "both" alternates.
 func TestDesyncSpecs(t *testing.T) {
 	if s := (desyncCfg{}).specs(); s != nil {
 		t.Fatal("off config must produce no specs")
@@ -50,7 +47,7 @@ func TestDesyncSpecs(t *testing.T) {
 	if len(bothS) != 4 {
 		t.Fatalf("both mode: want 4 specs, got %d", len(bothS))
 	}
-	// even index -> ttl decoy (low ttl, good sum); odd -> badsum decoy (ttl 64, bad sum)
+
 	for i, s := range bothS {
 		if i%2 == 0 && (s.badSum || s.ttl != 5) {
 			t.Fatalf("both spec %d (even) should be a ttl decoy: %+v", i, s)
@@ -61,10 +58,6 @@ func TestDesyncSpecs(t *testing.T) {
 	}
 }
 
-// TestBuildIP4Ext verifies the header fields, that a good checksum verifies to zero, and that badSum
-// deliberately breaks it. buildIP4 IS buildIP4Ext(ttl=64, badSum=false) in everything except the two
-// fields that are per-packet by design — the Identification, and the checksum that follows from it — so
-// the equivalence is stated field-wise rather than as byte-identity.
 func TestBuildIP4Ext(t *testing.T) {
 	src := net.IPv4(10, 0, 0, 1)
 	dst := net.IPv4(10, 0, 0, 2)
@@ -76,10 +69,10 @@ func TestBuildIP4Ext(t *testing.T) {
 		t.Fatalf("lengths differ: %d vs %d", len(base), len(ext))
 	}
 	for i := range base {
-		if i >= 4 && i < 6 { // Identification: different every packet, deliberately
+		if i >= 4 && i < 6 {
 			continue
 		}
-		if i >= 10 && i < 12 { // header checksum: follows the Identification
+		if i >= 10 && i < 12 {
 			continue
 		}
 		if base[i] != ext[i] {
@@ -93,7 +86,7 @@ func TestBuildIP4Ext(t *testing.T) {
 	if base[9] != byte(protoBare) {
 		t.Fatalf("proto byte = %d, want %d", base[9], protoBare)
 	}
-	// A valid IPv4 header sums (one's complement, including the stored checksum) to zero.
+
 	if s := onesComplementSum(base[:20]); s != 0 {
 		t.Fatalf("valid header checksum should verify to 0, got %#04x", s)
 	}
@@ -110,13 +103,12 @@ func TestBuildIP4Ext(t *testing.T) {
 	if s := onesComplementSum(bad[:20]); s == 0 {
 		t.Fatal("badSum header must NOT verify (checksum should be corrupted)")
 	}
-	// The only difference from a good header is the checksum field — everything else identical.
+
 	good := buildIP4Ext(src, dst, protoBare, 64, false, payload)
 	if binary.BigEndian.Uint16(bad[10:12]) == binary.BigEndian.Uint16(good[10:12]) {
 		t.Fatal("badSum checksum must differ from the correct one")
 	}
-	// Normalise the two fields that are per-packet by design (the Identification, and therefore the
-	// checksum) and require everything else to match: badSum must touch the checksum and nothing else.
+
 	copy(bad[4:6], good[4:6])
 	copy(bad[10:12], good[10:12])
 	if string(bad) != string(good) {
@@ -124,10 +116,6 @@ func TestBuildIP4Ext(t *testing.T) {
 	}
 }
 
-// TestBuildIP4ExtBadSumZeroTwin locks in the one's-complement zero-twin case: when the correct header
-// checksum is 0x0000 its complement 0xffff ALSO verifies, so a naive ^sum would leave a VALID checksum.
-// Identification is per-packet and contributes linearly to the sum, so for a fixed header exactly one ID
-// produces the twin. The counter is package-level and is searched exhaustively — no probability involved.
 func TestBuildIP4ExtBadSumZeroTwin(t *testing.T) {
 	src := net.IPv4(10, 0, 0, 0)
 	dst := net.IPv4(192, 168, 1, 0)
@@ -137,7 +125,7 @@ func TestBuildIP4ExtBadSumZeroTwin(t *testing.T) {
 	defer ipIDCounter.Store(saved)
 	found := false
 	for id := 0; id <= 0xffff; id++ {
-		ipIDCounter.Store(uint32(id) - 1) // nextIPID adds 1 before returning
+		ipIDCounter.Store(uint32(id) - 1)
 		if binary.BigEndian.Uint16(buildIP4Ext(src, dst, protoBare, 238, false, payload)[10:12]) == 0x0000 {
 			ipIDCounter.Store(uint32(id) - 1)
 			found = true
@@ -152,7 +140,7 @@ func TestBuildIP4ExtBadSumZeroTwin(t *testing.T) {
 	if binary.BigEndian.Uint16(good[10:12]) != 0x0000 {
 		t.Fatalf("test premise broken: correct checksum should be 0x0000, got %#04x", binary.BigEndian.Uint16(good[10:12]))
 	}
-	ipIDCounter.Store(ipIDCounter.Load() - 1) // rebuild the SAME header for the badSum twin
+	ipIDCounter.Store(ipIDCounter.Load() - 1)
 	if onesComplementSum(good[:20]) != 0 {
 		t.Fatal("the 0x0000-checksum header must itself verify")
 	}
@@ -162,8 +150,6 @@ func TestBuildIP4ExtBadSumZeroTwin(t *testing.T) {
 	}
 }
 
-// TestBuildIP4ExtTTLClamp checks the TTL is clamped into 1..255 (a 0 or negative TTL would
-// be an instantly-dead packet or a malformed byte).
 func TestBuildIP4ExtTTLClamp(t *testing.T) {
 	src, dst := net.IPv4(1, 1, 1, 1), net.IPv4(2, 2, 2, 2)
 	if p := buildIP4Ext(src, dst, protoUDP, 0, false, nil); p[8] != 1 {
@@ -174,9 +160,6 @@ func TestBuildIP4ExtTTLClamp(t *testing.T) {
 	}
 }
 
-// TestSpecsTCP checks the kernel-TCP inject path keeps EVERY decoy at the low TTL (never the
-// 64 that specs() promotes badsum to), because a well-formed segment on a real 4-tuple must not
-// reach the server. badSum still varies per mode.
 func TestSpecsTCP(t *testing.T) {
 	both := newDesyncCfg(true, 3, 4, "both").specsTCP()
 	if len(both) != 4 {
@@ -196,16 +179,13 @@ func TestSpecsTCP(t *testing.T) {
 			t.Fatalf("badsum-mode TCP spec should be low-ttl + badSum, got %+v", s)
 		}
 	}
-	// A high fake_ttl must be clamped on the inject path so a well-formed decoy can't reach the
-	// server (it would draw an RST / challenge-ACK on the real 4-tuple).
+
 	for i, s := range newDesyncCfg(true, 64, 3, "both").specsTCP() {
 		if s.ttl != injectMaxTTL {
 			t.Fatalf("specsTCP decoy %d: ttl 64 should clamp to %d, got %d", i, injectMaxTTL, s.ttl)
 		}
 	}
-	// Pin the wire to the ceiling TCP.SetDesync announces (TestSetDesyncReportsTheCappedTTL). If the
-	// two ever drift, the log goes back to describing a hop budget the wire does not carry — which is
-	// the defect that made the cap invisible in the first place, one layer down.
+
 	for _, ttl := range []int{1, 4, injectMaxTTL, injectMaxTTL + 1, 30, 255} {
 		want := ttl
 		if want > injectMaxTTL {
@@ -219,8 +199,6 @@ func TestSpecsTCP(t *testing.T) {
 	}
 }
 
-// TestBuildTCPSeg checks the crafted segment has the right ports/flags and a VALID TCP checksum
-// (recomputing over the segment with the stored checksum in place sums to zero).
 func TestBuildTCPSeg(t *testing.T) {
 	src := net.IPv4(10, 0, 0, 1)
 	dst := net.IPv4(10, 0, 1, 2)
@@ -234,13 +212,12 @@ func TestBuildTCPSeg(t *testing.T) {
 	if binary.BigEndian.Uint32(seg[4:8]) != 0x11223344 || binary.BigEndian.Uint32(seg[8:12]) != 0x55667788 {
 		t.Fatal("seq/ack not stamped")
 	}
-	// A valid TCP checksum: the pseudo-header + segment (checksum in place) one's-complement to 0.
+
 	if s := l4Checksum(src, dst, protoTCP, seg); s != 0 {
 		t.Fatalf("TCP checksum should verify to 0, got %#04x", s)
 	}
 }
 
-// TestFakePayload checks the decoy payload stays in the intended plausible-frame size band.
 func TestFakePayload(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		n := len(fakePayload())
@@ -250,9 +227,6 @@ func TestFakePayload(t *testing.T) {
 	}
 }
 
-// TestDecoySeqDistinct guards that the decoys of ONE batch carry DISTINCT sequence numbers: previously
-// every decoy read the same r.seq/r.tcpBytes, so a batch was N byte-for-byte-header packets (and on
-// icmp, N identical id+seq echo requests — a cheap signature). Pure over the seq state, no socket.
 func TestDecoySeqDistinct(t *testing.T) {
 	for _, proto := range []int{protoICMP, protoTCP, protoBare} {
 		r := &Raw{proto: proto}
@@ -265,7 +239,7 @@ func TestDecoySeqDistinct(t *testing.T) {
 				t.Fatalf("proto %d: decoy %d repeats seq %d — a batch must not carry identical sequences", proto, i, s)
 			}
 			seen[s] = true
-			// icmp stamps uint16(seq); check the low 16 bits stay distinct too (that is what is on the wire).
+
 			if proto == protoICMP {
 				lo := uint16(s)
 				for j := 0; j < i; j++ {
@@ -278,17 +252,11 @@ func TestDecoySeqDistinct(t *testing.T) {
 	}
 }
 
-// TestDecoySeqNeverAliasesTheLiveStream closes the half TestDecoySeqDistinct does not: that one proves
-// the decoys of a batch differ from EACH OTHER, and stays green while every decoy carries the live
-// stream's own on-wire sequence. The icmp profile stamps only uint16(seq), so the gap must be far from
-// zero modulo 2^16 as well as large in the 32-bit space, or a middlebox reads a real frame as a duplicate.
 func TestDecoySeqNeverAliasesTheLiveStream(t *testing.T) {
 	const live = 41000
 	r := &Raw{proto: protoICMP}
 	r.seq.Store(live)
 
-	// The frames around this handshake: the one just sent (live) and the next ones the stream will send
-	// (writeOut does r.seq.Add(1) per frame). No decoy of the batch may collide with any of them.
 	window := map[uint16]int{}
 	for n := 0; n < 64; n++ {
 		window[uint16(live+uint32(n))] = n
@@ -301,14 +269,11 @@ func TestDecoySeqNeverAliasesTheLiveStream(t *testing.T) {
 		}
 	}
 
-	// State the property directly, so a future change to fakeSeqGap cannot quietly reintroduce it: the
-	// offset must not vanish in the 16-bit field the icmp profile actually puts on the wire.
 	if fakeSeqGap%(1<<16) == 0 {
 		t.Fatalf("fakeSeqGap=%d is a multiple of 2^16, so uint16(seq+gap)==uint16(seq): the icmp "+
 			"profile gets no offset at all", fakeSeqGap)
 	}
 
-	// The tcp profile uses the full uint32, so the gap must still be large there.
 	rt := &Raw{proto: protoTCP}
 	rt.tcpBytes.Store(9000)
 	if d := rt.decoySeq(0) - (rt.tcpISN.Load() + rt.tcpBytes.Load()); d < 1<<16 {

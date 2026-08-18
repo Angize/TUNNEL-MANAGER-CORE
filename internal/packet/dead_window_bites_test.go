@@ -8,11 +8,6 @@ import (
 	"time"
 )
 
-// The resolved dead window must REACH the read deadline, not merely land in a field. Reading the field
-// back passes on a tree where the value never touches a socket, and the window only matters if a silent
-// peer is actually reaped on it: on tcp/ws that deadline IS the dead-detection window. So this drives
-// readLoop, on a real TCP connection, against a peer that connects and then says nothing. It runs on the
-// SERVER end, which is where the window used to be left at a default while the client self-healed.
 func TestTheServersDeadWindowReallyReapsASilentPeer(t *testing.T) {
 	const keepalive = time.Second
 
@@ -31,7 +26,7 @@ func TestTheServersDeadWindowReallyReapsASilentPeer(t *testing.T) {
 				accepted <- c
 			}
 		}()
-		peer, err := net.Dial("tcp", ln.Addr().String()) // connects, then stays silent forever
+		peer, err := net.Dial("tcp", ln.Addr().String())
 		if err != nil {
 			t.Fatalf("dial: %v", err)
 		}
@@ -62,7 +57,7 @@ func TestTheServersDeadWindowReallyReapsASilentPeer(t *testing.T) {
 	want := deadWindow(keepalive)
 
 	t.Run("the resolved window reaps the silent peer", func(t *testing.T) {
-		took, err := run(t, func(*TCP) {}) // the window the constructor resolved, untouched
+		took, err := run(t, func(*TCP) {})
 		if err == nil {
 			t.Fatalf("the read loop was still waiting after %v: the resolved window never reached the socket, so this end waits out the kernel's own TCP keepalive while the other self-heals in %v", took, want)
 		}
@@ -75,9 +70,6 @@ func TestTheServersDeadWindowReallyReapsASilentPeer(t *testing.T) {
 		t.Logf("reaped after %v (window %v)", took.Round(100*time.Millisecond), want)
 	})
 
-	// ...and the same carrier with a LONG window keeps waiting, so the case above cannot pass by
-	// accident on a carrier that reaps everything quickly. It is set on the field rather than derived,
-	// because a keepalive high enough to derive 30s would put the case above out of the test's budget.
 	t.Run("with a long window the same carrier keeps waiting", func(t *testing.T) {
 		took, err := run(t, func(b *TCP) { b.idle = 30 * time.Second })
 		if err != nil {

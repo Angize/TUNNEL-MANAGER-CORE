@@ -6,28 +6,15 @@ import (
 	"testing"
 )
 
-// The direct carriers still reach the walk by two different functions: udp, raw and flux through
-// rotationController.fail, tcp through TCP.burnAdvance. The COUNTER underneath them is now one
-// odometer, so this no longer compares two implementations of the rule — it compares the two WIRINGS
-// of it: the order the burn and the count happen in, which eligible set each hands over, and whether
-// each still guards the source walk on having a source pool at all. Any of those wrong in one caller
-// and only one carrier misbehaves, which is precisely how the two drifted apart before.
-//
-// So drive both with identical pools and identical verdicts and demand identical answers. What matters
-// is not the addresses (each carrier's swap func differs) but the DECISIONS: which destination is burned
-// on each round, and on which round the source is walked.
-
 type odoTrace struct {
-	destBurns  []string // the destination each round condemned, in order
-	srcMovedOn []int    // the 1-based rounds on which the source was walked
+	destBurns  []string
+	srcMovedOn []int
 }
 
 func (o odoTrace) String() string {
 	return fmt.Sprintf("burns=%v sourceMovesOnRounds=%v", o.destBurns, o.srcMovedOn)
 }
 
-// burnedSet is the set of destinations the pool currently has a record for. Comparing sets rather than
-// the raw map keeps the trace readable when a test fails.
 func burnedSet(p *PeerPool) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -40,8 +27,6 @@ func burnedSet(p *PeerPool) []string {
 	return out
 }
 
-// runControllerOdometer drives the udp/raw/flux path: rotationController.fail with the swap funcs those
-// carriers pass (rotDst burns+advances the destination pool, rotSrc walks the source pool).
 func runControllerOdometer(t *testing.T, dests, srcs []string, rounds int) odoTrace {
 	t.Helper()
 	dir := t.TempDir()
@@ -52,9 +37,7 @@ func runControllerOdometer(t *testing.T, dests, srcs []string, rounds int) odoTr
 	var tr odoTrace
 	for r := 1; r <= rounds; r++ {
 		before := dst.current()
-		// The OBSERVABLE, not the call: the tcp side can only be watched through the cursor, and a
-		// one-entry source pool never moves however often its walk is asked for. Recording the call here
-		// and the move there compares two different things and "finds" a divergence in the harness.
+
 		srcBefore := src.current()
 		c.fail(
 			func(proactive bool) { dst.fail() },
@@ -70,7 +53,6 @@ func runControllerOdometer(t *testing.T, dests, srcs []string, rounds int) odoTr
 	return tr
 }
 
-// runTCPOdometer drives the tcp path: TCP.burnAdvance, with the source walk it performs itself.
 func runTCPOdometer(t *testing.T, dests, srcs []string, rounds int) odoTrace {
 	t.Helper()
 	dir := t.TempDir()
@@ -93,8 +75,6 @@ func runTCPOdometer(t *testing.T, dests, srcs []string, rounds int) odoTrace {
 	return tr
 }
 
-// TestTheTwoDirectOdometersAgree walks a matrix of pool shapes. A divergence here means two tunnels with
-// identical pools blame different things for the same outage depending only on which carrier they run.
 func TestTheTwoDirectOdometersAgree(t *testing.T) {
 	shapes := []struct{ d, s int }{
 		{1, 1}, {1, 2}, {1, 3}, {2, 1}, {2, 2}, {2, 3}, {3, 1}, {3, 2}, {3, 3}, {4, 2},
@@ -129,9 +109,6 @@ func TestTheTwoDirectOdometersAgree(t *testing.T) {
 	}
 }
 
-// TestBothDirectOdometersAbsorbTheSamePin: a pin is a preference on every carrier, and it costs exactly
-// pinFailRelease proven-dead rounds to override. The two paths count that on different fields
-// (rotationController.pinFails vs TCP.pinFails), so they can drift apart silently.
 func TestBothDirectOdometersAbsorbTheSamePin(t *testing.T) {
 	dests := []string{"d1", "d2", "d3"}
 
@@ -168,9 +145,6 @@ func TestBothDirectOdometersAbsorbTheSamePin(t *testing.T) {
 	}
 }
 
-// TestNoDirectCarrierBurnsWithNowhereToGo is the single-destination rule, asked of both paths. A lone
-// destination never VARIES, so nothing ever measured it, and condemning it is pure loss: there is
-// nowhere to rotate to and the panel shows the only endpoint the tunnel has as dead.
 func TestNoDirectCarrierBurnsWithNowhereToGo(t *testing.T) {
 	for _, tc := range []struct {
 		name string

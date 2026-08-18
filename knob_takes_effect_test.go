@@ -5,9 +5,6 @@ import (
 	"testing"
 )
 
-// sniCarrier stands in for a carrier implementing the SetSNISplit seam. applied is what the real
-// *TCP returns: false when the transport sends no ClientHello of its own (transport=tcp), true on
-// the ws/http/grpc carrier.
 type sniCarrier struct {
 	applied bool
 	calls   int
@@ -21,10 +18,6 @@ func (c *sniCarrier) SetSNISplit(on bool, pos int, mode string, ttl int) bool {
 	return c.applied
 }
 
-// TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt drives the REAL applySNISplit that main calls. A
-// core config with transport=tcp and sni_split=true loads without complaint and prints "SNI
-// fragmentation on", while no ClientHello is ever split — SetSNISplit returns at its first condition on
-// a non-ws carrier. The operator reading that log has positive confirmation of a defence not running.
 func TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt(t *testing.T) {
 	discards := &sniCarrier{applied: false}
 	buf := captureLog(t)
@@ -42,7 +35,6 @@ func TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt(t *testing.T) {
 		t.Fatalf("a discarded sni_split must be reported, got %q", out)
 	}
 
-	// disorder is the ONE mode that reads split_ttl, so it is the one mode whose line may quote it.
 	applies := &sniCarrier{applied: true}
 	buf.Reset()
 	if !applySNISplit(applies, "ws", "disorder", 12, 4) {
@@ -59,8 +51,6 @@ func TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt(t *testing.T) {
 		t.Fatalf("the carrier got (%q,%d,%d), want (disorder,12,4)", applies.gotMode, applies.gotPos, applies.gotTTL)
 	}
 
-	// fake and split do NOT read split_ttl, so the line must not quote one. Printing ttl=N for a mode
-	// that never consults it is the same lie about a knob that this whole function exists to stop.
 	for _, mode := range []string{"fake", "split"} {
 		c := &sniCarrier{applied: true}
 		buf.Reset()
@@ -74,7 +64,6 @@ func TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt(t *testing.T) {
 		}
 	}
 
-	// A carrier without the seam at all (dns, raw, …) must warn rather than say nothing.
 	buf.Reset()
 	applySNISplit(struct{}{}, "dns", "", 0, 0)
 	out = buf.String()

@@ -13,53 +13,41 @@ import (
 	"time"
 )
 
-// The http carrier's upstream is a request/response ladder: capacity is (in-flight bytes)/RTT, while
-// anything merely QUEUED is pure added latency a keepalive ping cannot jump — the obfs length-mask
-// keystream forbids reordering, so there is no priority lane. Those two are easy to conflate, and this
-// pins the shape so a small in-flight window behind a deep waiting queue cannot come back.
 func TestUpstreamSizingInvariants(t *testing.T) {
 	inFlight := upWorkers * maxUpBatch
 	waiting := upChanCap*1400 + upWorkCap*maxUpBatch
 
-	// Capacity: at a CDN-ish round-trip the in-flight window has to be worth tens of Mbit, or the
-	// carrier itself becomes the bottleneck and the inner TCP never gets to see the real path.
 	if got := float64(inFlight) * 8 / 0.150 / 1e6; got < 40 {
 		t.Errorf("in-flight window %d B ⇒ only %.1f Mbit at a 150ms RTT; want >= 40", inFlight, got)
 	}
-	// Latency: the queue in front of the window is what a ping waits behind. Keep it to roughly one
-	// batch, not a reservoir — this is the half that made the operator's ping jump under load.
+
 	if waiting > 3*maxUpBatch {
 		t.Errorf("waiting queue %d B is more than 3 batches (%d B): that is standing latency, not buffer",
 			waiting, 3*maxUpBatch)
 	}
-	// The write channel must be able to hold one whole batch: the batcher only coalesces what is
-	// ALREADY queued, so a channel smaller than a batch silently caps the batch size.
+
 	if upChanCap*1400 < maxUpBatch {
 		t.Errorf("upChanCap %d chunks (%d B) cannot hold one %d B batch, so batches stay small",
 			upChanCap, upChanCap*1400, maxUpBatch)
 	}
-	// A batch must fit the server's per-POST read cap, or the server truncates and drops it.
+
 	if maxUpBatch >= maxPostBody {
 		t.Errorf("maxUpBatch %d must stay under maxPostBody %d", maxUpBatch, maxPostBody)
 	}
-	// Fewer idle conns than workers means a finished POST's connection is closed rather than kept,
-	// so the next POST pays a fresh TCP+TLS handshake through the CDN. +1 for the streaming GET.
+
 	if upIdleConns < upWorkers+1 {
 		t.Errorf("upIdleConns %d < upWorkers+1 %d: POSTs will re-handshake", upIdleConns, upWorkers+1)
 	}
-	// Parallel requests are also a fingerprint: a browser opens a handful to one host, not dozens.
+
 	if upWorkers > 12 {
 		t.Errorf("upWorkers %d is more parallel requests than a browser plausibly opens", upWorkers)
 	}
-	// The default must stay the Cloudflare shape: unpaced. A CDN that needs pacing asks for it.
+
 	if upMinGap != 0 {
 		t.Errorf("upMinGap defaults to %v; the compiled-in profile must not throttle", upMinGap)
 	}
 }
 
-// The shape is per-CDN now, so the setter has to actually move all of it — and clamp, because these
-// numbers reach the core straight from an operator field. A batch over the server's per-POST read cap
-// would be truncated, and a truncated length-prefixed AEAD chunk desyncs the stream.
 func TestSetHTTPCUpstream(t *testing.T) {
 	w0, b0, c0, i0, g0 := upWorkers, maxUpBatch, upChanCap, upIdleConns, upMinGap
 	defer func() { upWorkers, maxUpBatch, upChanCap, upIdleConns, upMinGap = w0, b0, c0, i0, g0 }()
@@ -69,7 +57,7 @@ func TestSetHTTPCUpstream(t *testing.T) {
 		t.Fatalf("all-zero must leave the defaults alone, got %d/%d/%v", upWorkers, maxUpBatch, upMinGap)
 	}
 
-	SetHTTPUpstream(4, 512, 30) // the ArvanCloud profile
+	SetHTTPUpstream(4, 512, 30)
 	if upWorkers != 4 || maxUpBatch != 512<<10 {
 		t.Errorf("workers/batch not applied: %d/%d", upWorkers, maxUpBatch)
 	}
@@ -95,9 +83,6 @@ func TestSetHTTPCUpstream(t *testing.T) {
 	}
 }
 
-// Pacing must cost nothing when the link is idle — the gap only ever applies to a dispatch that
-// FOLLOWS a recent one. A cap that also delayed the first packet would put a fixed tax on every
-// interactive round-trip.
 func TestUpMinGapPacesBurstsButNotAnIdleLink(t *testing.T) {
 	g0 := upMinGap
 	defer func() { upMinGap = g0 }()
@@ -116,8 +101,6 @@ func TestUpMinGapPacesBurstsButNotAnIdleLink(t *testing.T) {
 		t.Errorf("the first POST on an idle link waited %v; pacing must not delay it", d)
 	}
 
-	// Now a burst. The clock starts BEFORE the writes: write() blocks on the queue, so the pacing is
-	// paid during the loop — timing only the wait afterwards measures nothing.
 	t1 := time.Now()
 	for i := 0; i < 400; i++ {
 		if _, err := u.write(make([]byte, 1400), 0); err != nil {
@@ -134,7 +117,6 @@ func TestUpMinGapPacesBurstsButNotAnIdleLink(t *testing.T) {
 	}
 }
 
-// upRecorder is a fake edge that records each POST's seq and body.
 type upRecorder struct {
 	mu     sync.Mutex
 	got    map[uint64][]byte
@@ -191,9 +173,6 @@ func (r *upRecorder) waitPosts(t *testing.T, n int, d time.Duration) {
 	}
 }
 
-// startUp returns the upstream, a "did a POST fail yet" probe, and a teardown. The probe is separate
-// from teardown on purpose: cancelling the context legitimately fails whatever POSTs are still in
-// flight, so asserting after teardown would flag every test that ends with a busy pipeline.
 func startUp(t *testing.T, r *upRecorder) (*httpcUp, func() bool, func()) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(r.handler))
@@ -206,9 +185,6 @@ func startUp(t *testing.T, r *upRecorder) (*httpcUp, func() bool, func()) {
 	return u, failed.Load, func() { cancel(); srv.Close() }
 }
 
-// An idle link must post the moment it has something, not wait to fill a batch — the batcher blocks
-// for the FIRST chunk and then drains only what is already queued. If that ever became "wait for
-// maxUpBatch", every interactive packet would pay up to a full batch of delay.
 func TestXhUpPostsSmallWriteImmediately(t *testing.T) {
 	r := newUpRecorder(0)
 	u, failed, done := startUp(t, r)
@@ -233,10 +209,8 @@ func TestXhUpPostsSmallWriteImmediately(t *testing.T) {
 	}
 }
 
-// A burst must coalesce into batches that actually use the window, and the byte stream must survive
-// reassembly in the WORST order — which is what several workers racing through a CDN produces.
 func TestXhUpCoalescesAndReassemblesOutOfOrder(t *testing.T) {
-	r := newUpRecorder(25 * time.Millisecond) // a slow edge, so the queue builds and batches grow
+	r := newUpRecorder(25 * time.Millisecond)
 	u, failed, done := startUp(t, r)
 	defer done()
 
@@ -253,7 +227,6 @@ func TestXhUpCoalescesAndReassemblesOutOfOrder(t *testing.T) {
 		want = append(want, c...)
 	}
 
-	// wait until every written byte has been POSTed
 	deadline := time.After(20 * time.Second)
 	for {
 		r.mu.Lock()
@@ -306,15 +279,12 @@ func TestXhUpCoalescesAndReassemblesOutOfOrder(t *testing.T) {
 	if len(seqs) >= chunks {
 		t.Fatalf("%d POSTs for %d chunks — nothing coalesced", len(seqs), chunks)
 	}
-	// The point of the window: a batch must be able to exceed 32 KiB, or a slow edge holds the
-	// upstream down no matter how much is queued behind it.
+
 	if maxBody <= 32<<10 {
 		t.Errorf("largest batch was %d B; with a slow edge and %d queued chunks it should exceed 32 KiB",
 			maxBody, chunks)
 	}
 
-	// Now reassemble exactly the way the server does, but hand the chunks over in REVERSE seq order —
-	// the pathological case for the in-order buffer that concurrent workers make routine.
 	pr, pw := io.Pipe()
 	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}),
 		pend: map[uint64][]byte{}}
@@ -345,15 +315,11 @@ func TestXhUpCoalescesAndReassemblesOutOfOrder(t *testing.T) {
 	}
 }
 
-// The worker count has to actually take effect: a stale literal loop bound would leave the window at
-// a fraction of upWorkers × maxUpBatch while every constant still read correctly.
 func TestXhUpPostsInParallel(t *testing.T) {
-	r := newUpRecorder(150 * time.Millisecond) // long enough that several POSTs overlap
+	r := newUpRecorder(150 * time.Millisecond)
 	u, failed, done := startUp(t, r)
 	defer done()
 
-	// enough bytes to need many batches at the new size (200 chunks is only ~3), or the workers never
-	// have anything to overlap on and this measures nothing.
 	chunks := 20 * (maxUpBatch / 1400)
 	for i := 0; i < chunks; i++ {
 		c := make([]byte, 1400)

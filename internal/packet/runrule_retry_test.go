@@ -11,14 +11,6 @@ import (
 	"testing"
 )
 
-// runRule may drop the owner comment and try again, and that is a real need: a host with no xt_comment
-// must still get its anti-leak rule, because an untagged rule is a cleanup problem while a missing one
-// is a leak. What it may NOT do is retry on an error that has nothing to do with the comment.
-//
-// It did. The only condition was "was an owner asked for", so a rule that lost the race for the xtables
-// lock was retried a millisecond later, and if that one won it went in UNTAGGED — invisible to the
-// node's tnl:<tun> sweep — under a log line claiming there is no xt_comment on this host, which was
-// never established. The first attempt's output was dropped, so the real cause was never printed.
 func TestRunRuleOnlyDropsTheOwnerCommentWhenTheCommentIsWhatFailed(t *testing.T) {
 	const lockBusy = "Another app is currently holding the xtables lock. Perhaps you want to use the -w option?"
 	const noModule = "iptables v1.8.11 (nf_tables): unknown option \"--comment\""
@@ -26,8 +18,8 @@ func TestRunRuleOnlyDropsTheOwnerCommentWhenTheCommentIsWhatFailed(t *testing.T)
 
 	for _, tc := range []struct {
 		name       string
-		firstOut   string // what iptables says to the argv carrying the comment
-		wantRetry  bool   // ...and whether a second, bare attempt is defensible
+		firstOut   string
+		wantRetry  bool
 		wantOK     bool
 		wantLogged string
 	}{
@@ -39,8 +31,7 @@ func TestRunRuleOnlyDropsTheOwnerCommentWhenTheCommentIsWhatFailed(t *testing.T)
 			var sent [][]string
 			restore := iptablesRun
 			iptablesRun = func(a []string) ([]byte, error) {
-				// -C is the "is it there already" probe, not an install attempt: answer no, and leave it
-				// out of the count, which is about how many times we tried to PUT the rule in.
+
 				if indexOfArg(a, "-C") >= 0 {
 					return nil, errRuleAbsent
 				}
@@ -48,7 +39,7 @@ func TestRunRuleOnlyDropsTheOwnerCommentWhenTheCommentIsWhatFailed(t *testing.T)
 				if strings.Contains(strings.Join(a, " "), "-m comment") {
 					return []byte(tc.firstOut), errors.New("exit status 4")
 				}
-				return nil, nil // the bare rule always goes in, so a retry is always OBSERVABLE
+				return nil, nil
 			}
 			defer func() { iptablesRun = restore }()
 
@@ -73,8 +64,7 @@ func TestRunRuleOnlyDropsTheOwnerCommentWhenTheCommentIsWhatFailed(t *testing.T)
 				t.Errorf("a rule that went in untagged reported owner %v — the log would then name a tag "+
 					"the rule does not carry", own)
 			}
-			// Whatever happened, iptables' own words have to reach the log: that is the only place the
-			// operator can learn WHY, and the first attempt's output used to be discarded entirely.
+
 			if !strings.Contains(logged.String(), tc.wantLogged) {
 				t.Errorf("the log does not carry %q; it said %q", tc.wantLogged, logged.String())
 			}
@@ -88,8 +78,6 @@ func TestRunRuleOnlyDropsTheOwnerCommentWhenTheCommentIsWhatFailed(t *testing.T)
 		})
 	}
 
-	// The other direction: a carrier with no tun name asks for no owner at all, so there is nothing to
-	// drop and nothing to retry.
 	t.Run("an untagged carrier makes exactly one attempt", func(t *testing.T) {
 		var sent int
 		restore := iptablesRun

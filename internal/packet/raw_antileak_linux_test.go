@@ -9,17 +9,11 @@ import (
 	"time"
 )
 
-// A tiny netfilter stand-in. The raw anti-leak rule must hit the KERNEL's answer and miss OUR OWN
-// carrier frames, and on the icmp profile those are indistinguishable at a glance — both are "ICMP echo
-// reply to the peer". So rather than restating the expected argv, which goes stale the moment a rule is
-// edited, these tests EVALUATE each rule against real packets and the bytes rawEncap actually produces.
-
-// nfPacket is an outgoing IPv4 packet as netfilter's OUTPUT chain sees it.
 type nfPacket struct {
-	what     string // for failure messages
+	what     string
 	proto    int
-	icmpType int // -1 when not ICMP
-	sport    int // 0 when the protocol has no ports
+	icmpType int
+	sport    int
 	dport    int
 	rst      bool
 	mark     uint32
@@ -27,22 +21,18 @@ type nfPacket struct {
 
 var icmpTypeByName = map[string]int{
 	"echo-reply": 0,
-	// port-unreachable is a sub-name of type 3; the type is all the matcher needs, since our
-	// carrier never emits an ICMP type 3 at all.
+
 	"port-unreachable":        3,
 	"destination-unreachable": 3,
 	"echo-request":            8,
 }
 
-// ruleMatches evaluates one rawDropMatches entry against p. It FAILS the test on any match
-// argument it does not understand, so a new kind of match has to teach this matcher about itself
-// instead of silently passing.
 func ruleMatches(t *testing.T, m []string, p nfPacket) bool {
 	t.Helper()
 	hit := true
 	for i := 0; i < len(m); i++ {
 		switch m[i] {
-		case "-d": // scoped to the peer; every rule here carries it, so it is not a discriminator
+		case "-d":
 			i++
 		case "-p":
 			i++
@@ -92,8 +82,6 @@ func ruleMatches(t *testing.T, m []string, p nfPacket) bool {
 	return hit
 }
 
-// ourFrame builds the packet THIS end puts on the wire for profile/role, straight out of rawEncap,
-// so the test reads the real encapsulation instead of a copy of it.
 func ourFrame(profile string, isClient, marked bool) nfPacket {
 	body := []byte("sealed-frame-bytes-0123456789abcdef")
 	src, dst := net.IPv4(10, 9, 0, 1), net.IPv4(10, 9, 0, 2)
@@ -120,16 +108,6 @@ func ourFrame(profile string, isClient, marked bool) nfPacket {
 	return p
 }
 
-// kernelAnswers is what THIS end's kernel emits when the PEER's frames arrive, so it is a function of
-// our role:
-//
-//	icmp  the receiving kernel mirrors every echo request back, carrying our own ciphertext. The other
-//	      direction is silent: our echo replies provoke nothing.
-//	udp   both kernels answer an icmp port-unreachable, which QUOTES the packet — so it names whatever
-//	      port the peer aimed at, and the rule cannot key on ports.
-//	tcp   both kernels answer a RST.
-//
-// The kernel's answer carries no mark of ours, which is the whole basis of the icmp rule.
 func kernelAnswers(profile string, isClient bool) []nfPacket {
 	switch profile {
 	case "icmp":
@@ -137,8 +115,7 @@ func kernelAnswers(profile string, isClient bool) []nfPacket {
 	case "udp":
 		return []nfPacket{{what: "the kernel's icmp port-unreachable quoting our datagram", proto: protoICMP, icmpType: 3}}
 	case "tcp":
-		// Derived from the physics, not from the rule: a kernel that cannot deliver a segment
-		// resets by REVERSING it, so build the answer out of the frame the PEER sends us.
+
 		psp, pdp := rawPorts(!isClient, 0, 0)
 		return []nfPacket{{what: "the kernel's RST", proto: protoTCP, icmpType: -1,
 			sport: int(pdp), dport: int(psp), rst: true}}
@@ -148,10 +125,6 @@ func kernelAnswers(profile string, isClient bool) []nfPacket {
 
 var leakPeer = net.IPv4(203, 0, 113, 7)
 
-// TestRawAntiLeakNeverMatchesOurOwnFrames is the guard the first design of this fix failed. On the icmp
-// profile the server's DOWNSTREAM frames are echo replies to the peer — the same shape as the kernel's
-// mirror — so a plain "--icmp-type echo-reply -d peer -j DROP" drops the tunnel's whole download
-// direction. No rule this carrier installs may match anything it sends.
 func TestRawAntiLeakNeverMatchesOurOwnFrames(t *testing.T) {
 	for profile := range rawProfiles {
 		for _, isClient := range []bool{true, false} {
@@ -168,12 +141,9 @@ func TestRawAntiLeakNeverMatchesOurOwnFrames(t *testing.T) {
 	}
 }
 
-// TestRawAntiLeakSuppressesEveryMeasuredKernelAnswer is the other half: every answer the kernel was
-// MEASURED to send must be matched by a rule we install, on the side that sends it.
 func TestRawAntiLeakSuppressesEveryMeasuredKernelAnswer(t *testing.T) {
 	for _, profile := range []string{"icmp", "udp", "tcp"} {
-		// icmp is the one asymmetric case: only the server receives echo requests, so only the
-		// server's kernel answers, and only the server installs the rule.
+
 		roles := []bool{true, false}
 		if profile == "icmp" {
 			roles = []bool{false}
@@ -195,10 +165,6 @@ func TestRawAntiLeakSuppressesEveryMeasuredKernelAnswer(t *testing.T) {
 	}
 }
 
-// TestRawIcmpRuleIsSkippedWithoutTheMark pins the fail-safe. SO_MARK needs CAP_NET_ADMIN while a
-// raw socket only needs CAP_NET_RAW, so a container can have one and not the other. Without the
-// mark the rule cannot exempt our own downstream frames, and installing it anyway would take the
-// tunnel dark. Leaking is bad; going dark is worse.
 func TestRawIcmpRuleIsSkippedWithoutTheMark(t *testing.T) {
 	if got := rawDropMatches(leakPeer, "icmp", 0, false, false, false); len(got) != 0 {
 		t.Fatalf("an icmp server with no SO_MARK still installed %v — that drops its own downstream frames", got)
@@ -206,7 +172,7 @@ func TestRawIcmpRuleIsSkippedWithoutTheMark(t *testing.T) {
 	if got := rawDropMatches(leakPeer, "icmp", 0, false, true, false); len(got) != 1 {
 		t.Fatalf("an icmp server WITH the mark should install exactly one rule, got %v", got)
 	}
-	// The client sends echo requests, which no kernel answers — it must install nothing either way.
+
 	for _, marked := range []bool{true, false} {
 		if got := rawDropMatches(leakPeer, "icmp", 0, true, marked, false); len(got) != 0 {
 			t.Fatalf("an icmp CLIENT (marked=%v) installed %v; nothing answers its echo replies", marked, got)
@@ -214,16 +180,12 @@ func TestRawIcmpRuleIsSkippedWithoutTheMark(t *testing.T) {
 	}
 }
 
-// TestRawPortedProfilesReverseTheFlow: any carrier header that has L4 ports must put the client's and
-// the server's on the wire the other way round. Both ends sending an identical pair is not a
-// conversation anything pairs up — the downstream reads as an unsolicited new flow a NAT drops — and two
-// half-flows aimed at each other are a signature. Read out of rawEncap, so it measures the real thing.
 func TestRawPortedProfilesReverseTheFlow(t *testing.T) {
 	ported := 0
 	for profile := range rawProfiles {
 		c, s := ourFrame(profile, true, false), ourFrame(profile, false, false)
 		if c.sport == 0 && c.dport == 0 && s.sport == 0 && s.dport == 0 {
-			continue // this carrier header has no L4 ports
+			continue
 		}
 		ported++
 		if c.sport == c.dport {
@@ -234,13 +196,11 @@ func TestRawPortedProfilesReverseTheFlow(t *testing.T) {
 				profile, c.sport, c.dport, s.sport, s.dport)
 		}
 	}
-	if ported != 2 { // udp and tcp; anything else means ourFrame stopped reading a profile's ports
+	if ported != 2 {
 		t.Fatalf("measured %d profiles carrying L4 ports, want 2 (udp, tcp) — ourFrame is no longer reading them, so this test proves nothing", ported)
 	}
 }
 
-// TestRawAntiLeakLeavesQuietProfilesAlone: bare/ipip/gre/esp have no kernel handler that answers,
-// so they must not pay for an iptables rule (nor risk one that drops their traffic).
 func TestRawAntiLeakLeavesQuietProfilesAlone(t *testing.T) {
 	for _, profile := range []string{"bare", "ipip", "gre", "esp"} {
 		for _, isClient := range []bool{true, false} {
@@ -251,18 +211,14 @@ func TestRawAntiLeakLeavesQuietProfilesAlone(t *testing.T) {
 	}
 }
 
-// TestRawRotationPreScopesAntiLeak drives the REAL destination-rotation and pin entry points and asserts
-// the rule is re-scoped there — on the caller's own goroutine — rather than left for the receive loop to
-// discover. It also pins the install-before-remove order: the endpoint we just left stays admitted for
-// the frames still in flight, so a gap with no rule at all is exactly when the kernel leaks.
 func TestRawRotationPreScopesAntiLeak(t *testing.T) {
 	defer func(d time.Duration) { antiLeakLinger = d }(antiLeakLinger)
-	antiLeakLinger = 20 * time.Millisecond // the displaced rule goes on its own timer; see the linger test
+	antiLeakLinger = 20 * time.Millisecond
 	rec := &leakRecorder{}
 	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 0, "")
 	r := &Raw{profile: "udp", isClient: true, pp: pool, closeCh: make(chan struct{})}
 	r.link = &directLink{r: r}
-	r.localIP.Store(&net.IPAddr{IP: net.ParseIP("10.9.9.9")}) // learnLocalIP must not resolve a route
+	r.localIP.Store(&net.IPAddr{IP: net.ParseIP("10.9.9.9")})
 	r.leak.init(r.closeCh, rec.install)
 
 	first := hostOnly(pool.current())
@@ -275,9 +231,8 @@ func TestRawRotationPreScopesAntiLeak(t *testing.T) {
 		t.Fatalf("rotation did not pre-scope the anti-leak rule to %s: %v", second, ev)
 	}
 
-	// The first authenticated frame from the new destination now costs nothing.
 	r.learnPeer(&net.IPAddr{IP: net.ParseIP(second)})
-	time.Sleep(100 * time.Millisecond) // an async re-scope would have landed well inside this
+	time.Sleep(100 * time.Millisecond)
 	if ev := rec.events(); len(ev) != 1 {
 		t.Fatalf("the receive path re-scoped a rule the rotation had already installed: %v", ev)
 	}
@@ -309,9 +264,6 @@ func TestRawRotationPreScopesAntiLeak(t *testing.T) {
 	}
 }
 
-// TestRawLearnPeerNeverBlocksOnIptables: a raw SERVER only learns its peer from the first
-// authenticated frame, which arrives on recvConnLoop's goroutine — the data path. Forking iptables
-// there stalls the download for as long as the xtables lock is contended.
 func TestRawLearnPeerNeverBlocksOnIptables(t *testing.T) {
 	installing := make(chan struct{})
 	rec := &leakRecorder{delay: 750 * time.Millisecond, tookTo: installing}
@@ -325,16 +277,13 @@ func TestRawLearnPeerNeverBlocksOnIptables(t *testing.T) {
 	if el := time.Since(start); el > 200*time.Millisecond {
 		t.Fatalf("learnPeer held the receive goroutine for %v while iptables ran", el)
 	}
-	<-installing // the re-scope really did start, just not on the caller's goroutine
+	<-installing
 	waitFor(t, 5*time.Second, "the anti-leak rule was re-scoped off the receive path", func() bool {
 		ev := rec.events()
 		return len(ev) == 1 && strings.HasPrefix(ev[0], "add 10.0.0.42")
 	})
 }
 
-// TestHandBuiltRawTouchesNoFirewall: every Raw a test constructs by hand leaves the installer nil,
-// and each entry point must then be a no-op. DE runs these as root, so a regression here would put
-// real rules in the host's OUTPUT chain.
 func TestHandBuiltRawTouchesNoFirewall(t *testing.T) {
 	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2"}, 0, "")
 	r := &Raw{profile: "icmp", isClient: true, pp: pool, closeCh: make(chan struct{})}

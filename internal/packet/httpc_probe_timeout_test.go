@@ -7,10 +7,6 @@ import (
 	"time"
 )
 
-// TestHTTPCProbeHonoursProbeTimeout drives the REAL edge prober against a black-hole edge — one that
-// completes the TCP connect and then says nothing, which is how a throttled origin or a filtered edge
-// behaves — and requires it to give up inside the operator's probe_timeout_secs. Every retest and every
-// differential-probe arm goes through here, so the knob decides how fast a blocked edge is judged.
 func TestHTTPCProbeHonoursProbeTimeout(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -25,7 +21,7 @@ func TestHTTPCProbeHonoursProbeTimeout(t *testing.T) {
 			if err != nil {
 				return
 			}
-			mu.Lock() // hold it open and answer NOTHING
+			mu.Lock()
 			held = append(held, c)
 			mu.Unlock()
 		}
@@ -50,15 +46,12 @@ func TestHTTPCProbeHonoursProbeTimeout(t *testing.T) {
 	if reachable {
 		t.Fatal("an edge that never answers was reported reachable — a dead http edge would heal on retest")
 	}
-	// 3x the budget is the header wait (httpcHeaderWait), plus slack for scheduling.
+
 	if lim := 6 * probeTimeout; el > lim {
 		t.Fatalf("the probe took %v on a %v budget (limit %v) — probe_timeout_secs does not reach the http/grpc path", el, probeTimeout, lim)
 	}
 }
 
-// TestHTTPCLiveEstablishKeepsItsTimings guards the other half: the budget is threaded so the PROBE
-// can be short, not so the live dial becomes short. establishHTTPC passes handshakeTimeout, which
-// must reproduce the previous fixed numbers exactly — 10s dial, 10s TLS, 30s for the headers.
 func TestHTTPCLiveEstablishKeepsItsTimings(t *testing.T) {
 	if handshakeTimeout != 10*time.Second {
 		t.Fatalf("the live connect budget is %v; this test's expectations were written for 10s", handshakeTimeout)

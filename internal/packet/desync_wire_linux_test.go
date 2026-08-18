@@ -10,10 +10,6 @@ import (
 	"time"
 )
 
-// TestDesyncWireEmission is a real-socket integration check (root-only): it drives the actual
-// Raw.SetDesync + sendFakes path over a live IP_HDRINCL socket to the loopback and receives the decoys on
-// a raw socket of the same protocol, asserting the kernel transmitted exactly `count` of them with the
-// stamped low TTL. That proves the emission mechanism end to end, beyond the pure-function unit tests.
 func TestDesyncWireEmission(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("needs root (raw sockets / CAP_NET_RAW)")
@@ -22,8 +18,6 @@ func TestDesyncWireEmission(t *testing.T) {
 	const ttl = 7
 	const count = 3
 
-	// Receiver: a raw socket of our protocol bound to loopback. AF_INET SOCK_RAW hands back
-	// the full IP header, so the TTL is readable at byte 8.
 	rfd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, proto)
 	if err != nil {
 		t.Skipf("cannot open raw receive socket: %v", err)
@@ -35,13 +29,11 @@ func TestDesyncWireEmission(t *testing.T) {
 	tv := syscall.Timeval{Sec: 2}
 	_ = syscall.SetsockoptTimeval(rfd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
 
-	// Sender: the real Raw desync path. A directLink has no fd to borrow (fakeFD() == -1), so
-	// SetDesync opens the dedicated fake socket itself, exercising that fd-open branch too.
 	lo := net.IPv4(127, 0, 0, 1)
 	r := &Raw{isClient: true, proto: proto, fakeFd: -1}
 	r.link = &directLink{r: r}
 	r.localIP.Store(&net.IPAddr{IP: lo})
-	r.SetDesync(true, ttl, count, "ttl") // valid checksum so loopback delivers the decoys
+	r.SetDesync(true, ttl, count, "ttl")
 	if !r.desync.on || r.fakeFd < 0 {
 		t.Skip("SetDesync could not open the fake socket here")
 	}
@@ -60,7 +52,7 @@ func TestDesyncWireEmission(t *testing.T) {
 	for seen < count && time.Now().Before(deadline) {
 		n, _, err := syscall.Recvfrom(rfd, buf, 0)
 		if err != nil {
-			break // SO_RCVTIMEO fired
+			break
 		}
 		if n < 20 || buf[9] != byte(proto) {
 			continue

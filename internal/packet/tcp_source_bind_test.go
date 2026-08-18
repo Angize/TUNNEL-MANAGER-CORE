@@ -10,9 +10,6 @@ import (
 	"time"
 )
 
-// srcLogSink is a concurrency-safe log sink. The global logger is process-wide, so a goroutine left
-// running by another test can write to it while this one reads — a plain bytes.Buffer would trip the
-// race detector for reasons unrelated to what is being tested.
 type srcLogSink struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -30,7 +27,6 @@ func (s *srcLogSink) String() string {
 	return s.b.String()
 }
 
-// captureSrcLog redirects the standard logger into sink and returns the restore func.
 func captureSrcLog(sink *srcLogSink) func() {
 	oldOut, oldFlags := log.Writer(), log.Flags()
 	log.SetOutput(sink)
@@ -38,10 +34,6 @@ func captureSrcLog(sink *srcLogSink) func() {
 	return func() { log.SetOutput(oldOut); log.SetFlags(oldFlags) }
 }
 
-// TestDialerAcceptsSourceWithPort drives the REAL TCP.dialer — the function that decides what the next
-// connect() binds to — not a helper beside it. config.go promises an accidental "ip:port" in a source
-// pool is tolerated, and udp and raw/flux strip the port; tcp did not, and with the bind AND the warning
-// both inside `if ip != nil` the entry was discarded in silence. 127.0.0.1, so the bind is attempted.
 func TestDialerAcceptsSourceWithPort(t *testing.T) {
 	for _, src := range []string{"127.0.0.1", "127.0.0.1:0", "127.0.0.1:8080"} {
 		b := &TCP{isClient: true, bindIP: src}
@@ -58,20 +50,15 @@ func TestDialerAcceptsSourceWithPort(t *testing.T) {
 		if !ta.IP.Equal(net.IPv4(127, 0, 0, 1)) {
 			t.Errorf("source %q: bound %v, want 127.0.0.1", src, ta.IP)
 		}
-		// The port in a source entry is incidental — binding it would pin one ephemeral port across
-		// every re-dial and collide on the second. The other three carriers drop it too.
+
 		if ta.Port != 0 {
 			t.Errorf("source %q: bound port %d, want 0 (a source entry's port is not a bind port)", src, ta.Port)
 		}
 	}
 }
 
-// TestDialerNeverDropsASourceInSilence closes the class instead of the one string: whatever the
-// source turns out to be, the dialer either binds it or says why it did not. Silence was the real
-// defect — a value that parsed to nothing took the same path as no value at all.
 func TestDialerNeverDropsASourceInSilence(t *testing.T) {
-	// Strings that cannot yield an IP by any route, so the outcome does not depend on which
-	// addresses happen to be configured on the machine running the test.
+
 	for _, src := range []string{"not-an-ip", "1.2.3.4.5", "::gg"} {
 		var sink srcLogSink
 		restore := captureSrcLog(&sink)
@@ -89,7 +76,7 @@ func TestDialerNeverDropsASourceInSilence(t *testing.T) {
 			t.Errorf("source %q: log line does not carry the core/tcp prefix: %q", src, out)
 		}
 	}
-	// An empty source is not a configured one — it means "kernel default" — so it must stay quiet.
+
 	var sink srcLogSink
 	restore := captureSrcLog(&sink)
 	d := (&TCP{isClient: true}).dialer(time.Second)

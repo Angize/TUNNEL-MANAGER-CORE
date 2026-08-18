@@ -10,14 +10,10 @@ import (
 	"time"
 )
 
-// A chunk the server THREW AWAY must not be answered 204. 204 means "chunk accepted, session stays
-// open" and the client's POST worker treats it as success, so answering it for a chunk nobody has stalls
-// the upstream at nextSeq forever while the downstream GET keeps streaming and the dot stays green.
-// Driven through the REAL handler, with the session created the only way one can be — the downstream GET.
 func TestOverflowedUpstreamChunkIsNotAnswered204(t *testing.T) {
 	w0, b0, c0, i0, g0 := upWorkers, maxUpBatch, upChanCap, upIdleConns, upMinGap
 	defer func() { upWorkers, maxUpBatch, upChanCap, upIdleConns, upMinGap = w0, b0, c0, i0, g0 }()
-	SetHTTPUpstream(1, 8, 0) // pins maxPendBytes() at its 4 MiB floor, so 1 MiB chunks trip it in five
+	SetHTTPUpstream(1, 8, 0)
 
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	srvDev, _ := tunPair(t, "xhdrop")
@@ -30,8 +26,7 @@ func TestOverflowedUpstreamChunkIsNotAnswered204(t *testing.T) {
 	ts := httptest.NewServer(mux)
 	const sid = "0123456789abcdef0123456789abcdef"
 	t.Cleanup(func() {
-		// End the session first: the downstream GET handler parks on <-s.done, so closing the test
-		// server before it returns just makes httptest wait out its own five-second grace period.
+
 		if s := srv.httpcLookup(sid); s != nil {
 			s.close(srv, sid)
 		}
@@ -39,7 +34,6 @@ func TestOverflowedUpstreamChunkIsNotAnswered204(t *testing.T) {
 		srv.Close()
 	})
 
-	// The downstream GET opens the session and holds; it is the only path allowed to create one.
 	go func() {
 		resp, gerr := ts.Client().Get(ts.URL + "/?s=" + sid)
 		if gerr == nil {
@@ -70,8 +64,6 @@ func TestOverflowedUpstreamChunkIsNotAnswered204(t *testing.T) {
 		return resp.StatusCode
 	}
 
-	// seq 0 is deliberately never sent: the gap never fills, so every chunk below just accumulates in
-	// pend and nothing is ever written to the upstream pipe.
 	if code := post(1, 1<<20); code != http.StatusNoContent {
 		t.Fatalf("the FIRST buffered chunk got HTTP %d, want 204 — this test would pass for the wrong reason", code)
 	}
@@ -91,10 +83,6 @@ func TestOverflowedUpstreamChunkIsNotAnswered204(t *testing.T) {
 	}
 }
 
-// ...and the retransmit case must NOT be caught by the above. A re-POST of a seq already consumed is a
-// legitimate duplicate whose bytes really are in the stream; answering it with an error would make a
-// healthy client tear the session down over a retransmit. This one asserts deliver's contract directly,
-// because reaching the duplicate branch through the handler needs the gap to fill first.
 func TestDeliverReportsSuccessForADuplicateItAlreadyDelivered(t *testing.T) {
 	pr, pw := io.Pipe()
 	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), pend: map[uint64][]byte{}}

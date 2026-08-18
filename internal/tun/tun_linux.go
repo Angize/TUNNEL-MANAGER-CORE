@@ -1,7 +1,3 @@
-// Package tun opens and configures a Linux TUN device (raw L3 packets, no PI
-// header). Address/MTU/up are applied by shelling out to `ip`, matching the
-// node agent's philosophy of driving iproute2 rather than talking netlink
-// directly. The device is non-persistent, so closing the fd removes it.
 package tun
 
 import (
@@ -21,16 +17,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// ErrGSOUnsupported wraps a failure of one of the two ioctls Open runs ONLY when gso was asked for:
-// TUNSETIFF with IFF_VNET_HDR, and TUNSETOFFLOAD. It means "the gso-specific part of the open failed",
-// NOT "this kernel lacks gso" — a missing CAP_NET_ADMIN fails the same ioctl and the errno does not
-// distinguish them, so a caller must prove it by opening again WITHOUT gso and seeing that succeed.
 var ErrGSOUnsupported = errors.New("the gso-specific part of the tun open failed")
 
-// setIff and setOffload are seams. Production runs the ioctl; the gso-classification test replaces them
-// to fail a chosen one, which is the only way to reach the ErrGSOUnsupported branches on a kernel that
-// supports gso perfectly well. They take ifr as a POINTER, not a uintptr, because the
-// unsafe.Pointer→uintptr conversion must happen inside syscall.Syscall's own argument list.
 var setIff = func(f *os.File, ifr *[ifReqSize]byte) syscall.Errno {
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), tunSetIff, uintptr(unsafe.Pointer(ifr)))
 	return errno
@@ -44,56 +32,35 @@ var setOffload = func(f *os.File, flags uintptr) syscall.Errno {
 const (
 	iffTun  = 0x0001
 	iffNoPI = 0x1000
-	// iffMultiQueue makes ONE interface out of several open fds. The device keeps its single name, IP
-	// and MTU -- `ip addr` still shows one card -- and the queues exist only inside this process, so
-	// several goroutines can read and write it without queueing behind one file's lock.
+
 	iffMultiQueue = 0x0100
 	tunSetIff     = 0x400454ca
 	ifReqSize     = 40
 )
 
-// Device is an open TUN interface. When gso is set it was opened with a
-// virtio-net header and segmentation offload; Read then serves one L3 packet per
-// call out of a queue filled by splitting the kernel's super-packets (see
-// offload_linux.go), so callers keep the simple one-packet-per-Read contract.
 type Device struct {
 	f    *os.File
-	fd   int // raw blocking fd for data-path I/O — bypasses Go's netpoller (see rawRead)
+	fd   int
 	Name string
 
 	gso  bool
-	rbuf []byte   // super-packet read buffer (vnet header + up to 64 KiB)
-	q    [][]byte // segments not yet handed out; drained before the next read
+	rbuf []byte
+	q    [][]byte
 
-	nSuper, nSeg atomic.Uint64 // GSO diagnostic: super-packets split and segments produced
-	nUnsplit     atomic.Uint64 // GSO super-packets handed back unsegmented (unknown/legacy gso_type, or a header segment() would not parse)
-	// nOversize counts packets Read DROPPED because they did not fit the caller's buffer. It is a guard on
-	// an exported API, not a diagnostic: no caller in this binary can trip it, since rbuf is
-	// vnetHdrLen+65535 and every caller passes exactly maxDatagram. It is therefore reported only when
-	// NON-ZERO — a permanent "0 oversize dropped" is noise in a line whose job is "is this knob working?".
+	nSuper, nSeg atomic.Uint64
+	nUnsplit     atomic.Uint64
+
 	nOversize atomic.Uint64
 
-	// nOut and nWrites are the WRITE side's answer to the same question: how many packets left, and how
-	// many writes carried them. BOTH halves are counted, joined or not -- a ratio that ignored the
-	// single-packet writes would read as "every packet is being joined" on a tunnel where most are not.
 	nOut, nWrites atomic.Uint64
 
-	// Reporting state, touched ONLY by the single reader goroutine (readGSO), so no lock.
-	repAt   time.Time // when the reporting window last restarted
-	repSeen [6]uint64 // the values logged then: super, seg, unsplit, oversize, joined, writes
-	repSaid bool      // a line has been written at least once
+	repAt   time.Time
+	repSeen [6]uint64
+	repSaid bool
 }
 
-// gsoReportEvery bounds how often a running device logs its GSO counters. With the only evidence printed
-// at SHUTDOWN, an operator who turned GSO on had no way to tell "the kernel is coalescing" from "the
-// knob is inert" without stopping the tunnel. Ten minutes is quiet enough to live in the journal forever
-// and often enough to answer the question; a report is skipped entirely when nothing moved.
 const gsoReportEvery = 10 * time.Minute
 
-// reportGSO logs the counters at most once per gsoReportEvery, and only when something changed: silence
-// on the first read, an IMMEDIATE line the first time a counter moves, at most one per window after
-// that, and one "still nothing" line once a full window passes with no movement. Reporting on the first
-// read would say "0 -> 0" before the kernel could coalesce anything. readGSO only, so no lock.
 func (d *Device) reportGSO() {
 	now := time.Now()
 	cur := [6]uint64{d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), d.nOversize.Load(),
@@ -101,26 +68,22 @@ func (d *Device) reportGSO() {
 	if d.repAt.IsZero() {
 		d.repAt = now
 		if cur == ([6]uint64{}) {
-			// FIRST read and nothing has happened yet. "gso 0 super-packets -> 0 segments" here is not
-			// evidence of anything — it is just too early — and it reads exactly like the answer THE
-			// KNOB IS INERT. Printing it milliseconds after startup told the operator the opposite of
-			// the truth and, because it stamped the window, put the real answer ten minutes away.
+
 			return
 		}
-		// Something already moved on the very first read: that IS the answer, so say it now.
+
 	} else {
 		moved := cur != d.repSeen
 		switch {
 		case moved && !d.repSaid:
-			// The counters moved for the FIRST time. This is the line the operator is looking for and
-			// it must not wait out a window.
+
 		case moved, !d.repSaid:
-			// A later movement, or the single "still nothing" line that makes an inert knob visible.
+
 			if now.Sub(d.repAt) < gsoReportEvery {
 				return
 			}
 		default:
-			return // nothing moved and we have already spoken: stay quiet
+			return
 		}
 	}
 	d.repAt, d.repSeen, d.repSaid = now, cur, true
@@ -128,15 +91,6 @@ func (d *Device) reportGSO() {
 		d.Name, cur[0], cur[1], cur[2], oversizeNote(cur[3]), cur[4], cur[5])
 }
 
-// OpenN creates the TUN interface, assigns addr (CIDR, e.g. "10.200.0.1/24"), sets mtu and brings it
-// up. name is a hint; the kernel-assigned name is returned in Device.Name. When gso is true the device
-// is opened with a virtio-net header and TCP/UDP segmentation offload for higher bulk throughput.
-// n is how many QUEUES the one interface gets, so n goroutines can drive it without queueing behind a
-// single file's lock. Every queue is a full Device with its own buffers; only the first configures the
-// interface, because there is only ever one interface.
-//
-// Every queue opened MUST be used: the kernel spreads packets across all of them, so a queue nobody
-// reads is a blackhole for whatever lands on it.
 func OpenN(name string, mtu int, addr string, gso bool, n int) ([]*Device, error) {
 	if n < 1 {
 		n = 1
@@ -150,7 +104,7 @@ func OpenN(name string, mtu int, addr string, gso bool, n int) ([]*Device, error
 	for i := 0; i < n; i++ {
 		hint := name
 		if i > 0 {
-			hint = ds[0].Name // later queues must name the interface the first one actually got
+			hint = ds[0].Name
 		}
 		d, err := openQueue(hint, gso, n > 1)
 		if err != nil {
@@ -172,7 +126,6 @@ func OpenN(name string, mtu int, addr string, gso bool, n int) ([]*Device, error
 	return ds, nil
 }
 
-// openQueue opens one fd and attaches it to name, returning it as a Device.
 func openQueue(name string, gso, multi bool) (*Device, error) {
 	f, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
 	if err != nil {
@@ -187,13 +140,12 @@ func openQueue(name string, gso, multi bool) (*Device, error) {
 		flags |= iffVnetHdr
 	}
 	var ifr [ifReqSize]byte
-	copy(ifr[:15], name) // leave room for NUL terminator
+	copy(ifr[:15], name)
 	binary.LittleEndian.PutUint16(ifr[16:18], flags)
 	if errno := setIff(f, &ifr); errno != 0 {
 		f.Close()
 		if gso {
-			// IFF_VNET_HDR is the only thing this call does differently when gso is on,
-			// so the caller gets the chance to retry without it.
+
 			return nil, fmt.Errorf("TUNSETIFF (vnet-hdr): %w: %w", ErrGSOUnsupported, errno)
 		}
 		return nil, fmt.Errorf("TUNSETIFF: %w", errno)
@@ -212,10 +164,7 @@ func openQueue(name string, gso, multi bool) (*Device, error) {
 	if gso {
 		d.rbuf = make([]byte, vnetHdrLen+65535)
 	}
-	// Non-blocking, so a read that finds nothing returns EAGAIN instead of sleeping. That is what lets
-	// the send path take a whole burst at once: read the first packet, then keep taking whatever is
-	// ALREADY waiting until the queue runs dry. Read keeps its blocking contract by waiting on poll(2)
-	// when that happens, so no caller has to change.
+
 	if err := syscall.SetNonblock(d.fd, true); err != nil {
 		d.Close()
 		return nil, fmt.Errorf("making the tun fd non-blocking: %w", err)
@@ -223,10 +172,6 @@ func openQueue(name string, gso, multi bool) (*Device, error) {
 	return d, nil
 }
 
-// rawRead/rawWrite do blocking TUN I/O with a plain syscall, DELIBERATELY bypassing os.File and Go's
-// netpoller. A dependency's package-init can bring the netpoller up before main() opens the TUN, and the
-// TUN fd can then inherit a poisoned pollDesc from a transient fd that failed EPOLL_CTL_ADD — os.File
-// then returns "not pollable" and kills the data plane on EVERY transport. Same approach as wireguard-go.
 func rawRead(fd int, p []byte) (int, error) {
 	for {
 		n, err := syscall.Read(fd, p)
@@ -247,9 +192,6 @@ func rawWrite(fd int, p []byte) (int, error) {
 	}
 }
 
-// writeIovec writes the pieces as ONE packet, gathered by the kernel. Callers build the array on the
-// stack rather than going through unix.Writev, which allocates one per call: this runs once per
-// received packet, and not allocating is the whole point of writing in pieces.
 func writeIovec(fd int, iov []unix.Iovec) (int, error) {
 	for {
 		n, _, errno := syscall.Syscall(unix.SYS_WRITEV, uintptr(fd),
@@ -264,8 +206,6 @@ func writeIovec(fd int, iov []unix.Iovec) (int, error) {
 	}
 }
 
-// rawWritev writes hdr and pkt as ONE packet, so a caller that has a packet in two pieces does not have
-// to join them first.
 func rawWritev(fd int, hdr, pkt []byte) (int, error) {
 	var iov [2]unix.Iovec
 	iov[0].Base, iov[1].Base = &hdr[0], &pkt[0]
@@ -274,9 +214,6 @@ func rawWritev(fd int, hdr, pkt []byte) (int, error) {
 	return writeIovec(fd, iov[:])
 }
 
-// rd/wr are the data-path I/O. The production device (Open) has a real fd and uses the raw,
-// netpoller-free path above; the test-only FromFile device sets fd<0 and falls back to os.File
-// (its socketpair stand-in is pollable and never hits the poisoned-pollDesc problem).
 func (d *Device) rd(p []byte) (int, error) {
 	if d.fd < 0 {
 		return d.f.Read(p)
@@ -292,9 +229,6 @@ func (d *Device) rd(p []byte) (int, error) {
 	}
 }
 
-// tryRd is rd without the wait: ok is false the moment the fd has nothing, which is how a drain knows
-// where the burst ended. The FromFile stand-in has no non-blocking mode, so it reports nothing waiting
-// and simply never batches.
 func (d *Device) tryRd(p []byte) (int, bool, error) {
 	if d.fd < 0 {
 		return 0, false, nil
@@ -309,8 +243,6 @@ func (d *Device) tryRd(p []byte) (int, bool, error) {
 	return n, true, nil
 }
 
-// waitReadable sleeps until the fd has something, on poll(2) rather than go's netpoller -- the same
-// reason rawRead uses a bare syscall. Only reached because the fd is non-blocking.
 func (d *Device) waitReadable() error {
 	fds := []unix.PollFd{{Fd: int32(d.fd), Events: unix.POLLIN}}
 	for {
@@ -328,8 +260,6 @@ func (d *Device) wr(p []byte) (int, error) {
 	return d.f.Write(p)
 }
 
-// wrv is wr for a packet the caller holds in two pieces. The test-only FromFile device has no raw fd
-// and joins them; every device that carries traffic has one.
 func (d *Device) wrv(hdr, pkt []byte) (int, error) {
 	if d.fd >= 0 {
 		return rawWritev(d.fd, hdr, pkt)
@@ -340,9 +270,6 @@ func (d *Device) wrv(hdr, pkt []byte) (int, error) {
 	return d.f.Write(joined)
 }
 
-// wrvGSO is wrv for a super-packet: the virtio header, the leading packet entire, then each follower's
-// payload from where it already sits. Same seam as wrv, so the fd-less device joins here too rather
-// than in the caller.
 func (d *Device) wrvGSO(vnet, lead []byte, rest [][]byte, off int) (int, error) {
 	if d.fd >= 0 {
 		var iov [groMaxSegs + 1]unix.Iovec
@@ -364,8 +291,6 @@ func (d *Device) wrvGSO(vnet, lead []byte, rest [][]byte, off int) (int, error) 
 	return d.f.Write(joined)
 }
 
-// Read returns one L3 packet into buf. With GSO enabled it serves segments from
-// the queue, refilling it by reading and splitting one kernel super-packet.
 func (d *Device) Read(buf []byte) (int, error) {
 	if !d.gso {
 		return d.rd(buf)
@@ -384,13 +309,6 @@ func (d *Device) Read(buf []byte) (int, error) {
 	}
 }
 
-// TryRead is Read without the wait: it serves a segment already split out, or takes a packet already
-// waiting on the fd, and reports ok=false the moment there is neither.
-//
-// It is what lets a sender collect a burst into ONE syscall without ever holding the first packet back
-// for a second that may not come. The send path used to get its batches only from the GSO queue, which
-// meant it got them only when the kernel coalesced -- MEASURED on two real hosts, that is close to
-// never: one super-packet in a ten-second transfer. Asking the fd directly does not care.
 func (d *Device) TryRead(buf []byte) (int, bool, error) {
 	if !d.gso {
 		return d.tryRd(buf)
@@ -409,10 +327,6 @@ func (d *Device) TryRead(buf []byte) (int, bool, error) {
 	}
 }
 
-// serve hands out the next queued segment. A packet that does not fit is DROPPED, not truncated:
-// copy() silently shortens, and the carrier would then ship a header claiming a length the body no
-// longer has -- a corrupt packet the far end cannot even diagnose. No caller in THIS binary can reach
-// it (rbuf is vnetHdrLen+65535 and every caller passes maxDatagram), but Read is exported.
 func (d *Device) serve(buf []byte) (int, bool) {
 	seg := d.q[0]
 	d.q = d.q[1:]
@@ -423,8 +337,6 @@ func (d *Device) serve(buf []byte) (int, bool) {
 	return copy(buf, seg), true
 }
 
-// readGSO reads one virtio super-packet and returns its L3 segments (one element
-// for a non-GSO packet). A runt read returns no segments so Read retries.
 func (d *Device) readGSO() ([][]byte, error) {
 	n, err := d.rd(d.rbuf)
 	if err != nil {
@@ -433,7 +345,6 @@ func (d *Device) readGSO() ([][]byte, error) {
 	return d.segsFrom(n), nil
 }
 
-// tryReadGSO is readGSO without the wait, for the drain half of a batch.
 func (d *Device) tryReadGSO() ([][]byte, bool, error) {
 	n, ok, err := d.tryRd(d.rbuf)
 	if err != nil || !ok {
@@ -442,8 +353,6 @@ func (d *Device) tryReadGSO() ([][]byte, bool, error) {
 	return d.segsFrom(n), true, nil
 }
 
-// segsFrom turns one super-packet read of n bytes into its L3 segments: one element for a plain
-// packet, and none for a runt so the caller reads again.
 func (d *Device) segsFrom(n int) [][]byte {
 	if n <= vnetHdrLen {
 		return nil
@@ -457,10 +366,7 @@ func (d *Device) segsFrom(n int) [][]byte {
 		segs, split = splitGSO(pkt, gsoSize, gsoType)
 	}
 	if !split {
-		// Either a plain packet or a super-packet splitGSO handed back untouched. BOTH still carry the
-		// kernel's DEFERRED (virtio partial) checksum when NEEDS_CSUM is set, so both have to be finalized —
-		// finalizing only the plain-packet branch leaves every pass-through with the partial sum in the
-		// checksum field, which the far end drops: a silent hole in the stream, with nothing logged.
+
 		if flags&vnetNeedsCsum != 0 {
 			finalizeCsum(pkt)
 		}
@@ -476,13 +382,8 @@ func (d *Device) segsFrom(n int) [][]byte {
 	return segs
 }
 
-// zeroVnetHdr is the virtio-net header meaning "one complete packet, checksums done". It is never
-// written to, so every packet points at this one copy instead of carrying a freshly zeroed prefix.
 var zeroVnetHdr [vnetHdrLen]byte
 
-// Write hands one L3 packet to the kernel. With GSO the kernel expects a virtio-net header prefix, which
-// goes as a second iovec: the packet is written where it already is, so nothing is allocated or copied
-// to make room for ten leading bytes. There is still no GRO here — the write side never coalesces.
 func (d *Device) Write(pkt []byte) (int, error) {
 	if !d.gso {
 		n, err := d.wr(pkt)
@@ -506,10 +407,6 @@ func (d *Device) Write(pkt []byte) (int, error) {
 	return n, err
 }
 
-// oversizeNote renders the oversize-drop count for the GSO report, and renders NOTHING when it is
-// zero — which, for every caller in this binary, is always (see nOversize). A count that cannot move
-// is not diagnostics; it is a number the operator has to learn to ignore, sitting in the one line
-// that is supposed to tell them whether the knob does anything. If it ever does move, it appears.
 func oversizeNote(n uint64) string {
 	if n == 0 {
 		return ""
@@ -517,11 +414,9 @@ func oversizeNote(n uint64) string {
 	return fmt.Sprintf(", %d oversize dropped", n)
 }
 
-// Close removes the interface (non-persistent).
 func (d *Device) Close() error {
 	if d.gso && (d.nSuper.Load() > 0 || d.nUnsplit.Load() > 0 || d.nOversize.Load() > 0 || d.nOut.Load() > 0) {
-		// log, not fmt: this is the closing entry of the same series reportGSO writes while the
-		// tunnel runs, so it belongs in the journal beside them and not on a stdout nobody reads.
+
 		log.Printf("tun %s: gso final: in %d super-packets -> %d segments, %d unsplit%s; out %d packets in %d writes",
 			d.Name, d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), oversizeNote(d.nOversize.Load()),
 			d.nOut.Load(), d.nWrites.Load())

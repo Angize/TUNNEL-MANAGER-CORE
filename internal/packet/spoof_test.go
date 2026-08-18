@@ -7,19 +7,14 @@ import (
 	"testing"
 )
 
-// TestIPLinkAddressingMatrix pins the pure addressing decisions of both links across every spoof
-// combination, with no sockets opened. header() (what src/dst a packet carries), replyTo() (where a
-// server answers), filterSrc() (whether the peer source filter applies) and pinsSource() (whether a
-// source pool is refused) are the four axes every "and under spoof?" bug lived on. Needs no CAP_NET_RAW.
 func TestIPLinkAddressingMatrix(t *testing.T) {
 	ip := func(s string) net.IP { return net.ParseIP(s).To4() }
-	real := ip("10.0.0.1")               // our real source
-	to := &net.IPAddr{IP: ip("8.8.8.8")} // the real peer we route to
+	real := ip("10.0.0.1")
+	to := &net.IPAddr{IP: ip("8.8.8.8")}
 	decoy := ip("185.51.200.10")
 	forgedSrc := ip("192.0.2.7")
 	realClient := ip("203.0.113.9")
 
-	// header() must return exactly (wantSrc, wantDst).
 	hdr := []struct {
 		name             string
 		l                ipLink
@@ -39,7 +34,6 @@ func TestIPLinkAddressingMatrix(t *testing.T) {
 		}
 	}
 
-	// replyTo(): the packet source normally, the configured fixedPeer when the client forged its source.
 	src := &net.IPAddr{IP: ip("172.16.9.9")}
 	if got := (&directLink{r: &Raw{}}).replyTo(src); !got.IP.Equal(src.IP) {
 		t.Errorf("directLink replyTo = %v, want the packet source %v", got.IP, src.IP)
@@ -51,7 +45,6 @@ func TestIPLinkAddressingMatrix(t *testing.T) {
 		t.Errorf("forgedLink replyTo without fixedPeer = %v, want the packet source %v", got.IP, src.IP)
 	}
 
-	// filterSrc(): off exactly when the reply target is pinned (fixedPeer) or a client aims at a decoy.
 	fs := []struct {
 		name string
 		l    ipLink
@@ -69,7 +62,6 @@ func TestIPLinkAddressingMatrix(t *testing.T) {
 		}
 	}
 
-	// pinsSource(): only a forged source refuses a source-rotation pool.
 	if (&directLink{r: &Raw{}}).pinsSource() {
 		t.Error("directLink must not pin the source")
 	}
@@ -80,7 +72,6 @@ func TestIPLinkAddressingMatrix(t *testing.T) {
 		t.Error("a forged destination alone must not pin the source")
 	}
 
-	// fakeFD(): a directLink lends nothing (SetDesync opens its own); a forgedLink lends its spoofFd.
 	if (&directLink{r: &Raw{}}).fakeFD() != -1 {
 		t.Error("directLink fakeFD must be -1")
 	}

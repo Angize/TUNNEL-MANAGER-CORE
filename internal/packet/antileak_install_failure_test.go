@@ -10,18 +10,12 @@ import (
 	"time"
 )
 
-// A failed install must not be permanent. apply() writes down the peer it scoped to and every later
-// scope() short-circuits on it, so recording a peer whose rules never went in ends this carrier's
-// protection for the life of the process — and removing the old rule in the same breath takes
-// protection off the peer it still covered. What leaks then: on icmp the kernel echoes every frame
-// back (our own ciphertext, twice on the wire), on udp/tcp it answers each with a port-unreachable or
-// a RST. One contended iptables call is enough to get there, so the failure path is the whole test.
 func TestAntiLeakSurvivesAFailedInstall(t *testing.T) {
 	defer func(mn, mx, lg time.Duration) {
 		antiLeakRetryMin, antiLeakRetryMax, antiLeakLinger = mn, mx, lg
 	}(antiLeakRetryMin, antiLeakRetryMax, antiLeakLinger)
 	antiLeakRetryMin, antiLeakRetryMax = 20*time.Millisecond, 40*time.Millisecond
-	antiLeakLinger = 20 * time.Millisecond // the displaced rule is removed on its own timer now
+	antiLeakLinger = 20 * time.Millisecond
 
 	const prev, next = "203.0.113.10", "203.0.113.20"
 
@@ -67,9 +61,6 @@ func TestAntiLeakSurvivesAFailedInstall(t *testing.T) {
 		}
 	})
 
-	// A carrier that installs SOME of its rules and fails the rest has partial protection and a removal
-	// func apply() is about to drop on the floor. Undo it: the retry re-installs the whole set, and an
-	// unremovable rule outlives the process (the node can only sweep it by its owner tag, one rebuild later).
 	t.Run("a partial install is rolled back rather than orphaned", func(t *testing.T) {
 		var mu sync.Mutex
 		var ev []string
@@ -103,9 +94,6 @@ func TestAntiLeakSurvivesAFailedInstall(t *testing.T) {
 		}
 	})
 
-	// The trap in the ok flag: addRawDrop returns a nil removal both when every rule failed AND when the
-	// profile wanted no rule at all. Reading the second as a failure would put every bare/ipip/gre/esp
-	// tunnel into a retry loop that can never succeed.
 	t.Run("a profile no kernel answers is a success, not a failed install", func(t *testing.T) {
 		restore := iptablesRun
 		iptablesRun = func(args []string) ([]byte, error) {
@@ -121,8 +109,6 @@ func TestAntiLeakSurvivesAFailedInstall(t *testing.T) {
 		}
 	})
 
-	// ...and the other half of that flag: when iptables really does refuse, BOTH carriers must say so,
-	// because apply() has nothing else to key the retry off.
 	t.Run("iptables refusing every rule is reported as a failure", func(t *testing.T) {
 		restore := iptablesRun
 		iptablesRun = func([]string) ([]byte, error) {

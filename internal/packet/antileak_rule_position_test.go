@@ -7,22 +7,10 @@ import (
 	"testing"
 )
 
-// Every anti-leak rule goes in at the TOP of its chain, never appended.
-//
-// Appended is not "installed": the answers this carrier provokes are conntrack RELATED/ESTABLISHED,
-// and a host running ufw jumps to ufw-before-output from the top of OUTPUT, where
-// `--ctstate RELATED,ESTABLISHED -j ACCEPT` sits. ACCEPT ends the traversal, so an appended DROP is
-// never reached — while runRule reports success and the log says "anti-leak scoped to …", which is
-// what the operator reads as protection. Measured in a netns lab with a ufw-shaped chain: the
-// kernel's answer reaches the client with -A and does not with -I, on all three noisy profiles.
-//
-// Position is not observable from the rule itself, so what is pinned here is the argv: the seam every
-// rule really goes through.
 func TestEveryAntiLeakRuleGoesInAtTheTopOfItsChain(t *testing.T) {
 	var argv [][]string
 	restore := iptablesRun
-	// -C is runRule asking whether the rule is there already; answering "no" is what lets the install
-	// run, and those probes are not installs so they are not recorded.
+
 	iptablesRun = func(a []string) ([]byte, error) {
 		if indexOfArg(a, "-C") >= 0 {
 			return nil, errRuleAbsent
@@ -75,6 +63,4 @@ func indexOfArg(argv []string, want string) int {
 	return -1
 }
 
-// errRuleAbsent is what iptables -C reports when the rule is not in the chain: the answer that lets
-// an install proceed. Shared by the fakes that must not have their installs skipped.
 var errRuleAbsent = errors.New("iptables: Bad rule (does a matching rule exist in that chain?)")

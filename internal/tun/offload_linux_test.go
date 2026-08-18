@@ -8,22 +8,20 @@ import (
 	"testing"
 )
 
-// buildTCP4 makes an IPv4/TCP packet with the given payload (checksums valid),
-// as the kernel would hand us a TSO super-packet.
 func buildTCP4(src, dst [4]byte, seq uint32, flags byte, payload []byte) []byte {
 	p := make([]byte, 20+20+len(payload))
 	p[0] = 0x45
 	binary.BigEndian.PutUint16(p[2:4], uint16(len(p)))
-	binary.BigEndian.PutUint16(p[4:6], 0x1000) // id base
+	binary.BigEndian.PutUint16(p[4:6], 0x1000)
 	p[8] = 64
-	p[9] = 6 // TCP
+	p[9] = 6
 	copy(p[12:16], src[:])
 	copy(p[16:20], dst[:])
 	binary.BigEndian.PutUint16(p[10:12], ipChecksum(p[:20]))
 	binary.BigEndian.PutUint32(p[24:28], seq)
-	p[32] = 5 << 4 // data offset
+	p[32] = 5 << 4
 	p[33] = flags
-	binary.BigEndian.PutUint16(p[34:36], 0xffff) // window
+	binary.BigEndian.PutUint16(p[34:36], 0xffff)
 	copy(p[40:], payload)
 	binary.BigEndian.PutUint16(p[36:38], l4Checksum(p, 20, false, 6))
 	return p
@@ -38,10 +36,10 @@ func buildUDP4(src, dst [4]byte, payload []byte) []byte {
 	copy(p[12:16], src[:])
 	copy(p[16:20], dst[:])
 	binary.BigEndian.PutUint16(p[10:12], ipChecksum(p[:20]))
-	binary.BigEndian.PutUint16(p[20:22], 51820)                  // UDP src port
-	binary.BigEndian.PutUint16(p[22:24], 443)                    // UDP dst port
-	binary.BigEndian.PutUint16(p[24:26], uint16(8+len(payload))) // UDP length
-	copy(p[28:], payload)                                        // payload after 8-byte UDP header (20+8=28)
+	binary.BigEndian.PutUint16(p[20:22], 51820)
+	binary.BigEndian.PutUint16(p[22:24], 443)
+	binary.BigEndian.PutUint16(p[24:26], uint16(8+len(payload)))
+	copy(p[28:], payload)
 	binary.BigEndian.PutUint16(p[26:28], l4Checksum(p, 20, false, 17))
 	return p
 }
@@ -53,13 +51,13 @@ func ipOK(t *testing.T, seg []byte) {
 }
 
 func l4OK(t *testing.T, seg []byte, proto byte) {
-	off := 16 // TCP checksum offset within L4
+	off := 16
 	if proto == 17 {
 		off = 6
 	}
 	stored := binary.BigEndian.Uint16(seg[20+off : 20+off+2])
 	if stored == 0 && proto == 17 {
-		return // UDP checksum optional
+		return
 	}
 	seg[20+off], seg[20+off+1] = 0, 0
 	want := l4Checksum(seg, 20, false, proto)
@@ -76,7 +74,7 @@ func TestSegmentTCP4(t *testing.T) {
 		payload[i] = byte(i)
 	}
 	const seq0 = 1000
-	super := buildTCP4(src, dst, seq0, 0x18 /*PSH|ACK*/, payload)
+	super := buildTCP4(src, dst, seq0, 0x18, payload)
 
 	segs, _ := segment(super, 1400, true)
 	if len(segs) != 3 {
@@ -132,7 +130,7 @@ func TestSegmentUDP4(t *testing.T) {
 func TestSegmentSinglePassThrough(t *testing.T) {
 	src, dst := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
 	super := buildTCP4(src, dst, 1, 0x18, make([]byte, 500))
-	segs, _ := segment(super, 1400, true) // one MSS fits -> single segment
+	segs, _ := segment(super, 1400, true)
 	if len(segs) != 1 {
 		t.Fatalf("got %d segments, want 1", len(segs))
 	}

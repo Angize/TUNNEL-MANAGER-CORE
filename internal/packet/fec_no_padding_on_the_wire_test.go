@@ -7,17 +7,8 @@ import (
 	"testing"
 )
 
-// The encoder pads every shard to the block's LARGEST before handing the block to Reed-Solomon, which
-// it must — the codec needs equal lengths. It then used to put the padded copy on the wire. Two costs,
-// and the second is the one that matters:
-//
-//   - a block holding one big packet and nine small ones went out as ten big ones;
-//   - every packet of that block left at exactly the same size, which is a shape a real flow does not
-//     have and a padding-free tunnel does not have either.
-//
-// The header already carries shardLen, so the receiver can re-pad. Nothing but the codec needs it.
 func TestFecDoesNotPadTheWire(t *testing.T) {
-	// One 1400-byte frame and nine 60-byte ones: the mix that shows it.
+
 	sizes := []int{1400, 60, 60, 60, 60, 60, 60, 60, 60, 60}
 	frames := make([][]byte, len(sizes))
 	for i, n := range sizes {
@@ -39,11 +30,10 @@ func TestFecDoesNotPadTheWire(t *testing.T) {
 		t.Fatalf("%d data shards for %d frames", len(data), len(frames))
 	}
 
-	// Every data packet carries its own frame and nothing more.
 	shardLen := int(binary.BigEndian.Uint16(data[0][9:11]))
 	onWire, padded := 0, 0
 	for i, p := range data {
-		want := fecHdrLen + 2 + sizes[i] // header + the 2-byte length prefix + the frame
+		want := fecHdrLen + 2 + sizes[i]
 		if len(p) != want {
 			t.Errorf("data shard %d is %d bytes on the wire, want %d — it is still carrying %d bytes of padding",
 				i, len(p), want, len(p)-want)
@@ -56,7 +46,6 @@ func TestFecDoesNotPadTheWire(t *testing.T) {
 	}
 	t.Logf("data shards: %d bytes on the wire, %d if padded", onWire, padded)
 
-	// ...and they are no longer all the same size, which was the tell.
 	same := true
 	for _, p := range data[1:] {
 		if len(p) != len(data[0]) {
@@ -67,12 +56,10 @@ func TestFecDoesNotPadTheWire(t *testing.T) {
 		t.Error("every data packet of the block is still exactly the same size")
 	}
 
-	// It still has to WORK: drop two data shards and let parity rebuild them, on a decoder that only
-	// ever sees the unpadded wire form.
 	var got [][]byte
 	dec := newFecDecoder(func(b []byte) { got = append(got, append([]byte(nil), b...)) })
 	for i, p := range data {
-		if i == 0 || i == 5 { // the big one and a small one
+		if i == 0 || i == 5 {
 			continue
 		}
 		dec.input(p)
@@ -94,8 +81,6 @@ func TestFecDoesNotPadTheWire(t *testing.T) {
 	}
 }
 
-// A block whose frames are all the same size must be byte-identical to what it always was: this
-// changes what padding is carried, not the framing.
 func TestFecUniformBlockIsUnchanged(t *testing.T) {
 	sink := &fecCapture{}
 	enc, err := newFecEncoder(4, 2, sink.emit)
@@ -126,8 +111,6 @@ func TestFecUniformBlockIsUnchanged(t *testing.T) {
 	}
 }
 
-// input() runs pre-auth on attacker-chosen bytes, so the lengths it will accept are a bound, not a
-// convenience: a data shard may be shorter than shardLen and never longer, and parity is exact.
 func TestFecRefusesAShardThatOverrunsItsBlock(t *testing.T) {
 	delivered := 0
 	dec := newFecDecoder(func([]byte) { delivered++ })
@@ -137,7 +120,7 @@ func TestFecRefusesAShardThatOverrunsItsBlock(t *testing.T) {
 		binary.BigEndian.PutUint32(p[1:5], 7)
 		p[5], p[6], p[7], p[8] = 0, 4, 2, 4
 		binary.BigEndian.PutUint16(p[9:11], uint16(shardLen))
-		binary.BigEndian.PutUint16(p[fecHdrLen:], uint16(bodyLen-2)) // the frame's own length prefix
+		binary.BigEndian.PutUint16(p[fecHdrLen:], uint16(bodyLen-2))
 		return p
 	}
 	for _, tc := range []struct {

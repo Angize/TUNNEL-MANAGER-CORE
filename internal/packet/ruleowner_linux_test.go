@@ -9,10 +9,6 @@ import (
 	"testing"
 )
 
-// TestEveryRuleNamesItsOwner: a rule with no owner is an orphan nobody can attribute, and that is how
-// two production boxes ended up carrying a --dport 4500 rule from a deleted tunnel and one ICMP rule
-// twice. The node sweeps `tnl:<tun>` before a build and after a stop, which only works if the rule
-// carries the tag in the first place.
 func TestEveryRuleNamesItsOwner(t *testing.T) {
 	got := ownerMatch("core42")
 	want := []string{"-m", "comment", "--comment", "tnl:core42"}
@@ -22,25 +18,18 @@ func TestEveryRuleNamesItsOwner(t *testing.T) {
 	if len(got) > 0 && got[len(got)-1] != ruleOwnerPrefix+"core42" {
 		t.Error("the tag must be the prefix plus the tun name, or the node's sweep looks for the wrong string")
 	}
-	// A carrier with no device tags nothing rather than tagging the prefix alone: `tnl:` would be a
-	// tag every tunnel matches, and the first sweep would take out the whole fleet's rules.
+
 	if o := ownerMatch(""); o != nil {
 		t.Errorf("an unnamed carrier must tag nothing, got %v -- %q would match every tunnel", o, ruleOwnerPrefix)
 	}
 }
 
-// TestTheRemovalMatchesTheInstall drives the REAL installers and captures the argv they hand iptables,
-// for the install and for the teardown they return. An earlier version of this test compared the rule
-// BUILDERS instead, and a RED proof showed it stayed green when the owner was stripped from the actual
-// removal -- it was testing a helper, not the path. iptables -D deletes by matching the full spec, so
-// a removal missing one match silently removes nothing and the rule outlives its core.
 func TestTheRemovalMatchesTheInstallOnTheRealPath(t *testing.T) {
 	var argv [][]string
 	old := iptablesRun
 	iptablesRun = func(a []string) ([]byte, error) {
 		if v, _ := verbOf(a); v == "-C" {
-			// Nothing is installed in this stub host, so the "is it already there" probe must say no —
-			// answering yes would make every installer correctly skip, and the argv below would be empty.
+
 			return nil, errors.New("no such rule")
 		}
 		argv = append(argv, append([]string(nil), a...))
@@ -92,7 +81,7 @@ func TestTheRemovalMatchesTheInstallOnTheRealPath(t *testing.T) {
 				if a == b {
 					continue
 				}
-				if a != "-I" || b != "-D" { // the ONLY difference allowed anywhere in the argv
+				if a != "-I" || b != "-D" {
 					t.Errorf("%s[%d]: arg %d differs (%q install, %q removal) -- the rule survives its own teardown",
 						tc.name, i, j, a, b)
 				}
@@ -118,7 +107,7 @@ func TestRuleBuildersStayInStep(t *testing.T) {
 		}
 		for i := range add {
 			if i == 0 {
-				continue // -A vs -D, the only difference there may be
+				continue
 			}
 			if add[i] != del[i] {
 				t.Errorf("%s: arg %d differs (%q install, %q removal) -- the rule would survive its own teardown",

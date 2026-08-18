@@ -10,19 +10,13 @@ import (
 	"time"
 )
 
-// TestDialFailureLeavesTheDirectPoolAlone pins the one-judge rule on the carrier that used to have an
-// opinion of its own. A DPI that lets the TCP handshake complete and then kills the payload looks
-// exactly like this listener — accept, then close — and tcp used to burn the endpoint for it. It must
-// not: a dial that failed says the carrier could not come up, not which IP is to blame, and the node's
-// tun probe is the only thing positioned to answer that. The same test then shows the node's verdict
-// moving the pool, so "nothing burns it" is not mistaken for "nothing can".
 func TestDialFailureLeavesTheDirectPoolAlone(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer ln.Close()
-	go func() { // accept, then drop before a single core frame is exchanged
+	go func() {
 		for {
 			c, aerr := ln.Accept()
 			if aerr != nil {
@@ -37,7 +31,7 @@ func TestDialFailureLeavesTheDirectPoolAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("split host/port: %v", err)
 	}
-	second := net.JoinHostPort("127.0.0.2", port) // a loopback alias, same listener
+	second := net.JoinHostPort("127.0.0.2", port)
 
 	dev, _ := tunPair(t, "hsburn")
 	dir := t.TempDir()
@@ -49,7 +43,6 @@ func TestDialFailureLeavesTheDirectPoolAlone(t *testing.T) {
 	go b.Run()
 	t.Cleanup(func() { b.Close() })
 
-	// Give the dial loop several failed attempts. The pool must not move and nothing may be burned.
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
 		if pp.current() != addr {
@@ -64,14 +57,13 @@ func TestDialFailureLeavesTheDirectPoolAlone(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// The node's verdict, through the file the core really polls, DOES move it.
 	if werr := os.WriteFile(b.st.verdictPath(), []byte(`{"cmd":"fail","key":"`+addr+`"}`), 0o644); werr != nil {
 		t.Fatalf("write cmd: %v", werr)
 	}
 	deadline = time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if pp.current() != addr {
-			return // burned and advanced on the node's word
+			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

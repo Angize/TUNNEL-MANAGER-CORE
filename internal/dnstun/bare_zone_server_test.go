@@ -6,10 +6,6 @@ import (
 	"time"
 )
 
-// The drain lived in the SERVER's reply path, and no test ever built a server. bare_zone_test.go checks
-// Codec.DecodeName's error value — the mechanism of the fix, not the thing it was about. What was stolen
-// was a datagram off `s.downstream`, and nothing else constructs a dnsServer, queues a downstream
-// datagram or counts the queue. This drives the real server over a real UDP socket and MEASURES it.
 func TestApexQueryDoesNotStealADownstreamDatagram(t *testing.T) {
 	const zone = "t.example.com"
 	codec, err := NewCodec(zone)
@@ -23,7 +19,6 @@ func TestApexQueryDoesNotStealADownstreamDatagram(t *testing.T) {
 	defer tr.Close()
 	srv := tr.(*dnsServer)
 
-	// One datagram waiting to go server -> client, exactly as a live tunnel would have.
 	payload := []byte("downstream owed to the real client")
 	if err := tr.Send(payload); err != nil {
 		t.Fatalf("queue a downstream datagram: %v", err)
@@ -60,7 +55,6 @@ func TestApexQueryDoesNotStealADownstreamDatagram(t *testing.T) {
 		return txt
 	}
 
-	// A stranger who read the zone off the public delegation. `dig TXT <zone>`, in a loop.
 	for i := 0; i < 5; i++ {
 		if got := ask(t, zone+"."); len(got) != 0 {
 			t.Fatalf("the apex query was answered with %d bytes of the tunnel's downstream", len(got))
@@ -72,8 +66,6 @@ func TestApexQueryDoesNotStealADownstreamDatagram(t *testing.T) {
 			"per query, with no auth and no rate limit", got)
 	}
 
-	// ...and the REAL client's poll must still be served, or the fix would have broken every idle
-	// tunnel instead. This is the half that makes the assertion above meaningful.
 	poll, err := codec.EncodeName(nil, "abcdefgh")
 	if err != nil {
 		t.Fatalf("EncodeName: %v", err)
@@ -86,8 +78,6 @@ func TestApexQueryDoesNotStealADownstreamDatagram(t *testing.T) {
 		t.Fatalf("the client's poll left %d datagrams queued, want 0 — it did not consume the one it was given", left)
 	}
 
-	// The apex must still ANSWER (silence on our own zone is its own signal, and a resolver that gets
-	// nothing marks the delegation lame) — it just must not answer with the tunnel's data.
 	if got := ask(t, zone+"."); len(got) != 0 {
 		t.Fatalf("apex answered with %d bytes after the queue drained", len(got))
 	}

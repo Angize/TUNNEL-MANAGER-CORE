@@ -1,7 +1,3 @@
-// DNS-tunnel carrier: L3 packets ride a reliable, AEAD-sealed KCP session tunnelled inside DNS queries
-// and responses (see internal/dnstun). The client polls a recursive resolver; the server is an
-// authoritative responder. The last-resort carrier for a full protocol+destination whitelist: the client
-// only ever sends UDP/53 to a DOMESTIC resolver. Ordinary UDP sockets only, so it stays portable.
 package packet
 
 import (
@@ -19,32 +15,26 @@ import (
 const (
 	dnsBackoffMin = time.Second
 	dnsBackoffMax = 30 * time.Second
-	// dnsMinMTU is the smallest KCP MTU a zone may leave. It is dnstun's number, not a copy: the
-	// floor is about KCP's own per-segment overhead, which lives there.
+
 	dnsMinMTU = dnstun.MinUsefulMTU
 )
 
-// zoneBytesToDrop is how many characters a zone must lose to free `need` more bytes per query.
-// Each raw byte costs ceil(8/5) base32 characters in the query name, so one character of zone buys
-// back five eighths of a byte. Reported in the error because "your zone is too long" without a
-// number leaves the operator guessing at the one thing they can change.
 func zoneBytesToDrop(need int) int { return (need*8 + 4) / 5 }
 
-// DNS carries L3 packets over a DNS tunnel. It satisfies the core carrier interface (Run/Close).
 type DNS struct {
 	dev       *tun.Device
 	isClient  bool
 	cfg       dnstun.SessionConfig
 	zone      string
-	addr      string   // server: listen address (e.g. ":53"); unused for the client
-	resolvers []string // client: recursive resolvers to rotate across ("host" or "host:port")
+	addr      string
+	resolvers []string
 
-	mu      sync.Mutex // guards curConn/curT so Close can tear down whatever is live
+	mu      sync.Mutex
 	curConn net.Conn
 	curT    dnstun.WireTransport
-	conn    atomic.Pointer[net.Conn] // the live session for the long-lived tun→net loop (nil between sessions)
+	conn    atomic.Pointer[net.Conn]
 
-	st *coreStatus // client-only event ring; nil until SetStatusPath wires it, and nil-safe throughout
+	st *coreStatus
 
 	closeCh   chan struct{}
 	closeOnce sync.Once
@@ -57,9 +47,7 @@ func newDNS(dev *tun.Device, isClient bool, addr string, resolvers []string, zon
 	}
 	mtu := codec.MaxUpstream() - dnstun.SessionOverhead
 	if mtu < dnsMinMTU {
-		// A floor low enough for kcp-go to accept still lets a long zone come up, log "session established",
-		// and then spend most of every DNS query on the KCP header while one packet shatters into dozens.
-		// Refusing with the number of characters to remove beats a tunnel that cannot carry anything.
+
 		return nil, fmt.Errorf("dns: zone %q leaves only %d bytes per query, and the carrier needs %d "+
 			"(KCP spends %d of them on its own header) — shorten the zone by about %d characters",
 			zone, mtu, dnsMinMTU, dnstun.KCPOverhead, zoneBytesToDrop(dnsMinMTU-mtu))
@@ -71,24 +59,14 @@ func newDNS(dev *tun.Device, isClient bool, addr string, resolvers []string, zon
 	}, nil
 }
 
-// DialDNS (client) tunnels through resolvers (recursive resolvers, each "host" or "host:port",
-// typically domestic resolvers on :53) for the delegated zone. Queries rotate across them so heavy
-// loss or filtering on one resolver is covered by the others.
 func DialDNS(dev *tun.Device, resolvers []string, zone, psk, cipher string, keepalive time.Duration) (*DNS, error) {
 	return newDNS(dev, true, "", resolvers, zone, psk, cipher, keepalive)
 }
 
-// ListenDNS (server) is the authoritative responder for the delegated zone, bound to listenAddr
-// (e.g. ":53"). The server never re-dials, so it takes no keepalive.
 func ListenDNS(dev *tun.Device, listenAddr, zone, psk, cipher string) (*DNS, error) {
 	return newDNS(dev, false, listenAddr, nil, zone, psk, cipher, 0)
 }
 
-// Run drives the carrier: one long-lived tun→net loop feeds whatever session is live, while the
-// main loop (re)establishes a session and pumps net→tun until it dies, then reconnects with backoff.
-
-// SetStatusPath (client, optional) wires the event ring every OTHER carrier already writes, so this
-// carrier's self-heal reasons reach the node/panel system log. Call before Run().
 func (d *DNS) SetStatusPath(path string) {
 	if path == "" {
 		return
@@ -107,10 +85,7 @@ func (d *DNS) Run() error {
 		}
 		conn, err := d.connect()
 		if err != nil {
-			// Deliberately NO down event here. The retry loop backs off from 1s to 30s, so one per attempt would
-			// append an event a second at first and evict the real history out of a capped ring. The session
-			// death below records the outage once, and dw published while hb stays 0 already reads as
-			// "never connected".
+
 			log.Printf("core/dns: connect: %v", err)
 			if d.sleep(backoff) {
 				return nil
@@ -119,23 +94,20 @@ func (d *DNS) Run() error {
 			continue
 		}
 		log.Printf("core/dns: session established (%s zone=%s)", d.role(), d.zone)
-		d.st.reconnected("dns") // silent on the first connect; pairs a preceding down
+		d.st.reconnected("dns")
 		backoff = dnsBackoffMin
 		d.conn.Store(&conn)
-		d.netToTun(conn) // blocks until the session dies
+		d.netToTun(conn)
 		d.conn.Store(nil)
 		d.clearLive()
 		_ = conn.Close()
 		if d.isDone() {
 			return nil
 		}
-		d.st.down("session-dead", "dns") // the session ended on its own -> the next connect is a recovery
+		d.st.down("session-dead", "dns")
 	}
 }
 
-// connect creates a fresh transport and session for one attempt, recording both under the lock so
-// Close can tear them down. A fresh transport per attempt gives the server a clean :53 bind and the
-// client a fresh resolver socket on every reconnect.
 func (d *DNS) connect() (net.Conn, error) {
 	codec, err := dnstun.NewCodec(d.zone)
 	if err != nil {
@@ -163,10 +135,10 @@ func (d *DNS) connect() (net.Conn, error) {
 	if d.isClient {
 		conn, err = dnstun.DialSession(t, d.cfg)
 	} else {
-		conn, err = dnstun.ServeSession(t, d.cfg) // blocks until a client establishes
+		conn, err = dnstun.ServeSession(t, d.cfg)
 	}
 	if err != nil {
-		// DialSession/ServeSession already closed t on error.
+
 		d.mu.Lock()
 		d.curT = nil
 		d.mu.Unlock()
@@ -185,31 +157,28 @@ func (d *DNS) clearLive() {
 	d.mu.Unlock()
 }
 
-// tunToNet is long-lived: it reads L3 packets and writes them to whatever session is currently live,
-// dropping when there is none (the peer retransmits at L4). It ends only when the TUN device closes.
 func (d *DNS) tunToNet() {
 	buf := make([]byte, maxDatagram)
 	for {
 		n, err := d.dev.Read(buf)
 		if err != nil {
-			return // device closed: carrier shutting down
+			return
 		}
 		cp := d.conn.Load()
 		if cp == nil {
-			continue // no session yet / between sessions — drop
+			continue
 		}
 		if err := dnstun.WritePacket(*cp, buf[:n]); err != nil {
-			// session down; drop this packet — Run's netToTun will observe the death and reconnect
+
 		}
 	}
 }
 
-// netToTun pumps one session's inbound packets into the TUN until the session dies.
 func (d *DNS) netToTun(conn net.Conn) {
 	for {
 		pkt, err := dnstun.ReadPacket(conn)
 		if err != nil {
-			return // session dead -> reconnect
+			return
 		}
 		if _, err := d.dev.Write(pkt); err != nil {
 			log.Printf("core/dns: tun write: %v", err)
@@ -218,17 +187,15 @@ func (d *DNS) netToTun(conn net.Conn) {
 	}
 }
 
-// Close stops the carrier: it signals shutdown and tears down whatever session/transport is live,
-// which unblocks netToTun (via the session) and the transport loops.
 func (d *DNS) Close() error {
 	d.closeOnce.Do(func() { close(d.closeCh) })
 	d.mu.Lock()
 	conn, t := d.curConn, d.curT
 	d.mu.Unlock()
 	if conn != nil {
-		_ = conn.Close() // also closes its transport
+		_ = conn.Close()
 	} else if t != nil {
-		_ = t.Close() // no session yet (e.g. server awaiting a client): stop the transport loops
+		_ = t.Close()
 	}
 	return nil
 }

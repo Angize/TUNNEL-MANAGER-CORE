@@ -4,9 +4,6 @@ import (
 	"testing"
 )
 
-// TestFakeModeIgnoresSplitTTL pins that the fake decoy's TTL is not the disorder knob. The two modes
-// want opposite values from one stored number: disorder low so the head expires, fake high so the
-// decoy outruns the DPI.
 func TestFakeModeIgnoresSplitTTL(t *testing.T) {
 	for _, ttl := range []int{0, 1, 4, 5, 64, 255} {
 		f := newFragConn(nil, "example.com", 0, sniFakeMode, ttl, false, nil)
@@ -19,12 +16,12 @@ func TestFakeModeIgnoresSplitTTL(t *testing.T) {
 		t.Fatalf("fake mode's TTL (%d) must be well above the disorder TTL (%d) — the decoy has to "+
 			"outlive the hops disorder's head segment is meant to die within", fakeTTL, disorderTTL)
 	}
-	// disorder still reads it: the knob is not dead, it just belongs to one mode.
+
 	d := newFragConn(nil, "example.com", 0, sniDisorderMode, 5, false, nil)
 	if d.ttl != 5 {
 		t.Fatalf("disorder must still carry the operator's split_ttl, got %d", d.ttl)
 	}
-	// And the carrier plumbs it through unchanged, so this is the whole path and not a helper.
+
 	b := &TCP{isClient: true, ws: true}
 	if !b.SetSNISplit(true, 0, sniFakeMode, 4) {
 		t.Fatal("a ws carrier must accept sni_split")
@@ -34,9 +31,6 @@ func TestFakeModeIgnoresSplitTTL(t *testing.T) {
 	}
 }
 
-// TestSetSNISplitReportsWhetherItApplied pins the seam the startup log depends on. *TCP implements
-// SetSNISplit for transport=tcp as well as ws, and on tcp it discards the setting — so main could
-// not tell an applied knob from a discarded one and printed "SNI fragmentation on" either way.
 func TestSetSNISplitReportsWhetherItApplied(t *testing.T) {
 	for _, tc := range []struct {
 		name string

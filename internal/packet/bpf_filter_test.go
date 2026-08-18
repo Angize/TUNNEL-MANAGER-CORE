@@ -12,9 +12,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// runBPF is a classic-BPF interpreter for exactly the instructions these filters use, so a test can
-// see what the KERNEL will keep rather than compare instruction words to a golden copy. Anything else
-// is a failure, which is the point: a filter grown past this is a filter nobody here has read.
 func runBPF(t *testing.T, prog []unix.SockFilter, pkt []byte) uint32 {
 	t.Helper()
 	var a uint32
@@ -23,7 +20,7 @@ func runBPF(t *testing.T, prog []unix.SockFilter, pkt []byte) uint32 {
 		switch in.Code {
 		case unix.BPF_LD | unix.BPF_B | unix.BPF_ABS:
 			if int(in.K) >= len(pkt) {
-				return 0 // out of bounds: the kernel drops the packet
+				return 0
 			}
 			a = uint32(pkt[in.K])
 		case unix.BPF_LD | unix.BPF_W | unix.BPF_ABS:
@@ -47,8 +44,6 @@ func runBPF(t *testing.T, prog []unix.SockFilter, pkt []byte) uint32 {
 	return 0
 }
 
-// ip4 builds the head of an IPv4 packet as AF_PACKET SOCK_DGRAM delivers it: no link header, so
-// offset 0 is the IP header.
 func ip4(proto int, src, dst string) []byte {
 	p := make([]byte, 40)
 	p[0] = 0x45
@@ -58,10 +53,6 @@ func ip4(proto int, src, dst string) []byte {
 	return p
 }
 
-// Every AF_PACKET socket the carriers open is handed a copy of EVERY IPv4 frame on the host, and both
-// receive loops then drop nearly all of it in Go — a copy into userspace and a wake-up per packet of
-// somebody else's traffic. The filters must select exactly what those loops keep: no more (wasted) and
-// no less (a frame the tunnel needs, dropped by the kernel before anything can see it).
 func TestTheSocketFiltersKeepExactlyWhatTheReceiveLoopsWant(t *testing.T) {
 	const decoy, other = "198.51.100.9", "198.51.100.10"
 
@@ -109,14 +100,10 @@ func TestTheSocketFiltersKeepExactlyWhatTheReceiveLoopsWant(t *testing.T) {
 		}
 	})
 
-	// A whole frame, not a truncated one: a filter that returns a short length silently cuts every
-	// packet the tunnel receives, which the Go side would then decode as garbage.
 	if n := runBPF(t, bpfIPProto(protoUDP), ip4(protoUDP, "203.0.113.1", "10.0.0.1")); n < 65535 {
 		t.Errorf("the accept length is %d — frames would be truncated to that", n)
 	}
 
-	// ...and the kernel has to accept the programs. Attaching to a plain UDP socket runs the same
-	// verifier as an AF_PACKET one and needs no privileges, so this holds everywhere the tests do.
 	for name, prog := range map[string][]unix.SockFilter{
 		"flux":  bpfIPProto(protoUDP),
 		"decoy": bpfIPProtoDst(253, net.ParseIP(decoy)),
@@ -139,9 +126,6 @@ func attachTo(t *testing.T, prog []unix.SockFilter) error {
 		&unix.SockFprog{Len: uint16(len(prog)), Filter: &prog[0]})
 }
 
-// ...and then the kernel really has to drop them. This one opens the socket the carrier opens, with
-// the filter the carrier attaches, and looks at what actually turns up: the box's own ssh session is a
-// steady stream of TCP, so "no TCP arrived" is a live negative control rather than an assumption.
 func TestTheFluxFilterDropsEverythingButUDPInTheKernel(t *testing.T) {
 	fd, err := openAfpacket(bpfIPProto(protoUDP), "test")
 	if err != nil {
@@ -149,7 +133,6 @@ func TestTheFluxFilterDropsEverythingButUDPInTheKernel(t *testing.T) {
 	}
 	defer syscall.Close(fd)
 
-	// One UDP datagram of our own, so the count below is not waiting on the box being busy.
 	c, err := net.Dial("udp4", "127.0.0.1:9")
 	if err != nil {
 		t.Fatal(err)
@@ -175,7 +158,7 @@ func TestTheFluxFilterDropsEverythingButUDPInTheKernel(t *testing.T) {
 		}
 		seen[buf[9]]++
 		if seen[protoUDP] > 0 && time.Now().After(deadline.Add(-2*time.Second)) {
-			break // we have what we came for; do not sit here for the whole window
+			break
 		}
 	}
 	if seen[protoUDP] == 0 {

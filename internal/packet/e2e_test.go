@@ -12,10 +12,6 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
 
-// TestUDPServerMultiIP drives a full tunnel against a pooled UDP server bound on TWO loopback IPs at the
-// same port. The client dials the SECOND IP (not the first-bound), and the test asserts both that data
-// flows each way AND that the server then replies FROM the exact IP the client dialed (source-correct
-// for a NAT'd client), rather than the OS-default first socket.
 func TestUDPServerMultiIP(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"
@@ -36,7 +32,7 @@ func TestUDPServerMultiIP(t *testing.T) {
 	if len(srv.srvConns) != 2 {
 		t.Fatalf("want 2 server sockets, got %d", len(srv.srvConns))
 	}
-	cli, err := Dial(a2, cliDev, ka, false, true, psk, cipher, false, 0, 0) // dial the SECOND IP
+	cli, err := Dial(a2, cliDev, ka, false, true, psk, cipher, false, 0, 0)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -64,10 +60,6 @@ func TestUDPServerMultiIP(t *testing.T) {
 	}
 }
 
-// TestTCPServerMultiIP drives a full tunnel against a pooled TCP server bound on TWO loopback IPs at the
-// same port. The client dials the SECOND; the test asserts both listeners exist and that data flows each
-// way over it. TCP's reply source is inherently correct — the accepted socket's local addr IS the dialed
-// IP — so the multi-bind here is about accepting ONLY on the selected pool IPs.
 func TestTCPServerMultiIP(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"
@@ -88,7 +80,7 @@ func TestTCPServerMultiIP(t *testing.T) {
 	if len(srv.lns) != 2 {
 		t.Fatalf("want 2 server listeners, got %d", len(srv.lns))
 	}
-	cli, err := DialTCP(a2, cliDev, ka, false, true, psk, cipher, false, "") // dial the SECOND IP
+	cli, err := DialTCP(a2, cliDev, ka, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("DialTCP: %v", err)
 	}
@@ -113,10 +105,6 @@ func TestTCPServerMultiIP(t *testing.T) {
 	}
 }
 
-// TestUDPServerReplyConnAuthGated is the regression guard for the reply-socket hijack: once a NAT'd
-// client is established on one pool IP, an UNAUTHENTICATED datagram to ANOTHER pool IP must NOT move the
-// server's reply socket, which would send downstream from an IP the client's NAT never saw. It brings a
-// tunnel up on 127.0.0.2, fires garbage at the .1 socket, and asserts both the socket and the data.
 func TestUDPServerReplyConnAuthGated(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"
@@ -134,7 +122,7 @@ func TestUDPServerReplyConnAuthGated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listen multi: %v", err)
 	}
-	cli, err := Dial(a2, cliDev, ka, false, true, psk, cipher, false, 0, 0) // establish on .2
+	cli, err := Dial(a2, cliDev, ka, false, true, psk, cipher, false, 0, 0)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -143,7 +131,6 @@ func TestUDPServerReplyConnAuthGated(t *testing.T) {
 	t.Cleanup(func() { cli.Close(); srv.Close() })
 	time.Sleep(300 * time.Millisecond)
 
-	// Bring the tunnel fully up so an authenticated frame has committed replyConn to .2.
 	pkt1 := bytes.Repeat([]byte{0xC1}, 200)
 	if _, err := cliCtrl.Write(pkt1); err != nil {
 		t.Fatalf("inject client->server: %v", err)
@@ -155,22 +142,20 @@ func TestUDPServerReplyConnAuthGated(t *testing.T) {
 		t.Fatalf("precondition: reply socket = %v, want 127.0.0.2", ip)
 	}
 
-	// Fire an UNAUTHENTICATED datagram at the OTHER pool IP (.1). A pre-fix server would move replyConn
-	// to the .1 socket here; the fix gates the move on authentication, so it must stay on .2.
 	atk, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 5; i++ {
-		atk.Write(bytes.Repeat([]byte{0xEE}, 64)) // garbage: opens under no session, parses as no init
+		atk.Write(bytes.Repeat([]byte{0xEE}, 64))
 	}
 	atk.Close()
-	time.Sleep(150 * time.Millisecond) // let the .1 read loop process the garbage
+	time.Sleep(150 * time.Millisecond)
 
 	if ip := srv.replyConn.Load().LocalAddr().(*net.UDPAddr).IP; !ip.Equal(net.IPv4(127, 0, 0, 2)) {
 		t.Fatalf("reply socket hijacked to %v by an unauthenticated packet — want it pinned to 127.0.0.2", ip)
 	}
-	// Downstream must still flow (proving replyConn still egresses from the IP the client dialed).
+
 	pkt2 := bytes.Repeat([]byte{0x5A}, 500)
 	if _, err := srvCtrl.Write(pkt2); err != nil {
 		t.Fatalf("inject server->client: %v", err)
@@ -180,10 +165,6 @@ func TestUDPServerReplyConnAuthGated(t *testing.T) {
 	}
 }
 
-// tunPair returns a Device backed by one end of a unix datagram socketpair and
-// the control file for the other end: write to ctrl -> dev.Read returns it
-// (a packet "leaving" the app), and dev.Write -> ctrl.Read (a packet delivered
-// to the app). SOCK_DGRAM preserves the one-packet-per-read TUN semantics.
 func tunPair(t *testing.T, name string) (*tun.Device, *os.File) {
 	t.Helper()
 	fds, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)
@@ -247,14 +228,10 @@ type carrier interface {
 	Close() error
 }
 
-// runTunnel drives a full server<->client core tunnel over a real socket for the
-// given transport/obfs, injecting a packet each way and asserting it arrives
-// intact — exercising seal/open, counter nonce, anti-replay, peer learning, and
-// (tcp) handshake, the paths a live node runs.
 func runTunnel(t *testing.T, transport string, obfs bool) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	const cipher = "aes-256-gcm"
-	const cryptoOn = true // exercises the full ephemeral handshake + session keys
+	const cryptoOn = true
 	srvDev, srvCtrl := tunPair(t, "srv")
 	cliDev, cliCtrl := tunPair(t, "cli")
 	ka := 1 * time.Second

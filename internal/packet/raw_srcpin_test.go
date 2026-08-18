@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// TestRawPinnedSrc covers which local address a raw send is pinned to. It guards a feature that was
-// inert: a raw CLIENT with a source pool rotated the pool, logged the move and updated its status file
-// while every packet still left from the kernel default — the source only reached the wire through the
-// IP_HDRINCL branch, which exists solely under spoofing, where rotateSourceRaw deliberately no-ops.
 func TestRawPinnedSrc(t *testing.T) {
 	ip := func(s string) net.IP { return net.ParseIP(s).To4() }
 
@@ -21,7 +17,7 @@ func TestRawPinnedSrc(t *testing.T) {
 		if got := r.pinnedSrc(); !got.Equal(ip("10.9.9.1")) {
 			t.Fatalf("want the seeded pool source, got %v", got)
 		}
-		// ...and it follows a rotation, which is the whole point.
+
 		r.localIP.Store(&net.IPAddr{IP: ip("10.9.9.2")})
 		if got := r.pinnedSrc(); !got.Equal(ip("10.9.9.2")) {
 			t.Fatalf("want the rotated pool source, got %v", got)
@@ -30,7 +26,7 @@ func TestRawPinnedSrc(t *testing.T) {
 
 	t.Run("client with no source pool pins nothing", func(t *testing.T) {
 		r := &Raw{fakeFd: -1}
-		r.localIP.Store(&net.IPAddr{IP: ip("10.0.0.5")}) // set by DialRaw from routeLocalIP
+		r.localIP.Store(&net.IPAddr{IP: ip("10.0.0.5")})
 		if got := r.pinnedSrc(); got != nil {
 			t.Fatalf("a single-source client must keep the kernel's choice, got %v", got)
 		}

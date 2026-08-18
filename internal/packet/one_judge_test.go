@@ -5,31 +5,24 @@ import (
 	"time"
 )
 
-// nodeFail burns the pool's ACTIVE endpoint the way the node's fail command does, and returns the
-// endpoint that was condemned. On a direct pool this is the ONLY thing that burns.
 func nodeFail(p *PeerPool) string {
 	gone := p.current()
 	p.fail()
 	return gone
 }
 
-// TestNothingButTheNodeClearsABurn is the rule itself. A burn stands until the node's tun probe says
-// the tunnel is carrying (cmdOK, which lands here as clearBurn). A live carrier does not clear it: a
-// frame that came back proves an endpoint answered US, and an endpoint can answer everything we send
-// while carrying nothing — which is exactly what 5.75.197.201 does from Iran.
 func TestNothingButTheNodeClearsABurn(t *testing.T) {
 	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	gone := nodeFail(p)
 	if gone != "a" {
 		t.Fatalf("setup: expected to burn a, got %s", gone)
 	}
-	// Put the cursor back ON the burned endpoint — the 3-minute rotation lands there, a frame comes
-	// back, and THAT is the shape that used to wipe the burn one second later.
+
 	p.mu.Lock()
 	p.cur, p.chosen = 0, ""
 	p.mu.Unlock()
 	rc := newRotationController(p, nil)
-	rc.success() // the carrier is up and answering on it — this must change nothing about the burn
+	rc.success()
 	p.mu.Lock()
 	stillBurned := p.health.recs["a"] != nil
 	p.mu.Unlock()
@@ -53,14 +46,11 @@ func TestNothingButTheNodeClearsABurn(t *testing.T) {
 	}
 }
 
-// TestABurnedEndpointIsSelectableOnceDue covers how a burned endpoint gets retried at all. There is no
-// out-of-band prober: the only way to test a destination is to USE it, so the backoff decides when the
-// rotation may pick it up again and the node's probe decides what happens next.
 func TestABurnedEndpointIsSelectableOnceDue(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
-	nodeFail(p) // burns a, cursor moves to b
+	nodeFail(p)
 	if _, moved := p.rotateOnce(); moved {
 		t.Fatal("a burn whose backoff is still running must not be selected")
 	}
@@ -70,15 +60,6 @@ func TestABurnedEndpointIsSelectableOnceDue(t *testing.T) {
 	}
 }
 
-// TestTheLadderDeepensWhileOnlyTheNodeSpeaks walks the whole schedule the way the pool really walks it:
-// a verdict burns the endpoint, the rotation leaves it alone until its wait elapses, then picks it up
-// again — which is the only way any endpoint is ever retried — and the next verdict pushes the retry
-// further out. An endpoint that keeps failing is tried rarely rather than every cycle; one OK wipes the
-// record, so a genuine recovery starts clean.
-//
-// Driving it through rotateOnce/current, not by writing the cursor, is the point: a verdict only ever
-// arrives about the endpoint the carrier is USING, so "two verdicts while it waits" is not a state the
-// pool can be in, and a test that forces it proves nothing about the ladder.
 func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b"}, 0, "")
@@ -86,7 +67,7 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 	backOntoA := func(t *testing.T) {
 		t.Helper()
 		p.mu.Lock()
-		clk = p.health.rec("a").nextRetest // its wait elapsed
+		clk = p.health.rec("a").nextRetest
 		p.mu.Unlock()
 		if _, moved := p.rotateOnce(); !moved || p.current() != "a" {
 			t.Fatalf("the rotation would not return to a once it came due, current=%q", p.current())
@@ -117,7 +98,7 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 		t.Fatal("an OK must clear even a dead endpoint")
 	}
 	p.mu.Lock()
-	p.cur, p.chosen = 0, "" // a is healthy again, so the cursor may sit on it as it would after a heal
+	p.cur, p.chosen = 0, ""
 	p.mu.Unlock()
 	p.fail()
 	p.mu.Lock()
@@ -128,8 +109,6 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 	}
 }
 
-// TestProbeNowMakesEveryBurnSelectableAtOnce is the escape hatch: it does NOT declare anything healthy,
-// it only pulls every backoff forward so the rotation may retry them now — and the tun probe judges.
 func TestProbeNowMakesEveryBurnSelectableAtOnce(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b"}, 0, "")
@@ -150,15 +129,10 @@ func TestProbeNowMakesEveryBurnSelectableAtOnce(t *testing.T) {
 	}
 }
 
-// TestNodeVerdictsDriveTheLiveDirectPool runs both verdicts through the file a real carrier polls, so
-// the parse, the dispatch, the burn, the clear and the event are all the production path.
 func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 	cli, _, a1, _, _, _ := probePair(t, time.Second, "onej")
 	p := cli.pp
 
-	// The FIRST verdict buys a free step, not a burn: this carrier's ladder still has its handshake to
-	// spend, and that costs one round trip and blames nobody. Only once the free steps are gone may an
-	// endpoint answer for the silence.
 	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: a1})
 	time.Sleep(3 * time.Second)
 	p.mu.Lock()

@@ -6,13 +6,8 @@ import (
 	"testing"
 )
 
-// TestFecCodecCacheCannotBePoisoned: the codec cache is bounded, and it must also be PRUNED. input runs
-// before any peer authentication, so a stranger could fire ~64 tiny forged block headers once, before the
-// tunnel carries traffic, and own the cache for the life of the process — the real geometry could never
-// be built, repair silently stopped, and the panel still showed FEC on. Sprayed twice, so no one-shot fix.
 func TestFecCodecCacheCannotBePoisoned(t *testing.T) {
-	// Two real 10+3 blocks, built through the real send path. count == n, so each block fills and
-	// flushes synchronously inside addData — no timer, no second goroutine.
+
 	var wire [][]byte
 	e, err := newFecEncoder(10, 3, func(p []byte) { wire = append(wire, append([]byte(nil), p...)) })
 	if err != nil {
@@ -31,8 +26,6 @@ func TestFecCodecCacheCannotBePoisoned(t *testing.T) {
 	seen := map[string]int{}
 	d := newFecDecoder(func(frame []byte) { seen[string(frame)]++ })
 
-	// spray sends distinct (n,k) geometries no real config would use — 2x the cap, so a cache that
-	// refuses new entries once full is left holding nothing but junk. None of them is 10+3.
 	spray := func(firstBlk uint32) {
 		blk := firstBlk
 		for n := 100; n < 100+2*fecMaxCodecs; n++ {
@@ -40,8 +33,7 @@ func TestFecCodecCacheCannotBePoisoned(t *testing.T) {
 			blk++
 		}
 	}
-	// feedBlockLosing hands block `blk` to the decoder with data shard `lose` dropped — one loss,
-	// well inside what 10+3 repairs.
+
 	feedBlockLosing := func(blk uint32, lose int) {
 		for _, p := range wire {
 			if binary.BigEndian.Uint32(p[1:5]) != blk {
@@ -66,8 +58,6 @@ func TestFecCodecCacheCannotBePoisoned(t *testing.T) {
 		}
 	}
 
-	// And again, so the fix cannot be a one-shot: spray a second time, with the live geometry
-	// already cached, and a fresh real block must still be repaired.
 	spray(2000)
 	feedBlockLosing(1, 7)
 	for i := 10; i < 20; i++ {
@@ -77,7 +67,6 @@ func TestFecCodecCacheCannotBePoisoned(t *testing.T) {
 		}
 	}
 
-	// The bound that the cap exists for must still hold: 256 sprayed geometries, cache still capped.
 	d.mu.Lock()
 	n := len(d.codecs)
 	d.mu.Unlock()
@@ -86,9 +75,6 @@ func TestFecCodecCacheCannotBePoisoned(t *testing.T) {
 	}
 }
 
-// TestFecCodecCacheEvictsLeastRecentlyUsed pins the eviction ORDER, not just the bound: a geometry
-// that is still in use must outlive ones that were cached earlier and never touched again. Without
-// that, the live tunnel's own codec is as evictable as junk and the spray costs a rebuild per block.
 func TestFecCodecCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	d := newFecDecoder(func([]byte) {})
 	blk := uint32(0)
@@ -97,11 +83,11 @@ func TestFecCodecCacheEvictsLeastRecentlyUsed(t *testing.T) {
 		blk++
 	}
 
-	live := 40 // the "live" geometry, cached first and then kept warm
+	live := 40
 	use(live, 3)
-	for i := 0; i < fecMaxCodecs-1; i++ { // fill the cache exactly to the cap
+	for i := 0; i < fecMaxCodecs-1; i++ {
 		use(100+i, 7)
-		use(live, 3) // ...touching the live geometry each round so it stays most-recent
+		use(live, 3)
 	}
 	d.mu.Lock()
 	full := len(d.codecs)
@@ -110,7 +96,7 @@ func TestFecCodecCacheEvictsLeastRecentlyUsed(t *testing.T) {
 		t.Fatalf("cache holds %d codecs, want it filled to the cap %d", full, fecMaxCodecs)
 	}
 
-	use(200, 9) // one past the cap: something must go, and it must not be the live geometry
+	use(200, 9)
 	d.mu.Lock()
 	_, liveKept := d.codecs[live<<8|3]
 	_, coldGone := d.codecs[100<<8|7]

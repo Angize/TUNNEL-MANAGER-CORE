@@ -6,8 +6,6 @@ import (
 	"testing"
 )
 
-// A source pin lands when the source is adopted, not on a handshake: a source swap keeps the AEAD
-// session, so nothing re-handshakes and the destination pin's release path never runs.
 func TestASourcePinLandsWhenTheSourceIsAdopted(t *testing.T) {
 	const other = "127.0.0.2"
 
@@ -51,9 +49,6 @@ func TestASourcePinLandsWhenTheSourceIsAdopted(t *testing.T) {
 		}
 	})
 
-	// ...and the other half of the contract: a DESTINATION handshake must NOT release a source pin.
-	// It says nothing about the source, and releasing on it would report the operator's jump as
-	// complete over a tunnel still egressing from the old address — which is what success() did.
 	t.Run("a destination success does not release a source pin", func(t *testing.T) {
 		sp := NewPeerPool([]string{usableLoopbackIP, other}, 0, "")
 		dp := NewPeerPool([]string{"203.0.113.10", "203.0.113.11"}, 0, "")
@@ -61,7 +56,7 @@ func TestASourcePinLandsWhenTheSourceIsAdopted(t *testing.T) {
 		if !sp.selectEntry(other) || !sp.isPinned() {
 			t.Fatal("the pin did not take")
 		}
-		rc.success() // the DESTINATION carrier handshook; nothing happened to the source
+		rc.success()
 		if !sp.isPinned() {
 			t.Error("a destination handshake released the SOURCE pin: the panel reports the jump complete while the tunnel still egresses from the old address")
 		}

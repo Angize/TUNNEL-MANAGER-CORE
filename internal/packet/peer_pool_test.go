@@ -20,7 +20,7 @@ func TestPeerPoolRotateCycles(t *testing.T) {
 		}
 		got = append(got, a)
 	}
-	// a -> b, c, a, b (proactive, no burns)
+
 	want := []string{"b", "c", "a", "b"}
 	for i := range want {
 		if got[i] != want[i] {
@@ -31,15 +31,15 @@ func TestPeerPoolRotateCycles(t *testing.T) {
 
 func TestPeerPoolBurnSkipsAndAdvances(t *testing.T) {
 	p := NewPeerPool([]string{"a", "b", "c"}, 0, "")
-	// active is a; a fails -> burned, advance to b
+
 	if a, moved := p.fail(); a != "b" || !moved {
 		t.Fatalf("after burning a, got %q moved=%v, want b true", a, moved)
 	}
-	// b fails -> burned, advance to c (a still burned, skipped)
+
 	if a, _ := p.fail(); a != "c" {
 		t.Fatalf("after burning b, got %q, want c", a)
 	}
-	// proactive rotate should now skip the two burned (a,b) and stay on c
+
 	if a, moved := p.rotateOnce(); a != "c" || moved {
 		t.Fatalf("only c is live: got %q moved=%v, want c false", a, moved)
 	}
@@ -47,11 +47,9 @@ func TestPeerPoolBurnSkipsAndAdvances(t *testing.T) {
 
 func TestPeerPoolNeverDeadEndsWhenAllBurned(t *testing.T) {
 	p := NewPeerPool([]string{"a", "b"}, 0, "")
-	p.fail() // burn a -> advance to b
-	// Burning the last live endpoint must still MOVE (never dead-end, never re-stick on the endpoint we
-	// just failed). Unlike the old revive-all, the burns are KEPT (suspect, on backoff) — the pool falls
-	// back to the least-bad OTHER endpoint so the tunnel keeps trying while the retests work.
-	a, moved := p.fail() // burn b -> advance off b back to a (a is the least-bad other)
+	p.fail()
+
+	a, moved := p.fail()
 	if !moved || a != "a" {
 		t.Fatalf("after all-burned: got %q moved=%v, want a true (advance off the failed endpoint)", a, moved)
 	}
@@ -63,24 +61,21 @@ func TestPeerPoolNeverDeadEndsWhenAllBurned(t *testing.T) {
 	}
 }
 
-// TestPeerPoolSuspectToDeadBackoff walks a single endpoint through the whole health FSM: a fresh failure
-// makes it suspect (+30s), each failed live retest steps the backoff, and running off the end drops it to
-// dead on the slow interval — exactly the ws edge pool's schedule.
 func TestPeerPoolSuspectToDeadBackoff(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
-	// a fails -> suspect, nextRetest = now + suspectBackoff[0]
+
 	p.fail()
 	rec := p.health.recs["a"]
 	if rec == nil || rec.state != stateSuspect || rec.fails != 0 || rec.nextRetest != clk+suspectBackoff[0] {
 		t.Fatalf("first fail should make a suspect at +%ds, got %+v", suspectBackoff[0], rec)
 	}
-	// Walk every backoff step by re-failing a due retry; after len(suspectBackoff) failures it is dead.
+
 	for i := 1; i < len(suspectBackoff); i++ {
-		clk = rec.nextRetest // make a due
+		clk = rec.nextRetest
 		p.mu.Lock()
-		p.cur = 0 // pretend the live retry landed back on a
+		p.cur = 0
 		p.mu.Unlock()
 		p.fail()
 		if rec.state != stateSuspect || rec.fails != i {
@@ -91,31 +86,29 @@ func TestPeerPoolSuspectToDeadBackoff(t *testing.T) {
 	p.mu.Lock()
 	p.cur = 0
 	p.mu.Unlock()
-	p.fail() // the final failed retest drops it to dead
+	p.fail()
 	if rec.state != stateDead || rec.nextRetest != clk+deadRetest {
 		t.Fatalf("running off the backoff should mark a dead at +%ds, got %+v", deadRetest, rec)
 	}
 }
 
-// TestPeerPoolDueEndpointReadmitted checks the never-dead-end fallback: a burned endpoint is
-// skipped by current() while anything healthy exists, and once NOTHING is healthy the pool still hands
 func TestPeerPoolDueEndpointReadmitted(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
-	p.fail() // burn a (suspect), now on b
+	p.fail()
 	if got := p.current(); got != "b" {
 		t.Fatalf("while a is suspect current should stay on the healthy b, got %q", got)
 	}
-	// Burn b too so nothing is healthy; a is still pending (not due) -> current falls back to least-bad.
+
 	p.fail()
-	// Advance the clock past a's retest: a becomes DUE and current() must re-admit it for a live retry.
+
 	clk += suspectBackoff[len(suspectBackoff)-1] + deadRetest + 1
 	got := p.current()
 	if got != "a" && got != "b" {
 		t.Fatalf("a due endpoint should be re-admitted, got %q", got)
 	}
-	// Only the node's verdict clears it — see TestNothingButTheNodeClearsABurn.
+
 	p.mu.Lock()
 	active := p.addrs[p.cur]
 	p.mu.Unlock()
@@ -124,8 +117,6 @@ func TestPeerPoolDueEndpointReadmitted(t *testing.T) {
 	}
 }
 
-// TestPeerPoolSelectPin verifies the manual pin: current() forces the pinned endpoint, isPinned holds it,
-// a landing (pinApplied) releases it, and an unknown key is rejected.
 func TestPeerPoolSelectPin(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b", "c"}, 0, "")
@@ -142,8 +133,7 @@ func TestPeerPoolSelectPin(t *testing.T) {
 	if got := p.current(); got != "c" {
 		t.Fatalf("current() must force the pinned c, got %q", got)
 	}
-	// A fail() racing the pin must NOT burn or move off the pinned endpoint (atomic guard under p.mu):
-	// current() keeps forcing c until it lands or the TTL lapses.
+
 	if a, moved := p.fail(); a != "c" || moved {
 		t.Fatalf("fail() while pinned must stay on c: got %q moved=%v, want c false", a, moved)
 	}
@@ -156,11 +146,11 @@ func TestPeerPoolSelectPin(t *testing.T) {
 	if a, moved := p.rotateOnce(); a != "c" || moved {
 		t.Fatalf("rotateOnce() while pinned must stay on c: got %q moved=%v, want c false", a, moved)
 	}
-	p.pinLandedOn("c") // the carrier landed on c -> pin releases
+	p.pinLandedOn("c")
 	if p.isPinned() {
 		t.Fatal("pinLanded on the pinned endpoint must release the pin")
 	}
-	// A pin that CANNOT land releases on the core's own evidence — no clock is involved.
+
 	p.selectEntry("a")
 	for i := 1; i < pinFailRelease; i++ {
 		p.pinAttemptFailed("a")
@@ -174,13 +164,11 @@ func TestPeerPoolSelectPin(t *testing.T) {
 	}
 }
 
-// TestPeerPoolProbeAllNow checks that probe-now pulls every burned endpoint's retest forward so it is
-// immediately due.
 func TestPeerPoolProbeAllNow(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
-	p.fail() // burn a, +30s
+	p.fail()
 	if r := p.health.recs["a"]; r == nil || r.nextRetest <= clk {
 		t.Fatalf("a should be burned with a future retest, got %+v", r)
 	}
@@ -190,14 +178,12 @@ func TestPeerPoolProbeAllNow(t *testing.T) {
 	}
 }
 
-// TestPeerPoolStatusFileFSM checks the richer status file: active, the health array with per-endpoint
-// state, and the pin all round-trip through the JSON the panel reads.
 func TestPeerPoolStatusFileFSM(t *testing.T) {
 	dir := t.TempDir()
 	sp := dir + "/core-x.peerpool"
 	p := NewPeerPool([]string{"a", "b", "c"}, 0, sp)
-	p.fail()           // burn a, active -> b
-	p.selectEntry("c") // pin c
+	p.fail()
+	p.selectEntry("c")
 	data, err := os.ReadFile(sp)
 	if err != nil {
 		t.Fatalf("status file not written: %v", err)
@@ -219,7 +205,7 @@ func TestPeerPoolStatusFileFSM(t *testing.T) {
 	if len(st.Addrs) != 3 || len(st.Health) != 3 {
 		t.Fatalf("status should list all 3 endpoints, got addrs=%v health=%d", st.Addrs, len(st.Health))
 	}
-	// a was burned; pinning c cleared c's (never-set) mark. Exactly a should be suspect in the health map.
+
 	suspect := map[string]bool{}
 	for _, h := range st.Health {
 		if h.State == stateSuspect {
@@ -241,9 +227,6 @@ func TestPeerPoolSingleEndpointNoop(t *testing.T) {
 	}
 }
 
-// TestTCPDialTargetUsesPool verifies the TCP integration points without a real dial: dialTarget
-// reads the pool's current endpoint when a pool is wired and falls back to the fixed peer otherwise,
-// and a ws client refuses the pool (the ws edge pool owns rotation there).
 func TestTCPDialTargetUsesPool(t *testing.T) {
 	b := &TCP{isClient: true, addr: "1.1.1.1:9000"}
 	if got := b.dialTarget(); got != "1.1.1.1:9000" {
@@ -256,13 +239,12 @@ func TestTCPDialTargetUsesPool(t *testing.T) {
 	if got := b.dialTarget(); got != "2.2.2.2:9000" {
 		t.Fatalf("with pool: dialTarget = %q, want the pool's current endpoint", got)
 	}
-	// After burning the current endpoint the next dial must target the advanced one.
+
 	b.pp.fail()
 	if got := b.dialTarget(); got != "3.3.3.3:9000" {
 		t.Fatalf("after burn: dialTarget = %q, want the next endpoint", got)
 	}
 
-	// A ws client must NOT accept a peer pool — ws has its own edge pool.
 	w := &TCP{isClient: true, ws: true, addr: "1.1.1.1:443"}
 	w.SetPeerPool(NewPeerPool([]string{"2.2.2.2:443", "3.3.3.3:443"}, 0, ""))
 	if w.pp != nil {
@@ -285,13 +267,13 @@ func TestTCPSourceIPUsesPool(t *testing.T) {
 	if got := b.sourceIP(); got != "10.0.0.5" {
 		t.Fatalf("with source pool: sourceIP = %q, want the pool's current", got)
 	}
-	if _, moved := b.rotateSourceTCP(true); !moved { // proactive rotate should move in a 2-entry pool
+	if _, moved := b.rotateSourceTCP(true); !moved {
 		t.Fatal("rotateSourceTCP should report moved=true")
 	}
 	if got := b.sourceIP(); got != "10.0.0.6" {
 		t.Fatalf("after rotate: sourceIP = %q, want the advanced source", got)
 	}
-	// ws client must refuse a source pool (its edge pool owns rotation).
+
 	w := &TCP{isClient: true, ws: true, bindIP: "10.0.0.1"}
 	w.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, 0, ""))
 	if w.sp != nil {
@@ -299,9 +281,6 @@ func TestTCPSourceIPUsesPool(t *testing.T) {
 	}
 }
 
-// TestUDPSourceRebindSwapsConn checks the udp source-rotation mechanics: rotateSourceUDP opens a fresh
-// socket on the new source IP, swaps it in, and bumps rebindGen so the receive loop knows the old
-// socket's imminent read error is a deliberate swap (not a death). Uses loopback (127.0.0.0/8).
 func TestUDPSourceRebindSwapsConn(t *testing.T) {
 	c0, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -312,7 +291,7 @@ func TestUDPSourceRebindSwapsConn(t *testing.T) {
 	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0, ""))
 	gen0 := b.rebindGen.Load()
 
-	b.rotateSourceUDP(true) // advance 127.0.0.1 -> 127.0.0.2 and rebind
+	b.rotateSourceUDP(true)
 	if b.rebindGen.Load() == gen0 {
 		t.Fatal("rebindGen must advance on a source rebind so netToTun keeps the loop alive")
 	}
@@ -323,12 +302,9 @@ func TestUDPSourceRebindSwapsConn(t *testing.T) {
 	if got := nc.LocalAddr().(*net.UDPAddr).IP; !got.Equal(net.IPv4(127, 0, 0, 2)) {
 		t.Fatalf("rebound socket source = %v, want 127.0.0.2", got)
 	}
-	nc.Close() // c0 was already closed by rotateSourceUDP
+	nc.Close()
 }
 
-// TestUDPSourcePoolBindsInitialSource checks that wiring a source pool rebinds the socket to SrcIPs[0]
-// at setup, so the client egresses from the pool's first source immediately (not the OS default until
-// the first rotation — which on a failover-only pool never happens).
 func TestUDPSourcePoolBindsInitialSource(t *testing.T) {
 	c0, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -336,7 +312,7 @@ func TestUDPSourcePoolBindsInitialSource(t *testing.T) {
 	}
 	b := &UDP{isClient: true}
 	b.conn.Store(c0)
-	b.SetSourcePool(NewPeerPool([]string{"127.0.0.2", "127.0.0.3"}, 0, "")) // first entry != initial bind
+	b.SetSourcePool(NewPeerPool([]string{"127.0.0.2", "127.0.0.3"}, 0, ""))
 	got := b.conn.Load().LocalAddr().(*net.UDPAddr).IP
 	if !got.Equal(net.IPv4(127, 0, 0, 2)) {
 		t.Fatalf("SetSourcePool should bind the initial source to SrcIPs[0]=127.0.0.2, got %v", got)
@@ -344,17 +320,6 @@ func TestUDPSourcePoolBindsInitialSource(t *testing.T) {
 	b.conn.Load().Close()
 }
 
-// TestUDPSourceRebindFailureKeepsSocketAndPool: when a source rotation advances onto an IP that is no
-// longer on the interface the rebind fails, and the pool must NOT be left claiming that IP active while
-// the socket still egresses from the previous one — nextEndpoint has by then pointed the status file at
-// the unbindable one.
-//
-// What is undone is the MOVE, and only the move. It used to clear the previous source's health as well,
-// on the reading that a rotation which never took effect should leave no trace. But this is the failover
-// path: that burn is the odometer's attribution, earned by a whole lap of destinations failing against
-// this source, and the next IP not being on the interface is a separate, local fact that measured
-// nothing. Clearing it meant a pool whose only alternative is unbindable could never record anything
-// about the source it is stuck on — it read healthy on the panel for as long as it kept failing.
 func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
 	c0, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -362,12 +327,12 @@ func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
 	}
 	b := &UDP{isClient: true}
 	b.conn.Store(c0)
-	// 127.0.0.1 is bindable; 192.0.2.1 (TEST-NET-1) is never on this host, so a rebind onto it fails.
+
 	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "192.0.2.1"}, 0, ""))
 	sockBefore := b.conn.Load()
 	gen0 := b.rebindGen.Load()
 
-	b.rotateSourceUDP(false) // failover rotate: burns 127.0.0.1, advances onto 192.0.2.1, bind FAILS
+	b.rotateSourceUDP(false)
 
 	if b.conn.Load() != sockBefore {
 		t.Fatal("the socket was swapped even though the rebind failed")
@@ -388,8 +353,7 @@ func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
 	} else if r.state != stateSuspect || r.fails != 0 {
 		t.Fatalf("127.0.0.1 sits at %+v — one failover round is one step, no more", *r)
 	}
-	// ...and being burned must not strand it: the pool commits to the source the socket is really on, so
-	// current() keeps naming it whatever its health says.
+
 	for i := 0; i < 3; i++ {
 		if got := b.sp.current(); got != "127.0.0.1" {
 			t.Fatalf("ask %d gave %q — the commitment must hold", i, got)
@@ -398,31 +362,28 @@ func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
 	b.conn.Load().Close()
 }
 
-// TestRotationControllerCouplesSource verifies the failover policy: burning destinations advances the
-// source only once every destination has been tried against the current source.
 func TestRotationControllerCouplesSource(t *testing.T) {
-	dst := NewPeerPool([]string{"d0", "d1"}, 0, "") // size 2
+	dst := NewPeerPool([]string{"d0", "d1"}, 0, "")
 	src := NewPeerPool([]string{"s0", "s1"}, 0, "")
 	rc := newRotationController(dst, src)
 	dstMoves, srcMoves := 0, 0
 	rotDst := func(bool) { dstMoves++ }
 	rotSrc := func(bool) { srcMoves++ }
 
-	rc.fail(rotDst, rotSrc) // destRot 1
+	rc.fail(rotDst, rotSrc)
 	if dstMoves != 1 || srcMoves != 0 {
 		t.Fatalf("after 1 fail: dst=%d src=%d, want 1/0", dstMoves, srcMoves)
 	}
-	rc.fail(rotDst, rotSrc) // destRot 2 == size -> source advances, reset
+	rc.fail(rotDst, rotSrc)
 	if dstMoves != 2 || srcMoves != 1 {
 		t.Fatalf("after 2 fails: dst=%d src=%d, want 2/1 (source walked)", dstMoves, srcMoves)
 	}
-	rc.success() // clears the dest-cycle counter
+	rc.success()
 	rc.fail(rotDst, rotSrc)
 	if srcMoves != 1 {
 		t.Fatalf("success() must reset destRot so the source doesn't advance early, got src=%d", srcMoves)
 	}
 
-	// Source-only pool (no destination pool) advances the source on every failure.
 	rc2 := newRotationController(nil, NewPeerPool([]string{"s0", "s1"}, 0, ""))
 	n := 0
 	rc2.fail(func(bool) { t.Fatal("no dest pool: rotDst must not be called") }, func(bool) { n++ })
@@ -431,10 +392,6 @@ func TestRotationControllerCouplesSource(t *testing.T) {
 	}
 }
 
-// TestRotationControllerPinAutoReleasesOnProvenBlock checks R1: a manual pin on an endpoint that stays
-// blocked auto-releases after pinFailRelease proven-dead rounds so the tunnel recovers instead of freezing
-// on it for the whole pinTTL — and a success in between resets the count so a real transient never
-// releases a good pin.
 func TestRotationControllerPinAutoReleasesOnProvenBlock(t *testing.T) {
 	clk := int64(1000)
 	dst := NewPeerPool([]string{"d0", "d1"}, 0, "")
@@ -447,7 +404,6 @@ func TestRotationControllerPinAutoReleasesOnProvenBlock(t *testing.T) {
 	rotDst := func(bool) { moves++ }
 	rotSrc := func(bool) {}
 
-	// The rounds before the release threshold are absorbed: the pin holds and no failover happens.
 	for i := 0; i < pinFailRelease-1; i++ {
 		rc.fail(rotDst, rotSrc)
 		if !dst.isPinned() {
@@ -457,11 +413,9 @@ func TestRotationControllerPinAutoReleasesOnProvenBlock(t *testing.T) {
 			t.Fatalf("no failover while the pin is held, got moves=%d", moves)
 		}
 	}
-	// A live success resets the counter; the LANDING is what clears the pin, and the carriers do that
-	// themselves on the endpoint they are proven up on (see the clientLoops). Re-pin and confirm the
-	// release count restarts from zero — rounds from a prior pin must never leak into a fresh one.
+
 	rc.success()
-	dst.pinLandedOn("d1") // the carrier came up on the pinned endpoint
+	dst.pinLandedOn("d1")
 	if dst.isPinned() {
 		t.Fatal("a landing on the pinned endpoint must clear it")
 	}
@@ -478,7 +432,7 @@ func TestRotationControllerPinAutoReleasesOnProvenBlock(t *testing.T) {
 			t.Fatalf("no failover while the re-pin is held, got moves=%d", moves)
 		}
 	}
-	// The pinFailRelease-th consecutive proven-dead round releases the pin AND fails over in the same call.
+
 	rc.fail(rotDst, rotSrc)
 	if dst.isPinned() {
 		t.Fatal("a pin on a proven-blocked endpoint must auto-release at pinFailRelease")
@@ -488,15 +442,13 @@ func TestRotationControllerPinAutoReleasesOnProvenBlock(t *testing.T) {
 	}
 }
 
-// TestPeerPoolExpirePinFlushesStatus checks P1: when a pin's TTL lapses, the status file the panel reads
-// is flushed so it stops showing a pin the dataplane no longer honours.
 func TestPeerPoolExpirePinFlushesStatus(t *testing.T) {
 	dir := t.TempDir()
 	sp := dir + "/core-x.peerpool"
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b"}, 0, sp)
 	p.now = func() int64 { return clk }
-	p.selectEntry("b") // pins b and writes the status file with pin=b
+	p.selectEntry("b")
 	readPin := func() string {
 		data, err := os.ReadFile(sp)
 		if err != nil {
@@ -513,7 +465,7 @@ func TestPeerPoolExpirePinFlushesStatus(t *testing.T) {
 	if readPin() != "b" {
 		t.Fatalf("status should show pinned b, got %q", readPin())
 	}
-	p.pinAttemptFailed("zzz") // a failure somewhere else says nothing about this pin
+	p.pinAttemptFailed("zzz")
 	if readPin() != "b" {
 		t.Fatalf("a failure on another endpoint must not touch the pin, got %q", readPin())
 	}

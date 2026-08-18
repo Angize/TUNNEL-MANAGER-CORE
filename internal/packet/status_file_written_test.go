@@ -8,14 +8,6 @@ import (
 	"time"
 )
 
-// The status file is how a core's own account of itself reaches the operator: the event ring carries
-// self-heal reasons and startup configuration warnings into the panel's system log, and `active` names
-// the endpoint those events happened on. A carrier that never wires the file is silent about all of it,
-// and silence is indistinguishable from "nothing went wrong" — so this pins the seam itself, on BOTH
-// roles and on a datagram carrier and dns alike.
-//
-// What it does NOT prove: that any particular event fires. A healthy tunnel raises none, which is why
-// this asserts the file and its `active` descriptor rather than waiting for a reason to appear.
 func TestEveryStatusPathCarrierWritesItsFile(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	dir := t.TempDir()
@@ -40,8 +32,7 @@ func TestEveryStatusPathCarrierWritesItsFile(t *testing.T) {
 		Run() error
 		Close() error
 	}
-	// One case per role and per status-file writer. dns is here because it re-dials into a brand new
-	// session on every recovery, which is the shape most likely to lose its writer in a refactor.
+
 	udpAddr, dnsAddr := freeUDPPort(t), freeUDPPort(t)
 	srvDev, _ := tunPair(t, "sfwus")
 	cliDev, _ := tunPair(t, "sfwuc")
@@ -68,7 +59,7 @@ func TestEveryStatusPathCarrierWritesItsFile(t *testing.T) {
 	cases := []struct {
 		name   string
 		c      carrier
-		want   string // substring the `active` descriptor must name
+		want   string
 		status string
 	}{
 		{"udp server", usrv, "udp", filepath.Join(dir, "usrv.status")},

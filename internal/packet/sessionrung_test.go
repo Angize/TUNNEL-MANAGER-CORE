@@ -5,8 +5,6 @@ import (
 	"testing"
 )
 
-// rungLadder builds a real controller with both rungs installed and every step counted, so a test can
-// watch the ORDER the ladder spends them in rather than any one of them alone.
 func rungLadder(t *testing.T) (rc *rotationController, rolls, drops, burns *int) {
 	t.Helper()
 	dir := t.TempDir()
@@ -20,11 +18,6 @@ func rungLadder(t *testing.T) (rc *rotationController, rolls, drops, burns *int)
 	return rc, rolls, drops, burns
 }
 
-// TestTheLadderSpendsItsFreeStepsInOrder.
-//
-// Both rungs move the tunnel nowhere, so both come before anything is condemned — and they come in
-// cost order: the redraws first because they do not even cost a round trip, the handshake after
-// because it does. Only when every free step is spent may an endpoint be blamed.
 func TestTheLadderSpendsItsFreeStepsInOrder(t *testing.T) {
 	rc, rolls, drops, burns := rungLadder(t)
 	rot := func(bool) { *burns++ }
@@ -53,11 +46,6 @@ func TestTheLadderSpendsItsFreeStepsInOrder(t *testing.T) {
 	}
 }
 
-// TestTheHandshakeIsSpentOncePerOutage.
-//
-// A second handshake to the same peer asks the question the first already answered. If the first did
-// not bring the tunnel back then the session was not what was wrong, and repeating it would only hold
-// the walk off for ever.
 func TestTheHandshakeIsSpentOncePerOutage(t *testing.T) {
 	rc, _, drops, burns := rungLadder(t)
 	rot := func(bool) { *burns++ }
@@ -70,10 +58,6 @@ func TestTheHandshakeIsSpentOncePerOutage(t *testing.T) {
 	}
 }
 
-// TestAHandshakeAlreadyInFlightIsNotAStep.
-//
-// dropSession reports false when there is no session to give up — the client loop is already
-// re-initing. Counting that as a step would hold the walk off for a round that changed nothing.
 func TestAHandshakeAlreadyInFlightIsNotAStep(t *testing.T) {
 	rc, _, drops, burns := rungLadder(t)
 	rc.session.setDrop(func() bool { *drops++; return false })
@@ -91,22 +75,17 @@ func TestAHandshakeAlreadyInFlightIsNotAStep(t *testing.T) {
 	}
 }
 
-// TestTrafficCrossingRefillsBothRungs.
-//
-// Both budgets are per OUTAGE. A tunnel that came back settles what they were asking, so the next
-// outage gets its own steps rather than the remainder of the last one's.
 func TestTrafficCrossingRefillsBothRungs(t *testing.T) {
 	rc, rolls, drops, burns := rungLadder(t)
 	rot := func(bool) { *burns++ }
 
 	for i := 0; i < portTries+1; i++ {
-		rc.fail(rot, rot) // spend every free step
+		rc.fail(rot, rot)
 	}
 	if *burns != 0 {
 		t.Fatalf("setup: nothing should have burned yet, got %d", *burns)
 	}
 
-	// Traffic CROSSING, through the real cmdOK path — see portrung_test for why success() is not it.
 	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdOK, Key: rc.dst.current()})
 	rc.pollPins(func() {}, func() {}, func(bool) {}, func(bool) {}, nil, atPathEpoch)
 
@@ -121,10 +100,6 @@ func TestTrafficCrossingRefillsBothRungs(t *testing.T) {
 	}
 }
 
-// TestAPinnedTunnelStillHandshakesAndKeepsItsAllowance.
-//
-// Same reasoning as the redraw: a handshake keeps the tunnel exactly where the operator pinned it, so
-// it is compatible with the pick and a round spent on it is no evidence against the pinned endpoint.
 func TestAPinnedTunnelStillHandshakesAndKeepsItsAllowance(t *testing.T) {
 	rc, _, drops, burns := rungLadder(t)
 	rot := func(bool) { *burns++ }

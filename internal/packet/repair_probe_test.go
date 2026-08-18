@@ -13,9 +13,6 @@ import (
 	"time"
 )
 
-// tcpWinProbes reads the kernel's TcpExt TCPWinProbe counter — incremented by tcp_xmit_probe_skb,
-// which is the ONLY thing that puts the segment this test is about on the wire. Reading the kernel's
-// own tally is what makes this a measurement rather than an assertion about a constant.
 func tcpWinProbes(t *testing.T) int {
 	t.Helper()
 	f, err := os.Open("/proc/net/netstat")
@@ -49,10 +46,6 @@ func tcpWinProbes(t *testing.T) int {
 	return 0
 }
 
-// Leaving TCP_REPAIR mode must not put a segment on the wire. The kernel distinguishes the two "off"
-// values: 0 ALSO calls tcp_send_window_probe(), which on an ESTABLISHED socket transmits a bare ACK at
-// once; -1 does not. readSeqs runs on an idle, just-connected socket right at the ClientHello point, so
-// with 0 that ACK lands between the handshake and the ClientHello on EVERY sni_mode=fake connection.
 func TestLeavingRepairModeSendsNothing(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -77,8 +70,6 @@ func TestLeavingRepairModeSendsNothing(t *testing.T) {
 		}
 	}()
 
-	// Several passes, so a single stray probe from anything else on the box cannot mask the result:
-	// the bug produces exactly one per pass.
 	const passes = 5
 	conns := make([]net.Conn, 0, passes)
 	defer func() {
@@ -93,7 +84,7 @@ func TestLeavingRepairModeSendsNothing(t *testing.T) {
 		}
 		conns = append(conns, c)
 	}
-	time.Sleep(200 * time.Millisecond) // let every handshake settle and the sockets go quiet
+	time.Sleep(200 * time.Millisecond)
 
 	before := tcpWinProbes(t)
 	for _, c := range conns {

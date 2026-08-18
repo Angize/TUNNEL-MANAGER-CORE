@@ -11,10 +11,6 @@ import (
 	"testing"
 )
 
-// TestSockBufReportsWhenItWasClamped is the regression test for sock_buf failing in silence. The operator
-// sets 16 MiB, the panel saves it green, the node forwards it, the core accepts it — and short of
-// CAP_NET_ADMIN the privileged setsockopt is refused and the plain one is capped by the sysctl. Both
-// errors discarded and nothing read back meant a setting that looked applied and bought nothing.
 func TestSockBufReportsWhenItWasClamped(t *testing.T) {
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
 	if err != nil {
@@ -27,12 +23,8 @@ func TestSockBufReportsWhenItWasClamped(t *testing.T) {
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(prev) })
 
-	// MaxInt32: the kernel stores 2× what it is given, so it CANNOT grant this on any host — the
-	// doubled value would not fit the int the option is stored in, and it clamps to ~INT_MAX. That
-	// makes the clamp unconditional, whether or not this box has CAP_NET_ADMIN or a raised sysctl,
-	// which a merely-large request (1 GiB on a root box with SO_SNDBUFFORCE) does not.
 	const want = 1<<31 - 1
-	sockBufWarned = [2]sync.Once{} // this is process state; start from a known point
+	sockBufWarned = [2]sync.Once{}
 	sizeBuf(fd, want, soSndbufForce, syscall.SO_SNDBUF, 0, "send", "wmem_max")
 
 	got, err := syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_SNDBUF)
@@ -51,7 +43,6 @@ func TestSockBufReportsWhenItWasClamped(t *testing.T) {
 		t.Fatalf("the report must name the sysctl that caps it, got %q", out)
 	}
 
-	// Once per direction per process: a second socket must not repeat the same sentence.
 	buf.Reset()
 	fd2, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
 	if err != nil {
@@ -64,8 +55,6 @@ func TestSockBufReportsWhenItWasClamped(t *testing.T) {
 	}
 }
 
-// TestSockBufIsSilentWhenItApplied pins the other half: a request the kernel CAN satisfy must say
-// nothing at all. A warning on every healthy tunnel would be worse than the silence it replaces.
 func TestSockBufIsSilentWhenItApplied(t *testing.T) {
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
 	if err != nil {
@@ -78,7 +67,6 @@ func TestSockBufIsSilentWhenItApplied(t *testing.T) {
 	log.SetOutput(&buf)
 	t.Cleanup(func() { log.SetOutput(prev) })
 
-	// 8 KiB is under every default net.core.wmem_max (212992 on stock Linux).
 	sockBufWarned = [2]sync.Once{}
 	sizeBuf(fd, 8<<10, soSndbufForce, syscall.SO_SNDBUF, 0, "send", "wmem_max")
 	if buf.Len() != 0 {
@@ -86,10 +74,6 @@ func TestSockBufIsSilentWhenItApplied(t *testing.T) {
 	}
 }
 
-// TestCoverProbeHintOnlyOnCover pins the clock-skew hint: a cover carrier whose core handshake fails says
-// WHY that can happen, exactly once, and a non-cover carrier says nothing. The symptom has no other
-// signal — tlscover answers a token it cannot open by proxying to the real site, the same answer it gives
-// a probe — and nothing can be sent back to distinguish it, since a probe could read that too.
 func TestCoverProbeHintOnlyOnCover(t *testing.T) {
 	var buf bytes.Buffer
 	prev := log.Writer()
@@ -112,7 +96,6 @@ func TestCoverProbeHintOnlyOnCover(t *testing.T) {
 		t.Fatalf("the hint must name the OTHER cause too, or it sends the operator down one path: %q", out)
 	}
 
-	// Once per carrier: the dial loop retries forever, and a line per retry is a line per second.
 	buf.Reset()
 	b.coverProbeHint()
 	if buf.Len() != 0 {

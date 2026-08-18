@@ -17,7 +17,6 @@ func TestQueuePacketConnBasicRoundTrip(t *testing.T) {
 	c := NewQueuePacketConn(peer)
 	defer c.Close()
 
-	// WriteTo enqueues onto the peer's outgoing queue.
 	if _, err := c.WriteTo([]byte("hello"), peer); err != nil {
 		t.Fatalf("WriteTo: %v", err)
 	}
@@ -30,7 +29,6 @@ func TestQueuePacketConnBasicRoundTrip(t *testing.T) {
 		t.Fatal("OutgoingQueue: nothing queued")
 	}
 
-	// QueueIncoming feeds a datagram that ReadFrom returns, with its addr.
 	c.QueueIncoming([]byte("world"), peer)
 	buf := make([]byte, 16)
 	n, addr, err := c.ReadFrom(buf)
@@ -48,7 +46,7 @@ func TestQueuePacketConnWriteCopiesBuffer(t *testing.T) {
 	defer c.Close()
 	p := []byte("abc")
 	_, _ = c.WriteTo(p, peer)
-	p[0] = 'X' // mutate after the write — the queued copy must be unaffected
+	p[0] = 'X'
 	got := <-c.OutgoingQueue(peer)
 	if string(got) != "abc" {
 		t.Fatalf("WriteTo did not copy: got %q", got)
@@ -77,15 +75,12 @@ func TestQueuePacketConnCloseUnblocksRead(t *testing.T) {
 func TestQueueIncomingDropsWhenFull(t *testing.T) {
 	c := NewQueuePacketConn(ClientID{})
 	defer c.Close()
-	// Overfill the recv queue; QueueIncoming must never block or panic.
+
 	for i := 0; i < recvQueueSize+50; i++ {
 		c.QueueIncoming([]byte{byte(i)}, ClientID{})
 	}
 }
 
-// pump moves datagrams from src's outgoing queue (addressed to `via`) into dst as if
-// received from `as`, dropping a `lossPct` fraction to simulate an unreliable DNS channel.
-// It stops when either conn closes.
 func pump(src, dst *QueuePacketConn, via, as net.Addr, lossPct int, rng *mrand.Rand) {
 	out := src.OutgoingQueue(via)
 	for {
@@ -96,22 +91,17 @@ func pump(src, dst *QueuePacketConn, via, as net.Addr, lossPct int, rng *mrand.R
 			return
 		case buf := <-out:
 			if lossPct > 0 && rng.IntN(100) < lossPct {
-				continue // drop — kcp-go must recover
+				continue
 			}
 			dst.QueueIncoming(buf, as)
 		}
 	}
 }
 
-// TestKCPOverQueueReliableWithLoss is the core proof: a real kcp-go session over two cross-wired
-// QueuePacketConns delivers a large payload intact IN BOTH DIRECTIONS even when a fifth of datagrams are
-// dropped — the reliability layer the DNS carrier rides on works over a lossy, socket-less transport. It
-// drives the session FULL-DUPLEX, as the real carrier does; io.Copy on one session would self-stall.
 func TestKCPOverQueueReliableWithLoss(t *testing.T) {
 	const lossPct = 20
-	const payloadSize = 32 * 1024 // many datagrams, exercises retransmit/reorder
-	// Independent PRNGs per direction: a single *mrand.Rand shared across both pump goroutines
-	// would be a data race (math/rand/v2 is not concurrency-safe).
+	const payloadSize = 32 * 1024
+
 	rngUp := mrand.New(mrand.NewPCG(1, 2))
 	rngDown := mrand.New(mrand.NewPCG(3, 4))
 
@@ -119,21 +109,16 @@ func TestKCPOverQueueReliableWithLoss(t *testing.T) {
 	if _, err := rand.Read(clientID[:]); err != nil {
 		t.Fatal(err)
 	}
-	serverAddr := ClientID{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF} // client's fixed peer key
+	serverAddr := ClientID{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
 
 	clientQPC := NewQueuePacketConn(clientID)
 	serverQPC := NewQueuePacketConn(serverAddr)
 	defer clientQPC.Close()
 	defer serverQPC.Close()
 
-	// Cross-wire with loss: client's sends reach the server keyed by clientID; the server's
-	// sends to clientID reach the client keyed by serverAddr (the client side ignores the addr).
 	go pump(clientQPC, serverQPC, serverAddr, clientID, lossPct, rngUp)
 	go pump(serverQPC, clientQPC, clientID, serverAddr, lossPct, rngDown)
 
-	// Server: accept one session and echo full-duplex (a dedicated read loop that writes each
-	// chunk straight back — the write goes out on the same session from this one goroutine, but
-	// each Write is a discrete non-blocking-until-window call, not an io.Copy read/write lockstep).
 	lis, err := kcp.ServeConn(nil, 0, 0, serverQPC)
 	if err != nil {
 		t.Fatalf("ServeConn: %v", err)
@@ -156,7 +141,6 @@ func TestKCPOverQueueReliableWithLoss(t *testing.T) {
 		}
 	}()
 
-	// Client: open the session; write the payload and read the echo in SEPARATE goroutines.
 	cli, err := kcp.NewConn2(serverAddr, nil, 0, 0, clientQPC)
 	if err != nil {
 		t.Fatalf("NewConn2: %v", err)
@@ -170,7 +154,7 @@ func TestKCPOverQueueReliableWithLoss(t *testing.T) {
 
 	got := make([]byte, len(payload))
 	readDone := make(chan error, 1)
-	go func() { // reader
+	go func() {
 		off := 0
 		buf := make([]byte, 4096)
 		for off < len(got) {
@@ -200,9 +184,6 @@ func TestKCPOverQueueReliableWithLoss(t *testing.T) {
 	_ = cli.Close()
 }
 
-// tuneKCP applies the low-latency, single-stream settings the DNS carrier uses: turbo mode
-// (fast retransmit) so a lossy channel recovers quickly, stream mode (we frame our own
-// packets), and a small MTU befitting the tiny effective payload of a DNS message.
 func tuneKCP(s *kcp.UDPSession) {
 	s.SetStreamMode(true)
 	s.SetNoDelay(1, 20, 2, 1)
