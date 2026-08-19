@@ -1232,8 +1232,6 @@ func (r *Raw) pinPollLoop(rc *rotationController) {
 }
 
 func (r *Raw) clientLoop() {
-	failN := 0
-	unproven := false
 	rc := newRotationController(r.pp, r.sp)
 	rc.session.setDrop(r.rehandshake)
 
@@ -1248,7 +1246,6 @@ func (r *Raw) clientLoop() {
 	for {
 		rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
 		if r.sealer() == nil {
-			unproven = false
 			r.sendInit()
 		} else {
 
@@ -1260,23 +1257,13 @@ func (r *Raw) clientLoop() {
 
 			r.send(typePing, nil, r.peer.Load())
 
-			if unproven = rc.active() && !r.peerAnswered.Load(); unproven {
-				if failN++; failN >= peerFailThreshold {
-					r.session.Store(nil)
-					r.ci.Store(nil)
-					r.st.down("peer-dead", "raw")
-					failN = 0
-				}
-			} else {
-				failN = 0
-			}
 			if r.sealer() == nil {
 
 				continue
 			}
 		}
 		wait := keepaliveInterval(r.keepalive, r.psk)
-		if r.sealer() == nil || unproven {
+		if r.sealer() == nil {
 			wait = handshakeRetransmitWait()
 		}
 		select {
