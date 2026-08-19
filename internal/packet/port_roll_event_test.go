@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
 func rollingPort(t *testing.T, ka time.Duration) (*Raw, string) {
@@ -16,6 +18,19 @@ func rollingPort(t *testing.T, ka time.Duration) (*Raw, string) {
 	path := filepath.Join(t.TempDir(), "core.status")
 	r.SetStatusPath(path)
 	return r, path
+}
+
+func greenSession(t *testing.T, r *Raw) {
+	t.Helper()
+	sl, err := crypto.NewSealer(crypto.CipherChaCha, "port-refresh-psk-0123456789abcdef", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.session.Store(&sealerBox{s: sl})
+	if r.link == nil {
+
+		r.link = &capturingLink{r: r}
+	}
 }
 
 func rollEvents(t *testing.T, path string) []coreEvent {
@@ -30,49 +45,23 @@ func rollEvents(t *testing.T, path string) []coreEvent {
 }
 
 func TestARollingPortSaysSoOncePerOutage(t *testing.T) {
+	r, path := rollingPort(t, 6*time.Second)
 
-	ka := 6 * time.Second
-	r, path := rollingPort(t, ka)
-	r.lastRxCur.Store(time.Now().Add(-time.Minute).UnixNano())
-
-	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-stop:
-				return
-			case <-time.After(200 * time.Millisecond):
-				r.ask()
-			}
+	for i := 0; i < 5; i++ {
+		if !r.rollSourcePort() {
+			t.Fatalf("draw %d did not move the port", i+1)
 		}
-	}()
-
-	wait := ladderBeat(r)
-	seen := map[uint32]bool{}
-	deadline := time.Now().Add(14 * time.Second)
-	for time.Now().Before(deadline) {
-		seen[r.cliPort.Load()] = true
-		time.Sleep(20 * time.Millisecond)
-	}
-	close(stop)
-	close(r.closeCh)
-	wait()
-
-	if len(seen) < 3 {
-		t.Fatalf("only %d ports in 14s — the rung is not rolling, so this proves nothing", len(seen))
 	}
 	if ev := rollEvents(t, path); len(ev) != 1 {
-		t.Fatalf("%d port-roll events for %d rolls in one outage, want exactly 1", len(ev), len(seen))
+		t.Fatalf("%d port-roll events for 5 draws in one outage, want exactly 1. The ring is 500 lines "+
+			"fleet-wide and the ladder redraws every few seconds — a line each buries the burn that follows", len(ev))
 	}
 }
 
 func TestTheNextOutageSaysSoAgain(t *testing.T) {
-
 	r, path := rollingPort(t, 10*time.Second)
 	cur := r.peer.Load().IP
 
-	r.lastRxCur.Store(time.Now().Add(-time.Minute).UnixNano())
-	r.ask()
 	r.rollSourcePort()
 	r.rollSourcePort()
 	if n := len(rollEvents(t, path)); n != 1 {
@@ -80,10 +69,27 @@ func TestTheNextOutageSaysSoAgain(t *testing.T) {
 	}
 
 	r.markRx(cur)
-	r.lastRxCur.Store(time.Now().Add(-time.Minute).UnixNano())
-	r.ask()
 	r.rollSourcePort()
 	if n := len(rollEvents(t, path)); n != 2 {
 		t.Fatalf("a second outage wrote %d events in total, want 2 — the latch never re-armed", n)
+	}
+}
+
+func TestOnlyTheCurrentDestinationEndsTheOutage(t *testing.T) {
+	r, path := rollingPort(t, 10*time.Second)
+	cur, other := r.peer.Load().IP, net.IPv4(10, 30, 0, 3)
+
+	r.rollSourcePort()
+	r.markRx(other)
+	r.rollSourcePort()
+	if n := len(rollEvents(t, path)); n != 1 {
+		t.Fatalf("a reply from the endpoint we are NOT on ended the outage on behalf of the one we are "+
+			"on: %d events, want 1", n)
+	}
+
+	r.markRx(cur)
+	r.rollSourcePort()
+	if n := len(rollEvents(t, path)); n != 2 {
+		t.Fatalf("the current destination answered and the next outage stayed silent: %d events, want 2", n)
 	}
 }

@@ -13,7 +13,7 @@ func rungLadder(t *testing.T) (rc *rotationController, rolls, drops, burns *int)
 	rc = newRotationController(dst, src)
 	rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
 	rolls, drops, burns = new(int), new(int), new(int)
-	rc.port.setRoll(func() bool { *rolls++; return true }, nil)
+	rc.port.setRoll(func() bool { *rolls++; return true })
 	rc.session.setDrop(func() bool { *drops++; return true })
 	return rc, rolls, drops, burns
 }

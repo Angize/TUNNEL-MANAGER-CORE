@@ -47,7 +47,7 @@ func (r *ladderRig) rotSrc(bool) {
 func TestEveryCellOfTheWalkGetsItsOwnDraws(t *testing.T) {
 	rig := newLadderRig(t, []string{"d1", "d2", "d3"}, nil)
 	rolls, burns := 0, 0
-	rig.rc.port.setRoll(func() bool { rolls++; return true }, nil)
+	rig.rc.port.setRoll(func() bool { rolls++; return true })
 	rot := func(bool) { burns++ }
 
 	for i := 1; i <= portTries; i++ {
@@ -90,7 +90,7 @@ func TestTheWalkVisitsEveryCellOfTheMatrix(t *testing.T) {
 			rig := newLadderRig(t, dsts, srcs)
 			draws := map[string]int{}
 			cell := func() string { return activeOf(rig.dst) + "|" + activeOf(rig.src) }
-			rig.rc.port.setRoll(func() bool { draws[cell()]++; return true }, nil)
+			rig.rc.port.setRoll(func() bool { draws[cell()]++; return true })
 			rig.rc.session.setDrop(func() bool { return true })
 
 			seen := map[string]bool{}
