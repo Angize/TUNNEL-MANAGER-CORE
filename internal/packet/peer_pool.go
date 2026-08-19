@@ -274,6 +274,15 @@ func (p *PeerPool) clearBurn(addr string) bool {
 	return cleared
 }
 
+func (p *PeerPool) restoreAll() {
+	p.mu.Lock()
+	cleared := p.health.clearAll()
+	p.mu.Unlock()
+	if cleared {
+		p.writeStatus()
+	}
+}
+
 func (p *PeerPool) probeAllNow() {
 	p.mu.Lock()
 	p.health.probeAllNow()
@@ -419,16 +428,25 @@ const cmdOK = "ok"
 
 func (p *PeerPool) readCmd() (poolCmd, bool) { return readPoolCmd(p.cmdPath()) }
 
+const (
+	ladderRestMin = 30 * time.Second
+	ladderRestMax = 120 * time.Second
+)
+
 type rotationController struct {
-	mu       sync.Mutex
-	dst, src *PeerPool
-	verdict  string
-	port     portRung
-	session  sessionRung
-	od       odometer
-	pinFails int
-	rotate   time.Duration
-	rotateAt time.Time
+	mu        sync.Mutex
+	dst, src  *PeerPool
+	verdict   string
+	port      portRung
+	session   sessionRung
+	od        odometer
+	odSrc     odometer
+	pinFails  int
+	rotate    time.Duration
+	rotateAt  time.Time
+	rest      time.Duration
+	restUntil time.Time
+	restSaid  bool
 }
 
 func newRotationController(dst, src *PeerPool) *rotationController {
@@ -457,22 +475,30 @@ func (c *rotationController) pinned() bool {
 	return (c.dst != nil && c.dst.isPinned()) || (c.src != nil && c.src.isPinned())
 }
 
-func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurned bool) {
+func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurned, exhausted bool) {
 
 	if c.port.try() {
-		return false
+		return false, false
 	}
 
 	if c.session.try() {
-		return false
+		return false, false
 	}
+	moved, burned, done := c.walk(rotDst, rotSrc)
+	if moved {
+		c.port.restart()
+	}
+	return burned, done
+}
+
+func (c *rotationController) walk(rotDst, rotSrc func(proactive bool)) (moved, dstBurned, done bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.pinned() {
 
 		c.pinFails++
 		if c.pinFails < pinFailRelease {
-			return false
+			return false, false, false
 		}
 		c.pinFails = 0
 		if c.dst != nil {
@@ -485,28 +511,86 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurne
 	} else {
 		c.pinFails = 0
 	}
-	if c.dst != nil {
+	switch {
+	case c.dst != nil:
 
 		lap := c.od.failed(c.dst.eligibleCount)
+		done = lap
+		if c.src != nil && lap {
+			done = c.odSrc.failed(c.src.eligibleCount)
+		}
 		before := c.dst.burnCount()
 		rotDst(false)
+		dstBurned = c.dst.burnCount() != before
 		if c.src != nil && lap {
+			at := c.src.activeIdx()
 			rotSrc(false)
+			if c.src.activeIdx() != at {
+				c.dst.restoreAll()
+			}
 		}
-		return c.dst.burnCount() != before
+		return true, dstBurned, done
+	case c.src != nil:
+		done = c.odSrc.failed(c.src.eligibleCount)
+		rotSrc(false)
+		return true, false, done
+	}
+	return false, false, true
+}
+
+func (c *rotationController) resume(now time.Time) bool {
+	c.mu.Lock()
+	if c.restUntil.IsZero() {
+		c.mu.Unlock()
+		return true
+	}
+	if now.Before(c.restUntil) {
+		c.mu.Unlock()
+		return false
+	}
+	c.restUntil = time.Time{}
+	c.mu.Unlock()
+
+	c.port.restart()
+	c.session.restart()
+	return true
+}
+
+func (c *rotationController) exhaust(now time.Time) (first bool) {
+	c.mu.Lock()
+	c.rest *= 2
+	if c.rest < ladderRestMin {
+		c.rest = ladderRestMin
+	}
+	if c.rest > ladderRestMax {
+		c.rest = ladderRestMax
+	}
+	c.restUntil = now.Add(c.rest)
+	first, c.restSaid = !c.restSaid, true
+	c.mu.Unlock()
+
+	c.od.restart()
+	c.odSrc.restart()
+	if c.dst != nil {
+		c.dst.restoreAll()
 	}
 	if c.src != nil {
-		rotSrc(false)
+		c.src.restoreAll()
 	}
-	return false
+	return first
 }
 
 func (c *rotationController) success() {
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.od.restart()
 	c.pinFails = 0
+	c.rest, c.restUntil, c.restSaid = 0, time.Time{}, false
+	c.mu.Unlock()
+
+	c.od.restart()
+	c.odSrc.restart()
+	c.port.restart()
+	c.session.restart()
 }
 
 func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now time.Time) {
@@ -535,13 +619,14 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 
 func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc func(proactive bool),
 	ev func(kind, code, detail string), pathEpoch func() int64) {
+	now := time.Now()
 	judged := false
 	if cmd, ok := readPoolCmd(c.verdict); ok {
-		c.judge(cmd, rotDst, rotSrc, ev, pathEpoch())
+		c.judge(cmd, rotDst, rotSrc, ev, pathEpoch(), now)
 		judged = true
 	}
 
-	c.port.tick(time.Now(), judged)
+	c.port.tick(now, judged)
 	if c.dst != nil {
 		if cmd, ok := c.dst.readCmd(); ok && cmd.Key != "" && c.dst.selectEntry(cmd.Key) {
 			applyDst()
@@ -556,7 +641,7 @@ func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc 
 }
 
 func (c *rotationController) judge(cmd poolCmd, rotDst, rotSrc func(proactive bool),
-	ev func(kind, code, detail string), epoch int64) {
+	ev func(kind, code, detail string), epoch int64, now time.Time) {
 	switch {
 	case staleVerdict(cmd, epoch):
 
@@ -564,8 +649,7 @@ func (c *rotationController) judge(cmd poolCmd, rotDst, rotSrc func(proactive bo
 			cmd.Epoch, epoch)
 	case cmd.Cmd == cmdOK:
 
-		c.port.restart()
-		c.session.restart()
+		c.success()
 
 		if c.dst != nil && cmd.Key != "" && c.dst.clearBurn(cmd.Key) && ev != nil {
 			ev("heal", "peer-retest", cmd.Key)
@@ -575,12 +659,22 @@ func (c *rotationController) judge(cmd poolCmd, rotDst, rotSrc func(proactive bo
 		}
 	case cmd.Cmd == cmdFail:
 
-		dstBurned := c.fail(rotDst, rotSrc)
+		if !c.resume(now) {
+			return
+		}
+		dstBurned, exhausted := c.fail(rotDst, rotSrc)
 
 		if dstBurned {
 			log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", cmd.Key)
 			if ev != nil {
 				ev("burn", "tun-probe", "ip:"+cmd.Key)
+			}
+		}
+		if exhausted {
+			first := c.exhaust(now)
+			log.Printf("core: every endpoint and every free step is spent and nothing crosses — clearing the burns and resting the ladder")
+			if first && ev != nil {
+				ev("down", "path-exhausted", "")
 			}
 		}
 	}

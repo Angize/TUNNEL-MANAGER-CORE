@@ -398,10 +398,9 @@ func (b *TCP) burnAdvance(carrierGone bool) (string, bool) {
 	} else {
 		b.pinFails.Store(0)
 	}
-	walkSource := func() { b.rotateSourceTCP(!carrierGone) }
 	if b.pp == nil {
 		if b.sp != nil {
-			walkSource()
+			b.rotateSourceTCP(!carrierGone)
 		}
 		return "", false
 	}
@@ -409,7 +408,9 @@ func (b *TCP) burnAdvance(carrierGone bool) (string, bool) {
 	lap := b.odPeer.failed(b.pp.eligibleCount)
 	addr, _ := b.pp.fail()
 	if b.sp != nil && lap {
-		walkSource()
+		if _, moved := b.rotateSourceTCP(!carrierGone); moved {
+			b.pp.restoreAll()
+		}
 	}
 	return addr, true
 }

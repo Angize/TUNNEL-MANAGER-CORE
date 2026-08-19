@@ -75,6 +75,14 @@ func (h healthSet) clear(key string) bool {
 	return had
 }
 
+func (h healthSet) clearAll() bool {
+	if len(h.recs) == 0 {
+		return false
+	}
+	clear(h.recs)
+	return true
+}
+
 func (h healthSet) probeAllNow() {
 	now := h.now()
 	for _, r := range h.recs {

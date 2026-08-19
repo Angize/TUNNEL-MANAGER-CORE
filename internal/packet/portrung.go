@@ -7,21 +7,31 @@ import (
 
 const portTries = 2
 
+const judgeSilence = 20 * time.Second
+
 type portRung struct {
 	mu sync.Mutex
 
-	roll  func(step bool) bool
-	spent int
+	roll   func(step bool) bool
+	settle func()
+	spent  int
 
-	dead  func(time.Time) bool
-	ready func() bool
-	every time.Duration
-	next  time.Time
+	dead   func(time.Time) bool
+	ready  func() bool
+	every  time.Duration
+	next   time.Time
+	judged time.Time
 }
 
 func (p *portRung) setRoll(roll func(step bool) bool) {
 	p.mu.Lock()
 	p.roll = roll
+	p.mu.Unlock()
+}
+
+func (p *portRung) setSettle(settle func()) {
+	p.mu.Lock()
+	p.settle = settle
 	p.mu.Unlock()
 }
 
@@ -33,18 +43,25 @@ func (p *portRung) setRefresh(dead func(time.Time) bool, ready func() bool, ever
 
 func (p *portRung) tick(now time.Time, judged bool) {
 	p.mu.Lock()
-	roll, dead, ready, every := p.roll, p.dead, p.ready, p.every
-	if roll == nil {
-		p.mu.Unlock()
-		return
+	if judged {
+		p.judged = now
 	}
+	roll, settle, dead, ready, every := p.roll, p.settle, p.dead, p.ready, p.every
+	quiet := p.judged.IsZero() || now.Sub(p.judged) > judgeSilence
 	if p.next.IsZero() && every > 0 {
 		p.next = now.Add(jitterFrac(every))
 	}
 	due := every > 0 && now.After(p.next)
 	p.mu.Unlock()
 
-	reactive := dead != nil && dead(now)
+	if settle != nil {
+		settle()
+	}
+	if roll == nil {
+		return
+	}
+
+	reactive := quiet && dead != nil && dead(now)
 	if !reactive && (!due || judged || (ready != nil && !ready())) {
 		return
 	}

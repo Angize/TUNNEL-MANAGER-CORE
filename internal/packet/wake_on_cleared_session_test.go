@@ -22,6 +22,8 @@ func TestAClearedSessionDoesNotWaitOutTheKeepalive(t *testing.T) {
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
+
+		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdOK, Key: p.current()})
 		time.Sleep(1200 * time.Millisecond)
 	}
 
