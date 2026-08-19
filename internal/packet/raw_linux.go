@@ -676,14 +676,28 @@ func (r *Raw) portDead(now time.Time) bool {
 	return now.Sub(time.Unix(0, ask)) > ps
 }
 
+func (r *Raw) usePort(p uint16) {
+	r.cliPort.Store(uint32(p))
+	r.newTCPFlow()
+	r.lastAsk.Store(0)
+}
+
+func (r *Raw) freshTuple() {
+	p := r.cport()
+	if r.sportRandom {
+		if n := rawRollSport(); n != 0 {
+			p = n
+		}
+	}
+	r.usePort(p)
+}
+
 func (r *Raw) rollSourcePort() bool {
 	p := rawRollSport()
 	if p == 0 {
 		return false
 	}
-	r.cliPort.Store(uint32(p))
-	r.newTCPFlow()
-	r.lastAsk.Store(0)
+	r.usePort(p)
 	r.sendInit()
 
 	if !r.portRolling.Swap(true) {
@@ -1157,6 +1171,7 @@ func (r *Raw) rotateSourceRaw(proactive bool) {
 		return
 	}
 	r.localIP.Store(&net.IPAddr{IP: ip})
+	r.freshTuple()
 	log.Printf("raw: rotated source to %s", addr)
 
 	r.st.event("down", "src-rotate", "ip:"+addr)
@@ -1175,6 +1190,7 @@ func (r *Raw) rotatePeerRaw(proactive bool) {
 		return
 	}
 	r.peer.Store(&net.IPAddr{IP: ip})
+	r.freshTuple()
 
 	r.leak.scope(ip)
 	r.st.setActive("raw:" + r.profile + " · " + ip.String())
@@ -1204,7 +1220,11 @@ func (r *Raw) adoptPeerRaw() {
 	if ip == nil {
 		return
 	}
+	prev := r.peer.Load()
 	r.peer.Store(&net.IPAddr{IP: ip})
+	if prev == nil || !prev.IP.Equal(ip) {
+		r.freshTuple()
+	}
 	r.leak.scope(ip)
 	r.st.setActive("raw:" + r.profile + " · " + ip.String())
 	r.session.Store(nil)
@@ -1228,7 +1248,11 @@ func (r *Raw) adoptSourceRaw() {
 		r.sp.fail()
 		return
 	}
+	prevSrc := r.localIP.Load()
 	r.localIP.Store(&net.IPAddr{IP: ip})
+	if prevSrc == nil || !prevSrc.IP.Equal(ip) {
+		r.freshTuple()
+	}
 	log.Printf("raw: pinned source to %s", ip)
 	r.sp.pinLandedOn(addr)
 
