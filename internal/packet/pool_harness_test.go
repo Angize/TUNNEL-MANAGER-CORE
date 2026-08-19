@@ -12,7 +12,7 @@ import (
 
 const probePSK = "probe-shared-pre-shared-key-1234567890"
 
-func probePair(t *testing.T, ka time.Duration, tag string, extra ...string) (cli, srv *UDP, a1, a2 string, cliCtrl, srvCtrl *os.File) {
+func probePair(t *testing.T, tag string, extra ...string) (cli, srv *UDP, a1, a2 string, cliCtrl, srvCtrl *os.File) {
 	t.Helper()
 	srvDev, sc := tunPair(t, tag+"s")
 	cliDev, cc := tunPair(t, tag+"c")
@@ -24,11 +24,11 @@ func probePair(t *testing.T, ka time.Duration, tag string, extra ...string) (cli
 	c.Close()
 	a1 = fmt.Sprintf("127.0.0.1:%d", port)
 	a2 = fmt.Sprintf("127.0.0.2:%d", port)
-	srv, err = Listen([]string{a1, a2}, srvDev, ka, false, true, probePSK, "aes-256-gcm", false, 0, 0)
+	srv, err = Listen([]string{a1, a2}, srvDev, false, true, probePSK, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	cli, err = Dial(a1, cliDev, ka, false, true, probePSK, "aes-256-gcm", false, 0, 0)
+	cli, err = Dial(a1, cliDev, false, true, probePSK, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

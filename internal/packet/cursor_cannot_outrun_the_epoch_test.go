@@ -2,11 +2,10 @@ package packet
 
 import (
 	"testing"
-	"time"
 )
 
 func TestTheCursorCannotOutrunTheEpoch(t *testing.T) {
-	cli, _, a1, a2, _, _ := probePair(t, time.Second, "epoch")
+	cli, _, a1, a2, _, _ := probePair(t, "epoch")
 	p := cli.pp
 
 	settledEpoch(t, cli.st)

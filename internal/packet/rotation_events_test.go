@@ -57,7 +57,6 @@ func TestDirectPoolShortDeathEmitsOneDown(t *testing.T) {
 	const cipher = "aes-256-gcm"
 	srvDev, srvCtrl := tunPair(t, "pdsrv")
 	cliDev, cliCtrl := tunPair(t, "pdcli")
-	ka := 1 * time.Second
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -67,11 +66,11 @@ func TestDirectPoolShortDeathEmitsOneDown(t *testing.T) {
 	l.Close()
 	a1, a2 := fmt.Sprintf("127.0.0.1:%d", port), fmt.Sprintf("127.0.0.2:%d", port)
 
-	srv, err := ListenTCP([]string{a1, a2}, srvDev, ka, false, true, psk, cipher, false, "")
+	srv, err := ListenTCP([]string{a1, a2}, srvDev, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("ListenTCP: %v", err)
 	}
-	cli, err := DialTCP(a1, cliDev, ka, false, true, psk, cipher, false, "")
+	cli, err := DialTCP(a1, cliDev, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("DialTCP: %v", err)
 	}
@@ -150,7 +149,6 @@ func TestSourceOnlyRotationDoesNotAnnounceTheDestination(t *testing.T) {
 	const cipher = "aes-256-gcm"
 	srvDev, _ := tunPair(t, "sorsrv")
 	cliDev, _ := tunPair(t, "sorcli")
-	ka := time.Second
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -160,11 +158,11 @@ func TestSourceOnlyRotationDoesNotAnnounceTheDestination(t *testing.T) {
 	l.Close()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
-	srv, err := ListenTCP([]string{addr}, srvDev, ka, false, true, psk, cipher, false, "")
+	srv, err := ListenTCP([]string{addr}, srvDev, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("ListenTCP: %v", err)
 	}
-	cli, err := DialTCP(addr, cliDev, ka, false, true, psk, cipher, false, "")
+	cli, err := DialTCP(addr, cliDev, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("DialTCP: %v", err)
 	}

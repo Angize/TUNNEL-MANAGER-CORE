@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func sourcedPair(t *testing.T, ka time.Duration, tag string) (cli *UDP, dst, src *PeerPool) {
+func sourcedPair(t *testing.T, tag string) (cli *UDP, dst, src *PeerPool) {
 	t.Helper()
 	srvDev, _ := tunPair(t, tag+"s")
 	cliDev, _ := tunPair(t, tag+"c")
@@ -21,11 +21,11 @@ func sourcedPair(t *testing.T, ka time.Duration, tag string) (cli *UDP, dst, src
 	a1 := fmt.Sprintf("127.0.0.1:%d", port)
 	a2 := fmt.Sprintf("127.0.0.2:%d", port)
 
-	srv, err := Listen([]string{a1, a2}, srvDev, ka, false, true, probePSK, "aes-256-gcm", false, 0, 0)
+	srv, err := Listen([]string{a1, a2}, srvDev, false, true, probePSK, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	cli, err = Dial(a1, cliDev, ka, false, true, probePSK, "aes-256-gcm", false, 0, 0)
+	cli, err = Dial(a1, cliDev, false, true, probePSK, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -50,7 +50,7 @@ func sourcedPair(t *testing.T, ka time.Duration, tag string) (cli *UDP, dst, src
 }
 
 func TestAPacketArrivingIsNotTheJudgeSayingItCarries(t *testing.T) {
-	cli, dst, src := sourcedPair(t, time.Second, "srcaxis")
+	cli, dst, src := sourcedPair(t, "srcaxis")
 
 	was := activeOf(src)
 	burned, srcMoved := false, false
@@ -73,7 +73,7 @@ func TestAPacketArrivingIsNotTheJudgeSayingItCarries(t *testing.T) {
 
 func TestTheTimedRotationRunsWhileThereIsNoSession(t *testing.T) {
 	cliDev, _ := tunPair(t, "protc")
-	cli, err := Dial("127.0.0.1:9", cliDev, 2*time.Second, false, true, probePSK, "aes-256-gcm", false, 0, 0)
+	cli, err := Dial("127.0.0.1:9", cliDev, false, true, probePSK, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

@@ -10,7 +10,7 @@ const wakeKeepalive = 6 * time.Second
 const wakeBudget = 2 * time.Second
 
 func TestAClearedSessionDoesNotWaitOutTheKeepalive(t *testing.T) {
-	cli, _, _, _, _, _ := probePair(t, wakeKeepalive, "wake")
+	cli, _, _, _, _, _ := probePair(t, "wake")
 	p := cli.pp
 
 	settle := func() {

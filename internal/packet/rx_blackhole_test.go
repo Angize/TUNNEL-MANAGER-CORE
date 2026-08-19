@@ -65,13 +65,14 @@ func (bh *rxBlackhole) pipe(cli net.Conn, target string) {
 }
 
 func TestReceiveBlackholeIsDetectedWhileOutboundDataFlows(t *testing.T) {
+	defer func(d time.Duration) { pingEvery = d }(pingEvery)
+	pingEvery = 300 * time.Millisecond
 	const psk = "rx-blackhole-pre-shared-key-123456"
 	const cipher = "aes-256-gcm"
-	const ka = 150 * time.Millisecond
 
 	srvDev, _ := tunPair(t, "bhsrv")
 	srvAddr := freeTCPPort(t)
-	srv, err := ListenTCP([]string{srvAddr}, srvDev, ka, false, true, psk, cipher, false, "")
+	srv, err := ListenTCP([]string{srvAddr}, srvDev, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("ListenTCP: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestReceiveBlackholeIsDetectedWhileOutboundDataFlows(t *testing.T) {
 	bh := newRxBlackhole(t, srvAddr)
 
 	cliDev, cliCtrl := tunPair(t, "bhcli")
-	cli, err := DialTCP(bh.addr(), cliDev, ka, false, true, psk, cipher, false, "")
+	cli, err := DialTCP(bh.addr(), cliDev, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("DialTCP: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestReceiveBlackholeIsDetectedWhileOutboundDataFlows(t *testing.T) {
 			if _, err := cliCtrl.Write(pkt); err != nil {
 				return
 			}
-			time.Sleep(ka / 5)
+			time.Sleep(200 * time.Millisecond)
 		}
 	}()
 	defer func() { close(stop); wg.Wait() }()

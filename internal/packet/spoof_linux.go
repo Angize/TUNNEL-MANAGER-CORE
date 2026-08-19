@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"net"
 	"syscall"
-	"time"
 
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
 
-func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, spoofSrc, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
-	r, err := dialRawBase(peerIP, dev, ka, obfs, psk, cipher, "bare", rawProto, 0)
+func DialSpoof(peerIP string, dev *tun.Device, obfs bool, psk, cipher, spoofSrc, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
+	r, err := dialRawBase(peerIP, dev, obfs, psk, cipher, "bare", rawProto, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -43,8 +42,8 @@ func DialSpoof(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk,
 	return r, nil
 }
 
-func ListenSpoof(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, realPeer, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
-	r, err := listenRawBase(listenIP, dev, ka, obfs, psk, cipher, "bare", rawProto, 0)
+func ListenSpoof(listenIP string, dev *tun.Device, obfs bool, psk, cipher, realPeer, spoofDst string, fec bool, fecData, fecParity, rawProto int) (*Raw, error) {
+	r, err := listenRawBase(listenIP, dev, obfs, psk, cipher, "bare", rawProto, 0)
 	if err != nil {
 		return nil, err
 	}

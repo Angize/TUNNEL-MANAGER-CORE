@@ -65,7 +65,6 @@ func main() {
 	if t := cfg.Tuning; t != nil {
 		packet.ApplyTuning(packet.TuningInput{
 			SuspectBackoff: t.SuspectBackoff, DeadRetestSecs: t.DeadRetestSecs,
-			DeadMult:          t.DeadMult,
 			PingLossThreshold: t.PingLossThreshold, MinLivenessSecs: t.MinLivenessSecs,
 			ProbeTimeoutSecs: t.ProbeTimeoutSecs,
 		})
@@ -117,7 +116,6 @@ func main() {
 		Close() error
 	}
 	var b carrier
-	ka := time.Duration(cfg.Keepalive) * time.Second
 	obfsTag := ""
 	if cfg.Obfs {
 		obfsTag = " obfs"
@@ -135,12 +133,12 @@ func main() {
 			if len(la) == 0 {
 				la = []string{cfg.Listen}
 			}
-			b, err = packet.ListenTCP(la, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Cover, cfg.CoverSNI)
+			b, err = packet.ListenTCP(la, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Cover, cfg.CoverSNI)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/tcp%s%s) on %v", obfsTag, coverTag(cfg.Cover), la)
 			}
 		case "client":
-			b, err = packet.DialTCP(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Cover, cfg.CoverSNI)
+			b, err = packet.DialTCP(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Cover, cfg.CoverSNI)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/tcp%s%s) %s", obfsTag, coverTag(cfg.Cover), cfg.Peer)
 			}
@@ -148,12 +146,12 @@ func main() {
 	case "raw":
 		switch cfg.Role {
 		case "server":
-			b, err = packet.ListenRaw(cfg.Listen, dev, ka, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSportRandom, devs[1:]...)
+			b, err = packet.ListenRaw(cfg.Listen, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSportRandom, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/raw:%s%s%s) on %s", cfg.RawProfile, obfsTag, fecTag, cfg.Listen)
 			}
 		case "client":
-			b, err = packet.DialRaw(cfg.Peer, dev, ka, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSportRandom, devs[1:]...)
+			b, err = packet.DialRaw(cfg.Peer, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSportRandom, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/raw:%s%s%s) %s", cfg.RawProfile, obfsTag, fecTag, cfg.Peer)
 			}
@@ -162,12 +160,12 @@ func main() {
 		spoofTag := spoofLogTag(cfg)
 		switch cfg.Role {
 		case "server":
-			b, err = packet.ListenSpoof(cfg.Listen, dev, ka, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RealPeer, cfg.SpoofDst, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto)
+			b, err = packet.ListenSpoof(cfg.Listen, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RealPeer, cfg.SpoofDst, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/spoof:%s%s%s) on %s", spoofTag, obfsTag, fecTag, cfg.Listen)
 			}
 		case "client":
-			b, err = packet.DialSpoof(cfg.Peer, dev, ka, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.SpoofSrc, cfg.SpoofDst, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto)
+			b, err = packet.DialSpoof(cfg.Peer, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.SpoofSrc, cfg.SpoofDst, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/spoof:%s%s%s) %s", spoofTag, obfsTag, fecTag, cfg.Peer)
 			}
@@ -176,12 +174,12 @@ func main() {
 		rotate := time.Duration(cfg.FluxRotateSecs) * time.Second
 		switch cfg.Role {
 		case "server":
-			b, err = packet.ListenFlux(cfg.Listen, dev, ka, rotate, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.FluxCarrier, cfg.FluxShape, cfg.FluxEpochOffset, cfg.Fec, cfg.FecData, cfg.FecParity)
+			b, err = packet.ListenFlux(cfg.Listen, dev, rotate, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.FluxCarrier, cfg.FluxShape, cfg.FluxEpochOffset, cfg.Fec, cfg.FecData, cfg.FecParity)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/flux:%s/%s rotate=%ds%s%s)", cfg.FluxCarrier, cfg.FluxShape, cfg.FluxRotateSecs, obfsTag, fecTag)
 			}
 		case "client":
-			b, err = packet.DialFlux(cfg.Peer, dev, ka, rotate, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.FluxCarrier, cfg.FluxShape, cfg.FluxEpochOffset, cfg.Fec, cfg.FecData, cfg.FecParity)
+			b, err = packet.DialFlux(cfg.Peer, dev, rotate, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.FluxCarrier, cfg.FluxShape, cfg.FluxEpochOffset, cfg.Fec, cfg.FecData, cfg.FecParity)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/flux:%s/%s rotate=%ds%s%s) %s", cfg.FluxCarrier, cfg.FluxShape, cfg.FluxRotateSecs, obfsTag, fecTag, cfg.Peer)
 			}
@@ -190,13 +188,13 @@ func main() {
 		switch cfg.Role {
 		case "server":
 			if cfg.cdnIsHTTP() {
-				b, err = packet.ListenHTTPC(cfg.Listen, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher)
+				b, err = packet.ListenHTTPC(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher)
 				if err == nil {
 					log.Printf("tnl-core: listening (core/http%s) on %s", obfsTag, cfg.Listen)
 				}
 				break
 			}
-			b, err = packet.ListenWS(cfg.Listen, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath)
+			b, err = packet.ListenWS(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/ws%s) on %s", obfsTag, cfg.Listen)
 			}
@@ -210,7 +208,7 @@ func main() {
 				for i, s := range cfg.WSEdgeSNIs {
 					snis[i] = packet.WSPoolSNI{Host: s.Host, ECH: s.ECH, Path: s.Path}
 				}
-				b, err = packet.DialWSPoolCfg(dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher,
+				b, err = packet.DialWSPoolCfg(dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher,
 					cfg.WSEdgeIPs, snis, time.Duration(cfg.WSRotateSecs)*time.Second, cfg.WSStatusPath, cfg.cdnIsHTTP(), cfg.cdnMode())
 				if err == nil {
 					log.Printf("tnl-core: dialing (core/%s%s wss ech pool: %dIP×%dSNI rotate=%ds)",
@@ -223,7 +221,7 @@ func main() {
 				echList, _ = base64.StdEncoding.DecodeString(cfg.WSECH)
 			}
 			if cfg.cdnIsHTTP() {
-				b, err = packet.DialHTTPC(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath, cfg.WSTLS, echList, cfg.cdnMode())
+				b, err = packet.DialHTTPC(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath, cfg.WSTLS, echList, cfg.cdnMode())
 				if err == nil {
 					mode := cfg.cdnMode()
 					if mode == "" {
@@ -233,7 +231,7 @@ func main() {
 				}
 				break
 			}
-			b, err = packet.DialWS(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath, cfg.WSTLS, echList)
+			b, err = packet.DialWS(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath, cfg.WSTLS, echList)
 			if err == nil {
 				tlsTag := ""
 				if cfg.WSTLS {
@@ -253,7 +251,7 @@ func main() {
 				log.Printf("tnl-core: listening (core/dns zone=%s) on %s", cfg.DNSZone, cfg.Listen)
 			}
 		case "client":
-			b, err = packet.DialDNS(dev, cfg.DNSResolvers, cfg.DNSZone, cfg.Crypto.PSK, cfg.Crypto.Cipher, ka)
+			b, err = packet.DialDNS(dev, cfg.DNSResolvers, cfg.DNSZone, cfg.Crypto.PSK, cfg.Crypto.Cipher)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/dns zone=%s via resolvers %s)", cfg.DNSZone, strings.Join(cfg.DNSResolvers, ", "))
 			}
@@ -265,12 +263,12 @@ func main() {
 			if len(la) == 0 {
 				la = []string{cfg.Listen}
 			}
-			b, err = packet.Listen(la, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Fec, cfg.FecData, cfg.FecParity, devs[1:]...)
+			b, err = packet.Listen(la, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Fec, cfg.FecData, cfg.FecParity, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/udp%s%s) on %v", obfsTag, fecTag, la)
 			}
 		case "client":
-			b, err = packet.Dial(cfg.Peer, dev, ka, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Fec, cfg.FecData, cfg.FecParity, devs[1:]...)
+			b, err = packet.Dial(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Fec, cfg.FecData, cfg.FecParity, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/udp%s%s) %s", obfsTag, fecTag, cfg.Peer)
 			}

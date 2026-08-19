@@ -14,9 +14,8 @@ func newSoakClient(t *testing.T, rotate time.Duration) (*TCP, *wsPool, *os.File,
 	const cipher = "aes-256-gcm"
 	srvDev, srvCtrl := tunPair(t, "soaksrv")
 	cliDev, cliCtrl := tunPair(t, "soakcli")
-	ka := time.Second
 	addr := freeTCPPort(t)
-	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher, "")
+	srv, err := ListenWS(addr, srvDev, false, true, psk, cipher, "")
 	if err != nil {
 		t.Fatalf("ListenWS: %v", err)
 	}
@@ -24,9 +23,9 @@ func newSoakClient(t *testing.T, rotate time.Duration) (*TCP, *wsPool, *os.File,
 	t.Cleanup(func() { srv.Close() })
 
 	pool := newWSPool([]string{addr}, snis("front-a", "front-b"), "")
-	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, keepalive: ka, psk: psk,
+	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, psk: psk,
 		ws: true, wsTLS: false, pool: pool, rotate: rotate,
-		idle: deadWindow(ka), isClient: true, addr: "pool", closeCh: make(chan struct{})}
+		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
 	waitFor(t, 5*time.Second, "active up", func() bool { return cli.cur.Load() != nil })

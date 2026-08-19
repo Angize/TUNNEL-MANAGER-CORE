@@ -82,8 +82,6 @@ type Config struct {
 	TunAddr string `json:"tun_addr"`
 	MTU     int    `json:"mtu"`
 
-	Keepalive int `json:"keepalive"`
-
 	SockBuf int `json:"sock_buf"`
 
 	Workers int       `json:"workers"`
@@ -146,7 +144,6 @@ type Config struct {
 type TuningCfg struct {
 	SuspectBackoff    []int64 `json:"suspect_backoff"`
 	DeadRetestSecs    int64   `json:"dead_retest_secs"`
-	DeadMult          int64   `json:"dead_mult"`
 	PingLossThreshold int     `json:"ping_loss_threshold"`
 	MinLivenessSecs   int64   `json:"min_liveness_secs"`
 	ProbeTimeoutSecs  int64   `json:"probe_timeout_secs"`
@@ -168,14 +165,11 @@ func loadConfig(path string) (*Config, error) {
 	return &c, nil
 }
 
-const defaultKeepaliveSecs = 15
+const minRotateSecs = 10
 
 func (c *Config) applyDefaults() {
 	if c.MTU <= 0 {
 		c.MTU = 1400
-	}
-	if c.Keepalive <= 0 {
-		c.Keepalive = defaultKeepaliveSecs
 	}
 	if c.Workers < 1 {
 		c.Workers = 1
@@ -556,17 +550,13 @@ func (c *Config) validate() error {
 		}
 	}
 
-	ka := c.Keepalive
-	if ka <= 0 {
-		ka = defaultKeepaliveSecs
-	}
 	for _, r := range []struct {
 		name string
 		secs int
 	}{{"peer_rotate_secs", c.PeerRotateSecs}, {"ws_rotate_secs", c.WSRotateSecs}} {
-		if r.secs > 0 && r.secs < ka {
-			return fmt.Errorf("%s (%ds) must be >= keepalive (%ds): the endpoint it selects never gets to "+
-				"answer one keepalive before the next rotation moves on", r.name, r.secs, ka)
+		if r.secs > 0 && r.secs < minRotateSecs {
+			return fmt.Errorf("%s (%ds) must be at least %ds: the endpoint it selects never gets to "+
+				"answer before the next rotation moves on, so nothing is ever judged", r.name, r.secs, minRotateSecs)
 		}
 	}
 	if c.PeerRotateSecs < 0 {

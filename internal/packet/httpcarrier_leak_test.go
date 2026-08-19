@@ -26,7 +26,7 @@ func settleGoroutines() int {
 func TestHTTPCGrpcNoConnLeakOnRotation(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	srvDev, _ := tunPair(t, "xhgleak")
-	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
+	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, false, true, psk, "aes-256-gcm")
 	if err != nil {
 		t.Fatalf("ListenHTTPC: %v", err)
 	}

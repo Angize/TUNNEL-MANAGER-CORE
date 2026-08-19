@@ -24,7 +24,7 @@ func TestDNSRefusesAZoneThatLeavesAnUnusableMTU(t *testing.T) {
 
 	shortOK := false
 	for _, n := range []int{10, 20, 40, 75, 87} {
-		if _, err := newDNS(nil, true, "", nil, zoneOf(n), "psk", "chacha20-poly1305", 0); err == nil {
+		if _, err := newDNS(nil, true, "", nil, zoneOf(n), "psk", "chacha20-poly1305"); err == nil {
 			shortOK = true
 			break
 		}
@@ -35,7 +35,7 @@ func TestDNSRefusesAZoneThatLeavesAnUnusableMTU(t *testing.T) {
 
 	var refused error
 	for n := 120; n <= 240; n += 5 {
-		if _, err := newDNS(nil, true, "", nil, zoneOf(n), "psk", "chacha20-poly1305", 0); err != nil {
+		if _, err := newDNS(nil, true, "", nil, zoneOf(n), "psk", "chacha20-poly1305"); err != nil {
 			refused = err
 			break
 		}

@@ -40,7 +40,7 @@ type DNS struct {
 	closeOnce sync.Once
 }
 
-func newDNS(dev *tun.Device, isClient bool, addr string, resolvers []string, zone, psk, cipher string, keepalive time.Duration) (*DNS, error) {
+func newDNS(dev *tun.Device, isClient bool, addr string, resolvers []string, zone, psk, cipher string) (*DNS, error) {
 	codec, err := dnstun.NewCodec(zone)
 	if err != nil {
 		return nil, err
@@ -54,17 +54,17 @@ func newDNS(dev *tun.Device, isClient bool, addr string, resolvers []string, zon
 	}
 	return &DNS{
 		dev: dev, isClient: isClient, zone: zone, addr: addr, resolvers: resolvers,
-		cfg:     dnstun.SessionConfig{PSK: psk, Cipher: cipher, MTU: mtu, Keepalive: keepalive},
+		cfg:     dnstun.SessionConfig{PSK: psk, Cipher: cipher, MTU: mtu},
 		closeCh: make(chan struct{}),
 	}, nil
 }
 
-func DialDNS(dev *tun.Device, resolvers []string, zone, psk, cipher string, keepalive time.Duration) (*DNS, error) {
-	return newDNS(dev, true, "", resolvers, zone, psk, cipher, keepalive)
+func DialDNS(dev *tun.Device, resolvers []string, zone, psk, cipher string) (*DNS, error) {
+	return newDNS(dev, true, "", resolvers, zone, psk, cipher)
 }
 
 func ListenDNS(dev *tun.Device, listenAddr, zone, psk, cipher string) (*DNS, error) {
-	return newDNS(dev, false, listenAddr, nil, zone, psk, cipher, 0)
+	return newDNS(dev, false, listenAddr, nil, zone, psk, cipher)
 }
 
 func (d *DNS) SetStatusPath(path string) {

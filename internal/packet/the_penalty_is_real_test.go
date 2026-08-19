@@ -5,7 +5,6 @@ package packet
 import (
 	"net"
 	"testing"
-	"time"
 )
 
 func TestLandingOnACondemnedEndpointIsNotARetestOfIt(t *testing.T) {
@@ -81,7 +80,7 @@ func TestTheTimerRetriesACondemnedEndpointOnlyWhenItsBackoffRanOut(t *testing.T)
 
 func helloRaw(t *testing.T) (*Raw, *capturingLink) {
 	t.Helper()
-	r := &Raw{isClient: true, keepalive: 10 * time.Second, profile: "tcp",
+	r := &Raw{isClient: true, profile: "tcp",
 		psk: "hello-not-a-teardown-psk-0123456789", cipher: "chacha20-poly1305"}
 	cl := &capturingLink{r: r}
 	r.link = cl

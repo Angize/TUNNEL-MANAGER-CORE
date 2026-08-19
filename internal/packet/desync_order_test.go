@@ -103,7 +103,7 @@ func TestDesyncDecoysGoOutBeforeAnyOfOurBytes(t *testing.T) {
 	t.Run("ws", func(t *testing.T) {
 		srvDev, _ := tunPair(t, "dsows")
 		addr := freeTCPPort(t)
-		srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher, "")
+		srv, err := ListenWS(addr, srvDev, false, true, psk, cipher, "")
 		if err != nil {
 			t.Fatalf("ListenWS: %v", err)
 		}
@@ -112,7 +112,7 @@ func TestDesyncDecoysGoOutBeforeAnyOfOurBytes(t *testing.T) {
 
 		relay := newCountingRelay(t, addr)
 		cliDev, _ := tunPair(t, "dsowc")
-		cli, err := DialWS(relay.addr(), cliDev, ka, false, true, psk, cipher, "", "", false, nil)
+		cli, err := DialWS(relay.addr(), cliDev, false, true, psk, cipher, "", "", false, nil)
 		if err != nil {
 			t.Fatalf("DialWS: %v", err)
 		}
@@ -122,7 +122,7 @@ func TestDesyncDecoysGoOutBeforeAnyOfOurBytes(t *testing.T) {
 	t.Run("tcp+cover", func(t *testing.T) {
 		srvDev, _ := tunPair(t, "dsocs")
 		addr := freeTCPPort(t)
-		srv, err := ListenTCP([]string{addr}, srvDev, ka, false, true, psk, cipher, true, "cover.example")
+		srv, err := ListenTCP([]string{addr}, srvDev, false, true, psk, cipher, true, "cover.example")
 		if err != nil {
 			t.Fatalf("ListenTCP cover: %v", err)
 		}
@@ -131,7 +131,7 @@ func TestDesyncDecoysGoOutBeforeAnyOfOurBytes(t *testing.T) {
 
 		relay := newCountingRelay(t, addr)
 		cliDev, _ := tunPair(t, "dsocc")
-		cli, err := DialTCP(relay.addr(), cliDev, ka, false, true, psk, cipher, true, "cover.example")
+		cli, err := DialTCP(relay.addr(), cliDev, false, true, psk, cipher, true, "cover.example")
 		if err != nil {
 			t.Fatalf("DialTCP cover: %v", err)
 		}
@@ -141,7 +141,7 @@ func TestDesyncDecoysGoOutBeforeAnyOfOurBytes(t *testing.T) {
 	t.Run("plain tcp", func(t *testing.T) {
 		srvDev, _ := tunPair(t, "dsops")
 		addr := freeTCPPort(t)
-		srv, err := ListenTCP([]string{addr}, srvDev, ka, false, true, psk, cipher, false, "")
+		srv, err := ListenTCP([]string{addr}, srvDev, false, true, psk, cipher, false, "")
 		if err != nil {
 			t.Fatalf("ListenTCP: %v", err)
 		}
@@ -150,7 +150,7 @@ func TestDesyncDecoysGoOutBeforeAnyOfOurBytes(t *testing.T) {
 
 		relay := newCountingRelay(t, addr)
 		cliDev, _ := tunPair(t, "dsopc")
-		cli, err := DialTCP(relay.addr(), cliDev, ka, false, true, psk, cipher, false, "")
+		cli, err := DialTCP(relay.addr(), cliDev, false, true, psk, cipher, false, "")
 		if err != nil {
 			t.Fatalf("DialTCP: %v", err)
 		}

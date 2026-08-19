@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func clearModePair(t *testing.T, ka time.Duration, tag string) (*UDP, *UDP) {
+func clearModePair(t *testing.T, tag string) (*UDP, *UDP) {
 	t.Helper()
 	srvDev, _ := tunPair(t, tag+"s")
 	cliDev, _ := tunPair(t, tag+"c")
@@ -19,11 +19,11 @@ func clearModePair(t *testing.T, ka time.Duration, tag string) (*UDP, *UDP) {
 	addr := fmt.Sprintf("127.0.0.1:%d", c.LocalAddr().(*net.UDPAddr).Port)
 	c.Close()
 
-	srv, err := Listen([]string{addr}, srvDev, ka, false, false, "", "", false, 0, 0)
+	srv, err := Listen([]string{addr}, srvDev, false, false, "", "", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	cli, err := Dial(addr, cliDev, ka, false, false, "", "", false, 0, 0)
+	cli, err := Dial(addr, cliDev, false, false, "", "", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -48,8 +48,7 @@ func ready(cli *UDP) bool {
 }
 
 func TestAClearModeTunnelKeepsItsJudgeWhenItGoesSilent(t *testing.T) {
-	const ka = 2 * time.Second
-	cli, srv := clearModePair(t, ka, "cmj")
+	cli, srv := clearModePair(t, "cmj")
 
 	up := time.Now().Add(10 * time.Second)
 	for !ready(cli) {
@@ -60,7 +59,7 @@ func TestAClearModeTunnelKeepsItsJudgeWhenItGoesSilent(t *testing.T) {
 	}
 	srv.Close()
 
-	deadline := time.Now().Add(3 * deadWindow(ka))
+	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if !ready(cli) {
 			t.Fatalf("ready went false %v into the silence — the node stops sending verdicts there, "+
@@ -72,11 +71,10 @@ func TestAClearModeTunnelKeepsItsJudgeWhenItGoesSilent(t *testing.T) {
 }
 
 func TestAClearModeTunnelWritesNoStaleEvent(t *testing.T) {
-	const ka = 2 * time.Second
-	cli, srv := clearModePair(t, ka, "cms")
+	cli, srv := clearModePair(t, "cms")
 	path := cli.st.path
 	srv.Close()
-	time.Sleep(3 * deadWindow(ka))
+	time.Sleep(3 * time.Second)
 
 	for _, e := range coreStatusEvents(t, path) {
 		if e.Code == "stale" {

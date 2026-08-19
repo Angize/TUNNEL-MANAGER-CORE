@@ -14,11 +14,11 @@ func TestTunnelTCPCover(t *testing.T) {
 	cliDev, cliCtrl := tunPair(t, "ccli")
 	addr := freeTCPPort(t)
 
-	srv, err := ListenTCP([]string{addr}, srvDev, time.Second, true, true, psk, cipher, true, sni)
+	srv, err := ListenTCP([]string{addr}, srvDev, true, true, psk, cipher, true, sni)
 	if err != nil {
 		t.Fatalf("ListenTCP+cover: %v", err)
 	}
-	cli, err := DialTCP(addr, cliDev, time.Second, true, true, psk, cipher, true, sni)
+	cli, err := DialTCP(addr, cliDev, true, true, psk, cipher, true, sni)
 	if err != nil {
 		t.Fatalf("DialTCP+cover: %v", err)
 	}

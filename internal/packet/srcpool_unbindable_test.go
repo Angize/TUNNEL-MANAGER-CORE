@@ -59,7 +59,6 @@ func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 	const cipher = "aes-256-gcm"
 	srvDev, _ := tunPair(t, "supsrv")
 	cliDev, _ := tunPair(t, "supcli")
-	ka := time.Second
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -69,11 +68,11 @@ func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 	l.Close()
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 
-	srv, err := ListenTCP([]string{addr}, srvDev, ka, false, true, psk, cipher, false, "")
+	srv, err := ListenTCP([]string{addr}, srvDev, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("ListenTCP: %v", err)
 	}
-	cli, err := DialTCP(addr, cliDev, ka, false, true, psk, cipher, false, "")
+	cli, err := DialTCP(addr, cliDev, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("DialTCP: %v", err)
 	}

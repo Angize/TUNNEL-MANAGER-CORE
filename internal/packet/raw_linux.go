@@ -24,6 +24,7 @@ import (
 )
 
 type Raw struct {
+	ping time.Duration
 	conn *net.IPConn
 
 	batch *ipv4.PacketConn
@@ -31,16 +32,15 @@ type Raw struct {
 
 	rxw *tunWriters
 
-	txq       []txQueue
-	keepalive time.Duration
-	obfs      bool
-	psk       string
-	cipher    string
-	profile   string
-	isClient  bool
-	icmpID    uint16
-	spi       uint32
-	port      uint16
+	txq      []txQueue
+	obfs     bool
+	psk      string
+	cipher   string
+	profile  string
+	isClient bool
+	icmpID   uint16
+	spi      uint32
+	port     uint16
 
 	proto int
 
@@ -208,7 +208,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 	}
 }
 
-func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, isClient bool) *Raw {
+func newRaw(conn *net.IPConn, dev *tun.Device, obfs bool, psk, cipher, profile string, isClient bool) *Raw {
 	var idb [18]byte
 	_, _ = rand.Read(idb[:])
 	spi := binary.BigEndian.Uint32(idb[10:14])
@@ -222,7 +222,7 @@ func newRaw(conn *net.IPConn, dev *tun.Device, ka time.Duration, obfs bool, psk,
 		icmpID = binary.BigEndian.Uint16(h[0:2])
 	}
 	r := &Raw{
-		conn: conn, batch: batchConn(conn), dev: dev, keepalive: ka, obfs: obfs,
+		conn: conn, batch: batchConn(conn), dev: dev, obfs: obfs, ping: pingEvery,
 		psk: psk, cipher: cipher, profile: profile, isClient: isClient, fakeFd: -1,
 		icmpID: icmpID, closeCh: make(chan struct{}), wake: make(chan struct{}, 1), spi: spi,
 	}
@@ -253,7 +253,7 @@ func (r *Raw) tsNow() uint32 {
 	return v
 }
 
-func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, rawProto, rawPort int) (*Raw, error) {
+func dialRawBase(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile string, rawProto, rawPort int) (*Raw, error) {
 	proto, ok := rawEffProto(profile, rawProto)
 	if !ok {
 		return nil, fmt.Errorf("raw: unknown profile %q", profile)
@@ -267,7 +267,7 @@ func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, ps
 		return nil, err
 	}
 	applyConnSockBuf(conn)
-	r := newRaw(conn, dev, ka, obfs, psk, cipher, profile, true)
+	r := newRaw(conn, dev, obfs, psk, cipher, profile, true)
 	r.proto, r.port = proto, rawPortOr(rawPort)
 	r.peer.Store(&net.IPAddr{IP: ip})
 	if lip := routeLocalIP(ip); lip != nil {
@@ -276,7 +276,7 @@ func dialRawBase(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, ps
 	return r, nil
 }
 
-func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, rawProto, rawPort int) (*Raw, error) {
+func listenRawBase(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile string, rawProto, rawPort int) (*Raw, error) {
 	proto, ok := rawEffProto(profile, rawProto)
 	if !ok {
 		return nil, fmt.Errorf("raw: unknown profile %q", profile)
@@ -295,13 +295,13 @@ func listenRawBase(listenIP string, dev *tun.Device, ka time.Duration, obfs bool
 	if err := enablePktinfoDst(conn); err != nil {
 		log.Printf("raw: WARNING IP_PKTINFO could not be enabled (%v) — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one", err)
 	}
-	r := newRaw(conn, dev, ka, obfs, psk, cipher, profile, false)
+	r := newRaw(conn, dev, obfs, psk, cipher, profile, false)
 	r.proto, r.port = proto, rawPortOr(rawPort)
 	return r, nil
 }
 
-func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool, extraQ ...*tun.Device) (*Raw, error) {
-	r, err := dialRawBase(peerIP, dev, ka, obfs, psk, cipher, profile, rawProto, rawPort)
+func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool, extraQ ...*tun.Device) (*Raw, error) {
+	r, err := dialRawBase(peerIP, dev, obfs, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
 	}
@@ -319,8 +319,8 @@ func DialRaw(peerIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, c
 	return r, nil
 }
 
-func ListenRaw(listenIP string, dev *tun.Device, ka time.Duration, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool, extraQ ...*tun.Device) (*Raw, error) {
-	r, err := listenRawBase(listenIP, dev, ka, obfs, psk, cipher, profile, rawProto, rawPort)
+func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort int, sportRandom bool, extraQ ...*tun.Device) (*Raw, error) {
+	r, err := listenRawBase(listenIP, dev, obfs, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
 	}
@@ -1262,7 +1262,7 @@ func (r *Raw) clientLoop() {
 				continue
 			}
 		}
-		wait := keepaliveInterval(r.keepalive, r.psk)
+		wait := keepaliveInterval(r.ping, r.psk)
 		if r.sealer() == nil {
 			wait = handshakeRetransmitWait()
 		}

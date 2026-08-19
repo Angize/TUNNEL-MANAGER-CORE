@@ -34,7 +34,7 @@ func TestObfsSaltNeverGetsAWriteOfItsOwn(t *testing.T) {
 
 	srvDev, _ := tunPair(t, "saltsrv")
 	addr := freeTCPPort(t)
-	srv, err := ListenTCP([]string{addr}, srvDev, ka, true, true, psk, cipher, false, "")
+	srv, err := ListenTCP([]string{addr}, srvDev, true, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("ListenTCP: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestObfsSaltNeverGetsAWriteOfItsOwn(t *testing.T) {
 			t.Fatalf("round %d: dial: %v", i, derr)
 		}
 		cliRec := &writeRecorder{Conn: raw}
-		cli, cerr := DialTCP(addr, cliDev, ka, true, true, psk, cipher, false, "")
+		cli, cerr := DialTCP(addr, cliDev, true, true, psk, cipher, false, "")
 		if cerr != nil {
 			t.Fatalf("round %d: DialTCP: %v", i, cerr)
 		}

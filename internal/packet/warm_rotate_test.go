@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
@@ -37,7 +36,7 @@ func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "core-warm.status")
 	active := "tcp · " + addr
 	b := &TCP{cryptoOn: true, cipher: "aes-256-gcm", psk: "warm-rotate-psk-abcdefghijklmno",
-		keepalive: time.Second, idle: deadWindow(time.Second), isClient: true, addr: addr,
+		idle: connIdle, ping: pingEvery, isClient: true, addr: addr,
 		stTag: "tcp", closeCh: make(chan struct{})}
 	b.st = newCoreStatus(path, active)
 	b.warmNext = make(chan *warmDial, 1)

@@ -43,17 +43,18 @@ func seedBlocks(t *testing.T, from, to *os.File, n int) {
 }
 
 func TestUDPFecDecoderResetAfterClientRestart(t *testing.T) {
+	defer func(d time.Duration) { pingEvery = d }(pingEvery)
+	pingEvery = fecResetKeepalive
 	srvDev, srvCtrl := tunPair(t, "frsrv")
 	cli1Dev, cli1Ctrl := tunPair(t, "frcli1")
 	cli2Dev, cli2Ctrl := tunPair(t, "frcli2")
-	ka := fecResetKeepalive
 	addr := freeUDPPort(t)
 
-	srv, err := Listen([]string{addr}, srvDev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
+	srv, err := Listen([]string{addr}, srvDev, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	cli1, err := Dial(addr, cli1Dev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
+	cli1, err := Dial(addr, cli1Dev, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -69,7 +70,7 @@ func TestUDPFecDecoderResetAfterClientRestart(t *testing.T) {
 	}
 	cli1.Close()
 
-	cli2, err := Dial(addr, cli2Dev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
+	cli2, err := Dial(addr, cli2Dev, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
 	if err != nil {
 		t.Fatalf("Dial (restarted client): %v", err)
 	}
@@ -91,17 +92,18 @@ func TestUDPFecDecoderResetAfterClientRestart(t *testing.T) {
 }
 
 func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
+	defer func(d time.Duration) { pingEvery = d }(pingEvery)
+	pingEvery = fecResetKeepalive
 	srv1Dev, srv1Ctrl := tunPair(t, "frsrv1")
 	srv2Dev, srv2Ctrl := tunPair(t, "frsrv2")
 	cliDev, cliCtrl := tunPair(t, "frcli")
-	ka := fecResetKeepalive
 	addr := freeUDPPort(t)
 
-	srv1, err := Listen([]string{addr}, srv1Dev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
+	srv1, err := Listen([]string{addr}, srv1Dev, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	cli, err := Dial(addr, cliDev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
+	cli, err := Dial(addr, cliDev, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -116,7 +118,7 @@ func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
 	seedBlocks(t, srv1Ctrl, cliCtrl, 3)
 	srv1.Close()
 
-	srv2, err := Listen([]string{addr}, srv2Dev, ka, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
+	srv2, err := Listen([]string{addr}, srv2Dev, false, true, fecResetPSK, fecResetCipher, true, 4, 2)
 	if err != nil {
 		t.Fatalf("Listen (restarted server): %v", err)
 	}

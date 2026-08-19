@@ -11,7 +11,7 @@ func wsPoolClient(t *testing.T, tag string, hosts []string, addrs ...string) (*T
 	const cipher = "aes-256-gcm"
 	for i, a := range addrs {
 		dev, _ := tunPair(t, tag+"s"+string(rune('0'+i)))
-		srv, err := ListenWS(a, dev, time.Second, false, true, psk, cipher, "")
+		srv, err := ListenWS(a, dev, false, true, psk, cipher, "")
 		if err != nil {
 			t.Fatalf("ListenWS %s: %v", a, err)
 		}
@@ -20,9 +20,9 @@ func wsPoolClient(t *testing.T, tag string, hosts []string, addrs ...string) (*T
 	}
 	cliDev, _ := tunPair(t, tag+"c")
 	pool := newWSPool(addrs, snis(hosts...), "")
-	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, keepalive: time.Second, psk: psk,
+	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, psk: psk,
 		ws: true, wsTLS: false, pool: pool,
-		idle: deadWindow(time.Second), isClient: true, addr: "pool", closeCh: make(chan struct{})}
+		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
 	return cli, pool

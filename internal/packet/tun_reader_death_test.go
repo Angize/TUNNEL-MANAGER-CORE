@@ -30,7 +30,7 @@ func TestTunReaderDeathStopsTheCarrier(t *testing.T) {
 	t.Run("server", func(t *testing.T) {
 		dev, _, devFd := tunPairFD(t, "a2srv")
 		addr := freeTCPPort(t)
-		srv, err := ListenTCP([]string{addr}, dev, time.Second, false, true, psk, cipher, false, "")
+		srv, err := ListenTCP([]string{addr}, dev, false, true, psk, cipher, false, "")
 		if err != nil {
 			t.Fatalf("ListenTCP: %v", err)
 		}
@@ -57,7 +57,7 @@ func TestTunReaderDeathStopsTheCarrier(t *testing.T) {
 
 		srvDev, _ := tunPair(t, "a2csrv")
 		addr := freeTCPPort(t)
-		srv, err := ListenTCP([]string{addr}, srvDev, time.Second, false, true, psk, cipher, false, "")
+		srv, err := ListenTCP([]string{addr}, srvDev, false, true, psk, cipher, false, "")
 		if err != nil {
 			t.Fatalf("ListenTCP: %v", err)
 		}
@@ -65,7 +65,7 @@ func TestTunReaderDeathStopsTheCarrier(t *testing.T) {
 		t.Cleanup(func() { srv.Close() })
 
 		cliDev, _, cliFd := tunPairFD(t, "a2cli")
-		cli, err := DialTCP(addr, cliDev, time.Second, false, true, psk, cipher, false, "")
+		cli, err := DialTCP(addr, cliDev, false, true, psk, cipher, false, "")
 		if err != nil {
 			t.Fatalf("DialTCP: %v", err)
 		}
