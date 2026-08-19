@@ -77,26 +77,36 @@ func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 	})
 }
 
-func TestTheLadderStillDeepensWhenEverythingIsBurned(t *testing.T) {
+func TestTheLadderDeepensOnTheRetryItsBackoffAllowed(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.now = func() int64 { return clk }
 	p.fail()
 	p.fail()
 
-	addr := p.current()
+	addr := activeOf(p)
 	p.mu.Lock()
 	before := *p.health.rec(addr)
 	p.mu.Unlock()
 
 	p.fail()
 	p.mu.Lock()
+	held := *p.health.rec(addr)
+	p.mu.Unlock()
+	if held.fails != before.fails || held.nextRetest != before.nextRetest {
+		t.Fatalf("%s is condemned and its backoff has not run out, yet a verdict deepened it anyway "+
+			"(%+v -> %+v). At one verdict every three seconds that reaches the six-hour step in under a "+
+			"minute, and every number the operator set on the way there means nothing", addr, before, held)
+	}
+
+	clk = before.nextRetest
+	p.fail()
+	p.mu.Lock()
 	after := *p.health.rec(addr)
 	p.mu.Unlock()
 	if after.fails == before.fails && after.nextRetest == before.nextRetest {
-		t.Fatalf("%s was handed out, tried, and failed, and its ladder did not move (%+v) — with every "+
-			"endpoint burned the pool keeps handing one back, so a verdict that costs nothing leaves the "+
-			"carrier retrying the same ones at the shortest interval the ladder has, forever", addr, after)
+		t.Fatalf("%s came due, was handed back, was tried, and failed, and its ladder did not move "+
+			"(%+v) — the carrier would retry it at the shortest interval the ladder has, forever", addr, after)
 	}
 }
 

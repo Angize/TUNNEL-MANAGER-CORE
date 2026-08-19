@@ -62,8 +62,7 @@ func (lt *liveTunnel) verdict(t *testing.T) (key string) {
 	t.Helper()
 	key = lt.nodeSees(t)
 	before := lt.ladder()
-	lt.rc.judge(poolCmd{Cmd: cmdFail, Key: key, Epoch: testPathEpoch}, lt.rotDst, func(bool) {}, nil, testPathEpoch, lt.now)
-	lt.now = lt.now.Add(ladderRestMax + time.Second)
+	lt.rc.judge(poolCmd{Cmd: cmdFail, Key: key, Epoch: testPathEpoch}, lt.rotDst, func(bool) {}, nil, testPathEpoch)
 	for a, n := range lt.ladder() {
 		if n > before[a] {
 			lt.burn = append(lt.burn, a)
