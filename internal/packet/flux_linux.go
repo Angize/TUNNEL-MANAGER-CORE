@@ -782,6 +782,7 @@ func (f *Flux) clientLoop() {
 		go f.pinPollLoop(rc)
 	}
 	for {
+		rc.proactive(f.rotatePeerFlux, f.rotateSourceFlux, time.Now())
 		if f.cryptoOn && f.sealer() == nil {
 			unproven = false
 			f.sendInit()
@@ -792,11 +793,6 @@ func (f *Flux) clientLoop() {
 					f.pp.pinLandedOn(pa.IP.String())
 				}
 			}
-
-			if f.peerAnswered.Load() {
-				rc.success()
-			}
-			rc.proactive(f.rotatePeerFlux, f.rotateSourceFlux, time.Now())
 
 			f.send(typePing, nil, f.peer.Load())
 

@@ -111,6 +111,7 @@ func TestAskOnlyCountsWhenThereIsSomeoneToAnswer(t *testing.T) {
 func ladderBeat(r *Raw) (wait func()) {
 	rc := newRotationController(nil, nil)
 	rc.port.setRoll(r.rollSourcePort)
+	rc.port.setSettle(r.settlePort)
 	rc.port.setRefresh(r.portDead, func() bool { return r.sealer() != nil }, rawSportEvery)
 	done := make(chan struct{})
 	go func() {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 type liveTunnel struct {
@@ -12,12 +13,13 @@ type liveTunnel struct {
 	rc   *rotationController
 	live string
 	burn []string
+	now  time.Time
 }
 
 func newLiveTunnel(t *testing.T, addrs ...string) *liveTunnel {
 	t.Helper()
 	dir := t.TempDir()
-	lt := &liveTunnel{p: NewPeerPool(addrs, 0, filepath.Join(dir, "pool.json"))}
+	lt := &liveTunnel{p: NewPeerPool(addrs, 0, filepath.Join(dir, "pool.json")), now: time.Now()}
 	lt.rc = newRotationController(lt.p, nil)
 	lt.rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
 	lt.live = addrs[0]
@@ -60,7 +62,8 @@ func (lt *liveTunnel) verdict(t *testing.T) (key string) {
 	t.Helper()
 	key = lt.nodeSees(t)
 	before := lt.ladder()
-	lt.rc.judge(poolCmd{Cmd: cmdFail, Key: key, Epoch: testPathEpoch}, lt.rotDst, func(bool) {}, nil, testPathEpoch)
+	lt.rc.judge(poolCmd{Cmd: cmdFail, Key: key, Epoch: testPathEpoch}, lt.rotDst, func(bool) {}, nil, testPathEpoch, lt.now)
+	lt.now = lt.now.Add(ladderRestMax + time.Second)
 	for a, n := range lt.ladder() {
 		if n > before[a] {
 			lt.burn = append(lt.burn, a)

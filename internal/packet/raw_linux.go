@@ -87,6 +87,7 @@ type Raw struct {
 
 	cliPort     atomic.Uint32
 	sportRandom bool
+	trial       atomic.Pointer[portTrial]
 
 	leak     antiLeaker
 	sendMu   sync.RWMutex
@@ -676,22 +677,45 @@ func (r *Raw) portDead(now time.Time) bool {
 	return now.Sub(time.Unix(0, ask)) > ps
 }
 
-func (r *Raw) rollSourcePort(step bool) bool {
-	p := rawRollSport()
-	if p == 0 {
-		return false
-	}
+type portTrial struct {
+	prev uint16
+	rx   int64
+}
+
+func (r *Raw) usePort(p uint16) {
 	r.cliPort.Store(uint32(p))
 	r.newTCPFlow()
 	r.lastAsk.Store(0)
 	if peer := r.peer.Load(); peer != nil {
 		r.send(typePing, nil, peer)
 	}
+}
 
-	if step && !r.portRolling.Swap(true) {
-		r.st.event("down", "port-roll", "raw")
+func (r *Raw) rollSourcePort(step bool) bool {
+	p := rawRollSport()
+	if p == 0 {
+		return false
 	}
+	prev, rx := r.cport(), r.lastRxCur.Load()
+	r.usePort(p)
+
+	if step {
+		r.trial.Store(nil)
+		if !r.portRolling.Swap(true) {
+			r.st.event("down", "port-roll", "raw")
+		}
+		return true
+	}
+	r.trial.Store(&portTrial{prev: prev, rx: rx})
 	return true
+}
+
+func (r *Raw) settlePort() {
+	t := r.trial.Swap(nil)
+	if t == nil || r.lastRxCur.Load() != t.rx {
+		return
+	}
+	r.usePort(t.prev)
 }
 
 func (r *Raw) tunName() string {
@@ -1254,6 +1278,7 @@ func (r *Raw) clientLoop() {
 
 	if r.sportRandom {
 		rc.port.setRoll(r.rollSourcePort)
+		rc.port.setSettle(r.settlePort)
 
 		rc.port.setRefresh(r.portDead, func() bool { return r.sealer() != nil }, rawSportEvery)
 	}
@@ -1264,6 +1289,7 @@ func (r *Raw) clientLoop() {
 
 	r.seedRx()
 	for {
+		rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
 		if r.sealer() == nil {
 			unproven = false
 			r.sendInit()
@@ -1274,11 +1300,6 @@ func (r *Raw) clientLoop() {
 					r.pp.pinLandedOn(pa.IP.String())
 				}
 			}
-
-			if r.peerAnswered.Load() {
-				rc.success()
-			}
-			rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
 
 			r.send(typePing, nil, r.peer.Load())
 

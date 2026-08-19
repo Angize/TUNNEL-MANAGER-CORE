@@ -833,6 +833,7 @@ func (b *UDP) clientLoop() {
 		go b.pinPollLoop(rc)
 	}
 	for {
+		rc.proactive(b.rotatePeerUDP, b.rotateSourceUDP, time.Now())
 		if b.sealer() == nil && b.cryptoOn {
 			unproven = false
 			b.sendInit()
@@ -844,14 +845,9 @@ func (b *UDP) clientLoop() {
 				}
 			}
 
-			if b.peerAnswered.Load() {
-				rc.success()
-			}
-
 			if !b.cryptoOn && b.peerAnswered.Load() {
 				b.st.reconnected("udp")
 			}
-			rc.proactive(b.rotatePeerUDP, b.rotateSourceUDP, time.Now())
 
 			b.send(typePing, nil, b.peer.Load())
 
