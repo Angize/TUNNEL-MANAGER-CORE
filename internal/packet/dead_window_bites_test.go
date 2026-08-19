@@ -9,7 +9,6 @@ import (
 )
 
 func TestTheServersDeadWindowReallyReapsASilentPeer(t *testing.T) {
-	const keepalive = time.Second
 
 	run := func(t *testing.T, apply func(*TCP)) (time.Duration, error) {
 		t.Helper()
