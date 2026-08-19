@@ -11,7 +11,7 @@ func TestServerReelectsDownstreamAfterLiveConnDies(t *testing.T) {
 	const cipher = "aes-256-gcm"
 	srvDev, srvCtrl := tunPair(t, "reelect")
 	addr := freeTCPPort(t)
-	srv, err := ListenWS(addr, srvDev, time.Second, false, true, psk, cipher, "")
+	srv, err := ListenWS(addr, srvDev, false, true, psk, cipher, "")
 	if err != nil {
 		t.Fatalf("ListenWS: %v", err)
 	}

@@ -39,11 +39,11 @@ func TestEveryStatusPathCarrierWritesItsFile(t *testing.T) {
 	dnsSrvDev, _ := tunPair(t, "sfwds")
 	dnsCliDev, _ := tunPair(t, "sfwdc")
 
-	usrv, err := Listen([]string{udpAddr}, srvDev, time.Second, false, true, psk, "aes-256-gcm", false, 0, 0)
+	usrv, err := Listen([]string{udpAddr}, srvDev, false, true, psk, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	ucli, err := Dial(udpAddr, cliDev, time.Second, false, true, psk, "aes-256-gcm", false, 0, 0)
+	ucli, err := Dial(udpAddr, cliDev, false, true, psk, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestEveryStatusPathCarrierWritesItsFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListenDNS: %v", err)
 	}
-	dcli, err := DialDNS(dnsCliDev, []string{dnsAddr}, "t.example.com", psk, "aes-256-gcm", time.Second)
+	dcli, err := DialDNS(dnsCliDev, []string{dnsAddr}, "t.example.com", psk, "aes-256-gcm")
 	if err != nil {
 		t.Fatalf("DialDNS: %v", err)
 	}

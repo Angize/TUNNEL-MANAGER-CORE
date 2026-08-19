@@ -4,14 +4,13 @@ import (
 	"net"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
-func rollingPort(t *testing.T, ka time.Duration) (*Raw, string) {
+func rollingPort(t *testing.T) (*Raw, string) {
 	t.Helper()
-	r := &Raw{isClient: true, keepalive: ka, profile: "tcp", sportRandom: true, closeCh: make(chan struct{})}
+	r := &Raw{isClient: true, profile: "tcp", sportRandom: true, closeCh: make(chan struct{})}
 	r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
 	r.cliPort.Store(40000)
 	r.link = &capturingLink{r: r}
@@ -45,7 +44,7 @@ func rollEvents(t *testing.T, path string) []coreEvent {
 }
 
 func TestARollingPortSaysSoOncePerOutage(t *testing.T) {
-	r, path := rollingPort(t, 6*time.Second)
+	r, path := rollingPort(t)
 
 	for i := 0; i < 5; i++ {
 		if !r.rollSourcePort() {
@@ -59,7 +58,7 @@ func TestARollingPortSaysSoOncePerOutage(t *testing.T) {
 }
 
 func TestTheNextOutageSaysSoAgain(t *testing.T) {
-	r, path := rollingPort(t, 10*time.Second)
+	r, path := rollingPort(t)
 	cur := r.peer.Load().IP
 
 	r.rollSourcePort()
@@ -76,7 +75,7 @@ func TestTheNextOutageSaysSoAgain(t *testing.T) {
 }
 
 func TestOnlyTheCurrentDestinationEndsTheOutage(t *testing.T) {
-	r, path := rollingPort(t, 10*time.Second)
+	r, path := rollingPort(t)
 	cur, other := r.peer.Load().IP, net.IPv4(10, 30, 0, 3)
 
 	r.rollSourcePort()

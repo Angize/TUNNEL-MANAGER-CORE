@@ -6,7 +6,7 @@ import (
 )
 
 func TestManualPinReleasesOnLanding(t *testing.T) {
-	cli, _, _, a2, _, _ := probePair(t, time.Second, "pinl")
+	cli, _, _, a2, _, _ := probePair(t, "pinl")
 	writeFileAtomic(cli.pp.cmdPath(), []byte(`{"key":"`+a2+`"}`), 0o644)
 
 	deadline := time.Now().Add(15 * time.Second)

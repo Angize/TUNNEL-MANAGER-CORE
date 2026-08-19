@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func destPoolActive(t *testing.T, path string) string {
@@ -53,7 +52,7 @@ func TestFailedWarmBuildLeavesTheDestinationCursorWhereTheTunnelIs(t *testing.T)
 	dir := t.TempDir()
 	poolPath := filepath.Join(dir, "dest-pool.json")
 	b := &TCP{cryptoOn: true, cipher: "aes-256-gcm", psk: "warm-dst-cursor-psk-abcdefghijk",
-		keepalive: time.Second, idle: deadWindow(time.Second), isClient: true, addr: addr,
+		idle: connIdle, ping: pingEvery, isClient: true, addr: addr,
 		stTag: "tcp", closeCh: make(chan struct{})}
 	b.st = newCoreStatus(filepath.Join(dir, "core.status"), "tcp · "+addr)
 	b.warmNext = make(chan *warmDial, 1)

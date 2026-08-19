@@ -18,7 +18,6 @@ func TestUnbindableSourceRotationIsNotAnnounced(t *testing.T) {
 	const gone = "203.0.113.9"
 	srvDev, _ := tunPair(t, "ubsrv")
 	cliDev, _ := tunPair(t, "ubcli")
-	ka := time.Second
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -28,11 +27,11 @@ func TestUnbindableSourceRotationIsNotAnnounced(t *testing.T) {
 	l.Close()
 	d1, d2 := fmt.Sprintf("127.0.0.1:%d", port), fmt.Sprintf("127.0.0.2:%d", port)
 
-	srv, err := ListenTCP([]string{d1, d2}, srvDev, ka, false, true, psk, cipher, false, "")
+	srv, err := ListenTCP([]string{d1, d2}, srvDev, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("ListenTCP: %v", err)
 	}
-	cli, err := DialTCP(d1, cliDev, ka, false, true, psk, cipher, false, "")
+	cli, err := DialTCP(d1, cliDev, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("DialTCP: %v", err)
 	}

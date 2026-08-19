@@ -16,7 +16,7 @@ func httpcStressServer(t *testing.T) (string, *http.Client, *TCP) {
 	t.Helper()
 	const psk = "server-stress-psk-abcdefghijklmnop"
 	srvDev, _ := tunPair(t, "srvstress")
-	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
+	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, false, true, psk, "aes-256-gcm")
 	if err != nil {
 		t.Fatalf("ListenHTTPC: %v", err)
 	}

@@ -13,7 +13,6 @@ func TestUDPRotationKeepsStreamFlowing(t *testing.T) {
 	const cipher = "chacha20-poly1305"
 	srvDev, srvCtrl := tunPair(t, "rsrvrot")
 	cliDev, cliCtrl := tunPair(t, "rclirot")
-	ka := 500 * time.Millisecond
 
 	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -23,11 +22,11 @@ func TestUDPRotationKeepsStreamFlowing(t *testing.T) {
 	c.Close()
 	a1, a2 := fmt.Sprintf("127.0.0.1:%d", port), fmt.Sprintf("127.0.0.2:%d", port)
 
-	srv, err := Listen([]string{a1, a2}, srvDev, ka, false, true, psk, cipher, false, 0, 0)
+	srv, err := Listen([]string{a1, a2}, srvDev, false, true, psk, cipher, false, 0, 0)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	cli, err := Dial(a1, cliDev, ka, false, true, psk, cipher, false, 0, 0)
+	cli, err := Dial(a1, cliDev, false, true, psk, cipher, false, 0, 0)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -86,7 +85,7 @@ func TestUDPReHandshakeOnReconnect(t *testing.T) {
 	const cipher = "chacha20-poly1305"
 	srvDev, srvCtrl := tunPair(t, "rsrv")
 	addr := freeUDPPort(t)
-	srv, err := Listen([]string{addr}, srvDev, time.Second, true, true, psk, cipher, false, 0, 0)
+	srv, err := Listen([]string{addr}, srvDev, true, true, psk, cipher, false, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +94,7 @@ func TestUDPReHandshakeOnReconnect(t *testing.T) {
 
 	send := func(tag string) {
 		cliDev, cliCtrl := tunPair(t, tag)
-		cli, err := Dial(addr, cliDev, time.Second, true, true, psk, cipher, false, 0, 0)
+		cli, err := Dial(addr, cliDev, true, true, psk, cipher, false, 0, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

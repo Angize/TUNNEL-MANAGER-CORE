@@ -45,6 +45,7 @@ func stageSession(set []*stagedBox, s Sealer) []*stagedBox {
 }
 
 type UDP struct {
+	ping      time.Duration
 	conn      atomic.Pointer[net.UDPConn]
 	rebindGen atomic.Int64
 	rebindMu  sync.Mutex
@@ -54,14 +55,13 @@ type UDP struct {
 	rxConn    atomic.Pointer[net.UDPConn]
 	rxMu      sync.Mutex
 
-	devs      []*tun.Device
-	tw        *tunWriters
-	keepalive time.Duration
-	obfs      bool
-	cryptoOn  bool
-	psk       string
-	cipher    string
-	isClient  bool
+	devs     []*tun.Device
+	tw       *tunWriters
+	obfs     bool
+	cryptoOn bool
+	psk      string
+	cipher   string
+	isClient bool
 
 	peer    atomic.Pointer[net.UDPAddr]
 	session atomic.Pointer[sealerBox]
@@ -95,6 +95,10 @@ func (b *UDP) SetPeerPool(pp *PeerPool) {
 		}
 	}
 }
+
+var connIdle = 60 * time.Second
+
+var pingEvery = 10 * time.Second
 
 const handshakeRetransmit = time.Second
 
@@ -334,7 +338,7 @@ func (b *UDP) provenFrom(ip net.IP) {
 	b.peerAnswered.Store(true)
 }
 
-func Dial(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, fec bool, fecData, fecParity int, extra ...*tun.Device) (*UDP, error) {
+func Dial(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, fec bool, fecData, fecParity int, extra ...*tun.Device) (*UDP, error) {
 	ra, err := net.ResolveUDPAddr("udp", peerAddr)
 	if err != nil {
 		return nil, err
@@ -344,7 +348,7 @@ func Dial(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, crypt
 		return nil, err
 	}
 	applyConnSockBuf(conn)
-	b := &UDP{keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, isClient: true,
+	b := &UDP{obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, isClient: true, ping: pingEvery,
 		closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
 	b.initQueues(dev, extra)
 	b.conn.Store(conn)
@@ -358,8 +362,8 @@ func (b *UDP) initQueues(dev *tun.Device, extra []*tun.Device) {
 	b.tw = newTunWriters(b.devs)
 }
 
-func Listen(listenAddrs []string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, fec bool, fecData, fecParity int, extra ...*tun.Device) (*UDP, error) {
-	b := &UDP{keepalive: keepalive, obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, closeCh: make(chan struct{})}
+func Listen(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, fec bool, fecData, fecParity int, extra ...*tun.Device) (*UDP, error) {
+	b := &UDP{obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, ping: pingEvery, closeCh: make(chan struct{})}
 	b.initQueues(dev, extra)
 	for _, listenAddr := range listenAddrs {
 		la, err := net.ResolveUDPAddr("udp", listenAddr)
@@ -853,7 +857,7 @@ func (b *UDP) clientLoop() {
 		if b.sealer() == nil && b.cryptoOn {
 			wait = handshakeRetransmitWait()
 		} else {
-			wait = keepaliveInterval(b.keepalive, b.psk)
+			wait = keepaliveInterval(b.ping, b.psk)
 		}
 		select {
 		case <-b.closeCh:

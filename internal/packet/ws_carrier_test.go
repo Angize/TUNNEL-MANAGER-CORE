@@ -67,7 +67,7 @@ func TestServerDownstreamFollowsData(t *testing.T) {
 	const cipher = "aes-256-gcm"
 	srvDev, srvCtrl := tunPair(t, "sdf")
 	addr := freeTCPPort(t)
-	srv, err := ListenWS(addr, srvDev, time.Second, false, true, psk, cipher, "")
+	srv, err := ListenWS(addr, srvDev, false, true, psk, cipher, "")
 	if err != nil {
 		t.Fatalf("ListenWS: %v", err)
 	}
@@ -153,9 +153,8 @@ func TestPinReleasesOnLanding(t *testing.T) {
 	const cipher = "aes-256-gcm"
 	srvDev, _ := tunPair(t, "wprsrv")
 	cliDev, _ := tunPair(t, "wprcli")
-	ka := time.Second
 	addr := freeTCPPort(t)
-	srv, err := ListenWS(addr, srvDev, ka, false, true, psk, cipher, "")
+	srv, err := ListenWS(addr, srvDev, false, true, psk, cipher, "")
 	if err != nil {
 		t.Fatalf("ListenWS: %v", err)
 	}
@@ -163,9 +162,9 @@ func TestPinReleasesOnLanding(t *testing.T) {
 	t.Cleanup(func() { srv.Close() })
 
 	pool := newWSPool([]string{addr}, snis("front-a", "front-b"), "")
-	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, keepalive: ka, psk: psk,
+	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, psk: psk,
 		ws: true, wsTLS: false, pool: pool,
-		idle: deadWindow(ka), isClient: true, addr: "pool", closeCh: make(chan struct{})}
+		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
 

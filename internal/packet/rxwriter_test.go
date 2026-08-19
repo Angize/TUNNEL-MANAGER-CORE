@@ -338,7 +338,7 @@ func TestTheReadAndWriteHalvesUseTheSameQueues(t *testing.T) {
 	}
 	defer c.Close()
 	devs, count := pipeDevs(t, 3)
-	r := newRaw(c, devs[0], 0, false, "", "", "bare", true)
+	r := newRaw(c, devs[0], false, "", "", "bare", true)
 	r.proto = 253
 	r.rxw = newTunWriters(devs)
 	if err := r.buildTxQueues(devs[1:], r.proto); err != nil {
@@ -364,7 +364,7 @@ func TestEachSendQueueHasItsOwnSocket(t *testing.T) {
 	}
 	defer c.Close()
 	devs, _ := pipeDevs(t, 3)
-	r := newRaw(c, devs[0], 0, false, "", "", "bare", true)
+	r := newRaw(c, devs[0], false, "", "", "bare", true)
 	r.proto = 254
 	if err := r.buildTxQueues(devs[1:], r.proto); err != nil {
 		t.Skipf("cannot open the extra send sockets here: %v", err)

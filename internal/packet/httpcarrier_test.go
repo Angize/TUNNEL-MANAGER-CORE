@@ -104,7 +104,7 @@ func TestHTTPCProbeUsesRealEstablish(t *testing.T) {
 func TestHTTPCGrpcProbeHealthyOnRealOrigin(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	srvDev, _ := tunPair(t, "xhgprobe")
-	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
+	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, false, true, psk, "aes-256-gcm")
 	if err != nil {
 		t.Fatalf("ListenHTTPC: %v", err)
 	}
@@ -194,15 +194,14 @@ func testTunnelHTTPC(t *testing.T, mode string, obfs bool) {
 	const cipher = "aes-256-gcm"
 	srvDev, srvCtrl := tunPair(t, "xhsrv")
 	cliDev, cliCtrl := tunPair(t, "xhcli")
-	ka := 1 * time.Second
 	addr := freeTCPPort(t)
 
-	srv, err := ListenHTTPC(addr, srvDev, ka, obfs, true, psk, cipher)
+	srv, err := ListenHTTPC(addr, srvDev, obfs, true, psk, cipher)
 	if err != nil {
 		t.Fatalf("ListenHTTPC: %v", err)
 	}
 
-	cli, err := DialHTTPC(addr, cliDev, ka, obfs, true, psk, cipher, "", "/", false, nil, mode)
+	cli, err := DialHTTPC(addr, cliDev, obfs, true, psk, cipher, "", "/", false, nil, mode)
 	if err != nil {
 		t.Fatalf("DialHTTPC: %v", err)
 	}
@@ -244,9 +243,8 @@ func TestTunnelHTTPCGrpc(t *testing.T) {
 	const cipher = "aes-256-gcm"
 	srvDev, srvCtrl := tunPair(t, "xhgsrv")
 	cliDev, cliCtrl := tunPair(t, "xhgcli")
-	ka := 1 * time.Second
 
-	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, ka, false, true, psk, cipher)
+	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, false, true, psk, cipher)
 	if err != nil {
 		t.Fatalf("ListenHTTPC: %v", err)
 	}
@@ -258,7 +256,7 @@ func TestTunnelHTTPCGrpc(t *testing.T) {
 	go srv.Run()
 	t.Cleanup(func() { ts.Close(); srv.Close() })
 
-	cli, err := DialHTTPC(ts.Listener.Addr().String(), cliDev, ka, false, true, psk, cipher, "", "/", true, nil, "grpc")
+	cli, err := DialHTTPC(ts.Listener.Addr().String(), cliDev, false, true, psk, cipher, "", "/", true, nil, "grpc")
 	if err != nil {
 		t.Fatalf("DialHTTPC: %v", err)
 	}
@@ -272,7 +270,7 @@ func TestTunnelHTTPCGrpc(t *testing.T) {
 func TestHTTPCServerH2C(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
 	srvDev, _ := tunPair(t, "h2csrv")
-	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, time.Second, false, true, psk, "aes-256-gcm")
+	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, false, true, psk, "aes-256-gcm")
 	if err != nil {
 		t.Fatalf("ListenHTTPC: %v", err)
 	}

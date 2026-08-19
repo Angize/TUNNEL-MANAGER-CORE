@@ -20,7 +20,7 @@ type WSPoolSNI struct {
 	Path string
 }
 
-func DialWSPoolCfg(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []WSPoolSNI, rotate time.Duration, statusPath string, httpc bool, httpcMode string) (*TCP, error) {
+func DialWSPoolCfg(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []WSPoolSNI, rotate time.Duration, statusPath string, httpc bool, httpcMode string) (*TCP, error) {
 	entries := make([]wsSNIEntry, 0, len(snis))
 	for _, s := range snis {
 		var ech []byte
@@ -33,7 +33,7 @@ func DialWSPoolCfg(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool
 	if pool == nil {
 		return nil, errors.New("ws pool: need at least one IP and one SNI")
 	}
-	return DialWSPool(dev, keepalive, obfs, cryptoOn, psk, cipher, pool, rotate, httpc, httpcMode)
+	return DialWSPool(dev, obfs, cryptoOn, psk, cipher, pool, rotate, httpc, httpcMode)
 }
 
 type wsSNIEntry struct {

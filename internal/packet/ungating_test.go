@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func poollessClient(t *testing.T, ka time.Duration, tag string) (cli, server *UDP, ctrl *os.File) {
+func poollessClient(t *testing.T, tag string) (cli, server *UDP, ctrl *os.File) {
 	t.Helper()
 	srvDev, _ := tunPair(t, tag+"s")
 	cliDev, cc := tunPair(t, tag+"c")
@@ -19,11 +19,11 @@ func poollessClient(t *testing.T, ka time.Duration, tag string) (cli, server *UD
 	}
 	addr := fmt.Sprintf("127.0.0.1:%d", c.LocalAddr().(*net.UDPAddr).Port)
 	c.Close()
-	srv, err := Listen([]string{addr}, srvDev, ka, false, true, probePSK, "aes-256-gcm", false, 0, 0)
+	srv, err := Listen([]string{addr}, srvDev, false, true, probePSK, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
 	}
-	cli, err = Dial(addr, cliDev, ka, false, true, probePSK, "aes-256-gcm", false, 0, 0)
+	cli, err = Dial(addr, cliDev, false, true, probePSK, "aes-256-gcm", false, 0, 0)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -45,9 +45,8 @@ func poollessClient(t *testing.T, ka time.Duration, tag string) (cli, server *UD
 }
 
 func TestAPoolLessTunnelHearsTheJudge(t *testing.T) {
-	const ka = 6 * time.Second
 	const budget = 4 * time.Second
-	cli, _, _ := poollessClient(t, ka, "ungate")
+	cli, _, _ := poollessClient(t, "ungate")
 
 	for cli.sealer() == nil {
 		time.Sleep(20 * time.Millisecond)
@@ -56,7 +55,7 @@ func TestAPoolLessTunnelHearsTheJudge(t *testing.T) {
 	start := time.Now()
 	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail})
 
-	deadline := time.Now().Add(deadWindow(ka) + 10*time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for cli.session.Load() == was || cli.sealer() == nil {
 		if time.Now().After(deadline) {
 			t.Fatal("a tunnel with no pool never re-handshaked on the node's verdict — it has no ladder")
@@ -64,8 +63,8 @@ func TestAPoolLessTunnelHearsTheJudge(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if took := time.Since(start); took > budget {
-		t.Errorf("the re-handshake took %v, over the %v budget — that is the staleness clock (%v), "+
-			"not the ladder", took.Round(time.Millisecond), budget, deadWindow(ka))
+		t.Errorf("the re-handshake took %v, over the %v budget — that is a clock, not the ladder",
+			took.Round(time.Millisecond), budget)
 	}
 }
 

@@ -225,13 +225,13 @@ func (cf *connFramer) readFrame() (typ byte, session uint64, seq uint64, payload
 }
 
 type TCP struct {
-	dev       *tun.Device
-	cryptoOn  bool
-	cipher    string
-	keepalive time.Duration
-	obfs      bool
-	psk       string
-	idle      time.Duration
+	dev      *tun.Device
+	cryptoOn bool
+	cipher   string
+	obfs     bool
+	psk      string
+	idle     time.Duration
+	ping     time.Duration
 
 	cover     bool
 	coverSNI  string
@@ -523,26 +523,22 @@ func canBindSource(ip net.IP) bool {
 	return true
 }
 
-func deadWindow(keepalive time.Duration) time.Duration {
-	return time.Duration(deadMult) * keepalive
-}
-
-func DialTCP(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string) (*TCP, error) {
-	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
+func DialTCP(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string) (*TCP, error) {
+	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		cover: cover, coverSNI: coverSNI,
-		idle: deadWindow(keepalive), isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
+		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
 }
 
-func DialWS(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte) (*TCP, error) {
-	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
+func DialWS(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte) (*TCP, error) {
+	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH,
-		idle: deadWindow(keepalive), isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
+		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
 }
 
-func DialWSPool(dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, pool *wsPool, rotate time.Duration, httpc bool, httpcMode string) (*TCP, error) {
-	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
+func DialWSPool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, pool *wsPool, rotate time.Duration, httpc bool, httpcMode string) (*TCP, error) {
+	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, pool: pool, rotate: rotate,
-		idle: deadWindow(keepalive), isClient: true, addr: "pool", closeCh: make(chan struct{})}, nil
+		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}, nil
 }
 
 func newWSPoolFromCfg(ips []string, snis []wsSNIEntry, statusPath string) *wsPool {
@@ -552,33 +548,33 @@ func newWSPoolFromCfg(ips []string, snis []wsSNIEntry, statusPath string) *wsPoo
 	return newWSPool(ips, snis, statusPath)
 }
 
-func DialHTTPC(peerAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte, httpcMode string) (*TCP, error) {
-	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
+func DialHTTPC(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte, httpcMode string) (*TCP, error) {
+	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, httpc: true, httpcMode: httpcMode, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH,
-		idle: deadWindow(keepalive), isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
+		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
 }
 
-func ListenHTTPC(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string) (*TCP, error) {
+func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string) (*TCP, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, err
 	}
-	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
-		ws: true, httpc: true, idle: deadWindow(keepalive), addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
+	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
+		ws: true, httpc: true, idle: connIdle, ping: pingEvery, addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns), httpcSessions: make(map[string]*httpcSession)}, nil
 }
 
-func ListenWS(listenAddr string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher, wsPath string) (*TCP, error) {
+func ListenWS(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string) (*TCP, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, err
 	}
-	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
-		ws: true, wsPath: wsPath, idle: deadWindow(keepalive), addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
+	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
+		ws: true, wsPath: wsPath, idle: connIdle, ping: pingEvery, addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns)}, nil
 }
 
-func ListenTCP(listenAddrs []string, dev *tun.Device, keepalive time.Duration, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string) (*TCP, error) {
+func ListenTCP(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string) (*TCP, error) {
 	if len(listenAddrs) == 0 {
 		return nil, errors.New("tcp listen: no listen address")
 	}
@@ -593,9 +589,9 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, keepalive time.Duration, o
 		}
 		lns = append(lns, ln)
 	}
-	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, keepalive: keepalive, obfs: obfs, psk: psk,
+	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		cover: cover, coverSNI: coverSNI,
-		idle: deadWindow(keepalive), addr: listenAddrs[0], ln: lns[0], lns: lns, closeCh: make(chan struct{}),
+		idle: connIdle, ping: pingEvery, addr: listenAddrs[0], ln: lns[0], lns: lns, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns)}
 	if cover {
 
@@ -1894,7 +1890,7 @@ func (b *TCP) keepaliveLoop() {
 		select {
 		case <-b.closeCh:
 			return
-		case <-time.After(keepaliveInterval(b.keepalive, b.psk)):
+		case <-time.After(keepaliveInterval(b.ping, b.psk)):
 
 			if cf := b.cur.Load(); cf != nil && !b.recentData() {
 				if ok, err := b.pingOne(cf); !ok {
@@ -1925,7 +1921,7 @@ func (b *TCP) recentData() bool {
 	if last == 0 {
 		return false
 	}
-	return time.Since(time.Unix(0, last)) < b.keepalive
+	return time.Since(time.Unix(0, last)) < b.ping
 }
 
 func (b *TCP) sleep(d time.Duration) bool {

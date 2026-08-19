@@ -19,7 +19,6 @@ func liveRemote(b *TCP) string {
 func TestPinIsNotConsumedByAPreBuiltRotationCarrier(t *testing.T) {
 	const psk = "pin-prebuilt-rotation-psk-abcdef"
 	const cipher = "aes-256-gcm"
-	ka := time.Second
 
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -31,7 +30,7 @@ func TestPinIsNotConsumedByAPreBuiltRotationCarrier(t *testing.T) {
 	a2 := fmt.Sprintf("127.0.0.2:%d", port)
 
 	srvDev, _ := tunPair(t, "pinsrv")
-	srv, err := ListenTCP([]string{a1, a2}, srvDev, ka, false, true, psk, cipher, false, "")
+	srv, err := ListenTCP([]string{a1, a2}, srvDev, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("ListenTCP: %v", err)
 	}
@@ -39,7 +38,7 @@ func TestPinIsNotConsumedByAPreBuiltRotationCarrier(t *testing.T) {
 	t.Cleanup(func() { srv.Close() })
 
 	cliDev, _ := tunPair(t, "pincli")
-	cli, err := DialTCP(a1, cliDev, ka, false, true, psk, cipher, false, "")
+	cli, err := DialTCP(a1, cliDev, false, true, psk, cipher, false, "")
 	if err != nil {
 		t.Fatalf("DialTCP: %v", err)
 	}

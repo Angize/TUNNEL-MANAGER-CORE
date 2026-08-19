@@ -9,12 +9,12 @@ import (
 func TestApplyTuning(t *testing.T) {
 	save := struct {
 		sb      []int64
-		dr, dm  int64
+		dr      int64
 		plt     int32
 		ml, pto time.Duration
-	}{suspectBackoff, deadRetest, deadMult, pingLossThreshold, minLiveness, probeTimeout}
+	}{suspectBackoff, deadRetest, pingLossThreshold, minLiveness, probeTimeout}
 	defer func() {
-		suspectBackoff, deadRetest, deadMult = save.sb, save.dr, save.dm
+		suspectBackoff, deadRetest = save.sb, save.dr
 		pingLossThreshold = save.plt
 		minLiveness, probeTimeout = save.ml, save.pto
 	}()
@@ -26,8 +26,8 @@ func TestApplyTuning(t *testing.T) {
 
 	ApplyTuning(TuningInput{
 		SuspectBackoff: []int64{5, 10, 20}, DeadRetestSecs: 900,
-		DeadMult: 6, PingLossThreshold: 5,
-		MinLivenessSecs: 12, ProbeTimeoutSecs: 7,
+		PingLossThreshold: 5,
+		MinLivenessSecs:   12, ProbeTimeoutSecs: 7,
 	})
 	if !reflect.DeepEqual(suspectBackoff, []int64{5, 10, 20}) {
 		t.Errorf("suspectBackoff=%v", suspectBackoff)
@@ -35,23 +35,11 @@ func TestApplyTuning(t *testing.T) {
 	if deadRetest != 900 {
 		t.Errorf("health FSM: deadRetest=%d", deadRetest)
 	}
-	if deadMult != 6 || pingLossThreshold != 5 {
-		t.Errorf("dead-detect: dm=%d plt=%d", deadMult, pingLossThreshold)
+	if pingLossThreshold != 5 {
+		t.Errorf("dead-detect: plt=%d", pingLossThreshold)
 	}
 	if minLiveness != 12*time.Second || probeTimeout != 7*time.Second {
 		t.Errorf("durations: minLiveness=%v probeTimeout=%v", minLiveness, probeTimeout)
-	}
-
-	for _, ka := range []time.Duration{2 * time.Second, 10 * time.Second, 30 * time.Second} {
-		want := 6 * ka
-		if got := deadWindow(ka); got != want {
-			t.Errorf("deadWindow(%v)=%v want %v", ka, got, want)
-		}
-	}
-
-	ApplyTuning(TuningInput{DeadMult: 1})
-	if deadMult != 2 {
-		t.Errorf("DeadMult=1 must clamp to 2, got %d", deadMult)
 	}
 
 	ApplyTuning(TuningInput{ProbeTimeoutSecs: 999999})

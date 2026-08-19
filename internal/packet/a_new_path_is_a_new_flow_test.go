@@ -6,7 +6,6 @@ import (
 	"net"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 type tuple struct {
@@ -25,7 +24,7 @@ func (r *Raw) tuple() tuple {
 func movingRaw(t *testing.T, dsts, srcs []string) *Raw {
 	t.Helper()
 	dir := t.TempDir()
-	r := &Raw{isClient: true, keepalive: 10 * time.Second, profile: "tcp", proto: protoTCP,
+	r := &Raw{isClient: true, profile: "tcp", proto: protoTCP,
 		port: 443, psk: "a-new-path-is-a-new-flow-psk-0123", cipher: "chacha20-poly1305",
 		closeCh: make(chan struct{})}
 	r.link = &capturingLink{r: r}

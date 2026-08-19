@@ -7,7 +7,7 @@ import (
 )
 
 func TestOnlyTheLiveCarrierStampsHeartbeat(t *testing.T) {
-	b := &TCP{isClient: true, keepalive: time.Second, idle: 5 * time.Second,
+	b := &TCP{isClient: true, idle: 5 * time.Second,
 		closeCh: make(chan struct{})}
 
 	liveConn, livePeer := net.Pipe()
@@ -60,7 +60,7 @@ func TestOnlyTheLiveCarrierStampsHeartbeat(t *testing.T) {
 }
 
 func TestGoingLiveAdoptsTheCarriersOwnHeartbeat(t *testing.T) {
-	b := &TCP{isClient: true, keepalive: time.Second, idle: 5 * time.Second,
+	b := &TCP{isClient: true, idle: 5 * time.Second,
 		closeCh: make(chan struct{})}
 
 	conn, peer := net.Pipe()

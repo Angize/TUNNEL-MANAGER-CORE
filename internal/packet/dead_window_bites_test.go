@@ -40,7 +40,7 @@ func TestTheServersDeadWindowReallyReapsASilentPeer(t *testing.T) {
 		}
 		defer srv.Close()
 
-		b := &TCP{keepalive: keepalive, idle: deadWindow(keepalive)}
+		b := &TCP{idle: connIdle, ping: pingEvery}
 		apply(b)
 
 		done := make(chan error, 1)
@@ -54,7 +54,9 @@ func TestTheServersDeadWindowReallyReapsASilentPeer(t *testing.T) {
 		}
 	}
 
-	want := deadWindow(keepalive)
+	defer func(d time.Duration) { connIdle = d }(connIdle)
+	connIdle = 3 * time.Second
+	want := connIdle
 
 	t.Run("the resolved window reaps the silent peer", func(t *testing.T) {
 		took, err := run(t, func(*TCP) {})

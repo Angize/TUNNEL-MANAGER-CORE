@@ -40,7 +40,7 @@ func TestTheServerScopesItsAntiLeakRuleForTheHandshake(t *testing.T) {
 
 	t.Run("flux/udp", func(t *testing.T) {
 		rec := &scopeRecorder{}
-		f := newFlux(nil, time.Second, time.Minute, false, true, hsScopePSK, "chacha20-poly1305",
+		f := newFlux(nil, time.Minute, false, true, hsScopePSK, "chacha20-poly1305",
 			"udp", "random", 0, false, 0, 0, false)
 		f.sendFd, f.pktFd = -1, -1
 		f.leak.init(f.closeCh, rec.installer())

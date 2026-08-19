@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestRotationMayNotFireBeforeTheFirstKeepalive(t *testing.T) {
+func TestRotationMayNotFireBeforeTheJudgeCanSpeak(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		set  func(*Config, int)
@@ -14,26 +14,24 @@ func TestRotationMayNotFireBeforeTheFirstKeepalive(t *testing.T) {
 		{"ws_rotate_secs", func(c *Config, v int) { c.WSRotateSecs = v }},
 	} {
 		c := validRaw()
-		c.Keepalive = 30
-		tc.set(c, 29)
+		tc.set(c, minRotateSecs-1)
 		err := c.validate()
 		if err == nil {
-			t.Fatalf("%s=29 with keepalive=30 validated: a rotation that beats the first keepalive drops "+
-				"every connection before it can prove the endpoint works", tc.name)
+			t.Fatalf("%s at %ds validated. The node needs two bad sweeps to call a tunnel red, so a "+
+				"rotation faster than %ds moves the endpoint on before anything has judged it",
+				tc.name, minRotateSecs-1, minRotateSecs)
 		}
-		if !strings.Contains(err.Error(), tc.name) || !strings.Contains(err.Error(), "keepalive") {
-			t.Errorf("%s: the refusal must name the knob AND keepalive, got %q", tc.name, err.Error())
+		if !strings.Contains(err.Error(), tc.name) {
+			t.Errorf("%s: the refusal must name the knob, got %q", tc.name, err.Error())
 		}
 
 		c = validRaw()
-		c.Keepalive = 30
-		tc.set(c, 30)
+		tc.set(c, minRotateSecs)
 		if err := c.validate(); err != nil {
-			t.Errorf("%s=30 with keepalive=30 must be allowed: %v", tc.name, err)
+			t.Errorf("%s at the floor itself must be allowed: %v", tc.name, err)
 		}
 
 		c = validRaw()
-		c.Keepalive = 120
 		tc.set(c, 0)
 		if err := c.validate(); err != nil {
 			t.Errorf("%s=0 (failover-only) must stay allowed: %v", tc.name, err)
@@ -44,35 +42,17 @@ func TestRotationMayNotFireBeforeTheFirstKeepalive(t *testing.T) {
 func TestFluxEpochIsNotAnEndpointRotation(t *testing.T) {
 	c := validRaw()
 	c.Transport = "flux"
-	c.Keepalive = 60
 	c.FluxRotateSecs = 5
 	if err := c.validate(); err != nil {
-		t.Fatalf("a flux epoch shorter than the keepalive must be allowed -- it rotates the SHAPE off the "+
+		t.Fatalf("a flux epoch under the rotation floor must be allowed -- it rotates the SHAPE off the "+
 			"clock and drops nothing: %v", err)
 	}
 
 	c = validRaw()
 	c.Transport = "flux"
-	c.Keepalive = 60
 	c.PeerRotateSecs = 5
 	if err := c.validate(); err == nil {
-		t.Error("peer_rotate_secs=5 with keepalive=60 must still be refused; only the shape epoch is exempt")
-	}
-}
-
-func TestRotationFloorUsesTheDefaultedKeepalive(t *testing.T) {
-	c := validRaw()
-	c.Keepalive = 0
-	c.PeerRotateSecs = 5
-	if err := c.validate(); err == nil {
-		t.Fatal("peer_rotate_secs=5 with an unset keepalive validated; the default is 15, so 5 still " +
-			"rotates before the first ping")
-	}
-	c = validRaw()
-	c.Keepalive = 0
-	c.PeerRotateSecs = 15
-	if err := c.validate(); err != nil {
-		t.Errorf("peer_rotate_secs=15 against the default keepalive of 15 must pass: %v", err)
+		t.Error("peer_rotate_secs=5 must still be refused; only the shape epoch is exempt")
 	}
 }
 

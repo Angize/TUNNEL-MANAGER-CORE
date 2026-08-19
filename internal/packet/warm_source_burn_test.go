@@ -6,7 +6,6 @@ import (
 	"net"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
@@ -37,7 +36,7 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 	srcPath := filepath.Join(dir, "src-pool.json")
 	active := "tcp · " + addr
 	b := &TCP{cryptoOn: true, cipher: "aes-256-gcm", psk: "warm-src-burn-psk-abcdefghijklmn",
-		keepalive: time.Second, idle: deadWindow(time.Second), isClient: true, addr: addr,
+		idle: connIdle, ping: pingEvery, isClient: true, addr: addr,
 		stTag: "tcp", closeCh: make(chan struct{})}
 	b.st = newCoreStatus(path, active)
 	b.warmNext = make(chan *warmDial, 1)

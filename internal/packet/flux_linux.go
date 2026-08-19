@@ -18,14 +18,14 @@ import (
 )
 
 type Flux struct {
-	dev       *tun.Device
-	keepalive time.Duration
-	rotate    time.Duration
-	obfs      bool
-	cryptoOn  bool
-	psk       string
-	cipher    string
-	isClient  bool
+	ping     time.Duration
+	dev      *tun.Device
+	rotate   time.Duration
+	obfs     bool
+	cryptoOn bool
+	psk      string
+	cipher   string
+	isClient bool
 
 	carrier     string
 	shapeProf   string
@@ -136,7 +136,7 @@ func (f *Flux) sendFakes(to *net.IPAddr) {
 	}
 }
 
-func newFlux(dev *tun.Device, ka, rotate time.Duration, obfs, cryptoOn bool, psk, cipher, carrier, shape string, epochOffset int64, fec bool, fecData, fecParity int, isClient bool) *Flux {
+func newFlux(dev *tun.Device, rotate time.Duration, obfs, cryptoOn bool, psk, cipher, carrier, shape string, epochOffset int64, fec bool, fecData, fecParity int, isClient bool) *Flux {
 	if carrier == "" {
 		carrier = "udp"
 	}
@@ -144,7 +144,7 @@ func newFlux(dev *tun.Device, ka, rotate time.Duration, obfs, cryptoOn bool, psk
 		shape = "random"
 	}
 	f := &Flux{
-		dev: dev, keepalive: ka, rotate: rotate, obfs: obfs, cryptoOn: cryptoOn,
+		dev: dev, rotate: rotate, obfs: obfs, cryptoOn: cryptoOn, ping: pingEvery,
 		psk: psk, cipher: cipher, carrier: carrier, shapeProf: shape, epochOffset: epochOffset,
 		isClient: isClient, sendFd: -1, pktFd: -1, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 	}
@@ -184,7 +184,7 @@ func openFluxSockets() (send, pkt int, err error) {
 	return send, pkt, nil
 }
 
-func DialFlux(peerIP string, dev *tun.Device, ka, rotate time.Duration, obfs, cryptoOn bool, psk, cipher, carrier, shape string, epochOffset int64, fec bool, fecData, fecParity int) (*Flux, error) {
+func DialFlux(peerIP string, dev *tun.Device, rotate time.Duration, obfs, cryptoOn bool, psk, cipher, carrier, shape string, epochOffset int64, fec bool, fecData, fecParity int) (*Flux, error) {
 	ip := parseIP4(hostOnly(peerIP))
 	if ip == nil {
 		return nil, errBadFrame
@@ -193,7 +193,7 @@ func DialFlux(peerIP string, dev *tun.Device, ka, rotate time.Duration, obfs, cr
 	if err != nil {
 		return nil, err
 	}
-	f := newFlux(dev, ka, rotate, obfs, cryptoOn, psk, cipher, carrier, shape, epochOffset, fec, fecData, fecParity, true)
+	f := newFlux(dev, rotate, obfs, cryptoOn, psk, cipher, carrier, shape, epochOffset, fec, fecData, fecParity, true)
 	f.sendFd, f.pktFd = send, pkt
 	f.peer.Store(&net.IPAddr{IP: ip})
 	if lip := routeLocalIP(ip); lip != nil {
@@ -203,12 +203,12 @@ func DialFlux(peerIP string, dev *tun.Device, ka, rotate time.Duration, obfs, cr
 	return f, nil
 }
 
-func ListenFlux(listenIP string, dev *tun.Device, ka, rotate time.Duration, obfs, cryptoOn bool, psk, cipher, carrier, shape string, epochOffset int64, fec bool, fecData, fecParity int) (*Flux, error) {
+func ListenFlux(listenIP string, dev *tun.Device, rotate time.Duration, obfs, cryptoOn bool, psk, cipher, carrier, shape string, epochOffset int64, fec bool, fecData, fecParity int) (*Flux, error) {
 	send, pkt, err := openFluxSockets()
 	if err != nil {
 		return nil, err
 	}
-	f := newFlux(dev, ka, rotate, obfs, cryptoOn, psk, cipher, carrier, shape, epochOffset, fec, fecData, fecParity, false)
+	f := newFlux(dev, rotate, obfs, cryptoOn, psk, cipher, carrier, shape, epochOffset, fec, fecData, fecParity, false)
 	f.sendFd, f.pktFd = send, pkt
 	return f, nil
 }
@@ -796,7 +796,7 @@ func (f *Flux) clientLoop() {
 				continue
 			}
 		}
-		wait := keepaliveInterval(f.keepalive, f.psk)
+		wait := keepaliveInterval(f.ping, f.psk)
 		if f.cryptoOn && f.sealer() == nil {
 			wait = handshakeRetransmitWait()
 		}

@@ -16,9 +16,8 @@ func TestGrpcRequestIsNotABrowser(t *testing.T) {
 	const cipher = "aes-256-gcm"
 	srvDev, srvCtrl := tunPair(t, "grpcidsrv")
 	cliDev, cliCtrl := tunPair(t, "grpcidcli")
-	ka := time.Second
 
-	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, ka, false, true, psk, cipher)
+	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, false, true, psk, cipher)
 	if err != nil {
 		t.Fatalf("ListenHTTPC: %v", err)
 	}
@@ -40,7 +39,7 @@ func TestGrpcRequestIsNotABrowser(t *testing.T) {
 
 	t.Cleanup(func() { srv.Close(); ts.Close() })
 
-	cli, err := DialHTTPC(ts.Listener.Addr().String(), cliDev, ka, false, true, psk, cipher, "", "/", true, nil, "grpc")
+	cli, err := DialHTTPC(ts.Listener.Addr().String(), cliDev, false, true, psk, cipher, "", "/", true, nil, "grpc")
 	if err != nil {
 		t.Fatalf("DialHTTPC: %v", err)
 	}
@@ -126,7 +125,7 @@ func TestCarrierWiresTheRightFingerprint(t *testing.T) {
 			}()
 
 			dev, _ := tunPair(t, "fpwire"+tc.mode)
-			cli, err := DialHTTPC(ln.Addr().String(), dev, time.Second, false, true,
+			cli, err := DialHTTPC(ln.Addr().String(), dev, false, true,
 				"fingerprint-wiring-psk-abcdefghij", "aes-256-gcm", "cdn.example.com", "/", true, nil, tc.mode)
 			if err != nil {
 				t.Fatalf("DialHTTPC: %v", err)
@@ -158,9 +157,8 @@ func TestPostLadderStaysBrowserShaped(t *testing.T) {
 	const cipher = "aes-256-gcm"
 	srvDev, srvCtrl := tunPair(t, "postidsrv")
 	cliDev, cliCtrl := tunPair(t, "postidcli")
-	ka := time.Second
 
-	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, ka, false, true, psk, cipher)
+	srv, err := ListenHTTPC("127.0.0.1:0", srvDev, false, true, psk, cipher)
 	if err != nil {
 		t.Fatalf("ListenHTTPC: %v", err)
 	}
@@ -180,7 +178,7 @@ func TestPostLadderStaysBrowserShaped(t *testing.T) {
 
 	t.Cleanup(func() { srv.Close(); ts.Close() })
 
-	cli, err := DialHTTPC(ts.Listener.Addr().String(), cliDev, ka, false, true, psk, cipher, "", "/", false, nil, "post")
+	cli, err := DialHTTPC(ts.Listener.Addr().String(), cliDev, false, true, psk, cipher, "", "/", false, nil, "post")
 	if err != nil {
 		t.Fatalf("DialHTTPC: %v", err)
 	}

@@ -7,7 +7,7 @@ import (
 
 func TestNoClockGivesUpTheSession(t *testing.T) {
 	const ka = time.Second
-	cli, srv, _ := poollessClient(t, ka, "noclock")
+	cli, srv, _ := poollessClient(t, "noclock")
 
 	for cli.sealer() == nil {
 		time.Sleep(20 * time.Millisecond)
@@ -16,13 +16,13 @@ func TestNoClockGivesUpTheSession(t *testing.T) {
 
 	srv.Close()
 
-	silent := 3 * deadWindow(ka)
+	silent := 3 * time.Second
 	start := time.Now()
 	for time.Since(start) < silent {
 		if cli.session.Load() != was || cli.sealer() == nil {
 			t.Fatalf("the session was given up %v after the peer went silent and no verdict asked for it "+
-				"-- something is still re-handshaking on a clock (dead window %v)",
-				time.Since(start).Round(time.Millisecond), deadWindow(ka))
+				"-- something is still re-handshaking on a clock",
+				time.Since(start).Round(time.Millisecond))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

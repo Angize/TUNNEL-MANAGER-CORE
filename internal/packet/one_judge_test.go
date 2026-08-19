@@ -130,7 +130,7 @@ func TestProbeNowMakesEveryBurnSelectableAtOnce(t *testing.T) {
 }
 
 func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
-	cli, _, a1, _, _, _ := probePair(t, time.Second, "onej")
+	cli, _, a1, _, _, _ := probePair(t, "onej")
 	p := cli.pp
 
 	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: a1})

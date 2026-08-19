@@ -70,7 +70,7 @@ func TestKeepaliveIntervalPerTunnelStable(t *testing.T) {
 
 func TestRecentData(t *testing.T) {
 	dev, _ := tunPair(t, "recentdata")
-	b := &TCP{keepalive: 15 * time.Second, dev: dev}
+	b := &TCP{dev: dev, ping: pingEvery}
 	if b.recentData() {
 		t.Fatal("no data yet: recentData must be false so a fresh conn keeps its keepalive")
 	}
@@ -79,9 +79,9 @@ func TestRecentData(t *testing.T) {
 		t.Fatal("an inbound DATA frame must set recentData: the peer just proved it is answering, " +
 			"so the standalone ping is redundant for this period")
 	}
-	b.lastRxData.Store(time.Now().Add(-2 * b.keepalive).UnixNano())
+	b.lastRxData.Store(time.Now().Add(-2 * pingEvery).UnixNano())
 	if b.recentData() {
-		t.Fatal("data older than one keepalive: recentData must be false so pinging resumes")
+		t.Fatal("data older than one ping period: recentData must be false so pinging resumes")
 	}
 
 	b.handleFrame(&connFramer{}, typePong, nil)
