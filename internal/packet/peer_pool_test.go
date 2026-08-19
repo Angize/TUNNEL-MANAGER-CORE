@@ -45,13 +45,18 @@ func TestPeerPoolBurnSkipsAndAdvances(t *testing.T) {
 	}
 }
 
-func TestPeerPoolNeverDeadEndsWhenAllBurned(t *testing.T) {
+func TestPeerPoolParksButNeverDeadEndsWhenAllBurned(t *testing.T) {
 	p := NewPeerPool([]string{"a", "b"}, 0, "")
 	p.fail()
 
 	a, moved := p.fail()
-	if !moved || a != "a" {
-		t.Fatalf("after all-burned: got %q moved=%v, want a true (advance off the failed endpoint)", a, moved)
+	if moved {
+		t.Fatalf("every endpoint is condemned and none is due, and the pool moved to %q anyway. Each "+
+			"move costs a session teardown and a fresh handshake, and neither endpoint is any better than "+
+			"the other", a)
+	}
+	if a == "" {
+		t.Fatal("the pool handed back nothing at all — parking is not the same as dead-ending")
 	}
 	p.mu.Lock()
 	na, nb := p.health.recs["a"] != nil, p.health.recs["b"] != nil
