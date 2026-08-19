@@ -771,8 +771,6 @@ func (f *Flux) pinPollLoop(rc *rotationController) {
 }
 
 func (f *Flux) clientLoop() {
-	failN := 0
-	unproven := false
 	rc := newRotationController(f.pp, f.sp)
 	rc.session.setDrop(f.rehandshake)
 	rc.setVerdict(f.st.verdictPath())
@@ -782,7 +780,6 @@ func (f *Flux) clientLoop() {
 	for {
 		rc.proactive(f.rotatePeerFlux, f.rotateSourceFlux, time.Now())
 		if f.cryptoOn && f.sealer() == nil {
-			unproven = false
 			f.sendInit()
 		} else {
 
@@ -794,23 +791,13 @@ func (f *Flux) clientLoop() {
 
 			f.send(typePing, nil, f.peer.Load())
 
-			if unproven = f.cryptoOn && rc.active() && !f.peerAnswered.Load(); unproven {
-				if failN++; failN >= peerFailThreshold {
-					f.session.Store(nil)
-					f.ci.Store(nil)
-					f.st.down("peer-dead", "flux")
-					failN = 0
-				}
-			} else {
-				failN = 0
-			}
 			if f.cryptoOn && f.sealer() == nil {
 
 				continue
 			}
 		}
 		wait := keepaliveInterval(f.keepalive, f.psk)
-		if (f.cryptoOn && f.sealer() == nil) || unproven {
+		if f.cryptoOn && f.sealer() == nil {
 			wait = handshakeRetransmitWait()
 		}
 		select {

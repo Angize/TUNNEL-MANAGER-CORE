@@ -96,8 +96,6 @@ func (b *UDP) SetPeerPool(pp *PeerPool) {
 	}
 }
 
-const peerFailThreshold = 12
-
 const handshakeRetransmit = time.Second
 
 func handshakeRetransmitWait() time.Duration { return jitterFrac(handshakeRetransmit) }
@@ -822,8 +820,6 @@ func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {
 }
 
 func (b *UDP) clientLoop() {
-	failN := 0
-	unproven := false
 	rc := newRotationController(b.pp, b.sp)
 	rc.session.setDrop(b.rehandshake)
 	rc.setVerdict(b.st.verdictPath())
@@ -833,7 +829,6 @@ func (b *UDP) clientLoop() {
 	for {
 		rc.proactive(b.rotatePeerUDP, b.rotateSourceUDP, time.Now())
 		if b.sealer() == nil && b.cryptoOn {
-			unproven = false
 			b.sendInit()
 		} else {
 
@@ -849,23 +844,13 @@ func (b *UDP) clientLoop() {
 
 			b.send(typePing, nil, b.peer.Load())
 
-			if unproven = b.cryptoOn && rc.active() && !b.peerAnswered.Load(); unproven {
-				if failN++; failN >= peerFailThreshold {
-					b.session.Store(nil)
-					b.ci.Store(nil)
-					b.st.down("peer-dead", "udp")
-					failN = 0
-				}
-			} else {
-				failN = 0
-			}
 			if b.cryptoOn && b.sealer() == nil {
 
 				continue
 			}
 		}
 		var wait time.Duration
-		if (b.sealer() == nil && b.cryptoOn) || unproven {
+		if b.sealer() == nil && b.cryptoOn {
 			wait = handshakeRetransmitWait()
 		} else {
 			wait = keepaliveInterval(b.keepalive, b.psk)
