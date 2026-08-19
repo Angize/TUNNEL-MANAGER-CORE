@@ -314,14 +314,12 @@ func (b *UDP) livePath() (pathKey, bool) {
 	return k, b.peerAnswered.Load()
 }
 
-func (b *UDP) dropSession() bool {
-	if !b.cryptoOn || b.sealer() == nil {
+func (b *UDP) rehandshake() bool {
+	if !b.cryptoOn || b.peer.Load() == nil {
 		return false
 	}
-	b.session.Store(nil)
-	b.ci.Store(nil)
+	b.sendInit()
 	b.st.down("rehandshake", "udp")
-	wakeLoop(b.wake)
 	return true
 }
 
@@ -827,7 +825,7 @@ func (b *UDP) clientLoop() {
 	failN := 0
 	unproven := false
 	rc := newRotationController(b.pp, b.sp)
-	rc.session.setDrop(b.dropSession)
+	rc.session.setDrop(b.rehandshake)
 	rc.setVerdict(b.st.verdictPath())
 	if rc.polls() {
 		go b.pinPollLoop(rc)

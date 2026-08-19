@@ -52,7 +52,7 @@ func (lt *liveTunnel) ladder() map[string]int {
 	out := map[string]int{}
 	for _, a := range lt.p.addrs {
 		if r := lt.p.health.rec(a); r != nil {
-			out[a] = r.fails + 1
+			out[a] = int(r.nextRetest)
 		}
 	}
 	return out
@@ -64,7 +64,7 @@ func (lt *liveTunnel) verdict(t *testing.T) (key string) {
 	before := lt.ladder()
 	lt.rc.judge(poolCmd{Cmd: cmdFail, Key: key, Epoch: testPathEpoch}, lt.rotDst, func(bool) {}, nil, testPathEpoch)
 	for a, n := range lt.ladder() {
-		if n > before[a] {
+		if n != before[a] {
 			lt.burn = append(lt.burn, a)
 		}
 	}
@@ -141,7 +141,7 @@ func TestNoVerdictEverCondemnsAnEndpointTheTunnelWasNotOn(t *testing.T) {
 			t.Fatalf("round %d: the verdict on %s left the tunnel on it — the experiment never moves, "+
 				"so the next sweep measures the same dead path", round, was)
 		}
-		clk += 4
+		clk += deadRetest
 	}
 
 	lt.p.mu.Lock()

@@ -605,14 +605,12 @@ func (f *Flux) livePath() (pathKey, bool) {
 	return k, f.sealer() != nil
 }
 
-func (f *Flux) dropSession() bool {
-	if f.sealer() == nil {
+func (f *Flux) rehandshake() bool {
+	if !f.cryptoOn || f.peer.Load() == nil {
 		return false
 	}
-	f.session.Store(nil)
-	f.ci.Store(nil)
+	f.sendInit()
 	f.st.down("rehandshake", "flux")
-	wakeLoop(f.wake)
 	return true
 }
 
@@ -776,7 +774,7 @@ func (f *Flux) clientLoop() {
 	failN := 0
 	unproven := false
 	rc := newRotationController(f.pp, f.sp)
-	rc.session.setDrop(f.dropSession)
+	rc.session.setDrop(f.rehandshake)
 	rc.setVerdict(f.st.verdictPath())
 	if rc.polls() {
 		go f.pinPollLoop(rc)

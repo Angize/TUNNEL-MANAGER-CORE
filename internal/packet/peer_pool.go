@@ -47,14 +47,12 @@ func (p *PeerPool) current() string {
 func (p *PeerPool) commitLocked(idx int) string {
 	p.cur = idx
 	p.chosen = p.addrs[idx]
-	p.health.markTried(p.chosen)
 	return p.chosen
 }
 
 func (p *PeerPool) pickLocked(idx int) string {
 	p.cur = idx
 	p.chosen = ""
-	p.health.markTried(p.addrs[idx])
 	return p.addrs[idx]
 }
 
