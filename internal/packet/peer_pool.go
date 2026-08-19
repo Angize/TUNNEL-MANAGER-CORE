@@ -465,7 +465,7 @@ func (c *rotationController) active() bool { return c != nil && (c.dst != nil ||
 func (c *rotationController) setVerdict(path string) { c.verdict = path }
 
 func (c *rotationController) polls() bool {
-	return c != nil && (c.active() || c.verdict != "" || c.port.armed())
+	return c != nil && (c.active() || c.verdict != "")
 }
 
 func (c *rotationController) pinned() bool {
@@ -567,14 +567,10 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 
 func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc func(proactive bool),
 	ev func(kind, code, detail string), pathEpoch func() int64) {
-	now := time.Now()
-	judged := false
 	if cmd, ok := readPoolCmd(c.verdict); ok {
 		c.judge(cmd, rotDst, rotSrc, ev, pathEpoch())
-		judged = true
 	}
 
-	c.port.tick(now, judged)
 	if c.dst != nil {
 		if cmd, ok := c.dst.readCmd(); ok && cmd.Key != "" && c.dst.selectEntry(cmd.Key) {
 			applyDst()

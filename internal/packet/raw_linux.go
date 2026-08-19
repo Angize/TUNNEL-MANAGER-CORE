@@ -72,10 +72,6 @@ type Raw struct {
 	tsStart atomic.Int64
 	tsEcr   atomic.Uint32
 
-	lastRxCur atomic.Int64
-
-	lastAsk atomic.Int64
-
 	portRolling atomic.Bool
 
 	peerAnswered atomic.Bool
@@ -653,33 +649,9 @@ func (r *Raw) replyPort(sport uint16) uint16 {
 	return sport
 }
 
-func portSilence(keepalive time.Duration) time.Duration {
-	ps := keepalive / 2
-	if ps < 3*time.Second {
-		ps = 3 * time.Second
-	}
-	if ps >= deadWindow(keepalive)/2 {
-		return 0
-	}
-	return ps
-}
-
-func (r *Raw) portDead(now time.Time) bool {
-	ps := portSilence(r.keepalive)
-	if ps <= 0 {
-		return false
-	}
-	ask := r.lastAsk.Load()
-	if ask == 0 || ask <= r.lastRxCur.Load() {
-		return false
-	}
-	return now.Sub(time.Unix(0, ask)) > ps
-}
-
 func (r *Raw) usePort(p uint16) {
 	r.cliPort.Store(uint32(p))
 	r.newTCPFlow()
-	r.lastAsk.Store(0)
 }
 
 func (r *Raw) freshTuple() {
@@ -1071,15 +1043,10 @@ func (r *Raw) rehandshake() bool {
 
 func (r *Raw) markRx(from net.IP) {
 	if p := r.peer.Load(); p != nil && from != nil && p.IP.Equal(from) {
-		r.lastRxCur.Store(time.Now().UnixNano())
 		if r.portRolling.Load() {
 			r.portRolling.Store(false)
 		}
 	}
-}
-
-func (r *Raw) seedRx() {
-	r.lastRxCur.Store(time.Now().UnixNano())
 }
 
 func (r *Raw) provenFrom(ip net.IP) {
@@ -1199,7 +1166,6 @@ func (r *Raw) rotatePeerRaw(proactive bool) {
 		r.ci.Store(nil)
 	}
 
-	r.seedRx()
 	r.peerAnswered.Store(false)
 	log.Printf("raw: rotated destination to %s", addr)
 	if proactive {
@@ -1230,7 +1196,6 @@ func (r *Raw) adoptPeerRaw() {
 	r.session.Store(nil)
 	r.ci.Store(nil)
 
-	r.seedRx()
 	r.peerAnswered.Store(false)
 	log.Printf("raw: pinned destination to %s", ip)
 
@@ -1273,14 +1238,13 @@ func (r *Raw) clientLoop() {
 	rc.session.setDrop(r.rehandshake)
 
 	if r.sportRandom {
-		rc.port.setRoll(r.rollSourcePort, r.portDead)
+		rc.port.setRoll(r.rollSourcePort)
 	}
 	rc.setVerdict(r.st.verdictPath())
 	if rc.polls() {
 		go r.pinPollLoop(rc)
 	}
 
-	r.seedRx()
 	for {
 		rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
 		if r.sealer() == nil {
@@ -1341,16 +1305,6 @@ func (r *Raw) sendInit() {
 		r.sendFakes(peer)
 	}
 	r.writeCtrl(crypto.InitMsg(r.psk, ci), peer)
-	r.ask()
-}
-
-func (r *Raw) ask() {
-	if !r.isClient || r.peer.Load() == nil {
-		return
-	}
-	if r.lastAsk.Load() <= r.lastRxCur.Load() {
-		r.lastAsk.Store(time.Now().UnixNano())
-	}
 }
 
 func (r *Raw) send(typ byte, payload []byte, to *net.IPAddr) {
@@ -1366,7 +1320,6 @@ func (r *Raw) send(typ byte, payload []byte, to *net.IPAddr) {
 	}
 	r.writeCtrl(body, to)
 	if typ == typePing {
-		r.ask()
 	}
 }
 

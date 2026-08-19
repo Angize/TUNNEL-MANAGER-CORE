@@ -30,12 +30,9 @@ func TestARolledSourcePortStartsANewFlow(t *testing.T) {
 	mark := time.Now().UnixNano()
 
 	greenSession(t, r)
-	r.lastRxCur.Store(time.Now().Add(-time.Minute).UnixNano())
-	r.lastAsk.Store(time.Now().Add(-30 * time.Second).UnixNano())
-	wait := ladderBeat(r)
-	waitFor(t, 5*time.Second, "the source port rolled", func() bool { return r.cport() != portBefore })
-	close(r.closeCh)
-	wait()
+	if !r.rollSourcePort() {
+		t.Fatal("the draw did not move the port")
+	}
 	if r.tsStart.Load() < mark {
 		t.Error("the timestamp clock still counts from when the session opened, so the new tuple's TSval " +
 			"is the old one's series read at a different offset")
