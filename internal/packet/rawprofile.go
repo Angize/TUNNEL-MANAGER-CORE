@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"sort"
-	"time"
 )
 
 const (
@@ -69,8 +68,6 @@ const (
 
 	rawTCPWindow = 0xFAF0
 )
-
-var rawSportEvery = 60 * time.Second
 
 func rawPorts(isClient bool, srv, cli uint16) (sport, dport uint16) {
 	if srv == 0 {

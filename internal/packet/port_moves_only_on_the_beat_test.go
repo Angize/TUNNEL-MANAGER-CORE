@@ -7,18 +7,16 @@ import (
 	"time"
 )
 
-func beatHarness(t *testing.T) (beat func(), rolls *int, dead, ready *bool, verdict string) {
+func beatHarness(t *testing.T) (beat func(), rolls *int, dead *bool, verdict string) {
 	t.Helper()
 	dir := t.TempDir()
 	rc := newRotationController(nil, nil)
 	verdict = filepath.Join(dir, "core.json.verdict")
 	rc.setVerdict(verdict)
-	rolls, dead, ready = new(int), new(bool), new(bool)
-	rc.port.setRoll(func(bool) bool { *rolls++; return true })
-
-	rc.port.setRefresh(func(time.Time) bool { return *dead }, func() bool { return *ready }, time.Nanosecond)
+	rolls, dead = new(int), new(bool)
+	rc.port.setRoll(func() bool { *rolls++; return true }, func(time.Time) bool { return *dead })
 	beat = func() { rc.pollPins(func() {}, func() {}, func(bool) {}, func(bool) {}, nil, atPathEpoch) }
-	return beat, rolls, dead, ready, verdict
+	return beat, rolls, dead, verdict
 }
 
 func landOK(t *testing.T, path string) {
@@ -28,50 +26,23 @@ func landOK(t *testing.T, path string) {
 	}
 }
 
-func TestTheScheduleStandsAsideForAVerdict(t *testing.T) {
-	beat, rolls, _, ready, verdict := beatHarness(t)
-	*ready = true
+func TestNothingMovesThePortWhileTheTupleAnswers(t *testing.T) {
+	beat, rolls, dead, _ := beatHarness(t)
+	*dead = false
 
-	beat()
-	beat()
-	if *rolls == 0 {
-		t.Fatal("setup: a green tunnel with a due schedule did not roll at all")
-	}
-
-	was := *rolls
-	landOK(t, verdict)
-	beat()
-	if *rolls != was {
-		t.Errorf("the schedule rolled on the beat a verdict landed: %d -> %d. That is the path moving "+
-			"under the judge in the middle of the round it is measuring", was, *rolls)
-	}
-
-	beat()
-	if *rolls == was {
-		t.Error("the schedule never resumed after the verdict — one verdict stopped it for good")
-	}
-}
-
-func TestTheScheduleWaitsForAGreenTunnel(t *testing.T) {
-	beat, rolls, _, ready, _ := beatHarness(t)
-
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 8; i++ {
 		beat()
 	}
 	if *rolls != 0 {
-		t.Errorf("a tunnel with no session was refreshed %d time(s) on the schedule", *rolls)
-	}
-
-	*ready = true
-	beat()
-	if *rolls == 0 {
-		t.Error("the schedule never fired once the tunnel came up")
+		t.Errorf("a tuple that is answering was moved %d time(s). There is no schedule any more: the "+
+			"port moves when the judge asks for it or when the tuple has gone silent, and neither has "+
+			"happened here", *rolls)
 	}
 }
 
-func TestTheReactiveRollStandsAsideForALiveJudge(t *testing.T) {
-	beat, rolls, dead, ready, verdict := beatHarness(t)
-	*dead, *ready = true, false
+func TestTheLocalRepairStandsAsideForALiveJudge(t *testing.T) {
+	beat, rolls, dead, verdict := beatHarness(t)
+	*dead = true
 
 	beat()
 	if *rolls == 0 {
@@ -94,8 +65,7 @@ func TestTheReactiveRollStandsAsideForALiveJudge(t *testing.T) {
 func TestTheLocalRepairTakesOverWhenTheJudgeGoesQuiet(t *testing.T) {
 	var p portRung
 	rolls := 0
-	p.setRoll(func(bool) bool { rolls++; return true })
-	p.setRefresh(func(time.Time) bool { return true }, func() bool { return false }, 0)
+	p.setRoll(func() bool { rolls++; return true }, func(time.Time) bool { return true })
 
 	base := time.Now()
 	p.tick(base, true)
@@ -116,8 +86,7 @@ func TestTheLocalRepairTakesOverWhenTheJudgeGoesQuiet(t *testing.T) {
 func TestATunnelThatWasNeverJudgedRepairsItself(t *testing.T) {
 	var p portRung
 	rolls := 0
-	p.setRoll(func(bool) bool { rolls++; return true })
-	p.setRefresh(func(time.Time) bool { return true }, func() bool { return false }, 0)
+	p.setRoll(func() bool { rolls++; return true }, func(time.Time) bool { return true })
 
 	p.tick(time.Now(), false)
 	if rolls != 1 {

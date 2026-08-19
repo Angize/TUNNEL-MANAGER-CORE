@@ -73,7 +73,7 @@ func TestAPoolLessLadderSpendsItsStepsAndCondemnsNobody(t *testing.T) {
 	rc := newRotationController(nil, nil)
 	rc.setVerdict(filepath.Join(t.TempDir(), "core.json.verdict"))
 	rolls, drops, moves := 0, 0, 0
-	rc.port.setRoll(func(bool) bool { rolls++; return true })
+	rc.port.setRoll(func() bool { rolls++; return true }, nil)
 	rc.session.setDrop(func() bool { drops++; return true })
 	rot := func(bool) { moves++ }
 
