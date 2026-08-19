@@ -29,7 +29,6 @@ func (w *writeRecorder) snapshot() []int {
 func TestObfsSaltNeverGetsAWriteOfItsOwn(t *testing.T) {
 	const psk = "obfs-salt-ride-pre-shared-key-123"
 	const cipher = "aes-256-gcm"
-	const ka = time.Second
 	const rounds = 8
 
 	srvDev, _ := tunPair(t, "saltsrv")

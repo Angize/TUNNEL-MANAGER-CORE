@@ -5,7 +5,6 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
-	"time"
 )
 
 type countingRelay struct {
@@ -98,7 +97,6 @@ func assertDecoysFirst(t *testing.T, b *TCP, relay *countingRelay) {
 func TestDesyncDecoysGoOutBeforeAnyOfOurBytes(t *testing.T) {
 	const psk = "desync-order-pre-shared-key-12345"
 	const cipher = "aes-256-gcm"
-	const ka = time.Second
 
 	t.Run("ws", func(t *testing.T) {
 		srvDev, _ := tunPair(t, "dsows")

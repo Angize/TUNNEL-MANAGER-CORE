@@ -6,7 +6,6 @@ import (
 )
 
 func TestNoClockGivesUpTheSession(t *testing.T) {
-	const ka = time.Second
 	cli, srv, _ := poollessClient(t, "noclock")
 
 	for cli.sealer() == nil {
