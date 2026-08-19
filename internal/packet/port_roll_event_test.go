@@ -29,8 +29,6 @@ func rollEvents(t *testing.T, path string) []coreEvent {
 }
 
 func TestARollingPortSaysSoOncePerOutage(t *testing.T) {
-	defer func(d time.Duration) { rawSportEvery = d }(rawSportEvery)
-	rawSportEvery = time.Hour
 
 	ka := 6 * time.Second
 	r, path := rollingPort(t, ka)
@@ -68,16 +66,14 @@ func TestARollingPortSaysSoOncePerOutage(t *testing.T) {
 }
 
 func TestTheNextOutageSaysSoAgain(t *testing.T) {
-	defer func(d time.Duration) { rawSportEvery = d }(rawSportEvery)
-	rawSportEvery = time.Hour
 
 	r, path := rollingPort(t, 10*time.Second)
 	cur := r.peer.Load().IP
 
 	r.lastRxCur.Store(time.Now().Add(-time.Minute).UnixNano())
 	r.ask()
-	r.rollSourcePort(true)
-	r.rollSourcePort(true)
+	r.rollSourcePort()
+	r.rollSourcePort()
 	if n := len(rollEvents(t, path)); n != 1 {
 		t.Fatalf("first outage wrote %d events, want 1", n)
 	}
@@ -85,18 +81,8 @@ func TestTheNextOutageSaysSoAgain(t *testing.T) {
 	r.markRx(cur)
 	r.lastRxCur.Store(time.Now().Add(-time.Minute).UnixNano())
 	r.ask()
-	r.rollSourcePort(true)
+	r.rollSourcePort()
 	if n := len(rollEvents(t, path)); n != 2 {
 		t.Fatalf("a second outage wrote %d events in total, want 2 — the latch never re-armed", n)
-	}
-}
-
-func TestTheScheduledRollIsSilent(t *testing.T) {
-	r, path := rollingPort(t, 10*time.Second)
-	if !r.rollSourcePort(false) {
-		t.Fatal("the redraw did not move the port")
-	}
-	if n := len(rollEvents(t, path)); n != 0 {
-		t.Fatalf("the scheduled refresh wrote %d events, want none", n)
 	}
 }

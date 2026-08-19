@@ -110,9 +110,7 @@ func TestAskOnlyCountsWhenThereIsSomeoneToAnswer(t *testing.T) {
 
 func ladderBeat(r *Raw) (wait func()) {
 	rc := newRotationController(nil, nil)
-	rc.port.setRoll(r.rollSourcePort)
-	rc.port.setSettle(r.settlePort)
-	rc.port.setRefresh(r.portDead, func() bool { return r.sealer() != nil }, rawSportEvery)
+	rc.port.setRoll(r.rollSourcePort, r.portDead)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -134,9 +132,7 @@ func greenSession(t *testing.T, r *Raw) {
 	}
 }
 
-func TestTheLadderRollsOnScheduleAndOnlyAddsTheReactiveReason(t *testing.T) {
-	defer func(d time.Duration) { rawSportEvery = d }(rawSportEvery)
-	rawSportEvery = 3 * time.Second
+func TestACarryingTupleIsNeverMoved(t *testing.T) {
 
 	r := &Raw{isClient: true, keepalive: 10 * time.Second, profile: "tcp", sportRandom: true, closeCh: make(chan struct{})}
 	r.peer.Store(&net.IPAddr{IP: testDst})
@@ -159,7 +155,7 @@ func TestTheLadderRollsOnScheduleAndOnlyAddsTheReactiveReason(t *testing.T) {
 
 	wait := ladderBeat(r)
 	seen := map[uint32]bool{}
-	deadline := time.Now().Add(7 * time.Second)
+	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		seen[r.cliPort.Load()] = true
 		time.Sleep(50 * time.Millisecond)
@@ -167,14 +163,10 @@ func TestTheLadderRollsOnScheduleAndOnlyAddsTheReactiveReason(t *testing.T) {
 	close(r.closeCh)
 	wait()
 
-	if len(seen) < 2 {
-		t.Fatalf("a carrying tuple never rolled in 7s with a %v schedule: the reactive check "+
-			"replaced the scheduled roll instead of adding to it", rawSportEvery)
-	}
-
-	if len(seen) > 6 {
-		t.Fatalf("%d ports in 7s with a %v schedule -- a carrying tuple is being condemned",
-			len(seen), rawSportEvery)
+	if len(seen) != 1 {
+		t.Fatalf("a tuple that is answering moved through %d source ports. Nothing is wrong with it, so "+
+			"every move is a lottery ticket drawn for free: one bad draw takes a working tunnel dark until "+
+			"something else notices", len(seen))
 	}
 }
 
@@ -221,8 +213,6 @@ func TestADeadPathCondemnsOneTuplePerWindow(t *testing.T) {
 }
 
 func TestTheLadderRollsOncePerWindowOnADeadPath(t *testing.T) {
-	defer func(d time.Duration) { rawSportEvery = d }(rawSportEvery)
-	rawSportEvery = time.Hour
 
 	ka := 10 * time.Second
 	r := &Raw{isClient: true, keepalive: ka, profile: "tcp", sportRandom: true, closeCh: make(chan struct{})}
@@ -281,8 +271,6 @@ func TestOnlyTheCurrentDestinationAnswersForItsOwnTuple(t *testing.T) {
 }
 
 func TestAPoolProbingItsOtherEndpointDoesNotSaveADeadTuple(t *testing.T) {
-	defer func(d time.Duration) { rawSportEvery = d }(rawSportEvery)
-	rawSportEvery = time.Hour
 
 	ka := 10 * time.Second
 	cur, other := net.IPv4(10, 20, 0, 2), net.IPv4(10, 20, 0, 3)

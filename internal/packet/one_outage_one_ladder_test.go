@@ -78,7 +78,7 @@ func (r *ladderRig) untilRest(t *testing.T) {
 func TestEveryCellOfTheWalkGetsItsOwnDraws(t *testing.T) {
 	rig := newLadderRig(t, []string{"d1", "d2", "d3"}, nil)
 	rolls, burns := 0, 0
-	rig.rc.port.setRoll(func(bool) bool { rolls++; return true })
+	rig.rc.port.setRoll(func() bool { rolls++; return true }, nil)
 	rot := func(bool) { burns++ }
 
 	for i := 1; i <= portTries; i++ {
@@ -121,7 +121,7 @@ func TestTheWalkVisitsEveryCellOfTheMatrix(t *testing.T) {
 			rig := newLadderRig(t, dsts, srcs)
 			draws := map[string]int{}
 			cell := func() string { return activeOf(rig.dst) + "|" + activeOf(rig.src) }
-			rig.rc.port.setRoll(func(bool) bool { draws[cell()]++; return true })
+			rig.rc.port.setRoll(func() bool { draws[cell()]++; return true }, nil)
 			rig.rc.session.setDrop(func() bool { return true })
 
 			seen := map[string]bool{}
@@ -255,61 +255,5 @@ func TestTheRestGrowsWhileNothingCrosses(t *testing.T) {
 	rig.verdict(cmdOK)
 	if got := rig.rc.rest; got != 0 {
 		t.Errorf("the rest kept its %v after traffic crossed: the next outage would start parked", got)
-	}
-}
-
-func rawWithPort(port uint16) *Raw {
-	r := &Raw{isClient: true, keepalive: 10 * time.Second, profile: "tcp", sportRandom: true}
-	r.cliPort.Store(uint32(port))
-	r.lastRxCur.Store(1000)
-	return r
-}
-
-func drawAwayFrom(t *testing.T, r *Raw, from uint16, step bool) uint16 {
-	t.Helper()
-	for i := 0; i < 8; i++ {
-		if !r.rollSourcePort(step) {
-			t.Fatal("the draw did not happen")
-		}
-		if r.cport() != from {
-			return r.cport()
-		}
-	}
-	t.Fatalf("eight draws all landed back on %d", from)
-	return 0
-}
-
-func TestAScheduledDrawNothingAnsweredIsPutBack(t *testing.T) {
-	r := rawWithPort(40000)
-	drawAwayFrom(t, r, 40000, false)
-
-	r.settlePort()
-	if got := r.cport(); got != 40000 {
-		t.Errorf("the tunnel was left on %d, the port the refresh had just drawn and nothing answered "+
-			"on. A healthy tunnel goes dark until something else notices, for a port it never had to take", got)
-	}
-}
-
-func TestAScheduledDrawThatAnswersIsKept(t *testing.T) {
-	r := rawWithPort(40000)
-	drawn := drawAwayFrom(t, r, 40000, false)
-
-	r.lastRxCur.Store(2000)
-	r.settlePort()
-	if got := r.cport(); got != drawn {
-		t.Errorf("the candidate answered and was put back anyway (%d -> %d): the refresh would never "+
-			"move the port at all", drawn, got)
-	}
-}
-
-func TestALadderDrawIsCommittedNotTried(t *testing.T) {
-	r := rawWithPort(40000)
-	drawAwayFrom(t, r, 40000, false)
-	drawn := drawAwayFrom(t, r, r.cport(), true)
-
-	r.settlePort()
-	if got := r.cport(); got != drawn {
-		t.Errorf("the settle put back a draw the ladder had made (%d -> %d). The ladder draws because "+
-			"the port it is on is dead, so there is nothing to go back to", drawn, got)
 	}
 }

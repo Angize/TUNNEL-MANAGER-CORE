@@ -9,10 +9,8 @@ import (
 )
 
 func TestARolledSourcePortStartsANewFlow(t *testing.T) {
-	defer func(d time.Duration) { rawSportEvery = d }(rawSportEvery)
-	rawSportEvery = 20 * time.Millisecond
 
-	r := &Raw{profile: "tcp", proto: protoTCP, isClient: true, port: 443, closeCh: make(chan struct{})}
+	r := &Raw{profile: "tcp", proto: protoTCP, isClient: true, port: 443, keepalive: 6 * time.Second, closeCh: make(chan struct{})}
 	r.link = &capturingLink{r: r}
 	r.setSportMode(true)
 	if !r.sportRandom {
@@ -32,6 +30,8 @@ func TestARolledSourcePortStartsANewFlow(t *testing.T) {
 	mark := time.Now().UnixNano()
 
 	greenSession(t, r)
+	r.lastRxCur.Store(time.Now().Add(-time.Minute).UnixNano())
+	r.lastAsk.Store(time.Now().Add(-30 * time.Second).UnixNano())
 	wait := ladderBeat(r)
 	waitFor(t, 5*time.Second, "the source port rolled", func() bool { return r.cport() != portBefore })
 	close(r.closeCh)
