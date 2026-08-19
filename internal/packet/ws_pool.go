@@ -175,8 +175,6 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 
 	ip := p.bestIPLocked()
 	sni := p.bestSNILocked()
-	p.ipHealth.markTried(ip)
-	p.sniHealth.markTried(sni.host)
 	p.chosen = ""
 	return ip, sni, true
 }

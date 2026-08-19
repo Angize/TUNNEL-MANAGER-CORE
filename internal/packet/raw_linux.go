@@ -684,9 +684,7 @@ func (r *Raw) rollSourcePort() bool {
 	r.cliPort.Store(uint32(p))
 	r.newTCPFlow()
 	r.lastAsk.Store(0)
-	if peer := r.peer.Load(); peer != nil {
-		r.send(typePing, nil, peer)
-	}
+	r.sendInit()
 
 	if !r.portRolling.Swap(true) {
 		r.st.event("down", "port-roll", "raw")
@@ -1048,14 +1046,12 @@ func (r *Raw) livePath() (pathKey, bool) {
 	return k, r.sealer() != nil
 }
 
-func (r *Raw) dropSession() bool {
-	if r.sealer() == nil {
+func (r *Raw) rehandshake() bool {
+	if r.peer.Load() == nil {
 		return false
 	}
-	r.session.Store(nil)
-	r.ci.Store(nil)
+	r.sendInit()
 	r.st.down("rehandshake", "raw")
-	wakeLoop(r.wake)
 	return true
 }
 
@@ -1250,7 +1246,7 @@ func (r *Raw) clientLoop() {
 	failN := 0
 	unproven := false
 	rc := newRotationController(r.pp, r.sp)
-	rc.session.setDrop(r.dropSession)
+	rc.session.setDrop(r.rehandshake)
 
 	if r.sportRandom {
 		rc.port.setRoll(r.rollSourcePort, r.portDead)

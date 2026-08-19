@@ -12,6 +12,7 @@ func rollingPort(t *testing.T, ka time.Duration) (*Raw, string) {
 	r := &Raw{isClient: true, keepalive: ka, profile: "tcp", sportRandom: true, closeCh: make(chan struct{})}
 	r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
 	r.cliPort.Store(40000)
+	r.link = &capturingLink{r: r}
 	path := filepath.Join(t.TempDir(), "core.status")
 	r.SetStatusPath(path)
 	return r, path

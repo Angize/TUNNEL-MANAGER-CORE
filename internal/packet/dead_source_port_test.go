@@ -109,6 +109,10 @@ func TestAskOnlyCountsWhenThereIsSomeoneToAnswer(t *testing.T) {
 }
 
 func ladderBeat(r *Raw) (wait func()) {
+	if r.link == nil {
+
+		r.link = &capturingLink{r: r}
+	}
 	rc := newRotationController(nil, nil)
 	rc.port.setRoll(r.rollSourcePort, r.portDead)
 	done := make(chan struct{})
