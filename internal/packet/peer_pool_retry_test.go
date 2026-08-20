@@ -26,7 +26,9 @@ func TestProactiveRotationRetriesADueBurnButNotAPendingOne(t *testing.T) {
 	dst.now = func() int64 { return clk }
 	src := NewPeerPool([]string{"192.0.2.1", "192.0.2.2"}, 0, "")
 	src.now = func() int64 { return clk }
-	b := &TCP{pp: dst, sp: src}
+	b := &TCP{isClient: true}
+	b.SetPeerPool(dst)
+	b.SetSourcePool(src)
 
 	burnUntilDue(t, dst, 1, &clk)
 

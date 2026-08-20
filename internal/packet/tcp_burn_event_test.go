@@ -11,7 +11,8 @@ func TestTCPTunProbeBurnNamesTheEndpointItBurned(t *testing.T) {
 	dir := t.TempDir()
 	st := newCoreStatus(filepath.Join(dir, "core.json"), "tcp · lab")
 	p := NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, 0, filepath.Join(dir, "pool.json"))
-	b := &TCP{pp: p, st: st, isClient: true, closeCh: make(chan struct{})}
+	b := &TCP{st: st, isClient: true, closeCh: make(chan struct{})}
+	b.SetPeerPool(p)
 	defer close(b.closeCh)
 	armAndSpendTheFreeRungs(t, b)
 

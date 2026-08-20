@@ -46,7 +46,7 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 	b.SetSourcePool(sp)
 
 	for i := 0; i < b.pp.size(); i++ {
-		if b.buildWarm(func() { b.burnAdvance(false) }, b.sourceIP(), true, "") {
+		if b.buildWarm(b.sourceIP(), true, "") {
 			t.Fatal("buildWarm reported success against an endpoint that closes before a single core frame")
 		}
 		if w := b.takeWarm(); w != nil {
@@ -55,18 +55,18 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 		}
 	}
 
-	if burned := poolBurned(sp); len(burned) > 0 {
+	if burned := burnedIn(sp); len(burned) > 0 {
 		t.Errorf("a failed warm build burned source(s) %v — the build died on the DESTINATION (which is burned separately) and nothing proved a source bad", burned)
 	}
 	for _, e := range coreStatusEvents(t, path) {
 		t.Errorf("a failed warm build published %q/%q — the tunnel never left its source or its endpoint", e.Kind, e.Code)
 	}
 
-	b.odPeer.rot, b.odPeer.want = b.pp.size()-1, b.pp.size()
-	if _, burned := b.burnAdvance(true); !burned {
+	b.rc.od.rot, b.rc.od.want = b.pp.size()-1, b.pp.size()
+	if !tcpWalk(b) {
 		t.Fatal("a failover burn did not take")
 	}
-	if burned := poolBurned(sp); len(burned) == 0 {
+	if burned := burnedIn(sp); len(burned) == 0 {
 		t.Error("a genuine failover burned no source: with every destination tried against it, walking off that source is the whole point")
 	}
 	found := false
@@ -78,16 +78,4 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 	if !found {
 		t.Error("a genuine failover source rotation published no src-rotate event")
 	}
-}
-
-func poolBurned(p *PeerPool) []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	var out []string
-	for _, a := range p.addrs {
-		if p.health.recs[a] != nil {
-			out = append(out, a)
-		}
-	}
-	return out
 }

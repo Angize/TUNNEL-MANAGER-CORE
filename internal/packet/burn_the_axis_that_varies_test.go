@@ -59,12 +59,11 @@ func TestAMultiSNIPoolStillBurnsTheSNI(t *testing.T) {
 
 func TestASingleDestinationDirectPoolBurnsNothing(t *testing.T) {
 	dir := t.TempDir()
-	b := &TCP{
-		pp: NewPeerPool([]string{"d1"}, 0, filepath.Join(dir, "d.json")),
-		sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
-	}
+	b := &TCP{isClient: true}
+	b.SetPeerPool(NewPeerPool([]string{"d1"}, 0, filepath.Join(dir, "d.json")))
+	b.SetSourcePool(NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")))
 	src := b.sp.current()
-	b.burnAdvance(true)
+	tcpWalk(b)
 
 	b.pp.mu.Lock()
 	burned := !b.pp.health.healthy("d1")

@@ -36,28 +36,27 @@ func TestPinAbsorbsExactlyOneSecondOpinion_Direct(t *testing.T) {
 
 func TestPinAbsorbsExactlyOneSecondOpinion_TCP(t *testing.T) {
 	dir := t.TempDir()
-	b := &TCP{
-		pp: NewPeerPool([]string{"d1", "d2"}, 0, filepath.Join(dir, "d.json")),
-		sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
-	}
+	b := &TCP{isClient: true}
+	b.SetPeerPool(NewPeerPool([]string{"d1", "d2"}, 0, filepath.Join(dir, "d.json")))
+	b.SetSourcePool(NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")))
 	if !b.pp.selectEntry("d2") {
 		t.Fatal("could not pin")
 	}
 	for i := 1; i < pinFailRelease; i++ {
-		if _, moved := b.burnAdvance(true); moved {
+		if tcpWalk(b) {
 			t.Fatalf("verdict %d of %d already burned — a pin must absorb the first ones", i, pinFailRelease)
 		}
 		if !b.pp.isPinned() {
 			t.Fatalf("verdict %d of %d released the pin", i, pinFailRelease)
 		}
 	}
-	_, moved := b.burnAdvance(true)
+	burned := tcpWalk(b)
 	if b.pp.isPinned() {
 		t.Fatalf("after %d proven-dead verdicts the pin still freezes failover — this is the whole bug: "+
 			"udp/raw/flux recovered from identical evidence while tcp stayed down for the rest of pinTTL",
 			pinFailRelease)
 	}
-	if !moved {
+	if !burned {
 		t.Fatal("the pin released but the pool did not burn and advance")
 	}
 }
@@ -95,26 +94,25 @@ func TestPinAbsorbsExactlyOneSecondOpinion_CDN(t *testing.T) {
 
 func TestPinCountResetsBetweenPins(t *testing.T) {
 	dir := t.TempDir()
-	b := &TCP{
-		pp: NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")),
-		sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
-	}
+	b := &TCP{isClient: true}
+	b.SetPeerPool(NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")))
+	b.SetSourcePool(NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")))
 
 	if !b.pp.selectEntry("d2") {
 		t.Fatal("could not pin")
 	}
-	if _, moved := b.burnAdvance(true); moved {
+	if tcpWalk(b) {
 		t.Fatal("the first verdict under a pin must be absorbed")
 	}
 	b.pp.releasePin()
 
-	b.burnAdvance(true)
+	tcpWalk(b)
 
 	if !b.pp.selectEntry("d3") {
 		t.Fatal("could not re-pin")
 	}
 	for i := 1; i < pinFailRelease; i++ {
-		if _, moved := b.burnAdvance(true); moved || !b.pp.isPinned() {
+		if tcpWalk(b) || !b.pp.isPinned() {
 			t.Fatalf("the fresh pin broke on verdict %d of %d — it inherited the earlier pin's count",
 				i, pinFailRelease)
 		}
@@ -166,20 +164,19 @@ func TestAPinEndsOnEvidenceNeverOnAClock(t *testing.T) {
 func TestAHealthySessionEndsTheRound(t *testing.T) {
 	t.Run("the direct pool's counters", func(t *testing.T) {
 		dir := t.TempDir()
-		b := &TCP{
-			pp: NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")),
-			sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
-		}
+		b := &TCP{isClient: true}
+		b.SetPeerPool(NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")))
+		b.SetSourcePool(NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")))
 		if !b.pp.selectEntry("d2") {
 			t.Fatal("could not pin")
 		}
-		b.burnAdvance(true)
-		b.odPeer.rot = 3
+		tcpWalk(b)
+		b.rc.od.rot = 3
 		b.endRound()
-		if got := b.pinFails.Load(); got != 0 {
+		if got := b.rc.pinFails; got != 0 {
 			t.Fatalf("the pin's allowance survived a healthy session (pinFails=%d)", got)
 		}
-		if got := b.odPeer.rot; got != 0 {
+		if got := b.rc.od.rot; got != 0 {
 			t.Fatalf("the lap survived a healthy session (rot=%d)", got)
 		}
 	})

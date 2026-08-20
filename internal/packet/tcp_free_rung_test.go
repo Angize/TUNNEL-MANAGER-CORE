@@ -26,7 +26,7 @@ func rigTCP(t *testing.T, dsts []string) (*TCP, string) {
 	if len(dsts) > 0 {
 		b.SetPeerPool(NewPeerPool(dsts, 0, filepath.Join(dir, "peerpool")))
 	}
-	b.port.setRoll(b.rollSourcePort)
+	armLikeRun(b)
 	b.st.tracker.observe(pathKey{Dst: "d1", Dport: 443, Src: "10.0.0.1", Sport: 40001}, true)
 	liveCarrier(t, b)
 	return b, path
@@ -158,7 +158,7 @@ func TestTheEdgePoolClimbsTheSameLadder(t *testing.T) {
 	pool := newWSPool([]string{"e1", "e2"}, snis("x"), path)
 	b := &TCP{isClient: true, ws: true, stTag: "ws", addr: "pool", pool: pool}
 	b.st = newCoreStatus(filepath.Join(dir, "core.status"), "ws · pool")
-	b.port.setRoll(b.rollSourcePort)
+	armLikeRun(b)
 	liveCarrier(t, b)
 
 	ip, sni, _ := pool.current()

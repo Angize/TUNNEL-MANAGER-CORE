@@ -60,15 +60,14 @@ func TestLoopWholeEdgeOutage(t *testing.T) {
 
 func TestLoopWholeDirectOutage(t *testing.T) {
 	dir := t.TempDir()
-	b := &TCP{
-		pp: NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")),
-		sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
-	}
+	b := &TCP{isClient: true}
+	b.SetPeerPool(NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")))
+	b.SetSourcePool(NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")))
 	dsts, srcs := map[string]bool{}, map[string]bool{}
 	for round := 1; round <= 6; round++ {
 		dsts[b.pp.current()] = true
 		srcs[b.sp.current()] = true
-		b.burnAdvance(true)
+		tcpWalk(b)
 	}
 	if len(dsts) < 3 {
 		t.Fatalf("six rounds reached %d of 3 destinations: %v", len(dsts), dsts)

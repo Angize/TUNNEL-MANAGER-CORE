@@ -35,10 +35,9 @@ func TestTheDirectWalkFindsTheOnePairThatWorks(t *testing.T) {
 			goodS := fmt.Sprintf("s%d", sh.goodS)
 
 			clk := int64(1000)
-			b := &TCP{
-				pp: NewPeerPool(dests, 0, filepath.Join(dir, "d.json")),
-				sp: NewPeerPool(srcs, 0, filepath.Join(dir, "s.json")),
-			}
+			b := &TCP{isClient: true}
+			b.SetPeerPool(NewPeerPool(dests, 0, filepath.Join(dir, "d.json")))
+			b.SetSourcePool(NewPeerPool(srcs, 0, filepath.Join(dir, "s.json")))
 			b.pp.now = func() int64 { return clk }
 			b.sp.now = func() int64 { return clk }
 
@@ -62,7 +61,7 @@ func TestTheDirectWalkFindsTheOnePairThatWorks(t *testing.T) {
 						"must not be rotated off by a verdict about something else (round %d)",
 						goodD, goodS, d, s, round)
 				}
-				b.burnAdvance(true)
+				tcpWalk(b)
 				clk += 30
 			}
 			t.Fatalf("%d rounds and the walk never reached %s/%s. It visited: %v", convergeRounds,
@@ -133,14 +132,13 @@ func TestNothingWorksAndTheNodeHandsItAllBack(t *testing.T) {
 	t.Run("direct", func(t *testing.T) {
 		dir := t.TempDir()
 		clk := int64(1000)
-		b := &TCP{
-			pp: NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")),
-			sp: NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")),
-		}
+		b := &TCP{isClient: true}
+		b.SetPeerPool(NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")))
+		b.SetSourcePool(NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")))
 		b.pp.now = func() int64 { return clk }
 		b.sp.now = func() int64 { return clk }
 		for i := 0; i < 12; i++ {
-			b.burnAdvance(true)
+			tcpWalk(b)
 			clk += 30
 		}
 		b.ProbeAllNow()

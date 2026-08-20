@@ -66,7 +66,7 @@ func TestFailedWarmBuildLeavesTheDestinationCursorWhereTheTunnelIs(t *testing.T)
 	if _, moved := b.pp.rotateOnce(); !moved {
 		t.Fatal("rotateOnce did not move in a 3-endpoint pool")
 	}
-	if b.buildWarm(func() { b.burnAdvance(false) }, b.sourceIP(), true, live) {
+	if b.buildWarm(b.sourceIP(), true, live) {
 		t.Fatal("buildWarm reported success against an endpoint that closes before a single core frame")
 	}
 	if w := b.takeWarm(); w != nil {
@@ -77,7 +77,9 @@ func TestFailedWarmBuildLeavesTheDestinationCursorWhereTheTunnelIs(t *testing.T)
 		t.Errorf("after a failed warm build the pool calls %s active, but the tunnel never left %s — the panel marks the wrong IP live, and the next beat rotates onto the endpoint it is already on", got, live)
 	}
 
-	if len(poolBurned(b.pp)) == 0 {
-		t.Error("the endpoint that would not come up was left healthy — the next beat walks straight back onto it")
+	if got := burnedIn(b.pp); len(got) > 0 {
+		t.Errorf("a failed warm build condemned %v. The dial that could not come up is the SAME evidence "+
+			"a dial failure gives, and only the node's tun probe burns on it — a proactive build that "+
+			"loses a race must cost nothing", got)
 	}
 }
