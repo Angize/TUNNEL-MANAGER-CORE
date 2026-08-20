@@ -655,14 +655,18 @@ func (p *wsPool) readCmd() (c poolCmd, ok bool) {
 	return c, true
 }
 
+// Where the pool WOULD dial, which is the direct pool's `addrs[cur]` in every way that matters. Asking
+// `active` instead answered where it last CONNECTED: a carrier that cannot get a session up anywhere
+// froze that string, so the node's verdict kept naming an edge the pool had already walked off and the
+// edge actually failing was never blamed.
 func (p *wsPool) activeCombo() (ip, sni string) {
 	p.mu.Lock()
-	a := p.active
-	p.mu.Unlock()
-	if i := strings.Index(a, activeSep); i >= 0 {
-		return a[:i], a[i+len(activeSep):]
+	defer p.mu.Unlock()
+	i, s, ok := p.currentLocked()
+	if !ok {
+		return "", ""
 	}
-	return a, ""
+	return i, s.host
 }
 
 func (p *wsPool) clearBurn(kind, key string) bool {
@@ -749,6 +753,10 @@ func (p *wsPool) writeStatus() {
 	}
 	evs := append([]coreEvent(nil), p.events...)
 	epoch, path, ready := p.tracker.snapshot()
+	active := ""
+	if ip, sni, ok := p.currentLocked(); ok {
+		active = activeLabel(ip, sni.host)
+	}
 	st := struct {
 		Active string         `json:"active"`
 		Epoch  int64          `json:"epoch"`
@@ -757,7 +765,7 @@ func (p *wsPool) writeStatus() {
 		Health []healthStatus `json:"health"`
 		Events []coreEvent    `json:"events"`
 		TS     int64          `json:"ts"`
-	}{Active: p.active, Epoch: epoch, Ready: ready, Path: path, Health: health, Events: evs, TS: time.Now().Unix()}
+	}{Active: active, Epoch: epoch, Ready: ready, Path: path, Health: health, Events: evs, TS: time.Now().Unix()}
 	p.mu.Unlock()
 	if data, err := json.Marshal(st); err == nil {
 
