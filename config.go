@@ -107,6 +107,7 @@ type Config struct {
 	HTTPUpWorkers int `json:"http_up_workers"`
 	HTTPUpBatchKB int `json:"http_up_batch_kb"`
 	HTTPUpRate    int `json:"http_up_rate"`
+	HTTPStreams   int `json:"http_streams"`
 
 	WSECH string `json:"ws_ech"`
 
@@ -424,6 +425,14 @@ func (c *Config) validate() error {
 			}
 		}
 
+		if c.HTTPStreams != 0 {
+			if c.Role != "client" || c.CDNCarrier != "http" {
+				return errors.New("http_streams applies to an http-carrier CLIENT only")
+			}
+			if c.HTTPStreams < 0 || c.HTTPStreams > 16 {
+				return errors.New("http_streams must be between 1 and 16 (0 = default)")
+			}
+		}
 		if c.HTTPUpWorkers != 0 || c.HTTPUpBatchKB != 0 || c.HTTPUpRate != 0 {
 			if c.Role != "client" || c.CDNCarrier != "http" {
 				return errors.New("http_up_workers/http_up_batch_kb/http_up_rate apply to an http-carrier CLIENT only")

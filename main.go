@@ -307,6 +307,10 @@ func main() {
 		log.Printf("tnl-core: httpc upstream: workers=%d batch=%dKB rate=%d/s (0 = default)",
 			cfg.HTTPUpWorkers, cfg.HTTPUpBatchKB, cfg.HTTPUpRate)
 	}
+	if cfg.Role == "client" && cfg.cdnIsHTTP() && cfg.HTTPStreams != 0 {
+		packet.SetHTTPStreams(cfg.HTTPStreams)
+		log.Printf("tnl-core: httpc carrier streams=%d", cfg.HTTPStreams)
+	}
 
 	if cfg.Role == "client" && cfg.SNISplit {
 		applySNISplit(b, cfg.Transport, cfg.SNIMode, cfg.SplitPos, cfg.SplitTTL)

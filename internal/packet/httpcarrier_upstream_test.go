@@ -285,9 +285,8 @@ func TestXhUpCoalescesAndReassemblesOutOfOrder(t *testing.T) {
 			maxBody, chunks)
 	}
 
-	pr, pw := io.Pipe()
-	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}),
-		pend: map[uint64][]byte{}}
+	s := newHTTPCSession()
+	pr, pw := s.upR, s.upW
 	var out []byte
 	var rerr error
 	readDone := make(chan struct{})
@@ -297,7 +296,7 @@ func TestXhUpCoalescesAndReassemblesOutOfOrder(t *testing.T) {
 	}()
 	go func() {
 		for i := len(seqs) - 1; i >= 0; i-- {
-			s.deliver(seqs[i], got[seqs[i]])
+			s.up.deliver(seqs[i], got[seqs[i]])
 		}
 		pw.Close()
 	}()
