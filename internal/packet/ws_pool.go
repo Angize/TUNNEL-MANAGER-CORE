@@ -558,28 +558,6 @@ func (p *wsPool) partnerIPLocked() string {
 	return p.ips[p.i%len(p.ips)]
 }
 
-func (p *wsPool) altHealthySNI(exclude string) (wsSNIEntry, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, s := range p.snis {
-		if s.host != exclude && p.sniHealth.healthy(s.host) {
-			return s, true
-		}
-	}
-	return wsSNIEntry{}, false
-}
-
-func (p *wsPool) altHealthyIP(exclude string) (string, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for _, ip := range p.ips {
-		if ip != exclude && p.ipHealth.healthy(ip) {
-			return ip, true
-		}
-	}
-	return "", false
-}
-
 func (p *wsPool) probeAllNow() {
 	p.mu.Lock()
 	p.ipHealth.probeAllNow()

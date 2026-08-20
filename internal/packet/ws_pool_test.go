@@ -386,20 +386,6 @@ func TestDueRetestsAndProbeAllNow(t *testing.T) {
 	}
 }
 
-func TestAltHealthyLookups(t *testing.T) {
-	p := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
-	if s, ok := p.altHealthySNI("x"); !ok || s.host != "y" {
-		t.Fatalf("altHealthySNI(x) = %q ok=%v, want y", s.host, ok)
-	}
-	if ip, ok := p.altHealthyIP("a"); !ok || ip != "b" {
-		t.Fatalf("altHealthyIP(a) = %q ok=%v, want b", ip, ok)
-	}
-	p.markSuspect("sni", "y", "test")
-	if _, ok := p.altHealthySNI("x"); ok {
-		t.Fatal("no healthy SNI other than x should remain")
-	}
-}
-
 func TestSelectEntryPinsAndClears(t *testing.T) {
 	p := newWSPool([]string{"a", "b"}, snis("x"), "")
 	p.markSuspect("ip", "b", "test")

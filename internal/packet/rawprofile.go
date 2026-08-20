@@ -136,11 +136,6 @@ func rawChecksumBindsSource(profile string) bool {
 	return false
 }
 
-func rawProtoFor(profile string) (int, bool) {
-	p, ok := rawProfiles[profile]
-	return p, ok
-}
-
 func rawEffProto(profile string, rawProto int) (int, bool) {
 	base, ok := rawProfiles[profile]
 	if !ok {

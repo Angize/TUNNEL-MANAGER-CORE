@@ -40,12 +40,13 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 		stTag: "tcp", closeCh: make(chan struct{})}
 	b.st = newCoreStatus(path, active)
 	b.warmNext = make(chan *warmDial, 1)
-	b.SetPeerPool(NewPeerPool([]string{addr, second}, 0, ""))
+	dests := []string{addr, second}
+	b.SetPeerPool(NewPeerPool(dests, 0, ""))
 
 	sp := NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0, srcPath)
 	b.SetSourcePool(sp)
 
-	for i := 0; i < b.pp.size(); i++ {
+	for range dests {
 		if b.buildWarm(b.sourceIP(), true, "") {
 			t.Fatal("buildWarm reported success against an endpoint that closes before a single core frame")
 		}
@@ -62,7 +63,7 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 		t.Errorf("a failed warm build published %q/%q — the tunnel never left its source or its endpoint", e.Kind, e.Code)
 	}
 
-	b.rc.od.rot, b.rc.od.want = b.pp.size()-1, b.pp.size()
+	b.rc.od.rot, b.rc.od.want = len(dests)-1, len(dests)
 	if !tcpWalk(b) {
 		t.Fatal("a failover burn did not take")
 	}
