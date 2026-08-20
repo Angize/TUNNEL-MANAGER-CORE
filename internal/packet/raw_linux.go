@@ -455,7 +455,14 @@ func init() {
 	ipIDCounter.Store(binary.BigEndian.Uint32(b[:]))
 }
 
-func nextIPID() uint16 { return uint16(ipIDCounter.Add(1)) }
+// Never 0: the counter is uint16-wrapped, so one draw in 65536 lands there, and the AF_PACKET decoys
+// put whatever this returns on the wire verbatim.
+func nextIPID() uint16 {
+	if id := uint16(ipIDCounter.Add(1)); id != 0 {
+		return id
+	}
+	return uint16(ipIDCounter.Add(1))
+}
 
 func buildIP4(src, dst net.IP, proto int, payload []byte) []byte {
 	return buildIP4Ext(src, dst, proto, 64, false, payload)
