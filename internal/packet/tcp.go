@@ -1296,19 +1296,17 @@ type warmDial struct {
 	dstMoved bool
 }
 
-func (b *TCP) buildWarm(srcAddr string, dstMoved bool, dstPrev string) bool {
+func (b *TCP) buildWarm(srcAddr string, dstMoved bool) bool {
 	if b.closed.Load() {
 		return false
 	}
 	conn, label, combo, err := b.dialCarrier()
 	if err != nil {
-		b.pp.keepCursorOn(dstPrev)
 		return false
 	}
 	cf, err := b.handshakeAndPrime(conn)
 	if err != nil {
 		conn.Close()
-		b.pp.keepCursorOn(dstPrev)
 		return false
 	}
 
@@ -1320,7 +1318,6 @@ func (b *TCP) buildWarm(srcAddr string, dstMoved bool, dstPrev string) bool {
 		return true
 	default:
 		conn.Close()
-		b.pp.keepCursorOn(dstPrev)
 		return false
 	}
 }
@@ -1457,8 +1454,21 @@ func (b *TCP) dialLoop() {
 					return
 				}
 
-				if !b.pool.advance() {
+				prevIP, prevSNI, ok := b.pool.current()
+				if !ok || !b.pool.advance() {
 					rearm(b.rotate)
+					return
+				}
+				if !b.buildWarm("", true) {
+
+					b.pool.keepCursorOn(prevIP, prevSNI.host)
+					rearm(b.rotate)
+					return
+				}
+				if !timerLive.Load() || b.closed.Load() {
+					if w := b.takeWarm(); w != nil {
+						w.conn.Close()
+					}
 					return
 				}
 				rotated.Store(true)
@@ -1509,8 +1519,9 @@ func (b *TCP) dialLoop() {
 					return
 				}
 
-				if !b.buildWarm(srcMovedTo, dstMoved, dstPrev) {
+				if !b.buildWarm(srcMovedTo, dstMoved) {
 
+					b.pp.keepCursorOn(dstPrev)
 					rearm(iv)
 					return
 				}
@@ -1593,6 +1604,15 @@ func (b *TCP) dialCarrier() (net.Conn, string, string, error) {
 		}
 		if err != nil {
 			log.Printf("core/ws: connect via %s failed: %v", edge, err)
+
+			// A dial that never came up is the one thing about an edge that cannot be faked: a filtered
+			// edge passes a probe and swallows the payload, but it cannot answer a handshake it dropped.
+			// No "was another edge working" guard: when every edge is filtered that guard would burn
+			// nothing, which is exactly when the operator most needs to see it -- and a burned pool still
+			// carries, because currentLocked falls back to the best entry when nothing is healthy.
+			if b.pool != nil {
+				b.pool.markSuspect("ip", edge, "dial")
+			}
 			return nil, edge, "", err
 		}
 		return c, edge, combo, nil
@@ -1736,9 +1756,18 @@ func (b *TCP) pollWsCmd() {
 				}
 			} else if cmd.SNI != "" {
 
-				log.Printf("core/ws: %s%s%s failed by the node's tun probe, but the carrier has since moved to %s%s%s — burning what was measured, staying put",
-					cmd.IP, activeSep, cmd.SNI, ip, activeSep, sni)
-				b.pool.markSuspect("sni", cmd.SNI, "tun-probe")
+				log.Printf("core/ws: %s%s%s failed by the node's tun probe, but the pool has since moved to "+
+					"%s%s%s — burning what was measured, staying put", cmd.IP, activeSep, cmd.SNI, ip, activeSep, sni)
+
+				// Same axis rule as the walk: the SNI is the low digit, so a combination that would not
+				// carry condemns the SNI and only a whole row convicts the edge. With ONE SNI there is no
+				// low digit to vary, and blaming it would condemn the only domain the pool has -- that is
+				// the case burnAdvanceWS already sends to the edge, so send it there too.
+				if b.wsw.hasLow() {
+					b.pool.markSuspect("sni", cmd.SNI, "tun-probe")
+				} else if cmd.IP != "" {
+					b.pool.markSuspect("ip", cmd.IP, "tun-probe")
+				}
 			}
 		case cmd.Key != "":
 			log.Printf("core/ws: select edge %s=%s (panel pin)", cmd.Kind, cmd.Key)

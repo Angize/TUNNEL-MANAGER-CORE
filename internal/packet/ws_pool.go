@@ -303,6 +303,33 @@ func (p *wsPool) tierLocked(kind, key string) (tier int, next int64) {
 	return p.healthMap(kind).tier(key)
 }
 
+// Put the cursor back on a combination, the way the direct pool does after a warm dial it could not
+// build. Compares the RAW cursor, not currentLocked(), which would resolve and step.
+func (p *wsPool) keepCursorOn(ip, sni string) {
+	if p == nil || ip == "" {
+		return
+	}
+	p.mu.Lock()
+	moved := false
+	if p.ips[p.i%len(p.ips)] != ip || p.snis[p.j%len(p.snis)].host != sni {
+		for i, e := range p.ips {
+			if e != ip {
+				continue
+			}
+			for j, s := range p.snis {
+				if s.host == sni {
+					p.i, p.j, p.chosen = i, j, activeLabel(ip, sni)
+					moved = true
+				}
+			}
+		}
+	}
+	p.mu.Unlock()
+	if moved {
+		p.writeStatus()
+	}
+}
+
 func (p *wsPool) stepLocked() {
 	p.chosen = ""
 	p.j++

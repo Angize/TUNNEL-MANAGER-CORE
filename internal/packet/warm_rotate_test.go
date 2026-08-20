@@ -47,7 +47,7 @@ func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 		t.Fatal("proactive source rotate should move in a 2-entry pool")
 	}
 
-	if b.buildWarm(b.sourceIP(), true, "") {
+	if b.buildWarm(b.sourceIP(), true) {
 		t.Fatal("buildWarm reported success against an endpoint that closes before a single core frame")
 	}
 	if got := burnedIn(b.pp); len(got) > 0 {
