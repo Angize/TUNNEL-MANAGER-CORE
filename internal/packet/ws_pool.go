@@ -430,6 +430,12 @@ func (p *wsPool) eligibleSNIs() int {
 
 func (p *wsPool) markSuspect(kind, key, reason string) {
 	p.mu.Lock()
+	// A pinned entry holds its health record in pinTook; burning it here would be undone the moment the
+	// pin is restored. The pin's own counter releases it instead. Same rule as PeerPool.nextEndpoint.
+	if (kind == "ip" && p.pinIP == key) || (kind == "sni" && p.pinSNI == key) {
+		p.mu.Unlock()
+		return
+	}
 	fresh := p.healthMap(kind).burn(key)
 	p.mu.Unlock()
 	if fresh {

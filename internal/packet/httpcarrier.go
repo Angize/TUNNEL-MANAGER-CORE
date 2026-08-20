@@ -416,11 +416,11 @@ func (b *TCP) establishHTTPC() (net.Conn, string, string, error) {
 		}
 	}
 
-	combo := ""
-	if err == nil {
-		combo = activeLabel(dialAddr, host)
+	if err != nil {
+		b.pinFailedOn(dialAddr, host)
+		return nil, dialAddr, "", err
 	}
-	return conn, dialAddr, combo, err
+	return conn, dialAddr, activeLabel(dialAddr, host), nil
 }
 
 func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budget time.Duration) (net.Conn, error) {
