@@ -528,69 +528,6 @@ func (p *wsPool) reassessRotation() {
 	}
 }
 
-func (p *wsPool) retestResult(kind, key string, success bool) {
-	p.mu.Lock()
-	m := p.healthMap(kind)
-	r := m.rec(key)
-	if r == nil {
-		p.mu.Unlock()
-		return
-	}
-	if success {
-
-		r.nextRetest = p.now()
-	} else {
-		m.retestFailed(r)
-	}
-	p.mu.Unlock()
-	p.writeStatus()
-	if kind == "ip" {
-		p.reassessRotation()
-	}
-}
-
-type retestSpec struct {
-	kind string
-	key  string
-	ip   string
-	sni  wsSNIEntry
-}
-
-func (p *wsPool) dueRetests() []retestSpec {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	var out []retestSpec
-	for _, ip := range p.ips {
-		if p.ipHealth.due(ip) {
-			out = append(out, retestSpec{kind: "ip", key: ip, ip: ip, sni: p.partnerSNILocked()})
-		}
-	}
-	for _, s := range p.snis {
-		if p.sniHealth.due(s.host) {
-			out = append(out, retestSpec{kind: "sni", key: s.host, ip: p.partnerIPLocked(), sni: s})
-		}
-	}
-	return out
-}
-
-func (p *wsPool) partnerSNILocked() wsSNIEntry {
-	for _, s := range p.snis {
-		if p.sniHealth.healthy(s.host) {
-			return s
-		}
-	}
-	return p.snis[p.j%len(p.snis)]
-}
-
-func (p *wsPool) partnerIPLocked() string {
-	for _, ip := range p.ips {
-		if p.ipHealth.healthy(ip) {
-			return ip
-		}
-	}
-	return p.ips[p.i%len(p.ips)]
-}
-
 func (p *wsPool) probeAllNow() {
 	p.mu.Lock()
 	p.ipHealth.probeAllNow()

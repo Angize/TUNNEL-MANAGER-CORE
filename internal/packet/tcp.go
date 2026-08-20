@@ -282,8 +282,6 @@ type TCP struct {
 	sniMode  string
 	splitTTL int
 
-	probeFn func(ip string, sni wsSNIEntry) bool
-
 	manualSwitch atomic.Bool
 
 	lastErr atomic.Value
@@ -304,7 +302,6 @@ type TCP struct {
 	rolled atomic.Bool
 
 	srcWarned sync.Map
-	probing   atomic.Bool
 
 	lastSrc atomic.Pointer[string]
 
@@ -1115,61 +1112,6 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 	return &wsConn{Conn: conn, r: r, client: true}, dialAddr, activeLabel(dialAddr, host), nil
 }
 
-func (b *TCP) probe(ip string, sni wsSNIEntry) bool {
-	if b.probeFn != nil {
-		return b.probeFn(ip, sni)
-	}
-	return b.probeEdgeFull(ip, sni)
-}
-
-func (b *TCP) probeEdgeFull(ip string, sni wsSNIEntry) bool {
-	if b.httpc {
-
-		host := sni.host
-		if host == "" {
-			host = ip
-		}
-
-		conn, err := b.dialHTTPCOnce(ip, host, sni.ech, sni.path, probeTimeout)
-		if err != nil {
-
-			var echErr *utls.ECHRejectionError
-			if !errors.As(err, &echErr) || len(echErr.RetryConfigList) == 0 {
-				return false
-			}
-			log.Printf("core/http: ECH-SELFHEAL[probe] for %s (%s) — stale key rejected, retrying with the fresh one", host, ip)
-
-			if conn, err = b.dialHTTPCOnce(ip, host, echErr.RetryConfigList, sni.path, probeTimeout); err != nil {
-				return false
-			}
-		}
-		conn.Close()
-		return true
-	}
-	conn, err := b.dialer(probeTimeout).Dial("tcp", ip)
-	if err != nil {
-		return false
-	}
-	host := sni.host
-	if host == "" {
-		host = ip
-	}
-	if b.wsTLS {
-		tc, terr := b.tlsToEdge(conn, ip, host, sni.ech, false, probeTimeout)
-		if terr != nil {
-			return false
-		}
-		conn = tc
-	}
-	path := sni.path
-	if path == "" {
-		path = "/"
-	}
-	_, werr := wsClientHandshake(conn, host, path, time.Now().Add(handshakeTimeout))
-	conn.Close()
-	return werr == nil
-}
-
 func (b *TCP) setLastErr(err error) {
 	if err == nil {
 		return
@@ -1226,18 +1168,6 @@ func (b *TCP) retestLoop() {
 				log.Printf("core/ws: live ECH key updated for %v (no rebuild)", hosts)
 			}
 
-			if due := b.pool.dueRetests(); len(due) > 0 && b.probing.CompareAndSwap(false, true) {
-				go func(due []retestSpec) {
-					defer b.probing.Store(false)
-					for _, spec := range due {
-						if b.closed.Load() {
-							return
-						}
-
-						b.pool.retestResult(spec.kind, spec.key, b.probe(spec.ip, spec.sni))
-					}
-				}(due)
-			}
 		}
 	}
 }
@@ -1605,11 +1535,7 @@ func (b *TCP) dialCarrier() (net.Conn, string, string, error) {
 		if err != nil {
 			log.Printf("core/ws: connect via %s failed: %v", edge, err)
 
-			// A dial that never came up is the one thing about an edge that cannot be faked: a filtered
-			// edge passes a probe and swallows the payload, but it cannot answer a handshake it dropped.
-			// No "was another edge working" guard: when every edge is filtered that guard would burn
-			// nothing, which is exactly when the operator most needs to see it -- and a burned pool still
-			// carries, because currentLocked falls back to the best entry when nothing is healthy.
+			// An edge that cannot answer a handshake is evidence no probe can fake.
 			if b.pool != nil {
 				b.pool.markSuspect("ip", edge, "dial")
 			}

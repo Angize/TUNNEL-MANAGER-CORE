@@ -66,7 +66,7 @@ func echoHTTPC() *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
-func TestHTTPCProbeUsesRealEstablish(t *testing.T) {
+func TestAnHTTPCOriginThatAnswers502IsADialFailureAndBurns(t *testing.T) {
 	good := echoHTTPC()
 	defer good.Close()
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,15 +74,33 @@ func TestHTTPCProbeUsesRealEstablish(t *testing.T) {
 	}))
 	defer bad.Close()
 
-	probe := func(addr string) bool {
-		b := &TCP{addr: addr, ws: true, httpc: true, wsPath: "/", wsTLS: false}
-		return b.probeEdgeFull(addr, wsSNIEntry{path: "/"})
+	dial := func(addr string) (*wsPool, error) {
+		p := newWSPool([]string{addr}, []wsSNIEntry{{path: "/"}}, "")
+		b := &TCP{addr: addr, ws: true, httpc: true, wsPath: "/", wsTLS: false, pool: p}
+		c, _, _, err := b.dialCarrier()
+		if c != nil {
+			c.Close()
+		}
+		return p, err
 	}
-	if !probe(good.Listener.Addr().String()) {
-		t.Fatal("a working httpc origin must probe healthy")
+
+	p, err := dial(good.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("a working httpc origin must carry: %v", err)
 	}
-	if probe(bad.Listener.Addr().String()) {
-		t.Fatal("a 502-origin behind a reachable front must probe DEAD (a TLS-only probe would wrongly pass it)")
+	if !p.ipHealth.healthy(good.Listener.Addr().String()) {
+		t.Fatal("a successful dial burned its own edge")
+	}
+
+	addr := bad.Listener.Addr().String()
+	p, err = dial(addr)
+	if err == nil {
+		t.Fatal("a 502-origin behind a reachable front must fail the dial (a TLS-only reach would wrongly " +
+			"pass it, and the carrier would be handed a socket that swallows every frame)")
+	}
+	if p.ipHealth.healthy(addr) {
+		t.Fatal("the 502 edge was not burned: an origin that refuses the upgrade is the one thing about " +
+			"an edge that cannot be faked, and the rotation must be told")
 	}
 }
 
@@ -103,9 +121,11 @@ func TestHTTPCGrpcProbeHealthyOnRealOrigin(t *testing.T) {
 
 	b := &TCP{addr: ts.Listener.Addr().String(), ws: true, httpc: true, httpcMode: "grpc", wsPath: "/",
 		wsTLS: true, httpcTLS: &tls.Config{InsecureSkipVerify: true}}
-	if !b.probeEdgeFull(ts.Listener.Addr().String(), wsSNIEntry{path: "/"}) {
-		t.Fatal("a real grpc httpc origin must probe healthy")
+	c, _, _, err := b.dialCarrier()
+	if err != nil {
+		t.Fatalf("a real grpc httpc origin must carry: %v", err)
 	}
+	c.Close()
 }
 
 func TestHTTPCCarrierRoundTrip(t *testing.T) {

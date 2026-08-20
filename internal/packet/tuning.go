@@ -10,15 +10,12 @@ var (
 
 var (
 	minLiveness = 20 * time.Second
-
-	probeTimeout = 5 * time.Second
 )
 
 type TuningInput struct {
-	SuspectBackoff   []int64
-	DeadRetestSecs   int64
-	MinLivenessSecs  int64
-	ProbeTimeoutSecs int64
+	SuspectBackoff  []int64
+	DeadRetestSecs  int64
+	MinLivenessSecs int64
 }
 
 func ApplyTuning(t TuningInput) {
@@ -38,9 +35,6 @@ func ApplyTuning(t TuningInput) {
 	}
 	if t.MinLivenessSecs > 0 {
 		minLiveness = time.Duration(tclamp(t.MinLivenessSecs, 1, 3600)) * time.Second
-	}
-	if t.ProbeTimeoutSecs > 0 {
-		probeTimeout = time.Duration(tclamp(t.ProbeTimeoutSecs, 1, 120)) * time.Second
 	}
 }
 

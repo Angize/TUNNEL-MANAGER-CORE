@@ -30,7 +30,7 @@ func TestReassessRotationEvents(t *testing.T) {
 		t.Fatalf("degraded must not repeat, got %d", got)
 	}
 
-	p.retestResult("ip", "1.1.1.1", true)
+	p.clearBurn("ip", "1.1.1.1")
 	if got := count("restored"); got != 1 {
 		t.Fatalf("restored events = %d, want 1", got)
 	}

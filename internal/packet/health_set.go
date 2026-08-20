@@ -61,8 +61,6 @@ func (h healthSet) burn(key string) (fresh bool) {
 	return false
 }
 
-func (h healthSet) retestFailed(r *healthRec) { retestBackoff(r, h.now()) }
-
 func (h healthSet) clear(key string) bool {
 	_, had := h.recs[key]
 	delete(h.recs, key)
