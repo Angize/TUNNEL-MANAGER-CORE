@@ -9,19 +9,16 @@ var (
 )
 
 var (
-	pingLossThreshold int32 = 3
-
 	minLiveness = 20 * time.Second
 
 	probeTimeout = 5 * time.Second
 )
 
 type TuningInput struct {
-	SuspectBackoff    []int64
-	DeadRetestSecs    int64
-	PingLossThreshold int
-	MinLivenessSecs   int64
-	ProbeTimeoutSecs  int64
+	SuspectBackoff   []int64
+	DeadRetestSecs   int64
+	MinLivenessSecs  int64
+	ProbeTimeoutSecs int64
 }
 
 func ApplyTuning(t TuningInput) {
@@ -38,9 +35,6 @@ func ApplyTuning(t TuningInput) {
 	}
 	if t.DeadRetestSecs > 0 {
 		deadRetest = tclamp(t.DeadRetestSecs, 5, 86400)
-	}
-	if t.PingLossThreshold > 0 {
-		pingLossThreshold = int32(tclamp(t.PingLossThreshold, 1, 100))
 	}
 	if t.MinLivenessSecs > 0 {
 		minLiveness = time.Duration(tclamp(t.MinLivenessSecs, 1, 3600)) * time.Second

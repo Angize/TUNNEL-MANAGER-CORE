@@ -29,12 +29,11 @@ func TestOnlyTheLiveCarrierStampsHeartbeat(t *testing.T) {
 	go b.readLoop(live)
 	go b.readLoop(other)
 
-	other.unanswered.Store(1)
 	if err := otherWire.writeFrame(typePong, nil); err != nil {
 		t.Fatalf("write other pong: %v", err)
 	}
 	waitFor(t, 4*time.Second, "the other reader consumed its pong", func() bool {
-		return other.unanswered.Load() == 0
+		return other.rxAt.Load() != 0
 	})
 	time.Sleep(50 * time.Millisecond)
 	if hb := b.lastRx.Load(); hb != 0 {

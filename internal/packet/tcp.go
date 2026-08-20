@@ -50,8 +50,7 @@ const (
 )
 
 var (
-	errDesync      = errors.New("core/tcp: stream desync")
-	errPingTimeout = errors.New("core/tcp: keepalive pings unanswered")
+	errDesync = errors.New("core/tcp: stream desync")
 
 	errFrameTooBig = errors.New("core/tcp: frame exceeds max size")
 )
@@ -72,8 +71,6 @@ type connFramer struct {
 	wbuf     []byte
 
 	rp replayGuard
-
-	unanswered atomic.Int32
 
 	rxAt atomic.Int64
 }
@@ -1831,7 +1828,6 @@ func (b *TCP) readLoop(cf *connFramer) error {
 
 			continue
 		}
-		cf.unanswered.Store(0)
 		now := time.Now().UnixNano()
 		cf.rxAt.Store(now)
 
@@ -1889,8 +1885,6 @@ func (b *TCP) tunLoop() error {
 			b.onConnErr(cf, err)
 			continue
 		}
-
-		cf.conn.SetReadDeadline(time.Now().Add(b.idle))
 	}
 }
 
@@ -1929,10 +1923,8 @@ func (b *TCP) keepaliveLoop() {
 		case <-time.After(keepaliveInterval(b.ping, b.psk)):
 
 			if cf := b.cur.Load(); cf != nil && !b.recentData() {
-				if ok, err := b.pingOne(cf); !ok {
-					if err == errPingTimeout {
-						log.Printf("core/tcp: %d keepalive pings unanswered — dropping stale connection", pingLossThreshold)
-					}
+				if err := b.pingOne(cf); err != nil {
+
 					b.onConnErr(cf, err)
 				}
 			}
@@ -1940,17 +1932,9 @@ func (b *TCP) keepaliveLoop() {
 	}
 }
 
-func (b *TCP) pingOne(cf *connFramer) (ok bool, err error) {
-
-	if cf.unanswered.Load() >= pingLossThreshold {
-		return false, errPingTimeout
-	}
-	if err := cf.writeFrame(typePing, nil); err != nil {
-		return false, err
-	}
-	cf.unanswered.Add(1)
-	return true, nil
-}
+// The ping does not judge. It exists so a healthy but idle tunnel keeps producing the inbound traffic
+// the read deadline measures -- the deadline is what ends a carrier that stops answering.
+func (b *TCP) pingOne(cf *connFramer) error { return cf.writeFrame(typePing, nil) }
 
 func (b *TCP) recentData() bool {
 	last := b.lastRxData.Load()

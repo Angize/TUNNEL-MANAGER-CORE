@@ -65,8 +65,10 @@ func (bh *rxBlackhole) pipe(cli net.Conn, target string) {
 }
 
 func TestReceiveBlackholeIsDetectedWhileOutboundDataFlows(t *testing.T) {
-	defer func(d time.Duration) { pingEvery = d }(pingEvery)
-	pingEvery = 300 * time.Millisecond
+	// The ping keeps the deadline pushed forward while the far end answers; the deadline is what ends the
+	// carrier once it stops. Both are shortened so the same sequence plays out in test time.
+	defer func(p, i time.Duration) { pingEvery, connIdle = p, i }(pingEvery, connIdle)
+	pingEvery, connIdle = 300*time.Millisecond, 2*time.Second
 	const psk = "rx-blackhole-pre-shared-key-123456"
 	const cipher = "aes-256-gcm"
 
@@ -89,6 +91,10 @@ func TestReceiveBlackholeIsDetectedWhileOutboundDataFlows(t *testing.T) {
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
 	waitFor(t, 5*time.Second, "the client tunnel came up", func() bool { return cli.cur.Load() != nil })
+	// The carrier the blackhole is about to swallow. Watching for cur==nil would be a race: the dial loop
+	// redials in microseconds, so the gap can close between two polls. A DIFFERENT framer is the durable
+	// proof that this one was dropped.
+	doomed := cli.cur.Load()
 
 	bh.down.Store(true)
 
@@ -112,9 +118,9 @@ func TestReceiveBlackholeIsDetectedWhileOutboundDataFlows(t *testing.T) {
 	}()
 	defer func() { close(stop); wg.Wait() }()
 
-	waitFor(t, 5*time.Second,
-		"the client never noticed the receive blackhole: it kept writing data into a dead direction, "+
-			"the keepalive ping stayed suppressed and the read deadline stayed pushed forward, so the "+
-			"carrier was never dropped and nothing ever re-dialled or failed over",
-		func() bool { return cli.cur.Load() == nil })
+	waitFor(t, 10*time.Second,
+		"the client never noticed the receive blackhole: it kept writing data into a dead direction and "+
+			"the carrier was never dropped, so nothing ever re-dialled or failed over. Outbound traffic "+
+			"must not hold a carrier open -- only something ARRIVING may push the read deadline",
+		func() bool { cf := cli.cur.Load(); return cf == nil || cf != doomed })
 }
