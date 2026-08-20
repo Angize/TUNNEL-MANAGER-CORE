@@ -226,6 +226,8 @@ func (cf *connFramer) readFrame() (typ byte, session uint64, seq uint64, payload
 
 type TCP struct {
 	dev      *tun.Device
+	tw       *tunWriters
+	twOnce   sync.Once
 	cryptoOn bool
 	cipher   string
 	obfs     bool
@@ -624,7 +626,6 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, 
 }
 
 func (b *TCP) Run() error {
-
 	errc := make(chan error, 2)
 	go func() { errc <- b.tunLoop() }()
 	if b.isClient {
@@ -657,11 +658,17 @@ func (b *TCP) Run() error {
 	return <-errc
 }
 
+func (b *TCP) writers() *tunWriters {
+	b.twOnce.Do(func() { b.tw = newTunWriters([]*tun.Device{b.dev}) })
+	return b.tw
+}
+
 func (b *TCP) Close() error {
 	if b.closed.Swap(true) {
 		return nil
 	}
 	close(b.closeCh)
+	b.writers().close()
 	if s := b.httpSrv.Load(); s != nil {
 		s.Close()
 	}
@@ -1806,9 +1813,7 @@ func (b *TCP) handleFrame(cf *connFramer, typ byte, payload []byte) {
 		if !b.isClient {
 			b.cur.Store(cf)
 		}
-		if _, err := b.dev.Write(payload); err != nil {
-			log.Printf("core/tcp: tun write error: %v", err)
-		}
+		b.writers().write(payload)
 	}
 }
 
