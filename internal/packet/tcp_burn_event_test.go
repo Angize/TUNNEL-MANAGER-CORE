@@ -13,6 +13,7 @@ func TestTCPTunProbeBurnNamesTheEndpointItBurned(t *testing.T) {
 	p := NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, 0, filepath.Join(dir, "pool.json"))
 	b := &TCP{pp: p, st: st, isClient: true, closeCh: make(chan struct{})}
 	defer close(b.closeCh)
+	armAndSpendTheFreeRungs(t, b)
 
 	gone := p.current()
 	if err := os.WriteFile(st.verdictPath(), []byte(`{"cmd":"fail","key":"`+gone+`"}`), 0o644); err != nil {

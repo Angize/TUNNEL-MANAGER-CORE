@@ -39,7 +39,22 @@ func newVerdictPool(t *testing.T, ips, hosts []string) *TCP {
 		t.Fatal("fresh pool has no current edge")
 	}
 	p.setActive(activeLabel(ip, sni.host))
-	return &TCP{pool: p}
+	b := &TCP{pool: p}
+	armAndSpendTheFreeRungs(t, b)
+	return b
+}
+
+// Run() wires the rung on every client, so a hand-built carrier must too -- otherwise the test proves
+// nothing about the path that has one. Spending the budget up front leaves these tests asking what they
+// were written to ask: WHICH entry a verdict condemns, once the free steps are gone.
+func armAndSpendTheFreeRungs(t *testing.T, b *TCP) {
+	t.Helper()
+	b.port.setRoll(b.rollSourcePort)
+	for i := 1; i <= portTries; i++ {
+		if !b.port.try() {
+			t.Fatalf("free rung %d of %d would not spend", i, portTries)
+		}
+	}
 }
 
 func TestWSFailBurnsWhatItMeasured(t *testing.T) {
