@@ -36,6 +36,8 @@ const (
 
 	readBufSize = 4096
 
+	tunBatchFrames = 32
+
 	handshakeTimeout = 10 * time.Second
 
 	connectTimeout = 4 * time.Second
@@ -67,6 +69,7 @@ type connFramer struct {
 	saltSent bool
 
 	saltPend []byte
+	wbuf     []byte
 
 	rp replayGuard
 
@@ -124,54 +127,71 @@ func (cf *connFramer) ensureReadKS() error {
 	return nil
 }
 
-func (cf *connFramer) writeFrame(typ byte, payload []byte) error {
+func (cf *connFramer) frame(typ byte, payload []byte) ([]byte, error) {
 	if cf.obfs {
 		sealed, err := obfsSeal(cf.sealer, typ, payload, padMaxFor(typ))
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if len(sealed) > maxFrame {
-			return errFrameTooBig
+			return nil, errFrameTooBig
 		}
 		out := make([]byte, 2+len(sealed))
-		var lb [2]byte
-		binary.BigEndian.PutUint16(lb[:], uint16(len(sealed)))
+		binary.BigEndian.PutUint16(out[0:2], uint16(len(sealed)))
 		copy(out[2:], sealed)
-		cf.mu.Lock()
-		cf.writeKS.XORKeyStream(out[0:2], lb[:])
-		if len(cf.saltPend) > 0 {
-
-			out = append(cf.saltPend, out...)
-			cf.saltPend = nil
-		}
-		cf.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-		_, err = cf.conn.Write(out)
-		cf.mu.Unlock()
-		return err
+		return out, nil
 	}
-
 	sealed := payload
 	if cf.sealer != nil {
 		s, err := cf.sealer.Seal(payload, []byte{typ})
 		if err != nil {
-			return err
+			return nil, err
 		}
 		sealed = s
 	}
 	n := 2 + len(sealed)
 	if n > maxFrame {
-		return errFrameTooBig
+		return nil, errFrameTooBig
 	}
 	out := make([]byte, 2+n)
 	binary.BigEndian.PutUint16(out[0:2], uint16(n))
 	out[2] = magic
 	out[3] = typ
 	copy(out[4:], sealed)
+	return out, nil
+}
+
+func (cf *connFramer) writeAll(frames [][]byte) error {
+	if len(frames) == 0 {
+		return nil
+	}
 	cf.mu.Lock()
+	defer cf.mu.Unlock()
+	out := cf.wbuf[:0]
+	if len(cf.saltPend) > 0 {
+		out = append(out, cf.saltPend...)
+		cf.saltPend = nil
+	}
+	var lb [2]byte
+	for _, f := range frames {
+		if cf.obfs {
+			copy(lb[:], f[0:2])
+			cf.writeKS.XORKeyStream(f[0:2], lb[:])
+		}
+		out = append(out, f...)
+	}
+	cf.wbuf = out
 	cf.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	_, err := cf.conn.Write(out)
-	cf.mu.Unlock()
 	return err
+}
+
+func (cf *connFramer) writeFrame(typ byte, payload []byte) error {
+	f, err := cf.frame(typ, payload)
+	if err != nil {
+		return err
+	}
+	return cf.writeAll([][]byte{f})
 }
 
 func (cf *connFramer) readFrame() (typ byte, session uint64, seq uint64, payload []byte, err error) {
@@ -1873,6 +1893,7 @@ func (b *TCP) onConnErr(cf *connFramer, err error) {
 
 func (b *TCP) tunLoop() error {
 	buf := make([]byte, maxDatagram)
+	frames := make([][]byte, 0, tunBatchFrames)
 	for {
 		n, err := b.dev.Read(buf)
 		if err != nil {
@@ -1887,18 +1908,37 @@ func (b *TCP) tunLoop() error {
 		if cf == nil {
 			continue
 		}
-		if err := cf.writeFrame(typeData, buf[:n]); err != nil {
-			if errors.Is(err, errFrameTooBig) {
-
-				log.Printf("core/tcp: dropping oversize packet (%d bytes) — too large to frame", n)
-				continue
+		frames = frames[:0]
+		frames = b.appendFrame(cf, frames, buf[:n])
+		for len(frames) < cap(frames) && b.cur.Load() == cf {
+			m, ok, err := b.dev.TryRead(buf)
+			if err != nil || !ok {
+				break
 			}
+			frames = b.appendFrame(cf, frames, buf[:m])
+		}
+		err = cf.writeAll(frames)
+		clear(frames)
+		if err != nil {
 			b.onConnErr(cf, err)
 			continue
 		}
 
 		cf.conn.SetReadDeadline(time.Now().Add(b.idle))
 	}
+}
+
+func (b *TCP) appendFrame(cf *connFramer, frames [][]byte, pkt []byte) [][]byte {
+	f, err := cf.frame(typeData, pkt)
+	if err != nil {
+		if errors.Is(err, errFrameTooBig) {
+			log.Printf("core/tcp: dropping oversize packet (%d bytes) — too large to frame", len(pkt))
+			return frames
+		}
+		log.Printf("core/tcp: frame error: %v", err)
+		return frames
+	}
+	return append(frames, f)
 }
 
 func (b *TCP) diagLoop() {
