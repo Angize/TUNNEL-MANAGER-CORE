@@ -38,11 +38,11 @@ func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 	b := &TCP{cryptoOn: true, cipher: "aes-256-gcm", psk: "warm-rotate-psk-abcdefghijklmno",
 		idle: connIdle, ping: pingEvery, isClient: true, addr: addr,
 		stTag: "tcp", closeCh: make(chan struct{})}
-	b.st = newCoreStatus(path, active)
+	b.SetStatusPath(path)
 	b.warmNext = make(chan *warmDial, 1)
-	b.SetPeerPool(NewPeerPool([]string{addr, second}, 0, ""))
+	b.SetPeerPool(NewPeerPool([]string{addr, second}, 0))
 
-	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0, ""))
+	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0))
 	if _, moved := b.rotateSourceTCP(true); !moved {
 		t.Fatal("proactive source rotate should move in a 2-entry pool")
 	}

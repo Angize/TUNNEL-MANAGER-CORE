@@ -8,7 +8,7 @@ import (
 
 func TestUDPRefusesASourceThisHostCannotBind(t *testing.T) {
 	t.Run("a pin onto an unbindable source is abandoned, not consumed", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0)
 		b := &UDP{isClient: true}
 		b.SetSourcePool(sp)
 		if !sp.selectEntry(unusableIP) {
@@ -32,7 +32,7 @@ func TestUDPRefusesASourceThisHostCannotBind(t *testing.T) {
 	})
 
 	t.Run("an unbindable first entry is burned at seed time", func(t *testing.T) {
-		sp := NewPeerPool([]string{unusableIP, usableLoopbackIP}, 0, "")
+		sp := NewPeerPool([]string{unusableIP, usableLoopbackIP}, 0)
 		b := &UDP{isClient: true}
 		b.SetSourcePool(sp)
 
@@ -45,7 +45,7 @@ func TestUDPRefusesASourceThisHostCannotBind(t *testing.T) {
 	})
 
 	t.Run("a bindable source is neither burned nor un-pinned", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, "127.0.0.2"}, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, "127.0.0.2"}, 0)
 		b := &UDP{isClient: true}
 		b.SetSourcePool(sp)
 		if burned := burnedIn(sp); len(burned) > 0 {

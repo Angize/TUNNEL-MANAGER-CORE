@@ -1073,7 +1073,7 @@ func (r *Raw) SetPeerPool(pp *PeerPool) {
 	if r.isClient {
 		r.pp = pp
 		if pp != nil {
-			pp.setEvent("dst", r.st.event)
+			joinStatus(r.st, pp, "dst")
 
 			m := buildSrcAllow(pp.all())
 			r.poolIPs = m
@@ -1121,12 +1121,12 @@ func (r *Raw) SetSourcePool(sp *PeerPool) {
 	r.sp = sp
 
 	if sp != nil {
-		sp.setEvent("src", r.st.event)
+		joinStatus(r.st, sp, "src")
 		if ip := adoptableSource("raw", sp, sp.current(), &r.srcWarned); ip != nil {
 			r.localIP.Store(&net.IPAddr{IP: ip})
 		} else {
 
-			sp.fail()
+			sp.fail("unbindable")
 		}
 	}
 }
@@ -1187,6 +1187,14 @@ func (r *Raw) rotatePeerRaw(proactive bool) {
 	wakeLoop(r.wake)
 }
 
+func (r *Raw) pinAppliedRaw(kind, _ string) {
+	if kind == "src" {
+		r.adoptSourceRaw()
+		return
+	}
+	r.adoptPeerRaw()
+}
+
 func (r *Raw) adoptPeerRaw() {
 	if r.pp == nil {
 		return
@@ -1219,7 +1227,7 @@ func (r *Raw) adoptSourceRaw() {
 	ip := adoptableSource("raw", r.sp, addr, &r.srcWarned)
 	if ip == nil {
 
-		r.sp.fail()
+		r.sp.fail("unbindable")
 		return
 	}
 	prevSrc := r.localIP.Load()
@@ -1232,12 +1240,8 @@ func (r *Raw) adoptSourceRaw() {
 
 }
 
-func (r *Raw) ProbeAllNow() {
-	probeAllPools(r.pp, r.sp)
-}
-
 func (r *Raw) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, r.closeCh, r.adoptPeerRaw, r.adoptSourceRaw, r.rotatePeerRaw, r.rotateSourceRaw, r.st.event, r.st.pathEpoch)
+	runPinPoll(rc, r.closeCh, r.pinAppliedRaw, r.rotatePeerRaw, r.rotateSourceRaw, r.st.pathEpoch)
 }
 
 func (r *Raw) clientLoop() {
@@ -1247,7 +1251,8 @@ func (r *Raw) clientLoop() {
 	if r.sportRandom {
 		rc.port.setRoll(r.rollSourcePort)
 	}
-	rc.setVerdict(r.st.verdictPath())
+	rc.setMailboxes(r.st.verdictPath(), r.st.pinPath())
+	r.st.setPair(rc.pairStatus)
 	if rc.polls() {
 		go r.pinPollLoop(rc)
 	}

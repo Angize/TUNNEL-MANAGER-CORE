@@ -22,18 +22,20 @@ func TestOnePoolCmdReadsBothWriters(t *testing.T) {
 		js   string
 		want poolCmd
 	}{
-		{"direct verdict, dead destination", `{"cmd":"fail","key":"10.0.0.1"}`,
-			poolCmd{Cmd: cmdFail, Key: "10.0.0.1"}},
-		{"direct verdict, carrying pair", `{"cmd":"ok","key":"10.0.0.1","src":"192.168.1.1"}`,
-			poolCmd{Cmd: cmdOK, Key: "10.0.0.1", Src: "192.168.1.1"}},
-		{"direct pin", `{"key":"10.0.0.2"}`,
-			poolCmd{Key: "10.0.0.2"}},
-		{"edge verdict, dead combination", `{"cmd":"fail","ip":"1.1.1.1","sni":"a.example"}`,
-			poolCmd{Cmd: cmdFail, IP: "1.1.1.1", SNI: "a.example"}},
-		{"edge verdict, carrying combination", `{"cmd":"ok","ip":"1.1.1.1","sni":"a.example"}`,
-			poolCmd{Cmd: cmdOK, IP: "1.1.1.1", SNI: "a.example"}},
+		{"direct verdict, dead pair", `{"cmd":"fail","low":"10.0.0.1","high":"192.168.1.1"}`,
+			poolCmd{Cmd: cmdFail, Low: "10.0.0.1", High: "192.168.1.1"}},
+		{"direct verdict, carrying pair", `{"cmd":"ok","low":"10.0.0.1","high":"192.168.1.1"}`,
+			poolCmd{Cmd: cmdOK, Low: "10.0.0.1", High: "192.168.1.1"}},
+		{"direct pin", `{"kind":"dst","key":"10.0.0.2"}`,
+			poolCmd{Kind: "dst", Key: "10.0.0.2"}},
+		{"edge verdict, dead combination", `{"cmd":"fail","low":"a.example","high":"1.1.1.1"}`,
+			poolCmd{Cmd: cmdFail, Low: "a.example", High: "1.1.1.1"}},
+		{"edge verdict, carrying combination", `{"cmd":"ok","low":"a.example","high":"1.1.1.1"}`,
+			poolCmd{Cmd: cmdOK, Low: "a.example", High: "1.1.1.1"}},
 		{"edge pin, sni axis", `{"kind":"sni","key":"a.example"}`,
 			poolCmd{Kind: "sni", Key: "a.example"}},
+		{"a retest of one entry", `{"cmd":"retest","kind":"ip","key":"1.1.1.1"}`,
+			poolCmd{Cmd: cmdRetest, Kind: "ip", Key: "1.1.1.1"}},
 	}
 	for _, c := range cases {
 		got, ok := read(c.js)
@@ -49,7 +51,7 @@ func TestOnePoolCmdReadsBothWriters(t *testing.T) {
 
 func TestPoolCmdFiresExactlyOnce(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cmd.json")
-	if err := os.WriteFile(path, []byte(`{"cmd":"fail","key":"a"}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"cmd":"fail","low":"a"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := readPoolCmd(path); !ok {
@@ -62,7 +64,7 @@ func TestPoolCmdFiresExactlyOnce(t *testing.T) {
 
 func TestPoolCmdRejectsNothingBurgers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cmd.json")
-	for _, js := range []string{`{}`, `{"src":"192.168.1.1"}`, `not json`, `{"ip":"1.1.1.1"}`} {
+	for _, js := range []string{`{}`, `{"high":"192.168.1.1"}`, `not json`, `{"kind":"ip"}`} {
 		if err := os.WriteFile(path, []byte(js), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -75,16 +77,22 @@ func TestPoolCmdRejectsNothingBurgers(t *testing.T) {
 	}
 }
 
-func TestWSPoolPinDefaultsToTheEdgeAxis(t *testing.T) {
-	p := newWSPool([]string{"e1"}, snis("s1"), filepath.Join(t.TempDir(), "status.json"))
-	if err := os.WriteFile(p.cmdPath(), []byte(`{"key":"e1"}`), 0o644); err != nil {
+// The two mailboxes are separate files, and that is the whole point: one writer each. Sharing one path
+// meant a verdict landing between a pin's write and the core's poll replaced it, and the operator was
+// told nothing.
+func TestTheVerdictAndThePinAreDifferentFiles(t *testing.T) {
+	b, _ := edgeCarrier(t, []string{"e1", "e2"}, snis("s1"))
+	if b.st.verdictPath() == b.st.pinPath() {
+		t.Fatalf("both mailboxes are %q — os.Replace makes the second writer eat the first", b.st.pinPath())
+	}
+	if err := os.WriteFile(b.st.pinPath(), []byte(`{"kind":"ip","key":"e2"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	c, ok := p.readCmd()
-	if !ok {
-		t.Fatal("the pin was rejected")
+	if err := os.WriteFile(b.st.verdictPath(), []byte(`{"cmd":"fail","low":"s1","high":"e1"}`), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if c.Kind != "ip" {
-		t.Fatalf("an axis-less pin resolved to %q, want \"ip\"", c.Kind)
+	b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.pinApplied, b.st.pathEpoch)
+	if got, _, _ := b.pool.current(); got != "e2" {
+		t.Fatalf("the pin was lost behind a verdict written in the same tick: current=%s, want e2", got)
 	}
 }

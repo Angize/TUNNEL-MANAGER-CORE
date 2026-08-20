@@ -1,14 +1,12 @@
 package packet
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 type liveTunnel struct {
+	b    *TCP
 	p    *PeerPool
 	rc   *rotationController
 	live string
@@ -18,32 +16,24 @@ type liveTunnel struct {
 
 func newLiveTunnel(t *testing.T, addrs ...string) *liveTunnel {
 	t.Helper()
-	dir := t.TempDir()
-	lt := &liveTunnel{p: NewPeerPool(addrs, 0, filepath.Join(dir, "pool.json")), now: time.Now()}
-	lt.rc = newRotationController(lt.p, nil)
-	lt.rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
+	b, p, _ := peerCarrier(t, addrs, nil)
+	lt := &liveTunnel{b: b, p: p, rc: &b.rc, now: time.Now()}
 	lt.live = addrs[0]
-	lt.p.writeStatus()
+	lt.b.pretendConnected(lt.live, "")
 	return lt
 }
 
 func (lt *liveTunnel) rotDst(bool) {
 	if addr, moved := lt.p.nextEndpoint(false); moved {
 		lt.live = addr
+		lt.b.pretendConnected(addr, "")
 	}
 }
 
+// The endpoint the node would key its verdict on: the machine-readable pair in the one status file.
 func (lt *liveTunnel) nodeSees(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile(lt.p.statusPath)
-	if err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	var st peerPoolStatus
-	if err := json.Unmarshal(b, &st); err != nil {
-		t.Fatalf("parse status: %v", err)
-	}
-	return st.Active
+	return lt.b.readStatus(t).Pair.Low
 }
 
 func (lt *liveTunnel) ladder() map[string]int {
@@ -62,7 +52,7 @@ func (lt *liveTunnel) verdict(t *testing.T) (key string) {
 	t.Helper()
 	key = lt.nodeSees(t)
 	before := lt.ladder()
-	lt.rc.judge(poolCmd{Cmd: cmdFail, Key: key, Epoch: testPathEpoch}, lt.rotDst, func(bool) {}, nil, testPathEpoch)
+	lt.rc.judge(poolCmd{Cmd: cmdFail, Low: key, Epoch: lt.b.st.pathEpoch()}, lt.rotDst, func(bool) {}, lt.b.st.pathEpoch())
 	for a, n := range lt.ladder() {
 		if n != before[a] {
 			lt.burn = append(lt.burn, a)
@@ -107,6 +97,7 @@ func (lt *liveTunnel) pinAndRelease(t *testing.T, key string) {
 		t.Fatalf("could not pin %s", key)
 	}
 	lt.live = lt.p.current()
+	lt.b.pretendConnected(lt.live, "")
 	lt.p.releasePin()
 }
 

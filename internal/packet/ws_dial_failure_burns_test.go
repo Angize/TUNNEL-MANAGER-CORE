@@ -17,9 +17,9 @@ func TestAnEdgeThatWillNotDialIsBurned(t *testing.T) {
 	dead := ln.Addr().String()
 	ln.Close() // nothing listens there any more: connect refused
 
-	p := newWSPool([]string{dead, "127.0.0.2:1"}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
+	p := newWSPool([]string{dead, "127.0.0.2:1"}, snis("x"))
 	b := &TCP{isClient: true, ws: true, wsPath: "/", pool: p, closeCh: make(chan struct{})}
-	b.armEdgeWalk()
+	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
 
 	ip, _, _ := p.current()
 	if ip != dead {
@@ -45,9 +45,9 @@ func TestADialFailureBlamesTheEdgeNotTheDomain(t *testing.T) {
 	dead := ln.Addr().String()
 	ln.Close()
 
-	p := newWSPool([]string{dead, "127.0.0.2:1"}, snis("only.example"), filepath.Join(t.TempDir(), "st.json"))
+	p := newWSPool([]string{dead, "127.0.0.2:1"}, snis("only.example"))
 	b := &TCP{isClient: true, ws: true, wsPath: "/", pool: p, closeCh: make(chan struct{})}
-	b.armEdgeWalk()
+	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
 	b.dialCarrier()
 
 	p.mu.Lock()
@@ -72,21 +72,18 @@ func TestAStaleComboVerdictBurnsTheAxisTheWalkVaries(t *testing.T) {
 		{"one SNI: nothing varies under the edge, so the edge takes it", []string{"only"}, "ip"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			p := newWSPool([]string{"e1", "e2"}, snis(tc.snis...), filepath.Join(dir, "st.json"))
-			b := &TCP{isClient: true, ws: true, pool: p}
-			b.st = newCoreStatus(filepath.Join(dir, "core.status"), "ws · pool")
-			b.armEdgeWalk()
+			b, p := edgeCarrier(t, []string{"e1", "e2"}, snis(tc.snis...))
 
 			measIP, measSNI, _ := p.current()
-			p.setActive(activeLabel(measIP, measSNI.host))
+			b.pretendConnected(measSNI.host, measIP)
 			if !p.advance() {
 				t.Fatal("setup: the pool would not move")
 			}
-			p.tracker.observe(pathKey{Dst: measIP, Dport: 443, Sport: 1, SNI: measSNI.host}, true)
-			liveVerdict(t, p.cmdPath(), p.pathEpoch(),
-				poolCmd{Cmd: cmdFail, IP: measIP, SNI: measSNI.host})
-			b.pollWsCmd()
+
+			// The carrier is DOWN, so the published pair follows the cursor -- which is exactly the
+			// window this arm exists for: the probe measured the pair we have just left.
+			b.pretendDown()
+			b.tunFail(t, measSNI.host, measIP)
 
 			p.mu.Lock()
 			sniBurned := !p.sniHealth.healthy(measSNI.host)
@@ -115,9 +112,9 @@ func TestARotationOntoADeadEdgeKeepsTheCarrierAndBurnsIt(t *testing.T) {
 	ln.Close()
 	const live = "127.0.0.9:443"
 
-	p := newWSPool([]string{live, dead}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
+	p := newWSPool([]string{live, dead}, snis("x"))
 	b := &TCP{isClient: true, ws: true, wsPath: "/", pool: p, closeCh: make(chan struct{})}
-	b.armEdgeWalk()
+	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
 	b.warmNext = make(chan *warmDial, 1)
 
 	prevIP, prevSNI, ok := p.current()
@@ -158,7 +155,7 @@ func TestARotationOntoADeadEdgeKeepsTheCarrierAndBurnsIt(t *testing.T) {
 
 func TestABurnNeverLandsOnThePinnedEntry(t *testing.T) {
 	for _, tc := range []struct{ kind, key string }{{"ip", "e1"}, {"sni", "s1"}} {
-		p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), "")
+		p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"))
 		if !p.selectEntry(tc.kind, tc.key) {
 			t.Fatalf("%s: selectEntry(%s) did not find it", tc.kind, tc.key)
 		}

@@ -2,20 +2,21 @@ package packet
 
 import "testing"
 
-func TestReassessRotationEvents(t *testing.T) {
-	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, []wsSNIEntry{{host: "a.com"}}, "")
-
-	count := func(code string) int {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		n := 0
-		for _, e := range p.events {
-			if e.Kind == "pool" && e.Code == code {
-				n++
-			}
+func poolEventCount(b *TCP, code string) int {
+	b.st.mu.Lock()
+	defer b.st.mu.Unlock()
+	n := 0
+	for _, e := range b.st.events {
+		if e.Kind == "pool" && e.Code == code {
+			n++
 		}
-		return n
 	}
+	return n
+}
+
+func TestReassessRotationEvents(t *testing.T) {
+	b, p := edgeCarrier(t, []string{"1.1.1.1", "2.2.2.2"}, []wsSNIEntry{{host: "a.com"}})
+	count := func(code string) int { return poolEventCount(b, code) }
 
 	p.markSuspect("ip", "1.1.1.1", "test")
 	if got := count("degraded"); got != 1 {
@@ -38,31 +39,21 @@ func TestReassessRotationEvents(t *testing.T) {
 		t.Fatal("rotDegraded should be cleared after recovery")
 	}
 
-	p1 := newWSPool([]string{"9.9.9.9"}, []wsSNIEntry{{host: "a.com"}}, "")
+	b1, p1 := edgeCarrier(t, []string{"9.9.9.9"}, []wsSNIEntry{{host: "a.com"}})
 	p1.markSuspect("ip", "9.9.9.9", "test")
-	p1.mu.Lock()
-	for _, e := range p1.events {
+	b1.st.mu.Lock()
+	for _, e := range b1.st.events {
 		if e.Kind == "pool" {
-			p1.mu.Unlock()
+			b1.st.mu.Unlock()
 			t.Fatalf("single-ip pool emitted a pool event: %s", e.Code)
 		}
 	}
-	p1.mu.Unlock()
+	b1.st.mu.Unlock()
 }
 
 func TestSelectEntryReassessesRotation(t *testing.T) {
-	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, []wsSNIEntry{{host: "a.com"}}, "")
-	count := func(code string) int {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		n := 0
-		for _, e := range p.events {
-			if e.Kind == "pool" && e.Code == code {
-				n++
-			}
-		}
-		return n
-	}
+	b, p := edgeCarrier(t, []string{"1.1.1.1", "2.2.2.2"}, []wsSNIEntry{{host: "a.com"}})
+	count := func(code string) int { return poolEventCount(b, code) }
 
 	p.markSuspect("ip", "1.1.1.1", "test")
 	if count("degraded") != 1 {

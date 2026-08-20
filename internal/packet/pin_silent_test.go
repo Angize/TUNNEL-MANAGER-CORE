@@ -30,8 +30,8 @@ func TestOperatorPinIsSilentOnEveryCarrier(t *testing.T) {
 		return d
 	}
 
-	dstPool := func() *PeerPool { return NewPeerPool([]string{"10.0.0.1", "10.0.0.2"}, 0, "") }
-	srcPool := func() *PeerPool { return NewPeerPool([]string{"10.9.9.1", "10.9.9.2"}, 0, "") }
+	dstPool := func() *PeerPool { return NewPeerPool([]string{"10.0.0.1", "10.0.0.2"}, 0) }
+	srcPool := func() *PeerPool { return NewPeerPool([]string{"10.9.9.1", "10.9.9.2"}, 0) }
 
 	cases := []struct {
 		name string
@@ -56,7 +56,7 @@ func TestOperatorPinIsSilentOnEveryCarrier(t *testing.T) {
 			f.adoptSourceFlux()
 		}},
 		{"udp/dest", func(st *coreStatus) {
-			b := &UDP{st: st, pp: NewPeerPool([]string{"10.0.0.1:20000", "10.0.0.2:20000"}, 0, "")}
+			b := &UDP{st: st, pp: NewPeerPool([]string{"10.0.0.1:20000", "10.0.0.2:20000"}, 0)}
 			b.adoptPeerUDP()
 		}},
 	}

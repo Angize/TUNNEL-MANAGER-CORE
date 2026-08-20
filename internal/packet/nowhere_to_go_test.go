@@ -1,12 +1,11 @@
 package packet
 
 import (
-	"path/filepath"
 	"testing"
 )
 
 func TestNoDirectCarrierBurnsWithNowhereToGo(t *testing.T) {
-	dst := NewPeerPool([]string{"only"}, 0, filepath.Join(t.TempDir(), "d.json"))
+	dst := NewPeerPool([]string{"only"}, 0)
 	b := &TCP{isClient: true}
 	b.SetPeerPool(dst)
 	for i := 0; i < 5; i++ {

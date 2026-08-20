@@ -22,10 +22,11 @@ func newSoakClient(t *testing.T, rotate time.Duration) (*TCP, *wsPool, *os.File,
 	go srv.Run()
 	t.Cleanup(func() { srv.Close() })
 
-	pool := newWSPool([]string{addr}, snis("front-a", "front-b"), "")
+	pool := newWSPool([]string{addr}, snis("front-a", "front-b"))
 	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, psk: psk,
 		ws: true, wsTLS: false, pool: pool, rotate: rotate,
 		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
+	cli.SetStatusPath(runningStatusPath(t, cli))
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
 	waitFor(t, 5*time.Second, "active up", func() bool { return cli.cur.Load() != nil })
@@ -48,7 +49,7 @@ func drainCounter(ctrl *os.File, n *int64) {
 }
 
 func TestRotationSoakRapidRotate(t *testing.T) {
-	cli, pool, cliCtrl, srvCtrl := newSoakClient(t, 150*time.Millisecond)
+	cli, _, cliCtrl, srvCtrl := newSoakClient(t, 150*time.Millisecond)
 
 	var delivered int64
 	drainCounter(srvCtrl, &delivered)
@@ -64,7 +65,7 @@ func TestRotationSoakRapidRotate(t *testing.T) {
 			case <-stop:
 				return
 			case <-tk.C:
-				if a := poolActive(pool); a != "" {
+				if a := poolActive(cli); a != "" {
 					seen[a]++
 				}
 			}
@@ -114,7 +115,8 @@ func TestRotationSoakPinStorm(t *testing.T) {
 			case <-stop:
 				return
 			case <-tk.C:
-				cli.SelectEdge("sni", targets[i%2])
+				writeFileAtomic(cli.st.pinPath(),
+					[]byte(`{"kind":"sni","key":"`+targets[i%2]+`"}`), 0o644)
 				i++
 			}
 		}

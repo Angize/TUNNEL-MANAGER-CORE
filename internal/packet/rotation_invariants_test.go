@@ -3,7 +3,6 @@ package packet
 import (
 	"fmt"
 	"math/rand"
-	"path/filepath"
 	"testing"
 )
 
@@ -77,7 +76,7 @@ func TestPeerPoolInvariantsUnderRandomSequences(t *testing.T) {
 				addrs[i] = fmt.Sprintf("d%d", i+1)
 			}
 			clk := int64(1000)
-			p := NewPeerPool(addrs, 0, filepath.Join(t.TempDir(), "p.json"))
+			p := NewPeerPool(addrs, 0)
 			p.now = func() int64 { return clk }
 			pick := func() string { return addrs[rng.Intn(len(addrs))] }
 
@@ -87,7 +86,7 @@ func TestPeerPoolInvariantsUnderRandomSequences(t *testing.T) {
 				switch op {
 				case 0:
 					log = append(log, "fail")
-					p.fail()
+					p.fail("tun-probe")
 				case 1:
 					log = append(log, "rotateOnce")
 					p.rotateOnce()
@@ -102,7 +101,7 @@ func TestPeerPoolInvariantsUnderRandomSequences(t *testing.T) {
 				case 4:
 					k := pick()
 					log = append(log, "pinFailed:"+k)
-					p.pinAttemptFailed(k)
+					p.pinCannotLand(k)
 				case 5:
 					log = append(log, "releasePin")
 					p.releasePin()
@@ -118,8 +117,9 @@ func TestPeerPoolInvariantsUnderRandomSequences(t *testing.T) {
 					clk += int64(rng.Intn(4000))
 					log = append(log, fmt.Sprintf("clock=%d", clk))
 				case 9:
-					log = append(log, "probeAllNow")
-					p.probeAllNow()
+					k := pick()
+					log = append(log, "retest:"+k)
+					p.retestNow(k)
 				}
 				peerInvariants(t, p, step, log)
 			}
@@ -223,10 +223,8 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 				hosts[i] = fmt.Sprintf("s%d", i+1)
 			}
 			clk := int64(1000)
-			p := newWSPool(ips, snis(hosts...), filepath.Join(t.TempDir(), "st.json"))
+			b, p := edgeCarrier(t, ips, snis(hosts...))
 			p.now = func() int64 { return clk }
-			b := &TCP{pool: p}
-			b.armEdgeWalk()
 			axis := func() (string, string) {
 				if rng.Intn(2) == 0 {
 					return "ip", ips[rng.Intn(len(ips))]
@@ -242,9 +240,9 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 					p.advance()
 				case 1:
 					ip, sni, _ := p.current()
-					p.setActive(activeLabel(ip, sni.host))
+					b.pretendConnected(sni.host, ip)
 					log = append(log, "verdict:"+ip+"/"+sni.host)
-					b.burnAdvanceWS(ip, sni.host)
+					b.rc.fail(b.rotateLowTCP, b.rotateHighTCP)
 				case 2:
 					k, v := axis()
 					log = append(log, "pin:"+k+":"+v)
@@ -258,8 +256,9 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 					log = append(log, "dialFail:"+k+":"+v)
 					p.markSuspect(k, v, "dial")
 				case 5:
-					log = append(log, "probeAllNow")
-					p.probeAllNow()
+					k, v := axis()
+					log = append(log, "retest:"+k+":"+v)
+					p.retestNow(k, v)
 				case 6:
 					clk += int64(rng.Intn(4000))
 					log = append(log, fmt.Sprintf("clock=%d", clk))
@@ -273,11 +272,11 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 				case 9:
 					ip := ips[rng.Intn(len(ips))]
 					log = append(log, "pinApplied:"+ip)
-					p.pinApplied(ip, hosts[rng.Intn(len(hosts))])
+					p.pinLandedOn(ip, hosts[rng.Intn(len(hosts))])
 				case 10:
 					ip := ips[rng.Intn(len(ips))]
 					log = append(log, "pinFailed:"+ip)
-					p.pinAttemptFailed(ip, hosts[rng.Intn(len(hosts))])
+					p.pinCannotLand(ip, hosts[rng.Intn(len(hosts))])
 				}
 				edgeInvariants(t, p, step, log)
 			}

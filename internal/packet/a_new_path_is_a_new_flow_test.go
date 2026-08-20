@@ -4,7 +4,6 @@ package packet
 
 import (
 	"net"
-	"path/filepath"
 	"testing"
 )
 
@@ -23,7 +22,6 @@ func (r *Raw) tuple() tuple {
 
 func movingRaw(t *testing.T, dsts, srcs []string) *Raw {
 	t.Helper()
-	dir := t.TempDir()
 	r := &Raw{isClient: true, profile: "tcp", proto: protoTCP,
 		port: 443, psk: "a-new-path-is-a-new-flow-psk-0123", cipher: "chacha20-poly1305",
 		closeCh: make(chan struct{})}
@@ -35,10 +33,10 @@ func movingRaw(t *testing.T, dsts, srcs []string) *Raw {
 	r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
 	r.localIP.Store(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if len(dsts) > 0 {
-		r.SetPeerPool(NewPeerPool(dsts, 0, filepath.Join(dir, "d.json")))
+		r.SetPeerPool(NewPeerPool(dsts, 0))
 	}
 	if len(srcs) > 0 {
-		r.sp = NewPeerPool(srcs, 0, filepath.Join(dir, "s.json"))
+		r.sp = NewPeerPool(srcs, 0)
 	}
 	r.newTCPFlow()
 	r.tcpBytes.Store(4096)

@@ -23,7 +23,7 @@ func TestAClearedSessionDoesNotWaitOutTheKeepalive(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 
-		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdOK, Key: p.current()})
+		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdOK, Low: p.current()})
 		time.Sleep(1200 * time.Millisecond)
 	}
 
@@ -34,7 +34,7 @@ func TestAClearedSessionDoesNotWaitOutTheKeepalive(t *testing.T) {
 
 		was := cli.session.Load()
 		start := time.Now()
-		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: gone})
+		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Low: gone})
 
 		deadline := time.Now().Add(wakeKeepalive + 10*time.Second)
 		for cli.session.Load() == was || cli.sealer() == nil {
@@ -59,7 +59,7 @@ func TestAClearedSessionDoesNotWaitOutTheKeepalive(t *testing.T) {
 
 func TestATimedRotationDoesNotWakeTheLoop(t *testing.T) {
 	b := &UDP{isClient: true, cryptoOn: true, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
-	b.pp = NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, 0, "")
+	b.pp = NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, 0)
 	defer close(b.closeCh)
 
 	b.rotatePeerUDP(true)
@@ -79,7 +79,7 @@ func TestATimedRotationDoesNotWakeTheLoop(t *testing.T) {
 
 func TestAPinWakesTheLoop(t *testing.T) {
 	b := &UDP{isClient: true, cryptoOn: true, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
-	b.pp = NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, 0, "")
+	b.pp = NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, 0)
 	defer close(b.closeCh)
 
 	b.adoptPeerUDP()

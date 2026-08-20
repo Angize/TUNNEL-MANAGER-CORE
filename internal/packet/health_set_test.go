@@ -1,13 +1,12 @@
 package packet
 
 import (
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestHealthSetReadsTheOwnersClock(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b"}, 0, filepath.Join(t.TempDir(), "p.json"))
+	p := NewPeerPool([]string{"a", "b"}, 0)
 	clk := int64(1000)
 	p.now = func() int64 { return clk }
 
@@ -112,7 +111,7 @@ func TestHealthSetBestRanksByTier(t *testing.T) {
 	}
 }
 
-func TestHealthSetProbeAllNow(t *testing.T) {
+func TestRetestNowEndsOneWaitAndOnlyThatOne(t *testing.T) {
 	clk := time.Now().Unix()
 	h := newHealthSet(&[]func() int64{func() int64 { return clk }}[0])
 	h.burn("a")
@@ -120,13 +119,23 @@ func TestHealthSetProbeAllNow(t *testing.T) {
 	h.recs["b"].state = stateDead
 	h.recs["b"].nextRetest = clk + deadRetest
 
-	h.probeAllNow()
+	if h.retestNow("nobody") {
+		t.Fatal("an entry that carries no record reported a wait it does not have")
+	}
+	if !h.retestNow("a") {
+		t.Fatal("retestNow did not report that it ended a's wait")
+	}
+	if h.due("b") {
+		t.Fatal("ending a's wait ended b's too — the operator asked for ONE entry, and zeroing the " +
+			"others makes their backoff a lie")
+	}
+	h.retestNow("b")
 	for _, k := range []string{"a", "b"} {
 		if !h.due(k) {
-			t.Fatalf("%s is still waiting after probeAllNow (nextRetest-now=%d)", k, h.rec(k).nextRetest-clk)
+			t.Fatalf("%s is still waiting after retestNow (nextRetest-now=%d)", k, h.rec(k).nextRetest-clk)
 		}
 		if h.healthy(k) {
-			t.Fatalf("%s was CLEARED, not pulled forward — probe-now hands entries to the judge, it is not a verdict", k)
+			t.Fatalf("%s was CLEARED, not pulled forward — retest hands an entry to the judge, it is not a verdict", k)
 		}
 	}
 }
@@ -159,7 +168,7 @@ func TestABurnStepsOnlyTheEntryItMeasured(t *testing.T) {
 }
 
 func TestMarkSuspectDoesNotStepAWaitingEntry(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
+	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"))
 	clk := int64(5000)
 	p.now = func() int64 { return clk }
 

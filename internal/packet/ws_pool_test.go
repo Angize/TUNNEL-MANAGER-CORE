@@ -1,9 +1,6 @@
 package packet
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -15,8 +12,8 @@ func snis(hosts ...string) []wsSNIEntry {
 	return out
 }
 
-func clockPool(ips []string, snis []wsSNIEntry, statusPath string) (*wsPool, *int64) {
-	p := newWSPool(ips, snis, statusPath)
+func clockPool(ips []string, snis []wsSNIEntry) (*wsPool, *int64) {
+	p := newWSPool(ips, snis)
 	var now int64 = 1000
 	p.now = func() int64 { return now }
 	return p, &now
@@ -24,13 +21,12 @@ func clockPool(ips []string, snis []wsSNIEntry, statusPath string) (*wsPool, *in
 
 func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 
-	p := newWSPool([]string{"a", "b"}, snis("x"), "")
+	p := newWSPool([]string{"a", "b"}, snis("x"))
 	for round := 0; round < 20; round++ {
 		before, _, ok := p.current()
 		if !ok {
 			t.Fatal("current() returned not-ok on a healthy 2-IP pool")
 		}
-		p.setActive(activeLabel(before, "x"))
 		if !p.advance() {
 			t.Fatalf("round %d: a healthy 2-IP pool reported no move", round)
 		}
@@ -39,11 +35,10 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 		}
 	}
 
-	p2 := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
+	p2 := newWSPool([]string{"a", "b"}, snis("x", "y"))
 	seenIP, seenSNI := map[string]bool{}, map[string]bool{}
 	for round := 0; round < 8; round++ {
 		beforeIP, beforeSNI, _ := p2.current()
-		p2.setActive(activeLabel(beforeIP, beforeSNI.host))
 		if !p2.advance() {
 			t.Fatalf("round %d: a healthy 2x2 pool reported no move", round)
 		}
@@ -52,7 +47,8 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 			t.Fatal("current() returned not-ok on a healthy 2x2 pool")
 		}
 		if activeLabel(ip, sni.host) == activeLabel(beforeIP, beforeSNI.host) {
-			t.Fatalf("round %d: the rotation resolved back onto the live combo %q", round, p2.active)
+			t.Fatalf("round %d: the rotation resolved back onto the live combo %s", round,
+				activeLabel(ip, sni.host))
 		}
 		seenIP[ip] = true
 		seenSNI[sni.host] = true
@@ -64,7 +60,7 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 		t.Fatalf("the rotation never varied the SNI axis; saw %v", seenSNI)
 	}
 
-	p3 := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
+	p3 := newWSPool([]string{"a", "b"}, snis("x", "y"))
 	p3.markSuspect("sni", "y", "test")
 	for round := 0; round < 4; round++ {
 		p3.advance()
@@ -76,14 +72,14 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 
 func TestPoolAdvanceReportsRealMove(t *testing.T) {
 
-	p := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
+	p := newWSPool([]string{"a", "b"}, snis("x", "y"))
 	for i := 0; i < 4; i++ {
 		if !p.advance() {
 			t.Fatalf("healthy 2x2 pool: advance() must report a move (step %d)", i)
 		}
 	}
 
-	p2 := newWSPool([]string{"a", "b", "c"}, snis("x"), "")
+	p2 := newWSPool([]string{"a", "b", "c"}, snis("x"))
 	p2.markSuspect("ip", "b", "test")
 	p2.markSuspect("ip", "c", "test")
 	ipBefore, _, ok := p2.current()
@@ -104,19 +100,19 @@ func TestPoolAdvanceReportsRealMove(t *testing.T) {
 		t.Fatal("after edge b healed, advance() must report a move again")
 	}
 
-	p3 := newWSPool([]string{"a"}, snis("x"), "")
+	p3 := newWSPool([]string{"a"}, snis("x"))
 	if p3.advance() {
 		t.Fatal("1x1 pool: advance() must report no move")
 	}
 
-	p4 := newWSPool(nil, nil, "")
+	p4 := newWSPool(nil, nil)
 	if p4.advance() {
 		t.Fatal("empty pool: advance() must report no move")
 	}
 }
 
 func TestPoolRotatesAllCombos(t *testing.T) {
-	p := newWSPool([]string{"a", "b"}, snis("x", "y"), "")
+	p := newWSPool([]string{"a", "b"}, snis("x", "y"))
 	seen := map[string]bool{}
 	for i := 0; i < 4; i++ {
 		ip, sni, ok := p.current()
@@ -134,7 +130,7 @@ func TestPoolRotatesAllCombos(t *testing.T) {
 }
 
 func TestPoolUpdateECHTransitionGate(t *testing.T) {
-	p := newWSPool([]string{"a"}, snis("x", "y"), "")
+	p := newWSPool([]string{"a"}, snis("x", "y"))
 	fresh := []byte{1, 2, 3}
 
 	if !p.updateECH("x", fresh) {
@@ -162,33 +158,39 @@ func TestPoolUpdateECHTransitionGate(t *testing.T) {
 }
 
 func TestPoolDownReconnectPairing(t *testing.T) {
-	p := newWSPool([]string{"a", "b"}, snis("x"), "")
-
-	p.setActive("a · x")
-	if len(p.events) != 0 {
-		t.Fatalf("initial connect must emit no event, got %+v", p.events)
+	b, _ := edgeCarrier(t, []string{"a", "b"}, snis("x"))
+	evs := func() []coreEvent {
+		b.st.mu.Lock()
+		defer b.st.mu.Unlock()
+		return append([]coreEvent(nil), b.st.events...)
 	}
 
-	p.down("reset", "a · x")
-	p.setActive("b · x")
-	if len(p.events) != 2 || p.events[0].Kind != "down" || p.events[1].Kind != "up" || p.events[1].Code != "reconnect" {
-		t.Fatalf("want down then up/reconnect, got %+v", p.events)
+	b.st.setActive("a · x")
+	if len(evs()) != 0 {
+		t.Fatalf("initial connect must emit no event, got %+v", evs())
 	}
 
-	p.setActive("a · x")
-	if len(p.events) != 2 {
-		t.Fatalf("rotation without a pending down must be silent, got %d events", len(p.events))
+	b.st.down("reset", "a · x")
+	b.st.reconnected("b · x")
+	e := evs()
+	if len(e) != 2 || e[0].Kind != "down" || e[1].Kind != "up" || e[1].Code != "reconnect" {
+		t.Fatalf("want down then up/reconnect, got %+v", e)
 	}
 
-	p.down("throttle", "a · x")
-	p.setActive("a · x")
-	if len(p.events) != 4 || p.events[3].Kind != "up" {
-		t.Fatalf("a same-edge reconnect after a down must still emit up, got %+v", p.events)
+	b.st.reconnected("a · x")
+	if len(evs()) != 2 {
+		t.Fatalf("rotation without a pending down must be silent, got %d events", len(evs()))
+	}
+
+	b.st.down("throttle", "a · x")
+	b.st.reconnected("a · x")
+	if e = evs(); len(e) != 4 || e[3].Kind != "up" {
+		t.Fatalf("a same-edge reconnect after a down must still emit up, got %+v", e)
 	}
 }
 
 func TestMarkSuspectPullsFromRotation(t *testing.T) {
-	p := newWSPool([]string{"a", "b"}, snis("x"), "")
+	p := newWSPool([]string{"a", "b"}, snis("x"))
 	p.markSuspect("ip", "a", "test")
 	if r := p.ipHealth.recs["a"]; r == nil || r.state != stateSuspect || r.fails != 0 {
 		t.Fatalf("a should be suspect with fails=0, got %#v", r)
@@ -203,7 +205,7 @@ func TestMarkSuspectPullsFromRotation(t *testing.T) {
 }
 
 func TestABurnDeepensOnlyOnceThePreviousWaitIsSpent(t *testing.T) {
-	p, now := clockPool([]string{"a", "b"}, snis("x"), "")
+	p, now := clockPool([]string{"a", "b"}, snis("x"))
 	p.markSuspect("ip", "a", "test")
 	if got := p.ipHealth.recs["a"].nextRetest; got != *now+suspectBackoff[0] {
 		t.Fatalf("entry retest should be now+%d, got %d (now=%d)", suspectBackoff[0], got, *now)
@@ -246,15 +248,22 @@ func TestABurnDeepensOnlyOnceThePreviousWaitIsSpent(t *testing.T) {
 }
 
 func TestNothingButTheTunProbeReadmitsABurnedEdge(t *testing.T) {
-	p, now := clockPool([]string{"a", "b"}, snis("x"), "")
+	b, p := edgeCarrier(t, []string{"a", "b"}, snis("x"))
+	var now int64 = 1000
+	p.now = func() int64 { return now }
+	evs := func() []coreEvent {
+		b.st.mu.Lock()
+		defer b.st.mu.Unlock()
+		return append([]coreEvent(nil), b.st.events...)
+	}
 	p.markSuspect("ip", "a", "test")
-	base := len(p.events)
+	base := len(evs())
 
 	if p.ipHealth.due("a") {
 		t.Fatal("a fresh burn must not be due -- the wait is the whole point of the backoff")
 	}
 
-	*now += suspectBackoff[0] + 1
+	now += suspectBackoff[0] + 1
 	if p.ipHealth.healthy("a") {
 		t.Fatal("the wait elapsing HEALED the edge. Nothing inside the pool may readmit an edge on a " +
 			"clock: only the tun probe, which watches DATA cross, has evidence")
@@ -263,8 +272,8 @@ func TestNothingButTheTunProbeReadmitsABurnedEdge(t *testing.T) {
 		t.Fatal("the wait elapsed and the edge is still not due, so the rotation never hands it live " +
 			"traffic and the tun probe never gets to judge it")
 	}
-	if len(p.events) != base {
-		t.Fatalf("time passing announced something: %+v", p.events[base:])
+	if len(evs()) != base {
+		t.Fatalf("time passing announced something: %+v", evs()[base:])
 	}
 
 	if !p.clearBurn("ip", "a") {
@@ -273,14 +282,21 @@ func TestNothingButTheTunProbeReadmitsABurnedEdge(t *testing.T) {
 	if !p.ipHealth.healthy("a") {
 		t.Fatal("clearBurn left the record behind")
 	}
-	if n := len(p.events); n != base+1 || p.events[base].Kind != "pool" || p.events[base].Code != "restored" {
-		t.Fatalf("want exactly one pool/restored -- the rotation can reach both edges again -- got %+v",
-			p.events[base:])
+	// Two, and both are true: the entry itself is readmitted, and with it the pool can rotate again.
+	e := evs()[base:]
+	if len(e) != 2 {
+		t.Fatalf("want a heal and a pool/restored, got %+v", e)
+	}
+	if e[0].Kind != "heal" || e[0].Detail != "ip:a" {
+		t.Fatalf("the pool must name the entry it readmitted, got %+v", e[0])
+	}
+	if e[1].Kind != "pool" || e[1].Code != "restored" {
+		t.Fatalf("and then say the rotation can reach both edges again, got %+v", e[1])
 	}
 }
 
 func TestCurrentFallbackLeastBad(t *testing.T) {
-	p, _ := clockPool([]string{"a", "b"}, snis("x", "y"), "")
+	p, _ := clockPool([]string{"a", "b"}, snis("x", "y"))
 
 	p.ipHealth.recs["a"] = &healthRec{state: stateDead, nextRetest: 1005}
 	p.ipHealth.recs["b"] = &healthRec{state: stateSuspect, nextRetest: 1100}
@@ -302,32 +318,16 @@ func TestCurrentFallbackLeastBad(t *testing.T) {
 }
 
 func TestStatusSnapshotStates(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "st.json")
-	p, now := clockPool([]string{"a", "b"}, snis("x"), path)
+	b, p := edgeCarrier(t, []string{"a", "b"}, snis("x"))
+	var now int64 = 1000
+	p.now = func() int64 { return now }
 	p.current()
 	p.markSuspect("ip", "a", "test")
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("status file not written: %v", err)
-	}
-	var st struct {
-		Active string `json:"active"`
-		Health []struct {
-			Key        string `json:"key"`
-			Kind       string `json:"kind"`
-			State      string `json:"state"`
-			Fails      int    `json:"fails"`
-			NextRetest int64  `json:"next_retest_unix"`
-		} `json:"health"`
-	}
-	if err := json.Unmarshal(data, &st); err != nil {
-		t.Fatalf("bad status json: %v", err)
-	}
+	rows := b.readStatus(t).Health
 	got := map[string]string{}
 	var aNext int64
-	for _, h := range st.Health {
+	for _, h := range rows {
 		got[h.Kind+":"+h.Key] = h.State
 		if h.Kind == "ip" && h.Key == "a" {
 			aNext = h.NextRetest
@@ -336,31 +336,37 @@ func TestStatusSnapshotStates(t *testing.T) {
 	if got["ip:a"] != stateSuspect || got["ip:b"] != "healthy" || got["sni:x"] != "healthy" {
 		t.Fatalf("health states wrong: %v", got)
 	}
-	if aNext != *now+suspectBackoff[0] {
-		t.Fatalf("suspect a next_retest_unix=%d, want %d", aNext, *now+suspectBackoff[0])
+	if aNext != now+suspectBackoff[0] {
+		t.Fatalf("suspect a next_retest_unix=%d, want %d", aNext, now+suspectBackoff[0])
 	}
-	if len(st.Health) != 3 {
-		t.Fatalf("health should list every pool entry (2 ips + 1 sni), got %d", len(st.Health))
+	if len(rows) != 3 {
+		t.Fatalf("health should list every pool entry (2 ips + 1 sni), got %d", len(rows))
 	}
 }
 
-func TestProbeAllNowEndsEveryWait(t *testing.T) {
-	p, now := clockPool([]string{"a", "b"}, snis("x", "y"), "")
+func TestRetestEndsOneWaitAndOnlyThatOne(t *testing.T) {
+	p, now := clockPool([]string{"a", "b"}, snis("x", "y"))
 	p.markSuspect("ip", "a", "test")
 	p.markSuspect("sni", "x", "test")
 	if p.ipHealth.due("a") || p.sniHealth.due("x") {
 		t.Fatal("nothing should be due yet")
 	}
 
-	p.probeAllNow()
-	if !p.ipHealth.due("a") || !p.sniHealth.due("x") {
-		t.Fatal("probeAllNow must end the wait on BOTH axes -- it is the operator saying try everything now")
+	if !p.retestNow("ip", "a") {
+		t.Fatal("retest did not report that it ended a's wait")
 	}
-	if p.ipHealth.healthy("a") || p.sniHealth.healthy("x") {
-		t.Fatal("probeAllNow CLEARED a burn; it may only end the wait, and the tun probe decides the rest")
+	if !p.ipHealth.due("a") {
+		t.Fatal("the entry the operator named is still waiting")
+	}
+	if p.sniHealth.due("x") {
+		t.Fatal("ending one entry's wait ended the OTHER axis's too — the operator asked for one row, " +
+			"and zeroing the rest makes their backoff a lie")
+	}
+	if p.ipHealth.healthy("a") {
+		t.Fatal("retest CLEARED a burn; it may only end the wait, and the tun probe decides the rest")
 	}
 
-	p2, now2 := clockPool([]string{"a"}, snis("x"), "")
+	p2, now2 := clockPool([]string{"a"}, snis("x"))
 	p2.markSuspect("ip", "a", "test")
 	*now2 = *now + suspectBackoff[0] + 1
 	if !p2.ipHealth.due("a") {
@@ -369,7 +375,7 @@ func TestProbeAllNowEndsEveryWait(t *testing.T) {
 }
 
 func TestSelectEntryPinsAndClears(t *testing.T) {
-	p := newWSPool([]string{"a", "b"}, snis("x"), "")
+	p := newWSPool([]string{"a", "b"}, snis("x"))
 	p.markSuspect("ip", "b", "test")
 	if !p.selectEntry("ip", "b") {
 		t.Fatal("selectEntry should find b")
@@ -386,7 +392,7 @@ func TestSelectEntryPinsAndClears(t *testing.T) {
 }
 
 func TestPinOneShot(t *testing.T) {
-	p, _ := clockPool([]string{"a", "b", "c"}, snis("x", "y"), "")
+	p, _ := clockPool([]string{"a", "b", "c"}, snis("x", "y"))
 	p.markSuspect("sni", "x", "test")
 	p.markSuspect("ip", "a", "test")
 	if !p.selectEntry("ip", "c") {
@@ -408,15 +414,9 @@ func TestPinOneShot(t *testing.T) {
 		t.Fatalf("a burn of a non-pinned edge must not override the pin, got %q", ip)
 	}
 
-	for i := 1; i < pinFailRelease; i++ {
-		p.pinAttemptFailed("c", "")
-		if !p.isPinned() {
-			t.Fatalf("attempt %d of %d released the pin — one failure is not evidence", i, pinFailRelease)
-		}
-	}
-	p.pinAttemptFailed("c", "")
+	p.pinCannotLand("c", "")
 	if p.isPinned() {
-		t.Fatalf("after %d failed attempts the pin must no longer be honoured", pinFailRelease)
+		t.Fatal("the pin survived the first refused dial on the pinned edge")
 	}
 	p.current()
 	if p.pinIP != "" {
@@ -425,7 +425,9 @@ func TestPinOneShot(t *testing.T) {
 }
 
 func TestPinReleasesOnProvenBlock(t *testing.T) {
-	p, _ := clockPool([]string{"a", "b"}, snis("x"), "")
+	b, p := edgeCarrier(t, []string{"a", "b"}, snis("x"))
+	var now int64 = 1000
+	p.now = func() int64 { return now }
 	if !p.selectEntry("ip", "b") {
 		t.Fatal("selectEntry should find b")
 	}
@@ -452,21 +454,13 @@ func TestPinReleasesOnProvenBlock(t *testing.T) {
 		t.Fatalf("after the pin released, current() must fall back to healthy a, got %q ok=%v", ip, ok)
 	}
 
-	got := 0
-	p.mu.Lock()
-	for _, e := range p.events {
-		if e.Kind == "pool" && e.Code == "pin_dropped" {
-			got++
-		}
-	}
-	p.mu.Unlock()
-	if got != 1 {
+	if got := poolEventCount(b, "pin_dropped"); got != 1 {
 		t.Fatalf("want exactly one pool/pin_dropped event, got %d", got)
 	}
 }
 
 func TestPinHeldOnGuiltyPartnerAxis(t *testing.T) {
-	p, _ := clockPool([]string{"a", "b"}, snis("x", "y"), "")
+	p, _ := clockPool([]string{"a", "b"}, snis("x", "y"))
 	if !p.selectEntry("ip", "b") {
 		t.Fatal("selectEntry should find b")
 	}
@@ -480,7 +474,7 @@ func TestPinHeldOnGuiltyPartnerAxis(t *testing.T) {
 }
 
 func TestAdvanceIPAndSNIIndependently(t *testing.T) {
-	p := newWSPool([]string{"a", "b", "c"}, snis("x", "y"), "")
+	p := newWSPool([]string{"a", "b", "c"}, snis("x", "y"))
 	ip0, sni0, _ := p.current()
 	if ip0 != "a" || sni0.host != "x" {
 		t.Fatalf("start = %s/%s, want a/x", ip0, sni0.host)
@@ -490,10 +484,10 @@ func TestAdvanceIPAndSNIIndependently(t *testing.T) {
 	if ip1 != "b" || sni1.host != "x" {
 		t.Fatalf("after advanceIP = %s/%s, want b/x (SNI unchanged)", ip1, sni1.host)
 	}
-	p.advanceSNI()
+	p.stepLocked()
 	ip2, sni2, _ := p.current()
 	if ip2 != "b" || sni2.host != "y" {
-		t.Fatalf("after advanceSNI = %s/%s, want b/y (IP unchanged)", ip2, sni2.host)
+		t.Fatalf("after one step = %s/%s, want b/y (IP unchanged)", ip2, sni2.host)
 	}
 	p.advanceIP()
 	p.advanceIP()

@@ -7,12 +7,12 @@ import (
 
 func nodeFail(p *PeerPool) string {
 	gone := p.current()
-	p.fail()
+	p.fail("tun-probe")
 	return gone
 }
 
 func TestNothingButTheNodeClearsABurn(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b"}, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0)
 	gone := nodeFail(p)
 	if gone != "a" {
 		t.Fatalf("setup: expected to burn a, got %s", gone)
@@ -48,7 +48,7 @@ func TestNothingButTheNodeClearsABurn(t *testing.T) {
 
 func TestABurnedEndpointIsSelectableOnceDue(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0)
 	p.now = func() int64 { return clk }
 	nodeFail(p)
 	if _, moved := p.rotateOnce(); moved {
@@ -62,7 +62,7 @@ func TestABurnedEndpointIsSelectableOnceDue(t *testing.T) {
 
 func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0)
 	p.now = func() int64 { return clk }
 	backOntoA := func(t *testing.T) {
 		t.Helper()
@@ -77,7 +77,7 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 		if i > 0 {
 			backOntoA(t)
 		}
-		p.fail()
+		p.fail("tun-probe")
 		p.mu.Lock()
 		r := p.health.recs["a"]
 		fails, next := r.fails, r.nextRetest
@@ -87,7 +87,7 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 		}
 	}
 	backOntoA(t)
-	p.fail()
+	p.fail("tun-probe")
 	p.mu.Lock()
 	state, next := p.health.recs["a"].state, p.health.recs["a"].nextRetest
 	p.mu.Unlock()
@@ -100,7 +100,7 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 	p.mu.Lock()
 	p.cur, p.chosen = 0, ""
 	p.mu.Unlock()
-	p.fail()
+	p.fail("tun-probe")
 	p.mu.Lock()
 	fails := p.health.recs["a"].fails
 	p.mu.Unlock()
@@ -109,23 +109,23 @@ func TestTheLadderDeepensWhileOnlyTheNodeSpeaks(t *testing.T) {
 	}
 }
 
-func TestProbeNowMakesEveryBurnSelectableAtOnce(t *testing.T) {
+func TestRetestNowMakesOneBurnSelectableAtOnce(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0)
 	p.now = func() int64 { return clk }
 	nodeFail(p)
 	if _, moved := p.rotateOnce(); moved {
 		t.Fatal("setup: the burn should still be pending")
 	}
-	p.probeAllNow()
+	p.retestNow("a")
 	p.mu.Lock()
 	stillBurned := p.health.recs["a"] != nil
 	p.mu.Unlock()
 	if !stillBurned {
-		t.Fatal("probe now must not declare anything healthy — only the tun probe does that")
+		t.Fatal("retest must not declare anything healthy — only the tun probe does that")
 	}
 	if _, moved := p.rotateOnce(); !moved || p.current() != "a" {
-		t.Fatalf("probe now must make it selectable at once, got %q", p.current())
+		t.Fatalf("retest must make it selectable at once, got %q", p.current())
 	}
 }
 
@@ -133,7 +133,7 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 	cli, _, a1, _, _, _ := probePair(t, "onej")
 	p := cli.pp
 
-	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: a1})
+	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Low: a1})
 	time.Sleep(3 * time.Second)
 	p.mu.Lock()
 	early := p.health.recs[a1] != nil
@@ -142,7 +142,7 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 		t.Fatalf("the first verdict condemned %s while the ladder still had a free step", a1)
 	}
 
-	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: a1})
+	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Low: a1})
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		p.mu.Lock()
@@ -157,7 +157,7 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdOK, Key: a1})
+	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdOK, Low: a1})
 	deadline = time.Now().Add(15 * time.Second)
 	for {
 		p.mu.Lock()
@@ -176,7 +176,7 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 	cli.st.mu.Unlock()
 	var healed bool
 	for _, e := range evs {
-		if e.Kind == "heal" && e.Code == "peer-retest" && e.Detail == a1 {
+		if e.Kind == "heal" && e.Code == "tun-probe" && e.Detail == "dst:"+a1 {
 			healed = true
 		}
 	}

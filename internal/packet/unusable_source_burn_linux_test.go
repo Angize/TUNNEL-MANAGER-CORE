@@ -13,7 +13,7 @@ func TestUnbindableSourceLeavesRotation(t *testing.T) {
 
 	newPool := func(t *testing.T) *PeerPool {
 		t.Helper()
-		sp := NewPeerPool([]string{good, gone}, 0, "")
+		sp := NewPeerPool([]string{good, gone}, 0)
 		if a, moved := sp.rotateOnce(); !moved || a != gone {
 			t.Fatalf("pool setup: rotateOnce = %q/%v, want %s/true", a, moved, gone)
 		}

@@ -22,9 +22,9 @@ func rigTCP(t *testing.T, dsts []string) (*TCP, string) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "core.status")
 	b := &TCP{isClient: true, stTag: "tcp", addr: "d1:443"}
-	b.st = newCoreStatus(path, "tcp · d1:443")
+	b.SetStatusPath(path)
 	if len(dsts) > 0 {
-		b.SetPeerPool(NewPeerPool(dsts, 0, filepath.Join(dir, "peerpool")))
+		b.SetPeerPool(NewPeerPool(dsts, 0))
 	}
 	armLikeRun(b)
 	b.st.tracker.observe(pathKey{Dst: "d1", Dport: 443, Src: "10.0.0.1", Sport: 40001}, true)
@@ -46,7 +46,7 @@ func TestTheFreeRungIsSpentBeforeAnyDestinationBurns(t *testing.T) {
 	first := b.pp.current()
 
 	for i := 1; i <= portTries; i++ {
-		liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Key: first})
+		liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Low: first})
 		b.pollPeerCmd()
 		if burned := burnedIn(b.pp); len(burned) != 0 {
 			t.Fatalf("draw %d of %d condemned %v. Every free rung must be spent before an endpoint is "+
@@ -70,7 +70,7 @@ func TestTheFreeRungIsSpentBeforeAnyDestinationBurns(t *testing.T) {
 		}
 	}
 
-	liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Key: first})
+	liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Low: first})
 	b.pollPeerCmd()
 	burned := burnedIn(b.pp)
 	if len(burned) != 1 || !burned[first] {
@@ -83,16 +83,16 @@ func TestCarryingRefillsTheRungSoTheNextOutageGetsAWholeLadder(t *testing.T) {
 	b, _ := rigTCP(t, []string{"d1", "d2"})
 	epoch := b.st.pathEpoch()
 
-	liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Key: b.pp.current()})
+	liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Low: b.pp.current()})
 	b.pollPeerCmd()
 	b.rolled.Store(false)
 	liveCarrier(t, b)
 
-	liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdOK, Key: b.pp.current()})
+	liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdOK, Low: b.pp.current()})
 	b.pollPeerCmd()
 
 	for i := 1; i <= portTries; i++ {
-		liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Key: b.pp.current()})
+		liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Low: b.pp.current()})
 		b.pollPeerCmd()
 		if burned := burnedIn(b.pp); len(burned) != 0 {
 			t.Fatalf("after a carrying sweep the budget was still %d/%d spent: draw %d already burned %v",
@@ -129,7 +129,7 @@ func TestWithNoCarrierTheRungIsSpentAndNothingIsTornDown(t *testing.T) {
 	b.curConn.Store(nil)
 
 	for i := 1; i <= portTries; i++ {
-		liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Key: first})
+		liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Low: first})
 		b.pollPeerCmd()
 		if burned := burnedIn(b.pp); len(burned) != 0 {
 			t.Fatalf("draw %d condemned %v while there was no carrier at all", i, burned)
@@ -140,7 +140,7 @@ func TestWithNoCarrierTheRungIsSpentAndNothingIsTornDown(t *testing.T) {
 		}
 	}
 
-	liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Key: first})
+	liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Low: first})
 	b.pollPeerCmd()
 	if burned := burnedIn(b.pp); !burned[first] {
 		t.Fatalf("with no carrier the ladder never reached the burn (%v). A destination whose handshake "+
@@ -153,19 +153,15 @@ func TestWithNoCarrierTheRungIsSpentAndNothingIsTornDown(t *testing.T) {
 }
 
 func TestTheEdgePoolClimbsTheSameLadder(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "ws.status")
-	pool := newWSPool([]string{"e1", "e2"}, snis("x"), path)
-	b := &TCP{isClient: true, ws: true, stTag: "ws", addr: "pool", pool: pool}
-	b.st = newCoreStatus(filepath.Join(dir, "core.status"), "ws · pool")
+	b, pool := edgeCarrier(t, []string{"e1", "e2"}, snis("x"))
 	armLikeRun(b)
 	liveCarrier(t, b)
 
 	ip, sni, _ := pool.current()
-	pool.setActive(activeLabel(ip, sni.host))
-	pool.tracker.observe(pathKey{Dst: ip, Dport: 443, Sport: 40001, SNI: sni.host}, true)
-	epoch := pool.pathEpoch()
-	fail := poolCmd{Cmd: cmdFail, IP: ip, SNI: sni.host}
+	b.pretendConnected(sni.host, ip)
+	b.st.tracker.observe(pathKey{Dst: ip, Dport: 443, Sport: 40001, SNI: sni.host}, true)
+	epoch := b.st.pathEpoch()
+	fail := poolCmd{Cmd: cmdFail, Low: sni.host, High: ip}
 
 	burned := func() bool {
 		pool.mu.Lock()
@@ -174,8 +170,8 @@ func TestTheEdgePoolClimbsTheSameLadder(t *testing.T) {
 	}
 
 	for i := 1; i <= portTries; i++ {
-		liveVerdict(t, pool.cmdPath(), epoch, fail)
-		b.pollWsCmd()
+		liveVerdict(t, b.st.verdictPath(), epoch, fail)
+		b.pollPeerCmd()
 		if burned() {
 			t.Fatalf("draw %d of %d condemned edge %s. A free rung redials the SAME edge on a fresh "+
 				"ephemeral source port and blames nobody; only the burn moves the pool", i, portTries, ip)
@@ -188,8 +184,8 @@ func TestTheEdgePoolClimbsTheSameLadder(t *testing.T) {
 		liveCarrier(t, b)
 	}
 
-	liveVerdict(t, pool.cmdPath(), epoch, fail)
-	b.pollWsCmd()
+	liveVerdict(t, b.st.verdictPath(), epoch, fail)
+	b.pollPeerCmd()
 	if !burned() {
 		t.Fatalf("the verdict after the %d-draw budget ran out left edge %s healthy: the edge pool never "+
 			"reaches the burn", portTries, ip)

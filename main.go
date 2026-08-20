@@ -208,7 +208,7 @@ func main() {
 					snis[i] = packet.WSPoolSNI{Host: s.Host, ECH: s.ECH, Path: s.Path}
 				}
 				b, err = packet.DialWSPoolCfg(dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher,
-					cfg.WSEdgeIPs, snis, time.Duration(cfg.WSRotateSecs)*time.Second, cfg.WSStatusPath, cfg.cdnIsHTTP(), cfg.cdnMode())
+					cfg.WSEdgeIPs, snis, time.Duration(cfg.WSRotateSecs)*time.Second, cfg.cdnIsHTTP(), cfg.cdnMode())
 				if err == nil {
 					log.Printf("tnl-core: dialing (core/%s%s wss ech pool: %dIP×%dSNI rotate=%ds)",
 						carrier, obfsTag, len(cfg.WSEdgeIPs), len(cfg.WSEdgeSNIs), cfg.WSRotateSecs)
@@ -317,7 +317,7 @@ func main() {
 
 	if wantsDestPool(cfg) {
 		if s, ok := b.(interface{ SetPeerPool(*packet.PeerPool) }); ok {
-			pp := packet.NewPeerPool(cfg.PeerIPs, time.Duration(cfg.PeerRotateSecs)*time.Second, cfg.PeerStatusPath)
+			pp := packet.NewPeerPool(cfg.PeerIPs, time.Duration(cfg.PeerRotateSecs)*time.Second)
 			s.SetPeerPool(pp)
 			log.Printf("tnl-core: destination pool: %d peers rotate=%ds", len(cfg.PeerIPs), cfg.PeerRotateSecs)
 		}
@@ -325,7 +325,7 @@ func main() {
 
 	if wantsSourcePool(cfg) {
 		if s, ok := b.(interface{ SetSourcePool(*packet.PeerPool) }); ok {
-			sp := packet.NewPeerPool(cfg.SrcIPs, time.Duration(cfg.PeerRotateSecs)*time.Second, cfg.SrcStatusPath)
+			sp := packet.NewPeerPool(cfg.SrcIPs, time.Duration(cfg.PeerRotateSecs)*time.Second)
 			s.SetSourcePool(sp)
 			log.Printf("tnl-core: source pool: %d source IPs rotate=%ds", len(cfg.SrcIPs), cfg.PeerRotateSecs)
 		}
@@ -348,8 +348,6 @@ func main() {
 		dev.Close()
 		os.Exit(0)
 	}()
-
-	wireRotateSignals(b)
 
 	if err := b.Run(); err != nil {
 		log.Printf("tnl-core: stopped: %v", err)
@@ -397,7 +395,7 @@ func pinSource(b any, cfg *Config) string {
 			return pinBySpoof
 		}
 
-		s.SetSourcePool(packet.NewPeerPool([]string{cfg.BindIP}, 0, ""))
+		s.SetSourcePool(packet.NewPeerPool([]string{cfg.BindIP}, 0))
 		return pinByPool
 	}
 	return pinUnsupported

@@ -2,36 +2,36 @@ package packet
 
 import "testing"
 
-func TestActiveEdgeNotCorruptedByARotationStep(t *testing.T) {
-	snis := []wsSNIEntry{{host: "a.example"}, {host: "b.example"}}
-	p := newWSPool([]string{"1.1.1.1", "2.2.2.2"}, snis, "")
+// The published pair is what the node keys its verdict on, so it must name what the CARRIER is on --
+// never what the cursor has stepped to while a warm dial is still being built.
+func TestThePublishedPairIsNotCorruptedByARotationStep(t *testing.T) {
+	hosts := []wsSNIEntry{{host: "a.example"}, {host: "b.example"}}
+	b, p := edgeCarrier(t, []string{"1.1.1.1", "2.2.2.2"}, hosts)
 
 	ip0, sni0, ok := p.current()
 	if !ok {
 		t.Fatal("current: pool empty")
 	}
-	if p.active != "" {
-		t.Fatalf("current() must not publish the active edge; got %q", p.active)
-	}
-
-	activeCombo := activeLabel(ip0, sni0.host)
-	p.setActive(activeCombo)
-	if p.active != activeCombo {
-		t.Fatalf("setActive: active = %q, want %q", p.active, activeCombo)
+	b.pretendConnected(sni0.host, ip0)
+	if low, high := b.livePairNow(); low != sni0.host || high != ip0 {
+		t.Fatalf("the connected pair is %s · %s, want %s · %s", high, low, ip0, sni0.host)
 	}
 
 	p.advance()
 	ipN, sniN, _ := p.current()
-	nextCombo := activeLabel(ipN, sniN.host)
-	if nextCombo == activeCombo {
+	if ipN == ip0 && sniN.host == sni0.host {
 		t.Fatal("test setup: the rotation step resolved back to the live edge")
 	}
-	if p.active != activeCombo {
-		t.Fatalf("a rotation step corrupted the active edge: active = %q, want %q", p.active, activeCombo)
+	if low, high := b.livePairNow(); low != sni0.host || high != ip0 {
+		t.Fatalf("a rotation step moved the published pair to %s · %s while the carrier is still on "+
+			"%s · %s — a verdict arriving now would burn the pair nothing measured", high, low, ip0, sni0.host)
+	}
+	if got := b.readStatus(t).Pair; got.Low != sni0.host || got.High != ip0 {
+		t.Fatalf("and the file the node reads says %+v", got)
 	}
 
-	p.setActive(nextCombo)
-	if p.active != nextCombo {
-		t.Fatalf("after landing: active = %q, want %q", p.active, nextCombo)
+	b.pretendConnected(sniN.host, ipN)
+	if low, high := b.livePairNow(); low != sniN.host || high != ipN {
+		t.Fatalf("after landing: %s · %s, want %s · %s", high, low, ipN, sniN.host)
 	}
 }

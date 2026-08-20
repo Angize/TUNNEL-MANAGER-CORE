@@ -1,38 +1,23 @@
 package packet
 
-import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"testing"
-)
+import "testing"
 
 func TestLoopWholeEdgeOutage(t *testing.T) {
-	dir := t.TempDir()
-	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), filepath.Join(dir, "st.json"))
+	b, p := edgeCarrier(t, []string{"e1", "e2"}, snis("s1", "s2"))
 	clk := int64(10000)
 	p.now = func() int64 { return clk }
-	ip, sni, _ := p.current()
-	p.setActive(activeLabel(ip, sni.host))
-	b := &TCP{pool: p}
-	b.armEdgeWalk()
 	armAndSpendTheFreeRungs(t, b)
 
-	send := func(c poolCmd) {
-		d, _ := json.Marshal(c)
-		if err := os.WriteFile(p.cmdPath(), d, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		b.pollWsCmd()
-	}
 	seen := map[string]int{}
 	edges := map[string]bool{}
 	for round := 1; round <= 4; round++ {
 		ip, e, _ := p.current()
-		p.setActive(activeLabel(ip, e.host))
+		b.pretendConnected(e.host, ip)
 		seen[ip+"|"+e.host]++
 		edges[ip] = true
-		send(poolCmd{Cmd: cmdFail, IP: ip, SNI: e.host})
+		if !b.tunFailUntilItMoves(t, e.host, ip) {
+			t.Fatalf("round %d: the pool would not move off %s/%s", round, ip, e.host)
+		}
 	}
 	if len(seen) < 3 {
 		t.Fatalf("four rounds only reached %d combinations: %v — the walk is not covering the matrix", len(seen), seen)
@@ -42,10 +27,10 @@ func TestLoopWholeEdgeOutage(t *testing.T) {
 	}
 
 	ip, e, _ := p.current()
-	p.setActive(activeLabel(ip, e.host))
+	b.pretendConnected(e.host, ip)
 	p.markSuspect("ip", ip, "test")
 	p.markSuspect("sni", e.host, "test")
-	send(poolCmd{Cmd: cmdOK, IP: ip, SNI: e.host})
+	b.tunOK(t, e.host, ip)
 	p.mu.Lock()
 	stillIP, stillSNI := !p.ipHealth.healthy(ip), !p.sniHealth.healthy(e.host)
 	p.mu.Unlock()
@@ -53,21 +38,18 @@ func TestLoopWholeEdgeOutage(t *testing.T) {
 		t.Fatalf("a carrying combination stayed condemned: ip=%v sni=%v", stillIP, stillSNI)
 	}
 
-	send(poolCmd{Kind: "ip", Key: "e2"})
+	b.operatorPin(t, "ip", "e2")
 	if got, _, _ := p.current(); got != "e2" {
 		t.Fatalf("the operator's pin did not land after a run of verdicts: current=%s", got)
 	}
 }
 
 func TestLoopWholeDirectOutage(t *testing.T) {
-	dir := t.TempDir()
-	b := &TCP{isClient: true}
-	b.SetPeerPool(NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")))
-	b.SetSourcePool(NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")))
+	b, pp, sp := peerCarrier(t, []string{"d1", "d2", "d3"}, []string{"s1", "s2"})
 	dsts, srcs := map[string]bool{}, map[string]bool{}
 	for round := 1; round <= 6; round++ {
-		dsts[b.pp.current()] = true
-		srcs[b.sp.current()] = true
+		dsts[pp.current()] = true
+		srcs[sp.current()] = true
 		tcpWalk(b)
 	}
 	if len(dsts) < 3 {

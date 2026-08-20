@@ -22,9 +22,9 @@ func burnUntilDue(t *testing.T, p *PeerPool, at int, clk *int64) {
 
 func TestProactiveRotationRetriesADueBurnButNotAPendingOne(t *testing.T) {
 	clk := int64(1000)
-	dst := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 0, "")
+	dst := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 0)
 	dst.now = func() int64 { return clk }
-	src := NewPeerPool([]string{"192.0.2.1", "192.0.2.2"}, 0, "")
+	src := NewPeerPool([]string{"192.0.2.1", "192.0.2.2"}, 0)
 	src.now = func() int64 { return clk }
 	b := &TCP{isClient: true}
 	b.SetPeerPool(dst)
@@ -47,7 +47,7 @@ func TestProactiveRotationRetriesADueBurnButNotAPendingOne(t *testing.T) {
 		t.Fatalf("the status writer would publish %s while the tunnel dials %s", got, rotated)
 	}
 
-	p2 := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 0, "")
+	p2 := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 0)
 	p2.now = func() int64 { return clk }
 	p2.mu.Lock()
 	p2.health.recs["10.0.0.2"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600}
@@ -75,12 +75,12 @@ func TestFailoverLandsOnADueEndpointAndIsNotSticky(t *testing.T) {
 		want  string
 	}{
 
-		{"the retry failed", func(p *PeerPool) { p.fail() }, "10.0.0.1"},
+		{"the retry failed", func(p *PeerPool) { p.fail("tun-probe") }, "10.0.0.1"},
 		{"the node reported it carrying", func(p *PeerPool) { p.clearBurn("10.0.0.2") }, "10.0.0.2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clk := int64(1000)
-			p := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 0, "")
+			p := NewPeerPool([]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, 0)
 			p.now = func() int64 { return clk }
 			burnUntilDue(t, p, 1, &clk)
 			p.mu.Lock()
@@ -119,7 +119,7 @@ func TestEveryAdvanceAgreesWithCurrent(t *testing.T) {
 		for _, proactive := range []bool{true, false} {
 			t.Run(tc.name, func(t *testing.T) {
 				clk := int64(100000)
-				p := NewPeerPool([]string{"a", "b", "c", "d"}, 0, "")
+				p := NewPeerPool([]string{"a", "b", "c", "d"}, 0)
 				p.now = func() int64 { return clk }
 				p.mu.Lock()
 				for _, i := range tc.burnedDue {
@@ -143,8 +143,8 @@ func TestEveryAdvanceAgreesWithCurrent(t *testing.T) {
 }
 
 func TestTheRotationWalksEveryCombination(t *testing.T) {
-	dst := NewPeerPool([]string{"d1", "d2"}, time.Minute, "")
-	src := NewPeerPool([]string{"s1", "s2"}, time.Minute, "")
+	dst := NewPeerPool([]string{"d1", "d2"}, time.Minute)
+	src := NewPeerPool([]string{"s1", "s2"}, time.Minute)
 	rc := newRotationController(dst, src)
 	rotDst := func(bool) { dst.nextEndpoint(true) }
 	rotSrc := func(bool) { src.nextEndpoint(true) }
@@ -184,9 +184,9 @@ func TestTheRotationWalksEveryCombination(t *testing.T) {
 
 func TestASourceIsOnlyBlamedAfterARealLap(t *testing.T) {
 	clk := int64(1000)
-	dst := NewPeerPool([]string{"d1", "d2"}, 0, "")
+	dst := NewPeerPool([]string{"d1", "d2"}, 0)
 	dst.now = func() int64 { return clk }
-	src := NewPeerPool([]string{"s1", "s2"}, 0, "")
+	src := NewPeerPool([]string{"s1", "s2"}, 0)
 	src.now = func() int64 { return clk }
 	dst.mu.Lock()
 	dst.health.recs["d2"] = &healthRec{state: stateSuspect, nextRetest: clk + 3600}
@@ -194,7 +194,7 @@ func TestASourceIsOnlyBlamedAfterARealLap(t *testing.T) {
 
 	rc := newRotationController(dst, src)
 	srcMoves := 0
-	rotDst := func(bool) { dst.fail() }
+	rotDst := func(bool) { dst.fail("tun-probe") }
 	rotSrc := func(bool) { srcMoves++ }
 	for i := 0; i < 3; i++ {
 		rc.fail(rotDst, rotSrc)
@@ -203,8 +203,8 @@ func TestASourceIsOnlyBlamedAfterARealLap(t *testing.T) {
 		t.Fatalf("with ONE eligible destination every ask is a full lap, so the source moves each time; got %d", srcMoves)
 	}
 
-	dst2 := NewPeerPool([]string{"d1", "d2"}, 0, "")
-	src2 := NewPeerPool([]string{"s1", "s2"}, 0, "")
+	dst2 := NewPeerPool([]string{"d1", "d2"}, 0)
+	src2 := NewPeerPool([]string{"s1", "s2"}, 0)
 	rc2 := newRotationController(dst2, src2)
 	srcMoves = 0
 	rc2.fail(func(bool) {}, rotSrc)

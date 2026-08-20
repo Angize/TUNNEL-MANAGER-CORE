@@ -16,7 +16,7 @@ const usableLoopbackIP = "127.0.0.1"
 func TestRawAndFluxRefuseASourceThisHostCannotSendFrom(t *testing.T) {
 
 	t.Run("raw rotation undoes the move", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0)
 		r := &Raw{isClient: true}
 		r.link = &directLink{r: r}
 		r.SetSourcePool(sp)
@@ -33,7 +33,7 @@ func TestRawAndFluxRefuseASourceThisHostCannotSendFrom(t *testing.T) {
 	})
 
 	t.Run("flux rotation undoes the move", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0)
 		f := &Flux{isClient: true}
 		f.SetSourcePool(sp)
 		if got := srcOf(f.localIP.Load()); got != usableLoopbackIP {
@@ -54,7 +54,7 @@ func TestRawAndFluxRefuseASourceThisHostCannotSendFrom(t *testing.T) {
 		log.SetOutput(&sink)
 		defer log.SetOutput(old)
 
-		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0, "")
+		sp := NewPeerPool([]string{usableLoopbackIP, unusableIP}, 0)
 		r := &Raw{isClient: true}
 		r.link = &directLink{r: r}
 		r.SetSourcePool(sp)
@@ -77,7 +77,7 @@ func TestRawAndFluxRefuseASourceThisHostCannotSendFrom(t *testing.T) {
 	})
 
 	t.Run("raw seed refuses an unusable first entry", func(t *testing.T) {
-		sp := NewPeerPool([]string{unusableIP, usableLoopbackIP}, 0, "")
+		sp := NewPeerPool([]string{unusableIP, usableLoopbackIP}, 0)
 		r := &Raw{isClient: true}
 		r.link = &directLink{r: r}
 		r.SetSourcePool(sp)
@@ -87,7 +87,7 @@ func TestRawAndFluxRefuseASourceThisHostCannotSendFrom(t *testing.T) {
 	})
 
 	t.Run("flux seed refuses an unusable first entry", func(t *testing.T) {
-		sp := NewPeerPool([]string{unusableIP, usableLoopbackIP}, 0, "")
+		sp := NewPeerPool([]string{unusableIP, usableLoopbackIP}, 0)
 		f := &Flux{isClient: true}
 		f.SetSourcePool(sp)
 		if got := srcOf(f.localIP.Load()); got == unusableIP {

@@ -9,9 +9,9 @@ import (
 
 func TestLandingOnACondemnedEndpointIsNotARetestOfIt(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0)
 	p.now = func() int64 { return clk }
-	p.fail()
+	p.fail("tun-probe")
 
 	p.mu.Lock()
 	was := *p.health.rec("a")
@@ -35,10 +35,10 @@ func TestLandingOnACondemnedEndpointIsNotARetestOfIt(t *testing.T) {
 
 func TestACondemnedPoolDoesNotClimbTheLadderWhileItsBackoffsRun(t *testing.T) {
 	clk := int64(1000)
-	dst := NewPeerPool([]string{"d1", "d2"}, 0, "")
+	dst := NewPeerPool([]string{"d1", "d2"}, 0)
 	dst.now = func() int64 { return clk }
 	rc := newRotationController(dst, nil)
-	rot := func(bool) { dst.fail() }
+	rot := func(bool) { dst.fail("tun-probe") }
 
 	rc.fail(rot, nil)
 	rc.fail(rot, nil)
@@ -62,10 +62,10 @@ func TestACondemnedPoolDoesNotClimbTheLadderWhileItsBackoffsRun(t *testing.T) {
 
 func TestTheTimerRetriesACondemnedEndpointOnlyWhenItsBackoffRanOut(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0)
 	p.now = func() int64 { return clk }
-	p.fail()
-	p.fail()
+	p.fail("tun-probe")
+	p.fail("tun-probe")
 
 	if a, moved := p.nextEndpoint(true); moved {
 		t.Errorf("the rotation timer moved onto %q while its backoff was still running. Every move "+

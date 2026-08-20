@@ -8,10 +8,10 @@ import (
 func rungLadder(t *testing.T) (rc *rotationController, rolls, drops, burns *int) {
 	t.Helper()
 	dir := t.TempDir()
-	dst := NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json"))
-	src := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json"))
+	dst := NewPeerPool([]string{"d1", "d2", "d3"}, 0)
+	src := NewPeerPool([]string{"s1", "s2"}, 0)
 	rc = newRotationController(dst, src)
-	rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
+	rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
 	rolls, drops, burns = new(int), new(int), new(int)
 	rc.port.setRoll(func() bool { *rolls++; return true })
 	rc.session.setDrop(func() bool { *drops++; return true })
@@ -86,8 +86,8 @@ func TestTrafficCrossingRefillsBothRungs(t *testing.T) {
 		t.Fatalf("setup: nothing should have burned yet, got %d", *burns)
 	}
 
-	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdOK, Key: rc.dst.current()})
-	rc.pollPins(func() {}, func() {}, func(bool) {}, func(bool) {}, nil, atPathEpoch)
+	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdOK, Low: rc.dst.current(), High: rc.src.current()})
+	rc.poll(func(bool) {}, func(bool) {}, nil, atPathEpoch)
 
 	for i := 1; i <= portTries+1; i++ {
 		rc.fail(rot, rot)
@@ -114,9 +114,7 @@ func TestAPinnedTunnelStillHandshakesAndKeepsItsAllowance(t *testing.T) {
 		t.Errorf("a pinned tunnel refused to handshake again (drops=%d)", *drops)
 	}
 	if !rc.dst.isPinned() {
-		t.Error("the pin was released by rounds that only redrew and re-handshaked")
-	}
-	if rc.pinFails != 0 {
-		t.Errorf("the pin's allowance was spent on free steps (pinFails=%d)", rc.pinFails)
+		t.Error("the pin was released by rounds that only redrew and re-handshaked — both are free and " +
+			"blame nobody, so neither is a second opinion about the operator's pick")
 	}
 }

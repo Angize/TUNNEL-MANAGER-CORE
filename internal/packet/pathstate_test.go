@@ -33,20 +33,20 @@ func liveVerdict(t *testing.T, path string, epoch int64, c poolCmd) {
 
 func TestAStaleVerdictChangesNothingAndACurrentOneStillBurns(t *testing.T) {
 	dir := t.TempDir()
-	dst := NewPeerPool([]string{"d1", "d2"}, 0, filepath.Join(dir, "peerpool"))
+	dst := NewPeerPool([]string{"d1", "d2"}, 0)
 	rc := newRotationController(dst, nil)
-	rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
-	noop, rot := func() {}, func(bool) { dst.fail() }
+	rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
+	rot := func(bool) { dst.fail("tun-probe") }
 
 	stale := int64(testPathEpoch - 1)
-	liveVerdict(t, rc.verdict, stale, poolCmd{Cmd: cmdFail, Key: "d1"})
-	rc.pollPins(noop, noop, rot, rot, nil, atPathEpoch)
+	liveVerdict(t, rc.verdict, stale, poolCmd{Cmd: cmdFail, Low: "d1"})
+	rc.poll(rot, rot, nil, atPathEpoch)
 	if burned := burnedIn(dst); len(burned) != 0 {
 		t.Errorf("a verdict about epoch %d burned %v while the carrier is on %d", stale, burned, testPathEpoch)
 	}
 
-	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdFail, Key: "d1"})
-	rc.pollPins(noop, noop, rot, rot, nil, atPathEpoch)
+	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdFail, Low: "d1"})
+	rc.poll(rot, rot, nil, atPathEpoch)
 	if burned := burnedIn(dst); !burned["d1"] {
 		t.Error("a verdict on the LIVE path must still burn — the guard drops only the stale one")
 	}

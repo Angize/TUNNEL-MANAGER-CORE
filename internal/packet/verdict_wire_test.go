@@ -10,9 +10,9 @@ import (
 func judgedPool(t *testing.T, addrs ...string) (*PeerPool, *rotationController) {
 	t.Helper()
 	dir := t.TempDir()
-	p := NewPeerPool(addrs, 0, filepath.Join(dir, "pool.json"))
+	p := NewPeerPool(addrs, 0)
 	rc := newRotationController(p, nil)
-	rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
+	rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
 	return p, rc
 }
 
@@ -27,16 +27,16 @@ func nodeCmd(t *testing.T, rc *rotationController, c poolCmd) (rotated []string)
 		t.Fatalf("write cmd: %v", err)
 	}
 	rotDst := func(bool) {
-		rc.dst.fail()
+		rc.dst.fail("tun-probe")
 		rotated = append(rotated, "dst")
 	}
 	rotSrc := func(bool) {
 		if rc.src != nil {
-			rc.src.fail()
+			rc.src.fail("tun-probe")
 		}
 		rotated = append(rotated, "src")
 	}
-	rc.pollPins(func() {}, func() {}, rotDst, rotSrc, nil, atPathEpoch)
+	rc.poll(rotDst, rotSrc, nil, atPathEpoch)
 	return rotated
 }
 
@@ -45,10 +45,10 @@ const testPathEpoch = 7
 func atPathEpoch() int64 { return testPathEpoch }
 
 // The one walk policy, driven through the carrier's own swap funcs -- production reaches it via
-// rc.pollPins -> judge -> fail -> walk. Returns whether an ENDPOINT WAS BURNED, which is the only
-// honest answer: a walk that finds nothing better leaves the pool where it is.
+// rc.poll -> judge -> fail -> walk. Returns whether an ENDPOINT WAS BURNED, which is the only honest
+// answer: a walk that finds nothing better leaves the pool where it is.
 func tcpWalk(b *TCP) bool {
-	_, burned := b.rc.walk(b.rotateDestTCP, b.rotateSrcTCP)
+	_, burned := b.rc.walk(b.rotateLowTCP, b.rotateHighTCP)
 	return burned
 }
 
@@ -68,7 +68,7 @@ func TestAFreshFailStillBurnsAndAdvances(t *testing.T) {
 	p, rc := judgedPool(t, "a", "b")
 
 	measured := p.current()
-	rotated := nodeCmd(t, rc, poolCmd{Cmd: cmdFail, Key: measured})
+	rotated := nodeCmd(t, rc, poolCmd{Cmd: cmdFail, Low: measured})
 
 	if !burnedIn(p)[measured] {
 		t.Fatalf("%s was named and active, and was not burned", measured)
@@ -84,15 +84,15 @@ func TestAFreshFailStillBurnsAndAdvances(t *testing.T) {
 func TestAKeyedOKStillClearsOnlyWhatItNames(t *testing.T) {
 	p, rc := judgedPool(t, "a", "b")
 
-	nodeCmd(t, rc, poolCmd{Cmd: cmdFail, Key: "a"})
+	nodeCmd(t, rc, poolCmd{Cmd: cmdFail, Low: "a"})
 	if !burnedIn(p)["a"] {
 		t.Fatal("setup: a was not burned")
 	}
-	nodeCmd(t, rc, poolCmd{Cmd: cmdOK, Key: "b"})
+	nodeCmd(t, rc, poolCmd{Cmd: cmdOK, Low: "b"})
 	if !burnedIn(p)["a"] {
 		t.Fatal("an OK naming b cleared a")
 	}
-	nodeCmd(t, rc, poolCmd{Cmd: cmdOK, Key: "a"})
+	nodeCmd(t, rc, poolCmd{Cmd: cmdOK, Low: "a"})
 	if burnedIn(p)["a"] {
 		t.Fatal("an OK naming a did not clear a")
 	}

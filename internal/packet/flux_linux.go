@@ -631,7 +631,7 @@ func (f *Flux) SetPeerPool(pp *PeerPool) {
 	if f.isClient {
 		f.pp = pp
 		if pp != nil {
-			pp.setEvent("dst", f.st.event)
+			joinStatus(f.st, pp, "dst")
 
 			m := buildSrcAllow(pp.all())
 			f.poolIPs = m
@@ -662,12 +662,12 @@ func (f *Flux) SetSourcePool(sp *PeerPool) {
 	f.sp = sp
 
 	if sp != nil {
-		sp.setEvent("src", f.st.event)
+		joinStatus(f.st, sp, "src")
 		if ip := adoptableSource("flux", sp, sp.current(), &f.srcWarned); ip != nil {
 			f.localIP.Store(&net.IPAddr{IP: ip})
 		} else {
 
-			sp.fail()
+			sp.fail("unbindable")
 		}
 	}
 }
@@ -727,6 +727,14 @@ func (f *Flux) rotatePeerFlux(proactive bool) {
 	wakeLoop(f.wake)
 }
 
+func (f *Flux) pinAppliedFlux(kind, _ string) {
+	if kind == "src" {
+		f.adoptSourceFlux()
+		return
+	}
+	f.adoptPeerFlux()
+}
+
 func (f *Flux) adoptPeerFlux() {
 	if f.pp == nil {
 		return
@@ -755,7 +763,7 @@ func (f *Flux) adoptSourceFlux() {
 	addr := f.sp.current()
 	ip := adoptableSource("flux", f.sp, addr, &f.srcWarned)
 	if ip == nil {
-		f.sp.fail()
+		f.sp.fail("unbindable")
 		return
 	}
 	f.localIP.Store(&net.IPAddr{IP: ip})
@@ -764,18 +772,15 @@ func (f *Flux) adoptSourceFlux() {
 
 }
 
-func (f *Flux) ProbeAllNow() {
-	probeAllPools(f.pp, f.sp)
-}
-
 func (f *Flux) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, f.closeCh, f.adoptPeerFlux, f.adoptSourceFlux, f.rotatePeerFlux, f.rotateSourceFlux, f.st.event, f.st.pathEpoch)
+	runPinPoll(rc, f.closeCh, f.pinAppliedFlux, f.rotatePeerFlux, f.rotateSourceFlux, f.st.pathEpoch)
 }
 
 func (f *Flux) clientLoop() {
 	rc := newRotationController(f.pp, f.sp)
 	rc.session.setDrop(f.rehandshake)
-	rc.setVerdict(f.st.verdictPath())
+	rc.setMailboxes(f.st.verdictPath(), f.st.pinPath())
+	f.st.setPair(rc.pairStatus)
 	if rc.polls() {
 		go f.pinPollLoop(rc)
 	}

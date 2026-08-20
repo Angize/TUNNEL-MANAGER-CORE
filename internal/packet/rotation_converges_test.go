@@ -2,7 +2,6 @@ package packet
 
 import (
 	"fmt"
-	"path/filepath"
 	"testing"
 )
 
@@ -22,7 +21,6 @@ func TestTheDirectWalkFindsTheOnePairThatWorks(t *testing.T) {
 	for _, sh := range shapes {
 		sh := sh
 		t.Run(fmt.Sprintf("%dx%d_good=d%d.s%d", sh.dests, sh.srcs, sh.goodD, sh.goodS), func(t *testing.T) {
-			dir := t.TempDir()
 			dests := make([]string, sh.dests)
 			for i := range dests {
 				dests[i] = fmt.Sprintf("d%d", i+1)
@@ -36,8 +34,8 @@ func TestTheDirectWalkFindsTheOnePairThatWorks(t *testing.T) {
 
 			clk := int64(1000)
 			b := &TCP{isClient: true}
-			b.SetPeerPool(NewPeerPool(dests, 0, filepath.Join(dir, "d.json")))
-			b.SetSourcePool(NewPeerPool(srcs, 0, filepath.Join(dir, "s.json")))
+			b.SetPeerPool(NewPeerPool(dests, 0))
+			b.SetSourcePool(NewPeerPool(srcs, 0))
 			b.pp.now = func() int64 { return clk }
 			b.sp.now = func() int64 { return clk }
 
@@ -96,16 +94,14 @@ func TestTheEdgeWalkFindsTheOneComboThatWorks(t *testing.T) {
 			goodH := fmt.Sprintf("s%d", sh.goodH)
 
 			clk := int64(1000)
-			p := newWSPool(ips, snis(hosts...), filepath.Join(t.TempDir(), "st.json"))
+			b, p := edgeCarrier(t, ips, snis(hosts...))
 			p.now = func() int64 { return clk }
-			b := &TCP{pool: p}
-			b.armEdgeWalk()
 
 			found := 0
 			var seen []string
 			for round := 1; round <= convergeRounds; round++ {
 				ip, sni, _ := p.current()
-				p.setActive(activeLabel(ip, sni.host))
+				b.pretendConnected(sni.host, ip)
 				seen = append(seen, ip+"/"+sni.host)
 				if ip == goodE && sni.host == goodH {
 					p.clearBurn("ip", ip)
@@ -120,7 +116,7 @@ func TestTheEdgeWalkFindsTheOneComboThatWorks(t *testing.T) {
 					t.Fatalf("the walk had settled on %s/%s and then left it for %s/%s (round %d)",
 						goodE, goodH, ip, sni.host, round)
 				}
-				b.burnAdvanceWS(ip, sni.host)
+				b.rc.fail(b.rotateLowTCP, b.rotateHighTCP)
 				clk += 30
 			}
 			t.Fatalf("%d rounds and the walk never reached %s/%s. It visited: %v", convergeRounds,
@@ -131,26 +127,25 @@ func TestTheEdgeWalkFindsTheOneComboThatWorks(t *testing.T) {
 
 func TestNothingWorksAndTheNodeHandsItAllBack(t *testing.T) {
 	t.Run("direct", func(t *testing.T) {
-		dir := t.TempDir()
 		clk := int64(1000)
-		b := &TCP{isClient: true}
-		b.SetPeerPool(NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json")))
-		b.SetSourcePool(NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")))
-		b.pp.now = func() int64 { return clk }
-		b.sp.now = func() int64 { return clk }
+		b, pp, sp := peerCarrier(t, []string{"d1", "d2", "d3"}, []string{"s1", "s2"})
+		pp.now = func() int64 { return clk }
+		sp.now = func() int64 { return clk }
 		for i := 0; i < 12; i++ {
 			tcpWalk(b)
 			clk += 30
 		}
-		b.ProbeAllNow()
+		for _, d := range []string{"d1", "d2", "d3"} {
+			b.operatorRetest(t, "dst", d)
+		}
 
-		if n := b.pp.eligibleCount(); n != 3 {
+		if n := pp.eligibleCount(); n != 3 {
 			t.Fatalf("after the hand-back only %d of 3 destinations can be reached — the pool is still "+
 				"condemned and the walk cannot resume", n)
 		}
 		moved := map[string]bool{}
 		for i := 0; i < 6; i++ {
-			a, _ := b.pp.rotateOnce()
+			a, _ := pp.rotateOnce()
 			moved[a] = true
 		}
 		if len(moved) < 2 {
@@ -160,17 +155,20 @@ func TestNothingWorksAndTheNodeHandsItAllBack(t *testing.T) {
 
 	t.Run("edge", func(t *testing.T) {
 		clk := int64(1000)
-		p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
+		b, p := edgeCarrier(t, []string{"e1", "e2", "e3"}, snis("s1", "s2"))
 		p.now = func() int64 { return clk }
-		b := &TCP{pool: p}
-		b.armEdgeWalk()
 		for i := 0; i < 12; i++ {
 			ip, sni, _ := p.current()
-			p.setActive(activeLabel(ip, sni.host))
-			b.burnAdvanceWS(ip, sni.host)
+			b.pretendConnected(sni.host, ip)
+			b.rc.fail(b.rotateLowTCP, b.rotateHighTCP)
 			clk += 30
 		}
-		p.probeAllNow()
+		for _, e := range []string{"e1", "e2", "e3"} {
+			b.operatorRetest(t, "ip", e)
+		}
+		for _, h := range []string{"s1", "s2"} {
+			b.operatorRetest(t, "sni", h)
+		}
 
 		combos := map[string]bool{}
 		for i := 0; i < 12; i++ {

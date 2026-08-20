@@ -1,16 +1,14 @@
 package packet
 
 import (
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 )
 
 func TestRotationControllerIsRaceFree(t *testing.T) {
-	dir := t.TempDir()
-	dst := NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json"))
-	src := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json"))
+	dst := NewPeerPool([]string{"d1", "d2", "d3"}, 0)
+	src := NewPeerPool([]string{"s1", "s2"}, 0)
 	rc := newRotationController(dst, src)
 	rc.rotate = time.Millisecond
 	rc.rotateAt = time.Now()

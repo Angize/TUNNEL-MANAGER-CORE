@@ -31,8 +31,8 @@ func sourcedPair(t *testing.T, tag string) (cli *UDP, dst, src *PeerPool) {
 	}
 	dir := t.TempDir()
 	cli.SetStatusPath(filepath.Join(dir, "core.json"))
-	dst = NewPeerPool([]string{a1, a2}, 0, filepath.Join(dir, "peerpool"))
-	src = NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0, filepath.Join(dir, "srcpool"))
+	dst = NewPeerPool([]string{a1, a2}, 0)
+	src = NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0)
 	cli.SetPeerPool(dst)
 	cli.SetSourcePool(src)
 	go srv.Run()
@@ -55,7 +55,7 @@ func TestAPacketArrivingIsNotTheJudgeSayingItCarries(t *testing.T) {
 	was := activeOf(src)
 	burned, srcMoved := false, false
 	for i := 0; i < 5 && !(burned && srcMoved); i++ {
-		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Key: activeOf(dst)})
+		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Low: activeOf(dst)})
 		time.Sleep(3 * time.Second)
 		burned = burned || len(burnedIn(dst)) > 0
 		srcMoved = srcMoved || activeOf(src) != was
@@ -77,7 +77,7 @@ func TestTheTimedRotationRunsWhileThereIsNoSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	dst := NewPeerPool([]string{"127.0.0.1:9", "127.0.0.2:9"}, time.Second, "")
+	dst := NewPeerPool([]string{"127.0.0.1:9", "127.0.0.2:9"}, time.Second)
 	cli.SetStatusPath(filepath.Join(t.TempDir(), "core.json"))
 	cli.SetPeerPool(dst)
 	go cli.Run()

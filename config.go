@@ -68,11 +68,8 @@ type Config struct {
 
 	PeerIPs        []string `json:"peer_ips"`
 	PeerRotateSecs int      `json:"peer_rotate_secs"`
-	PeerStatusPath string   `json:"peer_status_path"`
 
 	SrcIPs []string `json:"src_ips"`
-
-	SrcStatusPath string `json:"src_status_path"`
 
 	PeerSrcIPs []string `json:"peer_src_ips"`
 
@@ -114,8 +111,6 @@ type Config struct {
 	WSEdgeIPs    []string `json:"ws_edge_ips"`
 	WSEdgeSNIs   []WSSNI  `json:"ws_edge_snis"`
 	WSRotateSecs int      `json:"ws_rotate_secs"`
-
-	WSStatusPath string `json:"ws_status_path"`
 
 	StatusPath string `json:"status_path"`
 

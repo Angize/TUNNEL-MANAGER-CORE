@@ -75,11 +75,15 @@ func (h healthSet) clearAll() bool {
 	return true
 }
 
-func (h healthSet) probeAllNow() {
-	now := h.now()
-	for _, r := range h.recs {
-		r.nextRetest = now
+// End ONE entry's wait. The operator asked for this key, not for the whole pool: a single button that
+// zeroed every wait made the other entries' backoff a lie.
+func (h healthSet) retestNow(key string) bool {
+	r := h.recs[key]
+	if r == nil {
+		return false
 	}
+	r.nextRetest = h.now()
+	return true
 }
 
 func (h healthSet) countEligible(keys []string) int {

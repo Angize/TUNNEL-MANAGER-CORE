@@ -43,15 +43,12 @@ func TestACannotLandPinEndsInsideTenSeconds(t *testing.T) {
 			worstGap = g
 		}
 	}
-	attempts := time.Duration(pinFailRelease) * connectTimeout
-	gaps := time.Duration(pinFailRelease-1) * worstGap
-	total := attempts + gaps
-
-	if total > 10*time.Second {
-		t.Fatalf("a pin that cannot land takes up to %v (%d attempts x %v + %d gaps x %v) — over the ten "+
-			"seconds an operator is willing to watch. Lower connectTimeout or pinFailRelease.",
-			total, pinFailRelease, connectTimeout, pinFailRelease-1, worstGap)
+	// One refused dial ends the pin, so the operator waits for exactly one connect attempt.
+	if total := connectTimeout; total > 10*time.Second {
+		t.Fatalf("a pin that cannot land takes up to %v — over the ten seconds an operator is willing "+
+			"to watch. Lower connectTimeout.", total)
 	}
+	_ = worstGap
 
 	if connectTimeout < 3*time.Second {
 		t.Fatalf("connectTimeout is %v: under 3s the kernel's third SYN (t=3s) never goes out, so two lost "+

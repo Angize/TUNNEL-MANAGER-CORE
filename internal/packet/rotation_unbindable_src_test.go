@@ -37,8 +37,8 @@ func TestUnbindableSourceRotationIsNotAnnounced(t *testing.T) {
 	}
 	statusPath := filepath.Join(t.TempDir(), "core.status")
 
-	cli.SetPeerPool(NewPeerPool([]string{d1, d2}, time.Second, ""))
-	cli.SetSourcePool(NewPeerPool([]string{"127.0.0.1", gone}, time.Second, ""))
+	cli.SetPeerPool(NewPeerPool([]string{d1, d2}, time.Second))
+	cli.SetSourcePool(NewPeerPool([]string{"127.0.0.1", gone}, time.Second))
 	cli.SetStatusPath(statusPath)
 
 	go srv.Run()
