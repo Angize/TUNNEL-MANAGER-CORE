@@ -1,12 +1,11 @@
 package packet
 
 import (
-	"path/filepath"
 	"testing"
 )
 
 func TestARejectedCandidateDoesNotLaunderTheLiveSource(t *testing.T) {
-	p := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(t.TempDir(), "s.json"))
+	p := NewPeerPool([]string{"s1", "s2"}, 0)
 	clk := int64(1000)
 	p.now = func() int64 { return clk }
 
@@ -53,8 +52,8 @@ func TestARejectedCandidateDoesNotLaunderTheLiveSource(t *testing.T) {
 }
 
 func TestARejectedCandidateStillUndoesTheRoundsOwnBurn(t *testing.T) {
-	p := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(t.TempDir(), "s.json"))
-	if _, moved := p.fail(); !moved {
+	p := NewPeerPool([]string{"s1", "s2"}, 0)
+	if _, moved := p.fail("tun-probe"); !moved {
 		t.Fatal("setup: the failover did not move")
 	}
 	p.rejectCandidate("s1")

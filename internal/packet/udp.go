@@ -91,7 +91,7 @@ func (b *UDP) SetPeerPool(pp *PeerPool) {
 	if b.isClient {
 		b.pp = pp
 		if pp != nil {
-			pp.setEvent("dst", b.st.event)
+			joinStatus(b.st, pp, "dst")
 			b.poolIPs = buildSrcAllow(pp.all())
 		}
 	}
@@ -111,8 +111,6 @@ func wakeLoop(ch chan struct{}) {
 	default:
 	}
 }
-
-const pinFailRelease = 2
 
 func (b *UDP) rotatePeerUDP(proactive bool) {
 	if b.pp == nil {
@@ -153,7 +151,7 @@ func (b *UDP) SetSourcePool(sp *PeerPool) {
 	b.sp = sp
 
 	if sp != nil {
-		sp.setEvent("src", b.st.event)
+		joinStatus(b.st, sp, "src")
 		host := sp.current()
 		if h, _, e := net.SplitHostPort(host); e == nil {
 			host = h
@@ -164,7 +162,7 @@ func (b *UDP) SetSourcePool(sp *PeerPool) {
 
 				log.Printf("core/udp: initial source bind to %s failed: %v", host, err)
 
-				b.sp.fail()
+				b.sp.fail("unbindable")
 			}
 			if err == nil {
 				applyConnSockBuf(nc)
@@ -258,20 +256,11 @@ func (b *UDP) adoptSourceUDP() {
 	if b.sp.pinCannotLand(addr) {
 		log.Printf("core/udp: manual jump to source %s abandoned — that IP will not bind on this host", addr)
 	}
-	b.sp.fail()
+	b.sp.fail("unbindable")
 }
 
-func probeAllPools(pp, sp *PeerPool) {
-	if pp != nil {
-		pp.probeAllNow()
-	}
-	if sp != nil {
-		sp.probeAllNow()
-	}
-}
-
-func runPinPoll(rc *rotationController, closeCh <-chan struct{}, adoptPeer, adoptSource func(),
-	rotDst, rotSrc func(proactive bool), ev func(kind, code, detail string), pathEpoch func() int64) {
+func runPinPoll(rc *rotationController, closeCh <-chan struct{}, applied func(kind, key string),
+	rotLow, rotHigh func(proactive bool), pathEpoch func() int64) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
@@ -279,17 +268,21 @@ func runPinPoll(rc *rotationController, closeCh <-chan struct{}, adoptPeer, adop
 		case <-closeCh:
 			return
 		case <-t.C:
-			rc.pollPins(adoptPeer, adoptSource, rotDst, rotSrc, ev, pathEpoch)
+			rc.poll(rotLow, rotHigh, applied, pathEpoch)
 		}
 	}
 }
 
-func (b *UDP) ProbeAllNow() {
-	probeAllPools(b.pp, b.sp)
+func (b *UDP) pinAppliedUDP(kind, _ string) {
+	if kind == "src" {
+		b.adoptSourceUDP()
+		return
+	}
+	b.adoptPeerUDP()
 }
 
 func (b *UDP) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, b.closeCh, b.adoptPeerUDP, b.adoptSourceUDP, b.rotatePeerUDP, b.rotateSourceUDP, b.st.event, b.st.pathEpoch)
+	runPinPoll(rc, b.closeCh, b.pinAppliedUDP, b.rotatePeerUDP, b.rotateSourceUDP, b.st.pathEpoch)
 }
 
 func (b *UDP) SetStatusPath(path string) {
@@ -828,7 +821,8 @@ func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {
 func (b *UDP) clientLoop() {
 	rc := newRotationController(b.pp, b.sp)
 	rc.session.setDrop(b.rehandshake)
-	rc.setVerdict(b.st.verdictPath())
+	rc.setMailboxes(b.st.verdictPath(), b.st.pinPath())
+	b.st.setPair(rc.pairStatus)
 	if rc.polls() {
 		go b.pinPollLoop(rc)
 	}

@@ -1,18 +1,13 @@
 package packet
 
-import (
-	"path/filepath"
-	"testing"
-)
+import "testing"
 
 func TestASingleSNIPoolBurnsTheEdge(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2", "e3"}, snis("only.example"), filepath.Join(t.TempDir(), "st.json"))
-	b := &TCP{pool: p}
-	b.armEdgeWalk()
+	b, p := edgeCarrier(t, []string{"e1", "e2", "e3"}, snis("only.example"))
 	ip, sni, _ := p.current()
-	p.setActive(activeLabel(ip, sni.host))
+	b.pretendConnected(sni.host, ip)
 
-	if !b.burnAdvanceWS(ip, sni.host) {
+	if !b.tunFail(t, sni.host, ip) {
 		t.Fatal("the verdict did nothing")
 	}
 
@@ -36,13 +31,11 @@ func TestASingleSNIPoolBurnsTheEdge(t *testing.T) {
 }
 
 func TestAMultiSNIPoolStillBurnsTheSNI(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2", "s3"), filepath.Join(t.TempDir(), "st.json"))
-	b := &TCP{pool: p}
-	b.armEdgeWalk()
+	b, p := edgeCarrier(t, []string{"e1", "e2"}, snis("s1", "s2", "s3"))
 	ip, sni, _ := p.current()
-	p.setActive(activeLabel(ip, sni.host))
+	b.pretendConnected(sni.host, ip)
 
-	if !b.burnAdvanceWS(ip, sni.host) {
+	if !b.tunFail(t, sni.host, ip) {
 		t.Fatal("the verdict did nothing")
 	}
 	p.mu.Lock()
@@ -60,11 +53,8 @@ func TestAMultiSNIPoolStillBurnsTheSNI(t *testing.T) {
 }
 
 func TestASingleDestinationDirectPoolBurnsNothing(t *testing.T) {
-	dir := t.TempDir()
-	b := &TCP{isClient: true}
-	b.SetPeerPool(NewPeerPool([]string{"d1"}, 0, filepath.Join(dir, "d.json")))
-	b.SetSourcePool(NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json")))
-	src := b.sp.current()
+	b, _, sp := peerCarrier(t, []string{"d1"}, []string{"s1", "s2"})
+	src := sp.current()
 	tcpWalk(b)
 
 	b.pp.mu.Lock()

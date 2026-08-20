@@ -12,7 +12,7 @@ import (
 const unbindableSrc = "203.0.113.9"
 
 func TestUnusableSourceIsBurnedNotSilentlyIgnored(t *testing.T) {
-	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, 0, "")
+	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, 0)
 	b := &TCP{sp: sp}
 	if got := b.sourceIP(); got != unbindableSrc {
 		t.Fatalf("setup: the pool should start on %s, got %s", unbindableSrc, got)
@@ -78,7 +78,7 @@ func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialTCP: %v", err)
 	}
-	sp := NewPeerPool([]string{"127.0.0.1", unbindableSrc}, 0, "")
+	sp := NewPeerPool([]string{"127.0.0.1", unbindableSrc}, 0)
 	cli.SetSourcePool(sp)
 	if !sp.selectEntry(unbindableSrc) {
 		t.Fatalf("selectEntry(%s) refused the pin", unbindableSrc)
@@ -103,7 +103,7 @@ func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 }
 
 func TestAbandoningAJumpNeverCancelsADifferentOne(t *testing.T) {
-	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, 0, "")
+	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, 0)
 	if !sp.selectEntry("127.0.0.1") {
 		t.Fatal("selectEntry refused the jump")
 	}

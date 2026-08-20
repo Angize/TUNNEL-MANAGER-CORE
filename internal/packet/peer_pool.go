@@ -10,33 +10,40 @@ import (
 )
 
 type PeerPool struct {
-	burns      atomic.Uint64
-	mu         sync.Mutex
-	writeMu    sync.Mutex
-	addrs      []string
-	health     healthSet
-	cur        int
-	rotate     time.Duration
-	statusPath string
+	burns  atomic.Uint64
+	mu     sync.Mutex
+	addrs  []string
+	health healthSet
+	cur    int
+	rotate time.Duration
 
-	pinKey   string
-	pinTries int
-
+	pinKey  string
 	pinTook *healthRec
 
 	chosen string
 	now    func() int64
 
-	axis string
-	ev   func(kind, code, detail string)
+	axis  string
+	ev    func(kind, code, detail string)
+	flush func()
 }
 
-// Which half of the matrix this pool is, and where its events go. The pool cannot know either: the
-// carrier owns the status file and decides whether it is the destination axis or the source one.
-func (p *PeerPool) setEvent(axis string, ev func(kind, code, detail string)) {
+// Which half of the matrix this pool is, where its events go, and how it asks the tunnel's one status
+// file to be republished. The pool cannot know any of the three: the carrier owns them.
+func (p *PeerPool) attach(axis string, ev func(kind, code, detail string), flush func()) {
 	p.mu.Lock()
-	p.axis, p.ev = axis, ev
+	p.axis, p.ev, p.flush = axis, ev, flush
 	p.mu.Unlock()
+	p.publish()
+}
+
+func (p *PeerPool) publish() {
+	p.mu.Lock()
+	f := p.flush
+	p.mu.Unlock()
+	if f != nil {
+		f()
+	}
 }
 
 func (p *PeerPool) emit(code, reason string) {
@@ -55,23 +62,21 @@ func (p *PeerPool) dropPin(reason string, matched func() bool) bool {
 	hit := matched()
 	if hit {
 		p.restorePinTookLocked()
-		p.pinKey, p.pinTries = "", 0
+		p.pinKey = ""
 	}
 	p.mu.Unlock()
 	if hit {
-		p.writeStatus()
+		p.publish()
 		p.emit("pin_dropped", reason)
 	}
 	return hit
 }
 
-func NewPeerPool(addrs []string, rotate time.Duration, statusPath string) *PeerPool {
+func NewPeerPool(addrs []string, rotate time.Duration) *PeerPool {
 	cp := make([]string, len(addrs))
 	copy(cp, addrs)
-	p := &PeerPool{addrs: cp, rotate: rotate,
-		statusPath: statusPath, now: func() int64 { return time.Now().Unix() }}
+	p := &PeerPool{addrs: cp, rotate: rotate, now: func() int64 { return time.Now().Unix() }}
 	p.health = newHealthSet(&p.now)
-	p.writeStatus()
 	return p
 }
 
@@ -226,7 +231,7 @@ func (p *PeerPool) advanceEligibleLocked() bool {
 	return false
 }
 
-func (p *PeerPool) fail() (addr string, moved bool) {
+func (p *PeerPool) fail(reason string) (addr string, moved bool) {
 	p.mu.Lock()
 
 	if len(p.addrs) < 2 || p.pinnedLocked() {
@@ -235,14 +240,20 @@ func (p *PeerPool) fail() (addr string, moved bool) {
 		return a, false
 	}
 	prev := p.cur
+	burned := ""
 	if p.burnLocked(p.addrs[p.cur]) {
 		p.burns.Add(1)
+		burned = p.addrs[p.cur]
 	}
 	p.advanceFailLocked()
 	a := p.addrs[p.cur]
 	moved = p.cur != prev
+	axis, ev := p.axis, p.ev
 	p.mu.Unlock()
-	p.writeStatus()
+	if burned != "" && ev != nil {
+		ev("burn", reason, axis+":"+burned)
+	}
+	p.publish()
 	return a, moved
 }
 
@@ -257,16 +268,17 @@ func (p *PeerPool) rotateOnce() (addr string, moved bool) {
 	a := p.addrs[p.cur]
 	p.mu.Unlock()
 	if moved {
-		p.writeStatus()
+		p.publish()
 	}
 	return a, moved
 }
 
+// The walk is the only caller that fails an endpoint, and it only ever gets there from a verdict.
 func (p *PeerPool) nextEndpoint(proactive bool) (addr string, moved bool) {
 	if proactive {
 		return p.rotateOnce()
 	}
-	return p.fail()
+	return p.fail("tun-probe")
 }
 
 func (p *PeerPool) keepCursorOn(addr string) {
@@ -286,7 +298,7 @@ func (p *PeerPool) keepCursorOn(addr string) {
 	}
 	p.mu.Unlock()
 	if moved {
-		p.writeStatus()
+		p.publish()
 	}
 }
 
@@ -308,15 +320,19 @@ func (p *PeerPool) rejectCandidate(prev string) {
 		p.advanceFailLocked()
 	}
 	p.mu.Unlock()
-	p.writeStatus()
+	p.publish()
 }
 
 func (p *PeerPool) clearBurn(addr string) bool {
 	p.mu.Lock()
 	cleared := p.health.clear(addr)
+	axis, ev := p.axis, p.ev
 	p.mu.Unlock()
 	if cleared {
-		p.writeStatus()
+		if ev != nil {
+			ev("heal", "tun-probe", axis+":"+addr)
+		}
+		p.publish()
 	}
 	return cleared
 }
@@ -326,15 +342,43 @@ func (p *PeerPool) restoreAll() {
 	cleared := p.health.clearAll()
 	p.mu.Unlock()
 	if cleared {
-		p.writeStatus()
+		p.publish()
 	}
 }
 
-func (p *PeerPool) probeAllNow() {
+// One entry's wait ends. Nothing is dialled: the entry re-enters the rotation and the tun probe judges
+// it there, which is the only place the answer can come from.
+func (p *PeerPool) retestNow(addr string) bool {
 	p.mu.Lock()
-	p.health.probeAllNow()
+	ok := p.health.retestNow(addr)
 	p.mu.Unlock()
-	p.writeStatus()
+	if ok {
+		p.publish()
+	}
+	return ok
+}
+
+// A burn with no walk behind it: the verdict named an endpoint the pool has already left. The pin still
+// outranks it -- a pinned entry holds its record in pinTook, so writing one here would be undone.
+func (p *PeerPool) markSuspect(addr, reason string) {
+	if addr == "" {
+		return
+	}
+	p.mu.Lock()
+	if p.pinKey == addr {
+		p.mu.Unlock()
+		return
+	}
+	fresh := p.health.burn(addr)
+	axis := p.axis
+	p.mu.Unlock()
+	if fresh {
+		p.burns.Add(1)
+		if p.ev != nil {
+			p.ev("burn", reason, axis+":"+addr)
+		}
+	}
+	p.publish()
 }
 
 func (p *PeerPool) selectEntry(key string) bool {
@@ -346,7 +390,7 @@ func (p *PeerPool) selectEntry(key string) bool {
 			if p.pinKey != "" && p.pinKey != key {
 				p.restorePinTookLocked()
 			}
-			p.pinKey, p.pinTries = key, 0
+			p.pinKey = key
 			p.pinTook = p.health.rec(key)
 			p.health.clear(key)
 			p.pickLocked(idx)
@@ -356,7 +400,7 @@ func (p *PeerPool) selectEntry(key string) bool {
 	}
 	p.mu.Unlock()
 	if ok {
-		p.writeStatus()
+		p.publish()
 	}
 	return ok
 }
@@ -366,11 +410,11 @@ func (p *PeerPool) pinLandedOn(addr string) {
 	changed := p.pinnedLocked() && p.pinKey == addr
 	if changed {
 
-		p.pinKey, p.pinTries, p.pinTook = "", 0, nil
+		p.pinKey, p.pinTook = "", nil
 	}
 	p.mu.Unlock()
 	if changed {
-		p.writeStatus()
+		p.publish()
 	}
 }
 
@@ -381,16 +425,9 @@ func (p *PeerPool) restorePinTookLocked() {
 	p.pinTook = nil
 }
 
-func (p *PeerPool) pinAttemptFailed(addr string) {
-	p.dropPin("cannot-land", func() bool {
-		if p.pinKey == "" || p.pinKey != addr {
-			return false
-		}
-		p.pinTries++
-		return p.pinTries >= pinFailRelease
-	})
-}
-
+// The operator's pick could not be reached. One refused attempt is the whole answer -- waiting for a
+// second only delays the burn that is coming anyway, and leaves the tunnel forced onto an edge it cannot
+// open in the meantime.
 func (p *PeerPool) pinCannotLand(key string) bool {
 	return p.dropPin("cannot-land", func() bool { return p.pinnedLocked() && p.pinKey == key })
 }
@@ -407,20 +444,15 @@ func (p *PeerPool) isPinned() bool {
 	return p.pinnedLocked()
 }
 
-func (p *PeerPool) cmdPath() string {
-	if p.statusPath == "" {
-		return ""
-	}
-	return p.statusPath + ".cmd"
-}
-
+// One shape for every command, whichever pool it reaches. A verdict names the PAIR it measured (low is
+// the digit a fail condemns, high the one that turns on a lap); a pin or a retest names ONE entry by its
+// axis kind. The kinds are the same strings the status file tags its health rows with.
 type poolCmd struct {
 	Cmd  string `json:"cmd"`
-	Key  string `json:"key"`
-	Src  string `json:"src"`
+	Low  string `json:"low"`
+	High string `json:"high"`
 	Kind string `json:"kind"`
-	IP   string `json:"ip"`
-	SNI  string `json:"sni"`
+	Key  string `json:"key"`
 
 	Epoch int64 `json:"epoch"`
 }
@@ -448,7 +480,7 @@ const cmdFail = "fail"
 
 const cmdOK = "ok"
 
-func (p *PeerPool) readCmd() (poolCmd, bool) { return readPoolCmd(p.cmdPath()) }
+const cmdRetest = "retest"
 
 type pinnable interface {
 	isPinned() bool
@@ -467,13 +499,27 @@ type highAxis interface {
 	activeIdx() int
 }
 
+// The two digits a verdict speaks about, whichever pool owns them.
+type poolPair interface {
+	live() (low, high string)
+	kinds() (lowKind, highKind string)
+	keepCursorOn(low, high string)
+	clear(kind, key string) bool
+	burn(kind, key, reason string)
+	pick(kind, key string) bool
+	retest(kind, key string) bool
+}
+
 type walkPolicy struct {
-	mu       sync.Mutex
-	pinFails int
-	od       odometer
-	pins     []pinnable
-	low      lowAxis
-	high     highAxis
+	mu   sync.Mutex
+	od   odometer
+	pins []pinnable
+	low  lowAxis
+	high highAxis
+
+	// walk() holds mu while it calls the arms, and an arm needs to know which digit it is. Reading
+	// `low` from inside one would take mu a second time and stop the tunnel dead.
+	lowAxisSet atomic.Bool
 }
 
 func (w *walkPolicy) pinnedLocked() bool {
@@ -485,35 +531,24 @@ func (w *walkPolicy) pinnedLocked() bool {
 	return false
 }
 
-func (w *walkPolicy) hasLow() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.low != nil
+func (w *walkPolicy) hasLow() bool { return w.lowAxisSet.Load() }
+
+func (w *walkPolicy) setLowLocked(low lowAxis) {
+	w.low = low
+	w.lowAxisSet.Store(low != nil)
 }
 
-func (w *walkPolicy) reset() {
-	w.mu.Lock()
-	w.pinFails = 0
-	w.mu.Unlock()
-	w.od.restart()
-}
+func (w *walkPolicy) reset() { w.od.restart() }
 
 func (w *walkPolicy) walk(rotLow, rotHigh func(proactive bool)) (stepped, lowBurned bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	// The operator's pick does not survive the first verdict against it. Holding it for a second only
+	// delays the burn that is coming anyway, and forces traffic onto the entry meanwhile.
 	if w.pinnedLocked() {
-
-		w.pinFails++
-		if w.pinFails < pinFailRelease {
-			return false, false
-		}
-		w.pinFails = 0
 		for _, p := range w.pins {
 			p.releasePin()
 		}
-
-	} else {
-		w.pinFails = 0
 	}
 	switch {
 	case w.low != nil:
@@ -539,8 +574,11 @@ func (w *walkPolicy) walk(rotLow, rotHigh func(proactive bool)) (stepped, lowBur
 
 type rotationController struct {
 	walkPolicy
+	pair     poolPair
+	liveFn   func() (low, high string)
 	dst, src *PeerPool
 	verdict  string
+	pinbox   string
 	port     portRung
 	session  sessionRung
 	rotate   time.Duration
@@ -562,10 +600,12 @@ func (c *rotationController) bind(dst, src *PeerPool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.dst, c.src = dst, src
-	c.pins, c.low, c.high, c.rotate = nil, nil, nil, 0
+	c.pair = peerPair{dst: dst, src: src}
+	c.pins, c.high, c.rotate = nil, nil, 0
+	c.setLowLocked(nil)
 	if dst != nil {
 		c.pins = append(c.pins, dst)
-		c.low = dst
+		c.setLowLocked(dst)
 		c.rotate = dst.rotate
 	}
 	if src != nil {
@@ -577,12 +617,112 @@ func (c *rotationController) bind(dst, src *PeerPool) {
 	}
 }
 
+// The edge pool wears the same policy: the SNI is the digit a fail condemns and the edge the one that
+// turns on a lap -- but only while there is more than one SNI to vary. With one, nothing varies under
+// the edge, so the edge itself is what a fail condemns.
+func (c *rotationController) bindEdges(p *wsPool) {
+	if p == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pair = edgePair{p}
+	c.pins = []pinnable{p}
+	c.high = wsEdges{p}
+	c.setLowLocked(nil)
+	if p.snisCount() >= 2 {
+		c.setLowLocked(wsSNIs{p})
+	}
+}
+
+// The destination and the source as one pair. The destination is the digit a fail condemns.
+type peerPair struct{ dst, src *PeerPool }
+
+func (p peerPair) kinds() (string, string) { return "dst", "src" }
+
+func (p peerPair) live() (low, high string) {
+	if p.dst != nil {
+		low = p.dst.current()
+	}
+	if p.src != nil {
+		high = p.src.current()
+	}
+	return low, high
+}
+
+func (p peerPair) axis(kind string) *PeerPool {
+	if kind == "src" {
+		return p.src
+	}
+	return p.dst
+}
+
+func (p peerPair) keepCursorOn(low, high string) {
+	p.dst.keepCursorOn(low)
+	p.src.keepCursorOn(high)
+}
+
+func (p peerPair) clear(kind, key string) bool {
+	a := p.axis(kind)
+	return a != nil && key != "" && a.clearBurn(key)
+}
+
+func (p peerPair) burn(kind, key, reason string) {
+	if a := p.axis(kind); a != nil {
+		a.markSuspect(key, reason)
+	}
+}
+
+func (p peerPair) pick(kind, key string) bool {
+	a := p.axis(kind)
+	return a != nil && key != "" && a.selectEntry(key)
+}
+
+func (p peerPair) retest(kind, key string) bool {
+	a := p.axis(kind)
+	return a != nil && key != "" && a.retestNow(key)
+}
+
 func (c *rotationController) active() bool { return c != nil && (c.dst != nil || c.src != nil) }
 
-func (c *rotationController) setVerdict(path string) { c.verdict = path }
+// The pair the node's probe is measuring. Defaults to the cursor, which is right for a carrier that
+// re-points atomically; a carrier that pre-builds its next session sets liveFn, because its cursor can
+// be a step ahead of the traffic.
+func (c *rotationController) livePair() (low, high string) {
+	if c.liveFn != nil {
+		return c.liveFn()
+	}
+	if c.pair == nil {
+		return "", ""
+	}
+	return c.pair.live()
+}
+
+func (c *rotationController) pairStatus() (low, high, lowKind, highKind string) {
+	if c.pair == nil {
+		return "", "", "", ""
+	}
+	lowKind, highKind = c.pair.kinds()
+	low, high = c.livePair()
+	return low, high, lowKind, highKind
+}
+
+// A pool reports through the tunnel's one status file: its events, its health rows, and the flush that
+// republishes both.
+func joinStatus(st *coreStatus, p *PeerPool, axis string) {
+	if p == nil {
+		return
+	}
+	p.attach(axis, st.event, st.write)
+	st.addHealth(p.healthRows)
+}
+
+// The two mailboxes: the node writes verdicts into one, the operator writes pins and retests into the
+// other. Two paths, because one file with two writers loses whichever arrived first.
+func (c *rotationController) setMailboxes(verdict, pin string) { c.verdict, c.pinbox = verdict, pin }
 
 func (c *rotationController) polls() bool {
-	return c != nil && (c.active() || c.verdict != "")
+	return c != nil && (c.active() || c.verdict != "" || c.pinbox != "")
 }
 
 func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurned bool) {
@@ -631,27 +771,34 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 	}
 }
 
-func (c *rotationController) pollPins(applyDst, applySrc func(), rotDst, rotSrc func(proactive bool),
-	ev func(kind, code, detail string), pathEpoch func() int64) {
+// One tick of the two mailboxes, for every carrier and both kinds of pool. Reports whether the pair the
+// carrier is on has changed, so the caller can drop a session that is now pointing at the wrong place.
+func (c *rotationController) poll(rotLow, rotHigh func(proactive bool), applied func(kind, key string),
+	pathEpoch func() int64) (moved bool) {
 	if cmd, ok := readPoolCmd(c.verdict); ok {
-		c.judge(cmd, rotDst, rotSrc, ev, pathEpoch())
+		moved = c.judge(cmd, rotLow, rotHigh, pathEpoch())
 	}
-
-	if c.dst != nil {
-		if cmd, ok := c.dst.readCmd(); ok && cmd.Key != "" && c.dst.selectEntry(cmd.Key) {
-			applyDst()
+	if cmd, ok := readPoolCmd(c.pinbox); ok && cmd.Key != "" && c.pair != nil {
+		switch cmd.Cmd {
+		case cmdRetest:
+			if c.pair.retest(cmd.Kind, cmd.Key) {
+				log.Printf("core: %s %s may be tried again now (operator)", cmd.Kind, cmd.Key)
+			}
+		default:
+			if c.pair.pick(cmd.Kind, cmd.Key) {
+				log.Printf("core: pin %s %s (operator)", cmd.Kind, cmd.Key)
+				if applied != nil {
+					applied(cmd.Kind, cmd.Key)
+				}
+				moved = true
+			}
 		}
 	}
-	if c.src != nil {
-
-		if cmd, ok := c.src.readCmd(); ok && cmd.Key != "" && c.src.selectEntry(cmd.Key) {
-			applySrc()
-		}
-	}
+	return moved
 }
 
-func (c *rotationController) judge(cmd poolCmd, rotDst, rotSrc func(proactive bool),
-	ev func(kind, code, detail string), epoch int64) {
+func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive bool),
+	epoch int64) (moved bool) {
 	switch {
 	case staleVerdict(cmd, epoch):
 
@@ -660,54 +807,71 @@ func (c *rotationController) judge(cmd poolCmd, rotDst, rotSrc func(proactive bo
 	case cmd.Cmd == cmdOK:
 
 		c.success()
-
-		if c.dst != nil && cmd.Key != "" && c.dst.clearBurn(cmd.Key) && ev != nil {
-			ev("heal", "peer-retest", cmd.Key)
+		if c.pair == nil {
+			return false
 		}
-		if c.src != nil && cmd.Src != "" && c.src.clearBurn(cmd.Src) && ev != nil {
-			ev("heal", "src-retest", cmd.Src)
-		}
+		lowKind, highKind := c.pair.kinds()
+		c.pair.clear(lowKind, cmd.Low)
+		c.pair.clear(highKind, cmd.High)
 	case cmd.Cmd == cmdFail:
 
-		if c.fail(rotDst, rotSrc) {
-			log.Printf("core: destination %s failed by the node's tun probe — burning and advancing", cmd.Key)
-			if ev != nil {
-				ev("burn", "tun-probe", "ip:"+cmd.Key)
+		// A tunnel with no pool has no endpoint to name and none to burn, but it still owns the free
+		// rungs -- a redrawn source port and a fresh handshake move it nowhere and need no second
+		// endpoint. Refusing it here would leave those tunnels with no ladder at all.
+		if c.pair == nil {
+			c.fail(rotLow, rotHigh)
+			return false
+		}
+		lowKind, highKind := c.pair.kinds()
+		liveLow, liveHigh := c.livePair()
+		lowGone := cmd.Low != "" && cmd.Low != liveLow
+		highGone := cmd.High != "" && cmd.High != liveHigh
+		if lowGone || highGone {
+
+			// The probe measured a pair we have already left. Condemn the half that is GONE -- the half
+			// still in use has not been judged, and walking away from where we just arrived would undo a
+			// move nothing has faulted. If both are gone, condemn the digit the walk varies.
+			kind, key := lowKind, cmd.Low
+			if highGone && (!lowGone || !c.hasLow()) {
+				kind, key = highKind, cmd.High
 			}
+			log.Printf("core: %s · %s failed by the node's tun probe, but the pool has since moved to "+
+				"%s · %s — burning what was measured, staying put", cmd.Low, cmd.High, liveLow, liveHigh)
+			c.pair.burn(kind, key, "tun-probe")
+			return false
+		}
+
+		// The walk burns whatever the CURSOR is on, so put the cursor back on what the probe measured
+		// first -- a rotation may have stepped it ahead of the traffic. And do not ask current() again
+		// before the walk: it steps PAST a burned entry, which would undo the cursor placed here and
+		// land the burn on the entry after it.
+		c.pair.keepCursorOn(liveLow, liveHigh)
+		burned := c.fail(rotLow, rotHigh)
+
+		// The walk turns the CURSOR. The live pair does not move until the carrier reconnects onto it,
+		// so asking that instead would report no movement and leave the session on a burned entry.
+		nowLow, nowHigh := c.pair.live()
+		moved = burned || nowLow != liveLow || nowHigh != liveHigh
+		if moved {
+			log.Printf("core: %s · %s failed by the node's tun probe — the ladder walked off it",
+				cmd.Low, cmd.High)
 		}
 	}
+	return moved
 }
 
-type peerPoolStatus struct {
-	Active  string         `json:"active"`
-	Addrs   []string       `json:"addrs"`
-	Health  []healthStatus `json:"health"`
-	Pin     string         `json:"pin"`
-	Updated int64          `json:"updated_unix"`
-}
-
-func (p *PeerPool) writeStatus() {
-	if p.statusPath == "" {
-		return
-	}
-
-	p.writeMu.Lock()
-	defer p.writeMu.Unlock()
+// Every entry, not only the burned ones: the panel builds its list from this, and an entry that is
+// missing reads as an entry the pool does not have.
+func (p *PeerPool) healthRows() []healthStatus {
 	p.mu.Lock()
-	health := make([]healthStatus, 0, len(p.addrs))
+	defer p.mu.Unlock()
+	rows := make([]healthStatus, 0, len(p.addrs))
 	for _, a := range p.addrs {
-		hs := healthStatus{Key: a, Kind: "ip", State: "healthy"}
+		hs := healthStatus{Key: a, Kind: p.axis, State: "healthy", Pin: a == p.pinKey}
 		if r := p.health.rec(a); r != nil {
 			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
 		}
-		health = append(health, hs)
+		rows = append(rows, hs)
 	}
-	st := peerPoolStatus{Active: p.addrs[p.cur], Addrs: append([]string(nil), p.addrs...),
-		Health: health, Pin: p.pinKey, Updated: time.Now().Unix()}
-	p.mu.Unlock()
-	data, err := json.Marshal(st)
-	if err != nil {
-		return
-	}
-	writeFileAtomic(p.statusPath, data, 0o644)
+	return rows
 }

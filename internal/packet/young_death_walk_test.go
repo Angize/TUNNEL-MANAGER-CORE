@@ -19,10 +19,11 @@ func wsPoolClient(t *testing.T, tag string, hosts []string, addrs ...string) (*T
 		t.Cleanup(func() { srv.Close() })
 	}
 	cliDev, _ := tunPair(t, tag+"c")
-	pool := newWSPool(addrs, snis(hosts...), "")
+	pool := newWSPool(addrs, snis(hosts...))
 	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, psk: psk,
 		ws: true, wsTLS: false, pool: pool,
 		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
+	cli.SetStatusPath(runningStatusPath(t, cli))
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
 	return cli, pool
@@ -35,11 +36,11 @@ func liveEdge(cli *TCP) string {
 	return ""
 }
 
-func poolEvents(p *wsPool, code string) int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+func poolEvents(b *TCP, code string) int {
+	b.st.mu.Lock()
+	defer b.st.mu.Unlock()
 	n := 0
-	for _, e := range p.events {
+	for _, e := range b.st.events {
 		if e.Code == code {
 			n++
 		}
@@ -94,7 +95,7 @@ func TestAYoungDeathWalksOneLapAndStops(t *testing.T) {
 		t.Fatal("the walk was still moving on the last death — it never settled for the probe to measure")
 	}
 
-	if n := poolEvents(pool, "edge-walk"); n != 1 {
+	if n := poolEvents(cli, "edge-walk"); n != 1 {
 		t.Errorf("the walk wrote %d edge-walk events for one outage (%d steps), want exactly 1", n, changes)
 	}
 }

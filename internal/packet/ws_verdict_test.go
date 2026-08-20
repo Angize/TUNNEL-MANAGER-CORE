@@ -1,23 +1,6 @@
 package packet
 
-import (
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"testing"
-)
-
-func wsVerdict(t *testing.T, b *TCP, c poolCmd) {
-	t.Helper()
-	data, err := json.Marshal(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(b.pool.cmdPath(), data, 0o644); err != nil {
-		t.Fatalf("write cmd: %v", err)
-	}
-	b.pollWsCmd()
-}
+import "testing"
 
 func wsBurned(p *wsPool, kind string) map[string]bool {
 	p.mu.Lock()
@@ -33,14 +16,12 @@ func wsBurned(p *wsPool, kind string) map[string]bool {
 
 func newVerdictPool(t *testing.T, ips, hosts []string) *TCP {
 	t.Helper()
-	p := newWSPool(ips, snis(hosts...), filepath.Join(t.TempDir(), "status.json"))
+	b, p := edgeCarrier(t, ips, snis(hosts...))
 	ip, sni, ok := p.current()
 	if !ok {
 		t.Fatal("fresh pool has no current edge")
 	}
-	p.setActive(activeLabel(ip, sni.host))
-	b := &TCP{pool: p}
-	b.armEdgeWalk()
+	b.pretendConnected(sni.host, ip)
 	armAndSpendTheFreeRungs(t, b)
 	return b
 }
@@ -50,10 +31,7 @@ func newVerdictPool(t *testing.T, ips, hosts []string) *TCP {
 // were written to ask: WHICH entry a verdict condemns, once the free steps are gone.
 func armLikeRun(b *TCP) {
 	b.rc.port.setRoll(b.rollSourcePort)
-	b.armEdgeWalk()
-	if b.st != nil {
-		b.rc.setVerdict(b.st.verdictPath())
-	}
+	b.rc.setMailboxes(b.st.verdictPath(), b.st.pinPath())
 }
 
 func armAndSpendTheFreeRungs(t *testing.T, b *TCP) {
@@ -69,19 +47,19 @@ func armAndSpendTheFreeRungs(t *testing.T, b *TCP) {
 func TestWSFailBurnsWhatItMeasured(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2"})
 
-	measuredIP, measuredSNI := b.pool.activeCombo()
+	measuredLow, measuredHigh := b.livePairNow()
 	b.pool.advance()
 	ip, sni, _ := b.pool.current()
-	b.pool.setActive(activeLabel(ip, sni.host))
-	if sni.host == measuredSNI {
+	b.pretendConnected(sni.host, ip)
+	if sni.host == measuredLow {
 		t.Fatalf("advance() did not change the SNI (%s) — the test cannot show the stale case", sni.host)
 	}
 
-	wsVerdict(t, b, poolCmd{Cmd: cmdFail, IP: measuredIP, SNI: measuredSNI})
+	b.tunFail(t, measuredLow, measuredHigh)
 
 	burned := wsBurned(b.pool, "sni")
-	if !burned[measuredSNI] {
-		t.Fatalf("the SNI the probe MEASURED (%s) was not burned; burned=%v", measuredSNI, burned)
+	if !burned[measuredLow] {
+		t.Fatalf("the SNI the probe MEASURED (%s) was not burned; burned=%v", measuredLow, burned)
 	}
 	if burned[sni.host] {
 		t.Fatalf("burned %s — the combo the carrier moved TO, which nothing measured", sni.host)
@@ -97,8 +75,10 @@ func TestWSVerdictWalksTheMatrix(t *testing.T) {
 
 	for i := 1; i <= 3; i++ {
 		ip, sni, _ := b.pool.current()
-		b.pool.setActive(activeLabel(ip, sni.host))
-		wsVerdict(t, b, poolCmd{Cmd: cmdFail, IP: ip, SNI: sni.host})
+		b.pretendConnected(sni.host, ip)
+		if !b.tunFailUntilItMoves(t, sni.host, ip) {
+			t.Fatalf("SNI %d of 3 on %s: the pool would not move", i, startIP)
+		}
 		if got, _, _ := b.pool.current(); i < 3 && got != startIP {
 			t.Fatalf("the edge moved after %d of 3 SNIs (%s -> %s) — it is convicted too early", i, startIP, got)
 		}
@@ -113,7 +93,7 @@ func TestWSOKClearsBothAxes(t *testing.T) {
 	b.pool.markSuspect("ip", "e1", "test")
 	b.pool.markSuspect("sni", "s1", "test")
 
-	wsVerdict(t, b, poolCmd{Cmd: cmdOK, IP: "e1", SNI: "s1"})
+	b.tunOK(t, "s1", "e1")
 
 	if wsBurned(b.pool, "ip")["e1"] {
 		t.Fatal("the edge stayed burned while the probe watched it carry")
@@ -128,7 +108,7 @@ func TestWSStaleOKClearsOnlyWhatItMeasured(t *testing.T) {
 	b.pool.markSuspect("sni", "s1", "test")
 	b.pool.markSuspect("sni", "s2", "test")
 
-	wsVerdict(t, b, poolCmd{Cmd: cmdOK, IP: "e1", SNI: "s1"})
+	b.tunOK(t, "s1", "e1")
 
 	if wsBurned(b.pool, "sni")["s1"] {
 		t.Fatal("s1 was measured carrying and stayed burned")
@@ -141,7 +121,7 @@ func TestWSStaleOKClearsOnlyWhatItMeasured(t *testing.T) {
 func TestWSPinStillWorks(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2"})
 
-	wsVerdict(t, b, poolCmd{Kind: "ip", Key: "e2"})
+	b.operatorPin(t, "ip", "e2")
 
 	if got, _, _ := b.pool.current(); got != "e2" {
 		t.Fatalf("the panel's pin did not land: current edge is %s, want e2", got)

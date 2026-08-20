@@ -10,14 +10,14 @@ import (
 func TestTCPTunProbeBurnNamesTheEndpointItBurned(t *testing.T) {
 	dir := t.TempDir()
 	st := newCoreStatus(filepath.Join(dir, "core.json"), "tcp · lab")
-	p := NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, 0, filepath.Join(dir, "pool.json"))
+	p := NewPeerPool([]string{"10.0.0.1:9", "10.0.0.2:9"}, 0)
 	b := &TCP{st: st, isClient: true, closeCh: make(chan struct{})}
 	b.SetPeerPool(p)
 	defer close(b.closeCh)
 	armAndSpendTheFreeRungs(t, b)
 
 	gone := p.current()
-	if err := os.WriteFile(st.verdictPath(), []byte(`{"cmd":"fail","key":"`+gone+`"}`), 0o644); err != nil {
+	if err := os.WriteFile(st.verdictPath(), []byte(`{"cmd":"fail","low":"`+gone+`"}`), 0o644); err != nil {
 		t.Fatalf("write cmd: %v", err)
 	}
 	go b.peerPinPollLoop()
@@ -37,7 +37,7 @@ func TestTCPTunProbeBurnNamesTheEndpointItBurned(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if burn.Detail != "ip:"+gone {
+	if burn.Detail != "dst:"+gone {
 		t.Fatalf("the burn event names %s, but the node condemned %s", burn.Detail, gone)
 	}
 	p.mu.Lock()

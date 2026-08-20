@@ -3,9 +3,7 @@ package packet
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,7 +19,7 @@ type WSPoolSNI struct {
 	Path string
 }
 
-func DialWSPoolCfg(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []WSPoolSNI, rotate time.Duration, statusPath string, httpc bool, httpcMode string) (*TCP, error) {
+func DialWSPoolCfg(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []WSPoolSNI, rotate time.Duration, httpc bool, httpcMode string) (*TCP, error) {
 	entries := make([]wsSNIEntry, 0, len(snis))
 	for _, s := range snis {
 		var ech []byte
@@ -30,7 +28,7 @@ func DialWSPoolCfg(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips
 		}
 		entries = append(entries, wsSNIEntry{host: s.Host, ech: ech, path: s.Path})
 	}
-	pool := newWSPoolFromCfg(ips, entries, statusPath)
+	pool := newWSPoolFromCfg(ips, entries)
 	if pool == nil {
 		return nil, errors.New("ws pool: need at least one IP and one SNI")
 	}
@@ -56,38 +54,40 @@ type healthRec struct {
 
 type wsPool struct {
 	mu          sync.Mutex
-	writeMu     sync.Mutex
 	ips         []string
 	snis        []wsSNIEntry
 	ipHealth    healthSet
 	sniHealth   healthSet
 	i, j        int
 	burns       atomic.Uint64
-	statusPath  string
-	active      string
 	rotDegraded bool
 	chosen      string
-	events      []coreEvent
-	evSeq       int64
-	wasDown     bool
 	pinIP       string
 	pinSNI      string
-	pinTries    int
 
 	pinTook map[string]*healthRec
 	now     func() int64
 
-	tracker pathTracker
+	ev    func(kind, code, detail string)
+	flush func()
 }
 
-func (p *wsPool) trackPath(live func() (pathKey, bool), closeCh <-chan struct{}) {
-	p.tracker.setLive(live)
-	go samplePathLoop(&p.tracker, p.writeStatus, closeCh)
+// Where this pool's events go, and how it asks the tunnel's one status file to be republished. Same
+// wiring as PeerPool: the carrier owns the file, the pool only owns the endpoints.
+func (p *wsPool) attach(ev func(kind, code, detail string), flush func()) {
+	p.mu.Lock()
+	p.ev, p.flush = ev, flush
+	p.mu.Unlock()
+	p.publish()
 }
 
-func (p *wsPool) pathEpoch() int64 {
-	e, _, _ := p.tracker.snapshot()
-	return e
+func (p *wsPool) publish() {
+	p.mu.Lock()
+	f := p.flush
+	p.mu.Unlock()
+	if f != nil {
+		f()
+	}
 }
 
 type coreEvent struct {
@@ -102,27 +102,16 @@ const coreEventRing = 48
 
 func (p *wsPool) event(kind, code, detail string) {
 	p.mu.Lock()
-	p.evSeq++
-	p.events = append(p.events, coreEvent{Seq: p.evSeq, TS: time.Now().Unix(), Kind: kind, Code: code, Detail: detail})
-	if len(p.events) > coreEventRing {
-		p.events = p.events[len(p.events)-coreEventRing:]
+	ev := p.ev
+	p.mu.Unlock()
+	if ev != nil {
+		ev(kind, code, detail)
 	}
-	p.mu.Unlock()
-	p.writeStatus()
 }
 
-func (p *wsPool) down(code, detail string) {
-	p.mu.Lock()
-	p.wasDown = true
-	p.mu.Unlock()
-	p.event("down", code, detail)
-}
-
-func newWSPool(ips []string, snis []wsSNIEntry, statusPath string) *wsPool {
-	p := &wsPool{ips: ips, snis: snis,
-		statusPath: statusPath, now: func() int64 { return time.Now().Unix() }}
+func newWSPool(ips []string, snis []wsSNIEntry) *wsPool {
+	p := &wsPool{ips: ips, snis: snis, now: func() int64 { return time.Now().Unix() }}
 	p.ipHealth, p.sniHealth = newHealthSet(&p.now), newHealthSet(&p.now)
-	p.writeStatus()
 	return p
 }
 
@@ -221,23 +210,6 @@ const activeSep = " · "
 
 func activeLabel(ip, host string) string { return ip + activeSep + host }
 
-func (p *wsPool) setActive(combo string) {
-	if combo == "" {
-		return
-	}
-	p.mu.Lock()
-	changed := p.active != combo
-	p.active = combo
-	pending := p.wasDown
-	p.wasDown = false
-	p.mu.Unlock()
-	if pending {
-		p.event("up", "reconnect", combo)
-	} else if changed {
-		p.writeStatus()
-	}
-}
-
 func (p *wsPool) resolvePinIPLocked() string {
 	if p.pinIP != "" {
 		for _, ip := range p.ips {
@@ -326,7 +298,7 @@ func (p *wsPool) keepCursorOn(ip, sni string) {
 	}
 	p.mu.Unlock()
 	if moved {
-		p.writeStatus()
+		p.publish()
 	}
 }
 
@@ -375,7 +347,7 @@ func (p *wsPool) restoreSNIs() {
 	p.sniHealth = newHealthSet(&p.now)
 	p.mu.Unlock()
 	if cleared {
-		p.writeStatus()
+		p.publish()
 	}
 }
 
@@ -396,15 +368,6 @@ func (a wsSNIs) restoreAll()        { a.p.restoreSNIs() }
 type wsEdges struct{ p *wsPool }
 
 func (a wsEdges) activeIdx() int { return a.p.activeIPIdx() }
-
-func (p *wsPool) advanceSNI() {
-	p.mu.Lock()
-	p.chosen = ""
-	if len(p.snis) > 0 {
-		p.j = (p.j + 1) % len(p.snis)
-	}
-	p.mu.Unlock()
-}
 
 func (p *wsPool) snisCount() int {
 	p.mu.Lock()
@@ -442,7 +405,7 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 		p.burns.Add(1)
 		p.event("burn", reason, kind+":"+key)
 	}
-	p.writeStatus()
+	p.publish()
 	if fresh && kind == "ip" {
 		p.reassessRotation()
 	}
@@ -481,23 +444,21 @@ func (p *wsPool) dropPin(reason string, matched func() bool) bool {
 	hit := matched()
 	if hit {
 		p.restorePinTookLocked()
-		p.pinIP, p.pinSNI, p.pinTries = "", "", 0
+		p.pinIP, p.pinSNI = "", ""
 	}
 	p.mu.Unlock()
 	if hit {
-		p.writeStatus()
+		p.publish()
 		p.event("pool", "pin_dropped", "edge:"+reason)
 	}
 	return hit
 }
 
-func (p *wsPool) pinAttemptFailed(ip, host string) {
-	p.dropPin("cannot-land", func() bool {
-		if (p.pinIP == "" || p.pinIP != ip) && (p.pinSNI == "" || p.pinSNI != host) {
-			return false
-		}
-		p.pinTries++
-		return p.pinTries >= pinFailRelease
+// The operator's pick could not be reached. One refused dial is the whole answer -- waiting for a second
+// only delays the burn that is coming anyway, and forces traffic onto an edge that will not open.
+func (p *wsPool) pinCannotLand(ip, host string) bool {
+	return p.dropPin("cannot-land", func() bool {
+		return (p.pinIP != "" && p.pinIP == ip) || (p.pinSNI != "" && p.pinSNI == host)
 	})
 }
 
@@ -528,11 +489,15 @@ func (p *wsPool) reassessRotation() {
 	}
 }
 
-func (p *wsPool) probeAllNow() {
+// One entry's wait ends. Nothing is dialled: it re-enters the rotation and the tun probe judges it.
+func (p *wsPool) retestNow(kind, key string) bool {
 	p.mu.Lock()
-	p.ipHealth.probeAllNow()
-	p.sniHealth.probeAllNow()
+	ok := p.healthMap(kind).retestNow(key)
 	p.mu.Unlock()
+	if ok {
+		p.publish()
+	}
+	return ok
 }
 
 func (p *wsPool) selectEntry(kind, key string) bool {
@@ -568,15 +533,11 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 		}
 	}
 	if ok {
-		p.pinTries = 0
-
-		if ip, sni, got := p.currentLocked(); got {
-			p.active = activeLabel(ip, sni.host)
-		}
+		p.stepToCurrentLocked()
 	}
 	p.mu.Unlock()
 	if ok {
-		p.writeStatus()
+		p.publish()
 		if kind == "ip" {
 
 			p.reassessRotation()
@@ -585,7 +546,7 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 	return ok
 }
 
-func (p *wsPool) pinApplied(ip, host string) {
+func (p *wsPool) pinLandedOn(ip, host string) {
 	p.mu.Lock()
 	changed := false
 
@@ -599,40 +560,10 @@ func (p *wsPool) pinApplied(ip, host string) {
 		p.pinSNI = ""
 		changed = true
 	}
-	if changed {
-		p.pinTries = 0
-	}
 	p.mu.Unlock()
 	if changed {
-		p.writeStatus()
+		p.publish()
 	}
-}
-
-func (p *wsPool) cmdPath() string {
-	if p.statusPath == "" {
-		return ""
-	}
-	return p.statusPath + ".cmd"
-}
-
-func (p *wsPool) readCmd() (c poolCmd, ok bool) {
-	if c, ok = readPoolCmd(p.cmdPath()); !ok {
-		return c, false
-	}
-	if c.Kind != "sni" {
-		c.Kind = "ip"
-	}
-	return c, true
-}
-
-func (p *wsPool) activeCombo() (ip, sni string) {
-	p.mu.Lock()
-	a := p.active
-	p.mu.Unlock()
-	if i := strings.Index(a, activeSep); i >= 0 {
-		return a[:i], a[i+len(activeSep):]
-	}
-	return a, ""
 }
 
 func (p *wsPool) clearBurn(kind, key string) bool {
@@ -640,7 +571,8 @@ func (p *wsPool) clearBurn(kind, key string) bool {
 	had := p.healthMap(kind).clear(key)
 	p.mu.Unlock()
 	if had {
-		p.writeStatus()
+		p.event("heal", "tun-probe", kind+":"+key)
+		p.publish()
 
 		if kind == "ip" {
 			p.reassessRotation()
@@ -649,33 +581,12 @@ func (p *wsPool) clearBurn(kind, key string) bool {
 	return had
 }
 
-func (p *wsPool) echCmdPath() string {
-	if p.statusPath == "" {
-		return ""
-	}
-	return p.statusPath + ".echcmd"
-}
-
-func (p *wsPool) readECHCmd() []string {
-	cp := p.echCmdPath()
-	if cp == "" {
-		return nil
-	}
-	data, err := os.ReadFile(cp)
-	if err != nil {
-		return nil
-	}
-	os.Remove(cp)
-	var c struct {
-		SNIs map[string]string `json:"snis"`
-	}
-	if json.Unmarshal(data, &c) != nil || len(c.SNIs) == 0 {
-		return nil
-	}
+// The keys an ECH push actually changed. Reading the file is the carrier's job; this only applies it.
+func (p *wsPool) applyECH(snis map[string]string) []string {
 	var changed []string
-	for host, b64 := range c.SNIs {
-		ech, derr := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
-		if derr != nil || len(ech) == 0 {
+	for host, b64 := range snis {
+		ech, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
+		if err != nil || len(ech) == 0 {
 			continue
 		}
 		if p.updateECH(host, ech) {
@@ -691,46 +602,78 @@ type healthStatus struct {
 	State      string `json:"state"`
 	Fails      int    `json:"fails"`
 	NextRetest int64  `json:"next_retest_unix"`
+	Pin        bool   `json:"pin,omitempty"`
 }
 
-func (p *wsPool) writeStatus() {
-	if p.statusPath == "" {
-		return
-	}
-
-	p.tracker.sample()
-	p.writeMu.Lock()
-	defer p.writeMu.Unlock()
+// Every entry on both axes, not only the burned ones: the panel builds its lists from this.
+func (p *wsPool) healthRows() []healthStatus {
 	p.mu.Lock()
-	health := make([]healthStatus, 0, len(p.ips)+len(p.snis))
+	defer p.mu.Unlock()
+	rows := make([]healthStatus, 0, len(p.ips)+len(p.snis))
 	for _, ip := range p.ips {
-		hs := healthStatus{Key: ip, Kind: "ip", State: "healthy"}
+		hs := healthStatus{Key: ip, Kind: "ip", State: "healthy", Pin: ip == p.pinIP}
 		if r := p.ipHealth.rec(ip); r != nil {
 			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
 		}
-		health = append(health, hs)
+		rows = append(rows, hs)
 	}
-	for _, s := range p.snis {
-		hs := healthStatus{Key: s.host, Kind: "sni", State: "healthy"}
-		if r := p.sniHealth.rec(s.host); r != nil {
+	for _, e := range p.snis {
+		hs := healthStatus{Key: e.host, Kind: "sni", State: "healthy", Pin: e.host == p.pinSNI}
+		if r := p.sniHealth.rec(e.host); r != nil {
 			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
 		}
-		health = append(health, hs)
+		rows = append(rows, hs)
 	}
-	evs := append([]coreEvent(nil), p.events...)
-	epoch, path, ready := p.tracker.snapshot()
-	st := struct {
-		Active string         `json:"active"`
-		Epoch  int64          `json:"epoch"`
-		Ready  bool           `json:"ready"`
-		Path   pathKey        `json:"path"`
-		Health []healthStatus `json:"health"`
-		Events []coreEvent    `json:"events"`
-		TS     int64          `json:"ts"`
-	}{Active: p.active, Epoch: epoch, Ready: ready, Path: path, Health: health, Events: evs, TS: time.Now().Unix()}
-	p.mu.Unlock()
-	if data, err := json.Marshal(st); err == nil {
+	return rows
+}
 
-		writeFileAtomic(p.statusPath, data, 0o644)
+// The cursor follows the pin, so current() keeps answering with it once the pin is gone.
+func (p *wsPool) stepToCurrentLocked() {
+	ip, sni, ok := p.currentLocked()
+	if !ok {
+		return
 	}
+	for i, v := range p.ips {
+		if v == ip {
+			p.i = i
+		}
+	}
+	for j, v := range p.snis {
+		if v.host == sni.host {
+			p.j = j
+		}
+	}
+}
+
+// The pair a verdict speaks about on an edge pool: the SNI is the digit a fail condemns.
+type edgePair struct{ p *wsPool }
+
+func (e edgePair) kinds() (string, string) { return "sni", "ip" }
+
+func (e edgePair) live() (low, high string) {
+	ip, sni, ok := e.p.current()
+	if !ok {
+		return "", ""
+	}
+	return sni.host, ip
+}
+
+func (e edgePair) keepCursorOn(low, high string) { e.p.keepCursorOn(high, low) }
+
+func (e edgePair) clear(kind, key string) bool {
+	return key != "" && e.p.clearBurn(kind, key)
+}
+
+func (e edgePair) burn(kind, key, reason string) {
+	if key != "" {
+		e.p.markSuspect(kind, key, reason)
+	}
+}
+
+func (e edgePair) pick(kind, key string) bool {
+	return key != "" && e.p.selectEntry(kind, key)
+}
+
+func (e edgePair) retest(kind, key string) bool {
+	return key != "" && e.p.retestNow(kind, key)
 }

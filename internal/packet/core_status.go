@@ -16,7 +16,34 @@ type coreStatus struct {
 	evSeq   int64
 	wasDown bool
 
+	// What the pools publish through this one file. Registered once at startup; read on every write.
+	health []func() []healthStatus
+	pair   func() (low, high, lowKind, highKind string)
+
 	tracker pathTracker
+}
+
+// A pool joins the tunnel's one status file instead of writing a second one.
+func (s *coreStatus) addHealth(rows func() []healthStatus) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.health = append(s.health, rows)
+	s.mu.Unlock()
+	s.write()
+}
+
+// The live pair, in machine form. The `active` string beside it is a display label and has always been
+// parsed by eye; a verdict may not rest on that.
+func (s *coreStatus) setPair(live func() (low, high, lowKind, highKind string)) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.pair = live
+	s.mu.Unlock()
+	s.write()
 }
 
 func (s *coreStatus) trackPath(live func() (pathKey, bool), closeCh <-chan struct{}) {
@@ -35,11 +62,19 @@ func (s *coreStatus) pathEpoch() int64 {
 	return e
 }
 
-func (s *coreStatus) verdictPath() string {
+func (s *coreStatus) verdictPath() string { return s.sidecar(".verdict") }
+
+// The operator's mailbox: pins and per-entry retests. Separate from the verdict's, because two writers
+// on one path means os.replace can drop whichever arrived first.
+func (s *coreStatus) pinPath() string { return s.sidecar(".pin") }
+
+func (s *coreStatus) echCmdPath() string { return s.sidecar(".echcmd") }
+
+func (s *coreStatus) sidecar(suffix string) string {
 	if s == nil || s.path == "" {
 		return ""
 	}
-	return s.path + ".verdict"
+	return s.path + suffix
 }
 
 func newCoreStatus(path, active string) *coreStatus {
@@ -135,16 +170,32 @@ func (s *coreStatus) write() {
 	s.mu.Lock()
 	evs := append([]coreEvent(nil), s.events...)
 	active := s.active
+	sources := append([]func() []healthStatus(nil), s.health...)
+	livePair := s.pair
 	s.mu.Unlock()
+
+	// Outside s.mu: these reach into the pools' own locks, and the pools call back in here to flush.
+	health := []healthStatus{}
+	for _, rows := range sources {
+		health = append(health, rows()...)
+	}
+	var pair pairStatus
+	if livePair != nil {
+		pair.Low, pair.High, pair.LowKind, pair.HighKind = livePair()
+	}
+
 	epoch, path, ready := s.tracker.snapshot()
 	payload := struct {
-		Active string      `json:"active"`
-		Epoch  int64       `json:"epoch"`
-		Ready  bool        `json:"ready"`
-		Path   pathKey     `json:"path"`
-		Events []coreEvent `json:"events"`
-		TS     int64       `json:"ts"`
-	}{Active: active, Epoch: epoch, Ready: ready, Path: path, Events: evs, TS: time.Now().Unix()}
+		Active string         `json:"active"`
+		Epoch  int64          `json:"epoch"`
+		Ready  bool           `json:"ready"`
+		Path   pathKey        `json:"path"`
+		Pair   pairStatus     `json:"pair"`
+		Health []healthStatus `json:"health"`
+		Events []coreEvent    `json:"events"`
+		TS     int64          `json:"ts"`
+	}{Active: active, Epoch: epoch, Ready: ready, Path: path, Pair: pair, Health: health,
+		Events: evs, TS: time.Now().Unix()}
 	buf, err := json.Marshal(payload)
 	if err != nil {
 		return
@@ -168,3 +219,10 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) {
 }
 
 var statusWriteLog sendErrLog
+
+type pairStatus struct {
+	Low      string `json:"low"`
+	High     string `json:"high"`
+	LowKind  string `json:"low_kind"`
+	HighKind string `json:"high_kind"`
+}

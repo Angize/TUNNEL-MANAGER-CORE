@@ -1,14 +1,12 @@
 package packet
 
 import (
-	"encoding/json"
 	"net"
-	"os"
 	"testing"
 )
 
 func TestPeerPoolRotateCycles(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b", "c"}, 0, "")
+	p := NewPeerPool([]string{"a", "b", "c"}, 0)
 	if p.current() != "a" {
 		t.Fatalf("first current = %q, want a", p.current())
 	}
@@ -30,13 +28,13 @@ func TestPeerPoolRotateCycles(t *testing.T) {
 }
 
 func TestPeerPoolBurnSkipsAndAdvances(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b", "c"}, 0, "")
+	p := NewPeerPool([]string{"a", "b", "c"}, 0)
 
-	if a, moved := p.fail(); a != "b" || !moved {
+	if a, moved := p.fail("tun-probe"); a != "b" || !moved {
 		t.Fatalf("after burning a, got %q moved=%v, want b true", a, moved)
 	}
 
-	if a, _ := p.fail(); a != "c" {
+	if a, _ := p.fail("tun-probe"); a != "c" {
 		t.Fatalf("after burning b, got %q, want c", a)
 	}
 
@@ -46,10 +44,10 @@ func TestPeerPoolBurnSkipsAndAdvances(t *testing.T) {
 }
 
 func TestPeerPoolParksButNeverDeadEndsWhenAllBurned(t *testing.T) {
-	p := NewPeerPool([]string{"a", "b"}, 0, "")
-	p.fail()
+	p := NewPeerPool([]string{"a", "b"}, 0)
+	p.fail("tun-probe")
 
-	a, moved := p.fail()
+	a, moved := p.fail("tun-probe")
 	if moved {
 		t.Fatalf("every endpoint is condemned and none is due, and the pool moved to %q anyway. Each "+
 			"move costs a session teardown and a fresh handshake, and neither endpoint is any better than "+
@@ -68,10 +66,10 @@ func TestPeerPoolParksButNeverDeadEndsWhenAllBurned(t *testing.T) {
 
 func TestPeerPoolSuspectToDeadBackoff(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0)
 	p.now = func() int64 { return clk }
 
-	p.fail()
+	p.fail("tun-probe")
 	rec := p.health.recs["a"]
 	if rec == nil || rec.state != stateSuspect || rec.fails != 0 || rec.nextRetest != clk+suspectBackoff[0] {
 		t.Fatalf("first fail should make a suspect at +%ds, got %+v", suspectBackoff[0], rec)
@@ -82,7 +80,7 @@ func TestPeerPoolSuspectToDeadBackoff(t *testing.T) {
 		p.mu.Lock()
 		p.cur = 0
 		p.mu.Unlock()
-		p.fail()
+		p.fail("tun-probe")
 		if rec.state != stateSuspect || rec.fails != i {
 			t.Fatalf("after %d retest fails a should be suspect fails=%d, got %+v", i, i, rec)
 		}
@@ -91,7 +89,7 @@ func TestPeerPoolSuspectToDeadBackoff(t *testing.T) {
 	p.mu.Lock()
 	p.cur = 0
 	p.mu.Unlock()
-	p.fail()
+	p.fail("tun-probe")
 	if rec.state != stateDead || rec.nextRetest != clk+deadRetest {
 		t.Fatalf("running off the backoff should mark a dead at +%ds, got %+v", deadRetest, rec)
 	}
@@ -99,14 +97,14 @@ func TestPeerPoolSuspectToDeadBackoff(t *testing.T) {
 
 func TestPeerPoolDueEndpointReadmitted(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0)
 	p.now = func() int64 { return clk }
-	p.fail()
+	p.fail("tun-probe")
 	if got := p.current(); got != "b" {
 		t.Fatalf("while a is suspect current should stay on the healthy b, got %q", got)
 	}
 
-	p.fail()
+	p.fail("tun-probe")
 
 	clk += suspectBackoff[len(suspectBackoff)-1] + deadRetest + 1
 	got := p.current()
@@ -124,7 +122,7 @@ func TestPeerPoolDueEndpointReadmitted(t *testing.T) {
 
 func TestPeerPoolSelectPin(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b", "c"}, 0, "")
+	p := NewPeerPool([]string{"a", "b", "c"}, 0)
 	p.now = func() int64 { return clk }
 	if p.selectEntry("zzz") {
 		t.Fatal("selectEntry must reject an unknown key")
@@ -139,7 +137,7 @@ func TestPeerPoolSelectPin(t *testing.T) {
 		t.Fatalf("current() must force the pinned c, got %q", got)
 	}
 
-	if a, moved := p.fail(); a != "c" || moved {
+	if a, moved := p.fail("tun-probe"); a != "c" || moved {
 		t.Fatalf("fail() while pinned must stay on c: got %q moved=%v, want c false", a, moved)
 	}
 	p.mu.Lock()
@@ -157,74 +155,74 @@ func TestPeerPoolSelectPin(t *testing.T) {
 	}
 
 	p.selectEntry("a")
-	for i := 1; i < pinFailRelease; i++ {
-		p.pinAttemptFailed("a")
-		if !p.isPinned() {
-			t.Fatalf("attempt %d of %d released the pin — one failure is not evidence", i, pinFailRelease)
+	if !p.pinCannotLand("b") {
+		p.mu.Lock()
+		still := p.pinKey
+		p.mu.Unlock()
+		if still != "a" {
+			t.Fatal("a failure on a DIFFERENT endpoint released the pin")
 		}
 	}
-	p.pinAttemptFailed("a")
+	p.pinCannotLand("a")
 	if p.isPinned() {
-		t.Fatalf("after %d failed attempts on the pinned endpoint the pin must go", pinFailRelease)
+		t.Fatal("the pin survived the first refused attempt on the pinned endpoint — waiting for a " +
+			"second only delays the burn that is coming anyway, and forces traffic onto it meanwhile")
 	}
 }
 
-func TestPeerPoolProbeAllNow(t *testing.T) {
+func TestPeerPoolRetestNow(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0)
 	p.now = func() int64 { return clk }
-	p.fail()
+	p.fail("tun-probe")
 	if r := p.health.recs["a"]; r == nil || r.nextRetest <= clk {
 		t.Fatalf("a should be burned with a future retest, got %+v", r)
 	}
-	p.probeAllNow()
+	p.retestNow("a")
 	if r := p.health.recs["a"]; r == nil || r.nextRetest != clk {
-		t.Fatalf("probeAllNow should pull a's retest to now, got %+v", r)
+		t.Fatalf("retestNow should pull a's retest to now, got %+v", r)
 	}
 }
 
-func TestPeerPoolStatusFileFSM(t *testing.T) {
-	dir := t.TempDir()
-	sp := dir + "/core-x.peerpool"
-	p := NewPeerPool([]string{"a", "b", "c"}, 0, sp)
-	p.fail()
-	p.selectEntry("c")
-	data, err := os.ReadFile(sp)
-	if err != nil {
-		t.Fatalf("status file not written: %v", err)
+func TestTheOneStatusFileCarriesBothAxes(t *testing.T) {
+	b, pp, _ := peerCarrier(t, []string{"a", "b", "c"}, []string{"s1", "s2"})
+	pp.fail("tun-probe")
+	pp.selectEntry("c")
+
+	st := b.readStatus(t)
+	byKind := map[string][]healthStatus{}
+	for _, h := range st.Health {
+		byKind[h.Kind] = append(byKind[h.Kind], h)
 	}
-	var st struct {
-		Active string   `json:"active"`
-		Addrs  []string `json:"addrs"`
-		Pin    string   `json:"pin"`
-		Health []struct {
-			Key, State string
-		} `json:"health"`
-	}
-	if json.Unmarshal(data, &st) != nil {
-		t.Fatalf("status file is not valid JSON: %s", data)
-	}
-	if st.Active != "c" || st.Pin != "c" {
-		t.Fatalf("after pinning c: active=%q pin=%q, want c/c", st.Active, st.Pin)
-	}
-	if len(st.Addrs) != 3 || len(st.Health) != 3 {
-		t.Fatalf("status should list all 3 endpoints, got addrs=%v health=%d", st.Addrs, len(st.Health))
+	if len(byKind["dst"]) != 3 || len(byKind["src"]) != 2 {
+		t.Fatalf("both pools must report into the ONE file, got dst=%d src=%d — a second file is a "+
+			"second answer, and the two can disagree", len(byKind["dst"]), len(byKind["src"]))
 	}
 
-	suspect := map[string]bool{}
-	for _, h := range st.Health {
+	suspect, pinned := map[string]bool{}, ""
+	for _, h := range byKind["dst"] {
 		if h.State == stateSuspect {
 			suspect[h.Key] = true
+		}
+		if h.Pin {
+			pinned = h.Key
 		}
 	}
 	if !suspect["a"] {
 		t.Fatalf("a should be reported suspect in health, got %v", suspect)
 	}
+	if pinned != "c" {
+		t.Fatalf("the operator's pick is not flagged in the rows: pinned=%q, want c", pinned)
+	}
+	if st.Pair.Low != "c" || st.Pair.LowKind != "dst" || st.Pair.HighKind != "src" {
+		t.Fatalf("the machine-readable pair is wrong: %+v — the node keys its verdict on this, and "+
+			"parsing the display label by eye is what let a stale one through", st.Pair)
+	}
 }
 
 func TestPeerPoolSingleEndpointNoop(t *testing.T) {
-	p := NewPeerPool([]string{"only"}, 0, "")
-	if a, moved := p.fail(); a != "only" || moved {
+	p := NewPeerPool([]string{"only"}, 0)
+	if a, moved := p.fail("tun-probe"); a != "only" || moved {
 		t.Fatalf("single-endpoint fail = %q moved=%v, want only false", a, moved)
 	}
 	if a, moved := p.rotateOnce(); a != "only" || moved {
@@ -237,7 +235,7 @@ func TestTCPDialTargetUsesPool(t *testing.T) {
 	if got := b.dialTarget(); got != "1.1.1.1:9000" {
 		t.Fatalf("no pool: dialTarget = %q, want the fixed peer", got)
 	}
-	b.SetPeerPool(NewPeerPool([]string{"2.2.2.2:9000", "3.3.3.3:9000"}, 0, ""))
+	b.SetPeerPool(NewPeerPool([]string{"2.2.2.2:9000", "3.3.3.3:9000"}, 0))
 	if b.pp == nil {
 		t.Fatal("direct-tcp client should accept a peer pool")
 	}
@@ -245,13 +243,13 @@ func TestTCPDialTargetUsesPool(t *testing.T) {
 		t.Fatalf("with pool: dialTarget = %q, want the pool's current endpoint", got)
 	}
 
-	b.pp.fail()
+	b.pp.fail("tun-probe")
 	if got := b.dialTarget(); got != "3.3.3.3:9000" {
 		t.Fatalf("after burn: dialTarget = %q, want the next endpoint", got)
 	}
 
 	w := &TCP{isClient: true, ws: true, addr: "1.1.1.1:443"}
-	w.SetPeerPool(NewPeerPool([]string{"2.2.2.2:443", "3.3.3.3:443"}, 0, ""))
+	w.SetPeerPool(NewPeerPool([]string{"2.2.2.2:443", "3.3.3.3:443"}, 0))
 	if w.pp != nil {
 		t.Fatal("ws client must reject a peer pool")
 	}
@@ -265,7 +263,7 @@ func TestTCPSourceIPUsesPool(t *testing.T) {
 	if got := b.sourceIP(); got != "10.0.0.1" {
 		t.Fatalf("no source pool: sourceIP = %q, want the fixed bindIP", got)
 	}
-	b.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, 0, ""))
+	b.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, 0))
 	if b.sp == nil {
 		t.Fatal("direct-tcp client should accept a source pool")
 	}
@@ -280,7 +278,7 @@ func TestTCPSourceIPUsesPool(t *testing.T) {
 	}
 
 	w := &TCP{isClient: true, ws: true, bindIP: "10.0.0.1"}
-	w.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, 0, ""))
+	w.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, 0))
 	if w.sp != nil {
 		t.Fatal("ws client must reject a source pool")
 	}
@@ -293,7 +291,7 @@ func TestUDPSourceRebindSwapsConn(t *testing.T) {
 	}
 	b := &UDP{isClient: true}
 	b.conn.Store(c0)
-	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0, ""))
+	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0))
 	gen0 := b.rebindGen.Load()
 
 	b.rotateSourceUDP(true)
@@ -317,7 +315,7 @@ func TestUDPSourcePoolBindsInitialSource(t *testing.T) {
 	}
 	b := &UDP{isClient: true}
 	b.conn.Store(c0)
-	b.SetSourcePool(NewPeerPool([]string{"127.0.0.2", "127.0.0.3"}, 0, ""))
+	b.SetSourcePool(NewPeerPool([]string{"127.0.0.2", "127.0.0.3"}, 0))
 	got := b.conn.Load().LocalAddr().(*net.UDPAddr).IP
 	if !got.Equal(net.IPv4(127, 0, 0, 2)) {
 		t.Fatalf("SetSourcePool should bind the initial source to SrcIPs[0]=127.0.0.2, got %v", got)
@@ -333,7 +331,7 @@ func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
 	b := &UDP{isClient: true}
 	b.conn.Store(c0)
 
-	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "192.0.2.1"}, 0, ""))
+	b.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "192.0.2.1"}, 0))
 	sockBefore := b.conn.Load()
 	gen0 := b.rebindGen.Load()
 
@@ -368,8 +366,8 @@ func TestUDPSourceRebindFailureKeepsSocketAndPool(t *testing.T) {
 }
 
 func TestRotationControllerCouplesSource(t *testing.T) {
-	dst := NewPeerPool([]string{"d0", "d1"}, 0, "")
-	src := NewPeerPool([]string{"s0", "s1"}, 0, "")
+	dst := NewPeerPool([]string{"d0", "d1"}, 0)
+	src := NewPeerPool([]string{"s0", "s1"}, 0)
 	rc := newRotationController(dst, src)
 	dstMoves, srcMoves := 0, 0
 	rotDst := func(bool) { dstMoves++ }
@@ -389,7 +387,7 @@ func TestRotationControllerCouplesSource(t *testing.T) {
 		t.Fatalf("success() must reset destRot so the source doesn't advance early, got src=%d", srcMoves)
 	}
 
-	rc2 := newRotationController(nil, NewPeerPool([]string{"s0", "s1"}, 0, ""))
+	rc2 := newRotationController(nil, NewPeerPool([]string{"s0", "s1"}, 0))
 	n := 0
 	rc2.fail(func(bool) { t.Fatal("no dest pool: rotDst must not be called") }, func(bool) { n++ })
 	if n != 1 {
@@ -397,9 +395,9 @@ func TestRotationControllerCouplesSource(t *testing.T) {
 	}
 }
 
-func TestRotationControllerPinAutoReleasesOnProvenBlock(t *testing.T) {
+func TestRotationControllerPinReleasesOnTheFirstProvenBlock(t *testing.T) {
 	clk := int64(1000)
-	dst := NewPeerPool([]string{"d0", "d1"}, 0, "")
+	dst := NewPeerPool([]string{"d0", "d1"}, 0)
 	dst.now = func() int64 { return clk }
 	rc := newRotationController(dst, nil)
 	if !dst.selectEntry("d1") {
@@ -409,74 +407,49 @@ func TestRotationControllerPinAutoReleasesOnProvenBlock(t *testing.T) {
 	rotDst := func(bool) { moves++ }
 	rotSrc := func(bool) {}
 
-	for i := 0; i < pinFailRelease-1; i++ {
-		rc.fail(rotDst, rotSrc)
-		if !dst.isPinned() {
-			t.Fatalf("pin must survive proven-dead round %d (< pinFailRelease)", i)
-		}
-		if moves != 0 {
-			t.Fatalf("no failover while the pin is held, got moves=%d", moves)
-		}
+	rc.fail(rotDst, rotSrc)
+	if dst.isPinned() {
+		t.Fatal("the pin survived the first verdict against it. Holding it for a second only delays the " +
+			"burn that is coming anyway, and forces traffic onto the endpoint meanwhile")
+	}
+	if moves != 1 {
+		t.Fatalf("the releasing round must also walk off the blocked endpoint, got moves=%d", moves)
 	}
 
 	rc.success()
-	dst.pinLandedOn("d1")
-	if dst.isPinned() {
-		t.Fatal("a landing on the pinned endpoint must clear it")
-	}
 	if !dst.selectEntry("d1") {
 		t.Fatal("re-pin d1 failed")
 	}
+	if !dst.isPinned() {
+		t.Fatal("a fresh pin after a success must hold until something faults it")
+	}
 	moves = 0
-	for i := 0; i < pinFailRelease-1; i++ {
-		rc.fail(rotDst, rotSrc)
-		if !dst.isPinned() {
-			t.Fatalf("the count must restart after success; the re-pin must survive round %d", i)
-		}
-		if moves != 0 {
-			t.Fatalf("no failover while the re-pin is held, got moves=%d", moves)
-		}
-	}
-
 	rc.fail(rotDst, rotSrc)
-	if dst.isPinned() {
-		t.Fatal("a pin on a proven-blocked endpoint must auto-release at pinFailRelease")
-	}
-	if moves != 1 {
-		t.Fatalf("the releasing round must also fail over off the blocked endpoint, got moves=%d", moves)
+	if dst.isPinned() || moves != 1 {
+		t.Fatalf("the re-pin behaved differently from the first one: pinned=%v moves=%d",
+			dst.isPinned(), moves)
 	}
 }
 
-func TestPeerPoolExpirePinFlushesStatus(t *testing.T) {
-	dir := t.TempDir()
-	sp := dir + "/core-x.peerpool"
-	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, 0, sp)
-	p.now = func() int64 { return clk }
-	p.selectEntry("b")
+func TestAPinFlushesTheStatusFileTheMomentItGoes(t *testing.T) {
+	b, pp, _ := peerCarrier(t, []string{"a", "b"}, nil)
+	pp.selectEntry("b")
 	readPin := func() string {
-		data, err := os.ReadFile(sp)
-		if err != nil {
-			t.Fatalf("status read: %v", err)
+		for _, h := range b.readStatus(t).Health {
+			if h.Pin {
+				return h.Key
+			}
 		}
-		var st struct {
-			Pin string `json:"pin"`
-		}
-		if err := json.Unmarshal(data, &st); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		return st.Pin
+		return ""
 	}
 	if readPin() != "b" {
 		t.Fatalf("status should show pinned b, got %q", readPin())
 	}
-	p.pinAttemptFailed("zzz")
+	pp.pinCannotLand("zzz")
 	if readPin() != "b" {
 		t.Fatalf("a failure on another endpoint must not touch the pin, got %q", readPin())
 	}
-	for i := 0; i < pinFailRelease; i++ {
-		p.pinAttemptFailed("b")
-	}
+	pp.pinCannotLand("b")
 	if readPin() != "" {
 		t.Fatalf("the status file must clear the pin the moment it is released, got %q", readPin())
 	}

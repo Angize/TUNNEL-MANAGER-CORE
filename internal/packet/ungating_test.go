@@ -69,8 +69,9 @@ func TestAPoolLessTunnelHearsTheJudge(t *testing.T) {
 }
 
 func TestAPoolLessLadderSpendsItsStepsAndCondemnsNobody(t *testing.T) {
+	dir := t.TempDir()
 	rc := newRotationController(nil, nil)
-	rc.setVerdict(filepath.Join(t.TempDir(), "core.json.verdict"))
+	rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
 	rolls, drops, moves := 0, 0, 0
 	rc.port.setRoll(func() bool { rolls++; return true })
 	rc.session.setDrop(func() bool { drops++; return true })
@@ -78,7 +79,7 @@ func TestAPoolLessLadderSpendsItsStepsAndCondemnsNobody(t *testing.T) {
 
 	fail := func() {
 		liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdFail})
-		rc.pollPins(func() {}, func() {}, rot, rot, nil, atPathEpoch)
+		rc.poll(rot, rot, nil, atPathEpoch)
 	}
 
 	for i := 1; i <= portTries; i++ {
@@ -102,7 +103,7 @@ func TestAPoolLessLadderSpendsItsStepsAndCondemnsNobody(t *testing.T) {
 	}
 
 	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdOK})
-	rc.pollPins(func() {}, func() {}, rot, rot, nil, atPathEpoch)
+	rc.poll(rot, rot, nil, atPathEpoch)
 	fail()
 	if rolls != portTries+1 {
 		t.Errorf("traffic crossing did not refill the draws: %d, want %d", rolls, portTries+1)
@@ -111,17 +112,16 @@ func TestAPoolLessLadderSpendsItsStepsAndCondemnsNobody(t *testing.T) {
 
 func TestASourcePooledTunnelHearsItsVerdict(t *testing.T) {
 	dir := t.TempDir()
-	src := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "srcpool"))
+	src := NewPeerPool([]string{"s1", "s2"}, 0)
 	rc := newRotationController(nil, src)
-	rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
-	noop := func() {}
-	rotSrc := func(bool) { src.fail() }
+	rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
+	rotSrc := func(bool) { src.fail("tun-probe") }
 
 	rc.session.setDrop(func() bool { return true })
 	burned, cur := false, ""
 	for i := 0; i < portTries+4 && !burned; i++ {
 		liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdFail})
-		rc.pollPins(noop, noop, func(bool) {}, rotSrc, nil, atPathEpoch)
+		rc.poll(func(bool) {}, rotSrc, nil, atPathEpoch)
 		src.mu.Lock()
 		burned, cur = src.health.recs["s1"] != nil, src.addrs[src.cur]
 		src.mu.Unlock()
@@ -138,9 +138,9 @@ func TestAVerdictAndAPinAreSeparateMailboxes(t *testing.T) {
 	p, rc := judgedPool(t, "a", "b")
 	pinned := 0
 
-	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdFail, Key: "a"})
-	writeFileAtomic(p.cmdPath(), []byte(`{"key":"b"}`), 0o644)
-	rc.pollPins(func() { pinned++ }, func() {}, func(bool) { p.fail() }, func(bool) {}, nil, atPathEpoch)
+	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdFail, Low: "a"})
+	writeFileAtomic(rc.pinbox, []byte(`{"kind":"dst","key":"b"}`), 0o644)
+	rc.poll(func(bool) { p.fail("tun-probe") }, func(bool) {}, func(string, string) { pinned++ }, atPathEpoch)
 
 	if !burnedIn(p)["a"] {
 		t.Error("the verdict did not burn the endpoint it named — the pin file swallowed it")

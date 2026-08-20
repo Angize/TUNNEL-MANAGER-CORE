@@ -8,10 +8,10 @@ import (
 func rungHarness(t *testing.T, withRung bool) (rc *rotationController, rolls *int, burns *int) {
 	t.Helper()
 	dir := t.TempDir()
-	dst := NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(dir, "d.json"))
-	src := NewPeerPool([]string{"s1", "s2"}, 0, filepath.Join(dir, "s.json"))
+	dst := NewPeerPool([]string{"d1", "d2", "d3"}, 0)
+	src := NewPeerPool([]string{"s1", "s2"}, 0)
 	rc = newRotationController(dst, src)
-	rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
+	rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
 	rolls, burns = new(int), new(int)
 	if withRung {
 		rc.port.setRoll(func() bool { *rolls++; return true })
@@ -78,8 +78,8 @@ func TestTrafficCrossingRefillsTheDraws(t *testing.T) {
 		t.Fatalf("expected one draw spent, got %d", *rolls)
 	}
 
-	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdOK, Key: rc.dst.current()})
-	rc.pollPins(func() {}, func() {}, func(bool) {}, func(bool) {}, nil, atPathEpoch)
+	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdOK, Low: rc.dst.current(), High: rc.src.current()})
+	rc.poll(func(bool) {}, func(bool) {}, nil, atPathEpoch)
 
 	for i := 1; i <= portTries; i++ {
 		rc.failCounting(burns)
@@ -104,9 +104,7 @@ func TestAPinnedTunnelStillRedrawsAndKeepsItsAllowance(t *testing.T) {
 		t.Errorf("a pinned tunnel refused the one step that keeps it on its pick (%d draws)", *rolls)
 	}
 	if !rc.dst.isPinned() {
-		t.Error("the pin was released by a round that only redrew a port")
-	}
-	if rc.pinFails != 0 {
-		t.Errorf("the pin's allowance was spent on a port redraw (pinFails=%d)", rc.pinFails)
+		t.Error("the pin was released by a round that only redrew a port — the redraw is free and " +
+			"blames nobody, so it is not a second opinion about the operator's pick")
 	}
 }

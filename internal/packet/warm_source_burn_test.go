@@ -33,17 +33,15 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "core-warm.status")
-	srcPath := filepath.Join(dir, "src-pool.json")
-	active := "tcp · " + addr
 	b := &TCP{cryptoOn: true, cipher: "aes-256-gcm", psk: "warm-src-burn-psk-abcdefghijklmn",
 		idle: connIdle, ping: pingEvery, isClient: true, addr: addr,
 		stTag: "tcp", closeCh: make(chan struct{})}
-	b.st = newCoreStatus(path, active)
+	b.SetStatusPath(path)
 	b.warmNext = make(chan *warmDial, 1)
 	dests := []string{addr, second}
-	b.SetPeerPool(NewPeerPool(dests, 0, ""))
+	b.SetPeerPool(NewPeerPool(dests, 0))
 
-	sp := NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0, srcPath)
+	sp := NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0)
 	b.SetSourcePool(sp)
 
 	for range dests {

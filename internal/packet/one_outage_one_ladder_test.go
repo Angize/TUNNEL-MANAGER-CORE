@@ -22,25 +22,25 @@ func newLadderRig(t *testing.T, dsts, srcs []string) *ladderRig {
 	dir := t.TempDir()
 	rig := &ladderRig{}
 	if len(dsts) > 0 {
-		rig.dst = NewPeerPool(dsts, 0, filepath.Join(dir, "d.json"))
+		rig.dst = NewPeerPool(dsts, 0)
 	}
 	if len(srcs) > 0 {
-		rig.src = NewPeerPool(srcs, 0, filepath.Join(dir, "s.json"))
+		rig.src = NewPeerPool(srcs, 0)
 	}
 	rig.rc = newRotationController(rig.dst, rig.src)
-	rig.rc.setVerdict(filepath.Join(dir, "core.json.verdict"))
+	rig.rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
 	return rig
 }
 
 func (r *ladderRig) rotDst(bool) {
 	if r.dst != nil {
-		r.dst.fail()
+		r.dst.fail("tun-probe")
 	}
 }
 
 func (r *ladderRig) rotSrc(bool) {
 	if r.src != nil {
-		r.src.fail()
+		r.src.fail("tun-probe")
 	}
 }
 
@@ -144,10 +144,10 @@ func TestTheBurnedAxisFollowsThePoolShape(t *testing.T) {
 
 func TestAWalkedOutPoolKeepsItsBurnsAndStopsMoving(t *testing.T) {
 	clk := int64(1000)
-	dst := NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(t.TempDir(), "d.json"))
+	dst := NewPeerPool([]string{"d1", "d2", "d3"}, 0)
 	dst.now = func() int64 { return clk }
 	rc := newRotationController(dst, nil)
-	rot := func(bool) { dst.fail() }
+	rot := func(bool) { dst.fail("tun-probe") }
 
 	for i := 0; i < 3; i++ {
 		rc.fail(rot, nil)

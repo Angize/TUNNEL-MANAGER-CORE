@@ -1,7 +1,6 @@
 package packet
 
 import (
-	"path/filepath"
 	"runtime"
 	"sync"
 	"testing"
@@ -10,7 +9,7 @@ import (
 
 func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
-	p := NewPeerPool([]string{"d1", "d2", "d3"}, 0, filepath.Join(t.TempDir(), "d.json"))
+	p := NewPeerPool([]string{"d1", "d2", "d3"}, 0)
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -30,13 +29,13 @@ func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 	}
 
 	run(func() { p.current() })
-	run(func() { p.fail() })
+	run(func() { p.fail("tun-probe") })
 	run(func() { p.rotateOnce() })
 	run(func() { p.selectEntry("d2") })
 	run(func() { p.pinLandedOn("d1") })
-	run(func() { p.pinAttemptFailed("d2") })
+	run(func() { p.pinCannotLand("d2") })
 	run(func() { p.clearBurn("d3") })
-	run(func() { p.probeAllNow() })
+	run(func() { p.retestNow("d1") })
 	run(func() { _ = p.eligibleCount() })
 	run(func() { p.keepCursorOn(p.current()) })
 
@@ -74,9 +73,7 @@ func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 
 func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
-	p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
-	b := &TCP{pool: p}
-	b.armEdgeWalk()
+	b, p := edgeCarrier(t, []string{"e1", "e2", "e3"}, snis("s1", "s2"))
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -99,18 +96,19 @@ func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 	run(func() { p.advance() })
 	run(func() { p.advanceIP(); p.restoreSNIs() })
 	run(func() {
-		ip, sni := p.activeCombo()
-		if ip != "" {
-			b.burnAdvanceWS(ip, sni)
+		low, high := b.livePairNow()
+		if high != "" {
+			b.rc.fail(b.rotateLowTCP, b.rotateHighTCP)
+			_ = low
 		}
 	})
 	run(func() {
 		ip, sni, _ := p.current()
-		p.setActive(activeLabel(ip, sni.host))
+		b.pretendConnected(sni.host, ip)
 	})
 	run(func() { p.selectEntry("ip", "e2") })
-	run(func() { p.pinApplied("e1", "s1") })
-	run(func() { p.pinAttemptFailed("e2", "s2") })
+	run(func() { p.pinLandedOn("e1", "s1") })
+	run(func() { p.pinCannotLand("e2", "s2") })
 	run(func() { p.clearBurn("sni", "s2") })
 	run(func() { p.clearBurn("ip", "e3") })
 	run(func() { _ = p.eligibleSNIs() })

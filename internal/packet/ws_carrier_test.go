@@ -142,10 +142,10 @@ func TestServerDownstreamFollowsData(t *testing.T) {
 	}
 }
 
-func poolActive(p *wsPool) string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.active
+func poolActive(b *TCP) string {
+	b.st.mu.Lock()
+	defer b.st.mu.Unlock()
+	return b.st.active
 }
 
 func TestPinReleasesOnLanding(t *testing.T) {
@@ -161,24 +161,26 @@ func TestPinReleasesOnLanding(t *testing.T) {
 	go srv.Run()
 	t.Cleanup(func() { srv.Close() })
 
-	pool := newWSPool([]string{addr}, snis("front-a", "front-b"), "")
+	pool := newWSPool([]string{addr}, snis("front-a", "front-b"))
 	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, psk: psk,
 		ws: true, wsTLS: false, pool: pool,
 		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
+	cli.SetStatusPath(runningStatusPath(t, cli))
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
 
 	waitFor(t, 5*time.Second, "active up", func() bool { return cli.cur.Load() != nil })
 
 	target := "front-b"
-	if poolActive(pool) == addr+" · front-b" {
+	if poolActive(cli) == addr+activeSep+"front-b" {
 		target = "front-a"
 	}
-	cli.SelectEdge("sni", target)
+	writeFileAtomic(cli.st.pinPath(), []byte(`{"kind":"sni","key":"`+target+`"}`), 0o644)
 
 	waitFor(t, 5*time.Second, "pin released on landing", func() bool {
 		pool.mu.Lock()
-		defer pool.mu.Unlock()
-		return pool.pinSNI == "" && pool.active == addr+" · "+target
+		pinned := pool.pinSNI
+		pool.mu.Unlock()
+		return pinned == "" && poolActive(cli) == addr+activeSep+target
 	})
 }

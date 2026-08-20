@@ -3,7 +3,7 @@ package packet
 import "testing"
 
 func TestCondemnedIsOnlyARealBurn(t *testing.T) {
-	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2"}, 0, "")
+	pool := NewPeerPool([]string{"10.0.0.1", "10.0.0.2"}, 0)
 	c := newRotationController(pool, nil)
 	rot := func(proactive bool) { pool.nextEndpoint(proactive) }
 
@@ -19,7 +19,7 @@ func TestCondemnedIsOnlyARealBurn(t *testing.T) {
 			"per verdict for as long as the outage lasts")
 	}
 
-	single := NewPeerPool([]string{"10.0.0.9"}, 0, "")
+	single := NewPeerPool([]string{"10.0.0.9"}, 0)
 	if newRotationController(single, nil).fail(func(bool) { single.nextEndpoint(false) }, nil) {
 		t.Error("a one-entry pool refuses to burn, so no endpoint was charged")
 	}

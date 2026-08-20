@@ -37,8 +37,9 @@ func TestDialFailureLeavesTheDirectPoolAlone(t *testing.T) {
 	dir := t.TempDir()
 	b := &TCP{dev: dev, cryptoOn: true, cipher: "aes-256-gcm", psk: "handshake-burn-psk-abcdefghijkl",
 		idle: connIdle, ping: pingEvery, isClient: true, addr: addr,
-		st: newCoreStatus(filepath.Join(dir, "core.json"), "tcp · hsburn"), closeCh: make(chan struct{})}
-	pp := NewPeerPool([]string{addr, second}, 0, filepath.Join(dir, "pool.json"))
+		closeCh: make(chan struct{})}
+	b.SetStatusPath(filepath.Join(dir, "core.json"))
+	pp := NewPeerPool([]string{addr, second}, 0)
 	b.SetPeerPool(pp)
 	go b.Run()
 	t.Cleanup(func() { b.Close() })
@@ -61,7 +62,7 @@ func TestDialFailureLeavesTheDirectPoolAlone(t *testing.T) {
 	// mailbox -- the sweep that produced this verdict repeats every few seconds on a real node.
 	deadline = time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
-		if werr := os.WriteFile(b.st.verdictPath(), []byte(`{"cmd":"fail","key":"`+addr+`"}`), 0o644); werr != nil {
+		if werr := os.WriteFile(b.st.verdictPath(), []byte(`{"cmd":"fail","low":"`+addr+`"}`), 0o644); werr != nil {
 			t.Fatalf("write cmd: %v", werr)
 		}
 		if pp.current() != addr {

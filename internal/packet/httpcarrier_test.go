@@ -75,7 +75,7 @@ func TestAnHTTPCOriginThatAnswers502IsADialFailureAndBurns(t *testing.T) {
 	defer bad.Close()
 
 	dial := func(addr string) (*wsPool, error) {
-		p := newWSPool([]string{addr}, []wsSNIEntry{{path: "/"}}, "")
+		p := newWSPool([]string{addr}, []wsSNIEntry{{path: "/"}})
 		b := &TCP{addr: addr, ws: true, httpc: true, wsPath: "/", wsTLS: false, pool: p}
 		c, _, _, err := b.dialCarrier()
 		if c != nil {

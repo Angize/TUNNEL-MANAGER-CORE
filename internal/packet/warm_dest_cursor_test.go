@@ -3,26 +3,15 @@
 package packet
 
 import (
-	"encoding/json"
 	"net"
-	"os"
 	"path/filepath"
 	"testing"
 )
 
-func destPoolActive(t *testing.T, path string) string {
+// Where the pool says it is pointing, as the node reads it out of the one status file.
+func destPoolActive(t *testing.T, b *TCP) string {
 	t.Helper()
-	buf, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read pool status %s: %v", path, err)
-	}
-	var doc struct {
-		Active string `json:"active"`
-	}
-	if json.Unmarshal(buf, &doc) != nil {
-		t.Fatalf("parse pool status %s", path)
-	}
-	return doc.Active
+	return b.readStatus(t).Pair.Low
 }
 
 func TestFailedWarmBuildLeavesTheDestinationCursorWhereTheTunnelIs(t *testing.T) {
@@ -50,16 +39,15 @@ func TestFailedWarmBuildLeavesTheDestinationCursorWhereTheTunnelIs(t *testing.T)
 	third := net.JoinHostPort("127.0.0.3", port)
 
 	dir := t.TempDir()
-	poolPath := filepath.Join(dir, "dest-pool.json")
 	b := &TCP{cryptoOn: true, cipher: "aes-256-gcm", psk: "warm-dst-cursor-psk-abcdefghijk",
 		idle: connIdle, ping: pingEvery, isClient: true, addr: addr,
 		stTag: "tcp", closeCh: make(chan struct{})}
-	b.st = newCoreStatus(filepath.Join(dir, "core.status"), "tcp · "+addr)
+	b.SetStatusPath(filepath.Join(dir, "core.status"))
 	b.warmNext = make(chan *warmDial, 1)
-	b.SetPeerPool(NewPeerPool([]string{addr, second, third}, 0, poolPath))
+	b.SetPeerPool(NewPeerPool([]string{addr, second, third}, 0))
 
 	live := b.pp.current()
-	if got := destPoolActive(t, poolPath); got != live {
+	if got := destPoolActive(t, b); got != live {
 		t.Fatalf("the pool starts describing %q, not %q — the rest of this test would be vacuous", got, live)
 	}
 
@@ -76,7 +64,7 @@ func TestFailedWarmBuildLeavesTheDestinationCursorWhereTheTunnelIs(t *testing.T)
 		w.conn.Close()
 		t.Fatal("a failed warm build parked a carrier")
 	}
-	if got := destPoolActive(t, poolPath); got != live {
+	if got := destPoolActive(t, b); got != live {
 		t.Errorf("after a failed warm build the pool calls %s active, but the tunnel never left %s — the panel marks the wrong IP live, and the next beat rotates onto the endpoint it is already on", got, live)
 	}
 

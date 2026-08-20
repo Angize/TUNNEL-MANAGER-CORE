@@ -32,8 +32,8 @@ func coreStatusEvents(t *testing.T, path string) []coreEvent {
 func TestRotateSourceTCPProactiveDefersEvent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "src.status")
 	b := &TCP{isClient: true, stTag: "tcp", addr: "d0:443"}
-	b.st = newCoreStatus(path, "tcp · d0:443")
-	b.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, 0, ""))
+	b.SetStatusPath(path)
+	b.SetSourcePool(NewPeerPool([]string{"10.0.0.5", "10.0.0.6"}, 0))
 
 	addr, moved := b.rotateSourceTCP(true)
 	if !moved || addr != "10.0.0.6" {
@@ -46,9 +46,18 @@ func TestRotateSourceTCPProactiveDefersEvent(t *testing.T) {
 	if _, moved := b.rotateSourceTCP(false); !moved {
 		t.Fatal("failover rotate should move in a 2-entry pool")
 	}
+	// Two, and both are true: the pool announces the burn it just made, and the carrier announces the
+	// rotation it caused. The burn used to be announced by the judge instead, which named the endpoint
+	// the VERDICT carried rather than the one that was actually burned.
 	ev := coreStatusEvents(t, path)
-	if len(ev) != 1 || ev[0].Kind != "down" || ev[0].Code != "src-rotate" {
-		t.Fatalf("failover source rotation: events=%+v, want exactly one down/src-rotate", ev)
+	if len(ev) != 2 {
+		t.Fatalf("failover source rotation: events=%+v, want a burn and a src-rotate", ev)
+	}
+	if ev[0].Kind != "burn" || ev[0].Detail != "src:10.0.0.6" {
+		t.Fatalf("first event should be the pool naming what IT burned, got %+v", ev[0])
+	}
+	if ev[1].Kind != "down" || ev[1].Code != "src-rotate" {
+		t.Fatalf("second event should be the rotation, got %+v", ev[1])
 	}
 }
 
@@ -76,7 +85,7 @@ func TestDirectPoolShortDeathEmitsOneDown(t *testing.T) {
 	}
 	statusPath := filepath.Join(t.TempDir(), "core.status")
 
-	cli.SetPeerPool(NewPeerPool([]string{a1, a2}, 0, ""))
+	cli.SetPeerPool(NewPeerPool([]string{a1, a2}, 0))
 	cli.SetStatusPath(statusPath)
 
 	go srv.Run()
@@ -168,8 +177,8 @@ func TestSourceOnlyRotationDoesNotAnnounceTheDestination(t *testing.T) {
 	}
 	statusPath := filepath.Join(t.TempDir(), "core.status")
 
-	cli.SetPeerPool(NewPeerPool([]string{addr}, 0, ""))
-	cli.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, time.Second, ""))
+	cli.SetPeerPool(NewPeerPool([]string{addr}, 0))
+	cli.SetSourcePool(NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, time.Second))
 	cli.SetStatusPath(statusPath)
 
 	go srv.Run()

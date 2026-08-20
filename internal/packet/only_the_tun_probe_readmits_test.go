@@ -1,12 +1,11 @@
 package packet
 
 import (
-	"path/filepath"
 	"testing"
 )
 
 func TestAProactiveRotationHandsADueEdgeLiveTraffic(t *testing.T) {
-	p, now := clockPool([]string{"e1", "e2"}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
+	p, now := clockPool([]string{"e1", "e2"}, snis("x"))
 	if ip, _, _ := p.current(); ip != "e1" {
 		t.Fatalf("setup: the cursor starts on %q, want e1", ip)
 	}
@@ -38,7 +37,7 @@ func TestAProactiveRotationHandsADueEdgeLiveTraffic(t *testing.T) {
 
 func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 	t.Run("fail: burned again, and further down the ladder", func(t *testing.T) {
-		p, now := clockPool([]string{"e1", "e2"}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
+		p, now := clockPool([]string{"e1", "e2"}, snis("x"))
 		p.markSuspect("ip", "e2", "tun-probe")
 		*now += suspectBackoff[0]
 		p.advance()
@@ -46,11 +45,12 @@ func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 		if ip != "e2" {
 			t.Fatalf("setup: the try landed on %q", ip)
 		}
-		p.setActive(activeLabel(ip, sni.host))
-
-		b := &TCP{pool: p}
-		b.armEdgeWalk()
-		if !b.burnAdvanceWS(ip, sni.host) {
+		b, _ := edgeCarrier(t, nil, nil)
+		b.pool = p
+		b.rc.bindEdges(p)
+		b.publishPair()
+		b.pretendConnected(sni.host, ip)
+		if !b.tunFail(t, sni.host, ip) {
 			t.Fatal("the verdict did nothing")
 		}
 		if p.ipHealth.due("e2") {
@@ -63,7 +63,7 @@ func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 	})
 
 	t.Run("ok: cleared outright, no ladder left to wait out", func(t *testing.T) {
-		p, now := clockPool([]string{"e1", "e2"}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
+		p, now := clockPool([]string{"e1", "e2"}, snis("x"))
 		p.markSuspect("ip", "e2", "tun-probe")
 		*now += suspectBackoff[0]
 		p.advance()
@@ -80,17 +80,17 @@ func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 
 func TestTheLadderDeepensOnTheRetryItsBackoffAllowed(t *testing.T) {
 	clk := int64(1000)
-	p := NewPeerPool([]string{"a", "b"}, 0, "")
+	p := NewPeerPool([]string{"a", "b"}, 0)
 	p.now = func() int64 { return clk }
-	p.fail()
-	p.fail()
+	p.fail("tun-probe")
+	p.fail("tun-probe")
 
 	addr := activeOf(p)
 	p.mu.Lock()
 	before := *p.health.rec(addr)
 	p.mu.Unlock()
 
-	p.fail()
+	p.fail("tun-probe")
 	p.mu.Lock()
 	held := *p.health.rec(addr)
 	p.mu.Unlock()
@@ -101,7 +101,7 @@ func TestTheLadderDeepensOnTheRetryItsBackoffAllowed(t *testing.T) {
 	}
 
 	clk = before.nextRetest
-	p.fail()
+	p.fail("tun-probe")
 	p.mu.Lock()
 	after := *p.health.rec(addr)
 	p.mu.Unlock()
@@ -112,7 +112,7 @@ func TestTheLadderDeepensOnTheRetryItsBackoffAllowed(t *testing.T) {
 }
 
 func TestAPinIsNotAProactiveRotation(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2", "e3"}, snis("x"), filepath.Join(t.TempDir(), "st.json"))
+	p := newWSPool([]string{"e1", "e2", "e3"}, snis("x"))
 	if !p.selectEntry("ip", "e3") {
 		t.Fatal("could not pin e3")
 	}

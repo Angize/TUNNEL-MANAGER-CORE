@@ -298,7 +298,6 @@ type TCP struct {
 	bindIP   string
 
 	rc     rotationController
-	wsw    walkPolicy
 	rolled atomic.Bool
 
 	srcWarned sync.Map
@@ -319,10 +318,11 @@ type TCP struct {
 	cur     atomic.Pointer[connFramer]
 	curConn atomic.Pointer[net.Conn]
 
-	liveSNI atomic.Pointer[string]
-	closed  atomic.Bool
-	closeCh chan struct{}
-	preAuth chan struct{}
+	liveSNI  atomic.Pointer[string]
+	livePair atomic.Pointer[pairNow]
+	closed   atomic.Bool
+	closeCh  chan struct{}
+	preAuth  chan struct{}
 
 	authMu    sync.Mutex
 	authConns []*connFramer
@@ -333,11 +333,28 @@ func (b *TCP) SetSourceIP(ip string) { b.bindIP = ip }
 func (b *TCP) SetPeerPool(pp *PeerPool) {
 	if b.isClient && !b.ws {
 		b.pp = pp
-		if pp != nil {
-			pp.setEvent("dst", b.event)
-		}
+		joinStatus(b.st, pp, "dst")
 		b.rc.bind(pp, b.sp)
+		b.publishPair()
 	}
+}
+
+// What the node's probe is measuring RIGHT NOW. The connected pair while a carrier is up -- the cursor
+// may already have stepped ahead of it during a warm rotation -- and the cursor once it is down, because
+// that is what the next dial will use and a stale last-connect would name a pair nothing is trying.
+func (b *TCP) livePairNow() (low, high string) {
+	if lp := b.livePair.Load(); lp != nil && b.cur.Load() != nil {
+		return lp.low, lp.high
+	}
+	if b.rc.pair == nil {
+		return "", ""
+	}
+	return b.rc.pair.live()
+}
+
+func (b *TCP) publishPair() {
+	b.rc.liveFn = b.livePairNow
+	b.st.setPair(b.rc.pairStatus)
 }
 
 func (b *TCP) dialTarget() string {
@@ -361,10 +378,9 @@ func (b *TCP) lastSourceUsed() string {
 func (b *TCP) SetSourcePool(sp *PeerPool) {
 	if b.isClient && !b.ws {
 		b.sp = sp
-		if sp != nil {
-			sp.setEvent("src", b.event)
-		}
+		joinStatus(b.st, sp, "src")
 		b.rc.bind(b.pp, sp)
+		b.publishPair()
 	}
 }
 
@@ -390,10 +406,7 @@ func (b *TCP) livePath() (pathKey, bool) {
 	return k, b.cur.Load() != nil
 }
 
-func (b *TCP) endRound() {
-	b.rc.success()
-	b.wsw.reset()
-}
+func (b *TCP) endRound() { b.rc.success() }
 
 func (b *TCP) rollSourcePort() bool {
 	if c := b.curConn.Load(); c != nil {
@@ -401,24 +414,13 @@ func (b *TCP) rollSourcePort() bool {
 		(*c).Close()
 	}
 
-	b.event("down", "port-roll", b.stTag)
+	b.st.event("down", "port-roll", b.stTag)
 	return true
-}
-
-func (b *TCP) event(kind, code, detail string) {
-	if b.pool != nil {
-		b.pool.event(kind, code, detail)
-		return
-	}
-	b.st.event(kind, code, detail)
 }
 
 func (b *TCP) pinFailedOn(ip, host string) {
 	if b.pool != nil {
-		b.pool.pinAttemptFailed(ip, host)
-	}
-	if b.pp != nil {
-		b.pp.pinAttemptFailed(ip)
+		b.pool.pinCannotLand(ip, host)
 	}
 }
 
@@ -432,22 +434,6 @@ func (b *TCP) rotateDestTCP(proactive bool) {
 }
 
 func (b *TCP) rotateSrcTCP(proactive bool) { b.rotateSourceTCP(proactive) }
-
-func (b *TCP) adoptPeerTCP() {
-	if b.pp == nil {
-		return
-	}
-	addr := b.pp.current()
-	log.Printf("core/tcp: pin destination %s (panel select)", addr)
-	b.st.setActive(b.stTag + " · " + addr)
-}
-
-func (b *TCP) adoptSourceTCP() {
-	if b.sp == nil {
-		return
-	}
-	log.Printf("core/tcp: pin source %s (panel select)", b.sp.current())
-}
 
 func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
 	if b.sp == nil {
@@ -491,7 +477,7 @@ func (b *TCP) fragWrap(conn net.Conn, host string, ech []byte) net.Conn {
 }
 
 func (b *TCP) SetStatusPath(path string) {
-	if path == "" || b.pool != nil {
+	if path == "" {
 		return
 	}
 
@@ -504,8 +490,19 @@ func (b *TCP) SetStatusPath(path string) {
 	case b.cover:
 		carrier = "cover"
 	}
-	b.st = newCoreStatus(path, carrier+" · "+b.addr)
+	active := carrier + activeSep + b.addr
+	if b.pool != nil {
+		active = ""
+	}
+	b.st = newCoreStatus(path, active)
 	b.stTag = carrier
+	b.rc.setMailboxes(b.st.verdictPath(), b.st.pinPath())
+	if b.pool != nil {
+		b.pool.attach(b.st.event, b.st.write)
+		b.st.addHealth(b.pool.healthRows)
+		b.rc.bindEdges(b.pool)
+		b.publishPair()
+	}
 }
 
 func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
@@ -556,30 +553,15 @@ func DialWSPool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, pool *
 	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, pool: pool, rotate: rotate,
 		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
-	b.armEdgeWalk()
+	b.rc.bindEdges(pool)
 	return b, nil
 }
 
-// The SNI is the low digit and the EDGE the high one -- but only while there is more than one SNI to
-// vary. With one, nothing varies under the edge, so the edge itself is what a fail condemns.
-func (b *TCP) armEdgeWalk() {
-	if b.pool == nil {
-		return
-	}
-	b.wsw.mu.Lock()
-	defer b.wsw.mu.Unlock()
-	b.wsw.pins = []pinnable{b.pool}
-	b.wsw.high = wsEdges{b.pool}
-	if b.pool.snisCount() >= 2 {
-		b.wsw.low = wsSNIs{b.pool}
-	}
-}
-
-func newWSPoolFromCfg(ips []string, snis []wsSNIEntry, statusPath string) *wsPool {
+func newWSPoolFromCfg(ips []string, snis []wsSNIEntry) *wsPool {
 	if len(ips) == 0 || len(snis) == 0 {
 		return nil
 	}
-	return newWSPool(ips, snis, statusPath)
+	return newWSPool(ips, snis)
 }
 
 func DialHTTPC(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte, httpcMode string) (*TCP, error) {
@@ -650,15 +632,9 @@ func (b *TCP) Run() error {
 		go b.keepaliveLoop()
 		go b.diagLoop()
 		b.rc.port.setRoll(b.rollSourcePort)
-		if b.pool != nil {
-			b.pool.trackPath(b.livePath, b.closeCh)
-			go b.retestLoop()
-		} else {
-			b.st.trackPath(b.livePath, b.closeCh)
-			b.rc.setVerdict(b.st.verdictPath())
-			if b.rc.polls() {
-				go b.peerPinPollLoop()
-			}
+		b.st.trackPath(b.livePath, b.closeCh)
+		if b.rc.polls() {
+			go b.peerPinPollLoop()
 		}
 
 		go func() {
@@ -1154,50 +1130,41 @@ func classifyErr(s string) string {
 	}
 }
 
-func (b *TCP) retestLoop() {
-	t := time.NewTicker(1 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-b.closeCh:
-			return
-		case <-t.C:
-			b.pollWsCmd()
-			if hosts := b.pool.readECHCmd(); len(hosts) > 0 {
-
-				log.Printf("core/ws: live ECH key updated for %v (no rebuild)", hosts)
-			}
-
-		}
+// A live ECH push: the panel writes the fresh keys, the carrier applies them without a rebuild. Reading
+// the file is the carrier's job on both shapes; a pool applies them across its list, a single edge only
+// to the one host it dials.
+func (b *TCP) readECHCmd() []string {
+	if !b.ws || b.st == nil {
+		return nil
 	}
-}
-
-func (b *TCP) readECHCmdSingle() bool {
-	if !b.ws || b.wsHost == "" || b.st == nil {
-		return false
-	}
-	cp := b.st.path + ".echcmd"
+	cp := b.st.echCmdPath()
 	data, err := os.ReadFile(cp)
 	if err != nil {
-		return false
+		return nil
 	}
 	os.Remove(cp)
 	var c struct {
 		SNIs map[string]string `json:"snis"`
 	}
 	if json.Unmarshal(data, &c) != nil || len(c.SNIs) == 0 {
-		return false
+		return nil
+	}
+	if b.pool != nil {
+		return b.pool.applyECH(c.SNIs)
+	}
+	if b.wsHost == "" {
+		return nil
 	}
 	b64, ok := c.SNIs[b.wsHost]
 	if !ok {
-		return false
+		return nil
 	}
 	ech, derr := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
 	if derr != nil || len(ech) == 0 || bytes.Equal(b.wsECH, ech) {
-		return false
+		return nil
 	}
 	b.wsECH = ech
-	return true
+	return []string{b.wsHost}
 }
 
 const (
@@ -1279,7 +1246,7 @@ func (b *TCP) dialLoop() {
 		if b.closed.Load() {
 			return
 		}
-		if b.readECHCmdSingle() {
+		if b.pool == nil && len(b.readECHCmd()) > 0 {
 			log.Printf("core/ws: live ECH key updated for %s (single edge, no rebuild)", b.wsHost)
 		}
 
@@ -1336,7 +1303,13 @@ func (b *TCP) dialLoop() {
 		backoff = 0
 		connectedAt := time.Now()
 
-		b.st.reconnected(label)
+		// Name the whole pair on an edge pool: the operator reading the ring wants to know which
+		// edge AND which domain came back, not just the address.
+		back := label
+		if combo != "" {
+			back = combo
+		}
+		b.st.reconnected(back)
 
 		b.manualSwitch.Store(false)
 		b.cur.Store(cf)
@@ -1345,13 +1318,15 @@ func (b *TCP) dialLoop() {
 		b.curConn.Store(&cc)
 		if b.pool != nil {
 
-			b.pool.setActive(combo)
-			sni := strings.TrimPrefix(combo, label+" · ")
+			b.st.setActive(combo)
+			sni := strings.TrimPrefix(combo, label+activeSep)
 			b.liveSNI.Store(&sni)
+			b.livePair.Store(&pairNow{low: sni, high: label})
 
-			b.pool.pinApplied(label, sni)
+			b.pool.pinLandedOn(label, sni)
 		} else {
 
+			b.livePair.Store(&pairNow{low: label, high: b.lastSourceUsed()})
 			if b.pp != nil {
 				b.pp.pinLandedOn(label)
 			}
@@ -1475,6 +1450,7 @@ func (b *TCP) dialLoop() {
 		}
 		b.curConn.CompareAndSwap(&cc, nil)
 		b.liveSNI.Store(nil)
+		b.livePair.Store(nil)
 		b.cur.CompareAndSwap(cf, nil)
 
 		deliberate := false
@@ -1493,7 +1469,7 @@ func (b *TCP) dialLoop() {
 				b.endRound()
 			case b.pool != nil || b.pp != nil || b.sp != nil:
 				if b.pool != nil {
-					b.pool.down(classifyErr(cause), label)
+					b.st.down(classifyErr(cause), label)
 				}
 
 				if time.Since(connectedAt) >= minLiveness {
@@ -1601,21 +1577,6 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 	return cf, nil
 }
 
-func (b *TCP) RotateIP()  { b.rotate1(func() { b.pool.advanceIP() }) }
-func (b *TCP) RotateSNI() { b.rotate1(func() { b.pool.advanceSNI() }) }
-
-func (b *TCP) ProbeAllNow() {
-	if b.pool != nil {
-		b.pool.probeAllNow()
-	}
-	if b.pp != nil {
-		b.pp.probeAllNow()
-	}
-	if b.sp != nil {
-		b.sp.probeAllNow()
-	}
-}
-
 func (b *TCP) peerPinPollLoop() {
 	t := time.NewTicker(1 * time.Second)
 	defer t.Stop()
@@ -1636,106 +1597,46 @@ func (b *TCP) dropCarrier() {
 	}
 }
 
+// One tick of both mailboxes, for every carrier this file serves: a direct pool, an edge pool, or a
+// tunnel with no pool at all (which still has free rungs to spend).
 func (b *TCP) pollPeerCmd() {
-	dropped := false
-	drop := func() { dropped = true; b.dropCarrier() }
-	was := ""
-	if b.pp != nil {
-		was = b.pp.current()
-	}
-	b.rc.pollPins(
-		func() { b.adoptPeerTCP(); drop() },
-		func() { b.adoptSourceTCP(); drop() },
-		b.rotateDestTCP, b.rotateSrcTCP, b.event, b.st.pathEpoch)
-
-	if !dropped && b.pp != nil && b.pp.current() != was {
+	if b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.pinApplied, b.st.pathEpoch) {
 		b.dropCarrier()
 	}
-}
-
-func (b *TCP) pollWsCmd() {
-	if cmd, ok := b.pool.readCmd(); ok {
-		epoch := b.pool.pathEpoch()
-		switch {
-		case staleVerdict(cmd, epoch):
-
-			log.Printf("core/ws: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
-				cmd.Epoch, epoch)
-		case cmd.Cmd == cmdOK:
-			b.rc.port.restart()
-			b.wsw.reset()
-			if cmd.IP != "" && b.pool.clearBurn("ip", cmd.IP) {
-				b.pool.event("heal", "tun-probe", "ip:"+cmd.IP)
-			}
-			if cmd.SNI != "" && b.pool.clearBurn("sni", cmd.SNI) {
-				b.pool.event("heal", "tun-probe", "sni:"+cmd.SNI)
-			}
-		case cmd.Cmd == cmdFail:
-			ip, sni := b.pool.activeCombo()
-			if cmd.IP == ip && cmd.SNI == sni {
-				if b.rc.port.try() {
-					break
-				}
-				if b.burnAdvanceWS(ip, sni) {
-					log.Printf("core/ws: %s%s%s failed by the node's tun probe — burning the axis the walk varies and advancing", ip, activeSep, sni)
-					b.dropCarrier()
-				}
-			} else if cmd.SNI != "" {
-
-				log.Printf("core/ws: %s%s%s failed by the node's tun probe, but the pool has since moved to "+
-					"%s%s%s — burning what was measured, staying put", cmd.IP, activeSep, cmd.SNI, ip, activeSep, sni)
-
-				// Same axis rule as the walk: the SNI is the low digit, so a combination that would not
-				// carry condemns the SNI and only a whole row convicts the edge. With ONE SNI there is no
-				// low digit to vary, and blaming it would condemn the only domain the pool has -- that is
-				// the case burnAdvanceWS already sends to the edge, so send it there too.
-				if b.wsw.hasLow() {
-					b.pool.markSuspect("sni", cmd.SNI, "tun-probe")
-				} else if cmd.IP != "" {
-					b.pool.markSuspect("ip", cmd.IP, "tun-probe")
-				}
-			}
-		case cmd.Key != "":
-			log.Printf("core/ws: select edge %s=%s (panel pin)", cmd.Kind, cmd.Key)
-			b.SelectEdge(cmd.Kind, cmd.Key)
-		}
+	if hosts := b.readECHCmd(); len(hosts) > 0 {
+		log.Printf("core/ws: live ECH key updated for %v (no rebuild)", hosts)
 	}
 }
 
-func (b *TCP) burnAdvanceWS(ip, sni string) bool {
-	burnEdge := func(bool) { b.pool.advanceIP() }
-	if !b.wsw.hasLow() {
-
-		burnEdge = func(bool) {
-			b.pool.markSuspect("ip", ip, "tun-probe")
-			b.pool.advanceIP()
-		}
-	}
-	burns := b.pool.burnCount()
-	wasIP, wasSNI, _ := b.pool.current()
-	b.wsw.walk(func(bool) { b.pool.markSuspect("sni", sni, "tun-probe") }, burnEdge)
-	nowIP, nowSNI, _ := b.pool.current()
-
-	// The cursor is not the endpoint: advanceIP always turns it, while current() keeps serving the best
-	// entry once every edge is burned.
-	return b.pool.burnCount() != burns || nowIP != wasIP || nowSNI.host != wasSNI.host
-}
-
-func (b *TCP) SelectEdge(kind, key string) {
+// The digit a fail condemns: the destination on a direct pool, the SNI on an edge pool.
+func (b *TCP) rotateLowTCP(proactive bool) {
 	if b.pool == nil {
+		b.rotateDestTCP(proactive)
 		return
 	}
-	b.rotate1(func() { b.pool.selectEntry(kind, key) })
+	low, _ := b.livePairNow()
+	b.pool.markSuspect("sni", low, "tun-probe")
 }
 
-func (b *TCP) rotate1(step func()) {
+// The digit that turns once a whole row of the low one has been tried. With ONE SNI there is no low
+// digit to vary, so the walk arrives here every round and the edge is what a fail condemns.
+func (b *TCP) rotateHighTCP(proactive bool) {
 	if b.pool == nil {
+		b.rotateSrcTCP(proactive)
 		return
 	}
-	step()
-	b.manualSwitch.Store(true)
-	if c := b.curConn.Load(); c != nil {
-		(*c).Close()
+	if !b.rc.hasLow() {
+		_, edge := b.livePairNow()
+		b.pool.markSuspect("ip", edge, "tun-probe")
+	}
+	b.pool.advanceIP()
+}
+
+// The operator's pick took. Only the direct destination needs saying here: the panel reads the edge
+// pool's own rows, and a source pin shows up on the next dial.
+func (b *TCP) pinApplied(kind, key string) {
+	if b.pool == nil && kind == "dst" {
+		b.st.setActive(b.stTag + activeSep + key)
 	}
 }
 
@@ -1907,3 +1808,6 @@ func (b *TCP) sleep(d time.Duration) bool {
 		return false
 	}
 }
+
+// What the carrier is actually on, as opposed to where the cursor has stepped to.
+type pairNow struct{ low, high string }
