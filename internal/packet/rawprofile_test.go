@@ -32,7 +32,7 @@ func TestRawProfileRoundTrip(t *testing.T) {
 		bytes.Repeat([]byte{0xAA}, 1),
 	}
 	for name := range rawProfiles {
-		proto, _ := rawProtoFor(name)
+		proto, _ := rawEffProto(name, 0)
 		for i, pl := range payloads {
 			for _, client := range []bool{true, false} {
 				l4 := rawEncap(name, pl, testSrc, testDst, client, 0x1234, 0, 0, uint32(i+1), 0, 0x10203040, 0, 0, tcpPshAck)
@@ -58,13 +58,13 @@ func TestRawProfileRoundTrip(t *testing.T) {
 func TestRawProtoNumbers(t *testing.T) {
 	want := map[string]int{"bare": 253, "ipip": 4, "gre": 47, "icmp": 1, "udp": 17, "tcp": 6, "esp": 50}
 	for name, n := range want {
-		got, ok := rawProtoFor(name)
+		got, ok := rawEffProto(name, 0)
 		if !ok || got != n {
 			t.Errorf("proto(%s) = %d,%v want %d", name, got, ok, n)
 		}
 	}
-	if _, ok := rawProtoFor("nope"); ok {
-		t.Error("rawProtoFor accepted an unknown profile")
+	if _, ok := rawEffProto("nope", 0); ok {
+		t.Error("rawEffProto accepted an unknown profile")
 	}
 }
 

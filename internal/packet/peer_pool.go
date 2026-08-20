@@ -137,8 +137,6 @@ func (p *PeerPool) activeIdx() int {
 	return p.cur
 }
 
-func (p *PeerPool) size() int { return len(p.addrs) }
-
 func (p *PeerPool) all() []string {
 	out := make([]string, len(p.addrs))
 	copy(out, p.addrs)
