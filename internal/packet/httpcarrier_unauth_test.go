@@ -22,12 +22,12 @@ func httpcPostChunk(t *testing.T, base, sid string, seq int, n int) int {
 }
 
 func pendBytes(s *httpcSession) (held int, entries int) {
-	s.upMu.Lock()
-	defer s.upMu.Unlock()
-	for _, d := range s.pend {
+	s.up.mu.Lock()
+	defer s.up.mu.Unlock()
+	for _, d := range s.up.pend {
 		held += len(d)
 	}
-	return held, len(s.pend)
+	return held, len(s.up.pend)
 }
 
 func TestHTTPCPostNeverCreatesSession(t *testing.T) {
@@ -50,10 +50,9 @@ func TestHTTPCPostNeverCreatesSession(t *testing.T) {
 func TestHTTPCPendBufferIsBoundedInBytes(t *testing.T) {
 	b := &TCP{httpcSessions: map[string]*httpcSession{}}
 	const sid = "ffeeddccbbaa99887766554433221100"
-	pr, pw := io.Pipe()
-	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), pend: map[uint64][]byte{}}
+	s := newHTTPCSession()
 	b.httpcSessions[sid] = s
-	defer pw.Close()
+	defer s.upW.Close()
 
 	ts := httptest.NewServer(http.HandlerFunc(b.httpcHandler))
 	defer ts.Close()
@@ -77,10 +76,9 @@ func TestHTTPCPendBufferIsBoundedInBytes(t *testing.T) {
 func TestHTTPCPendAccountingSurvivesRepostedSeq(t *testing.T) {
 	b := &TCP{httpcSessions: map[string]*httpcSession{}}
 	const sid = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
-	pr, pw := io.Pipe()
-	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), pend: map[uint64][]byte{}}
+	s := newHTTPCSession()
 	b.httpcSessions[sid] = s
-	defer pw.Close()
+	defer s.upW.Close()
 
 	ts := httptest.NewServer(http.HandlerFunc(b.httpcHandler))
 	defer ts.Close()

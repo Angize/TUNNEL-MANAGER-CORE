@@ -84,16 +84,15 @@ func TestOverflowedUpstreamChunkIsNotAnswered204(t *testing.T) {
 }
 
 func TestDeliverReportsSuccessForADuplicateItAlreadyDelivered(t *testing.T) {
-	pr, pw := io.Pipe()
-	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), pend: map[uint64][]byte{}}
+	s := newHTTPCSession()
 	drained := make(chan struct{})
-	go func() { io.Copy(io.Discard, pr); close(drained) }()
-	defer func() { pw.Close(); <-drained }()
+	go func() { io.Copy(io.Discard, s.upR); close(drained) }()
+	defer func() { s.upW.Close(); <-drained }()
 
-	if !s.deliver(0, []byte("hello")) {
+	if !s.up.deliver(0, []byte("hello")) {
 		t.Fatal("the first in-order chunk was reported as dropped")
 	}
-	if !s.deliver(0, []byte("hello")) {
+	if !s.up.deliver(0, []byte("hello")) {
 		t.Fatal("a retransmit of an already-delivered seq is reported as dropped: the client would be told 400 and re-dial a perfectly healthy session")
 	}
 }

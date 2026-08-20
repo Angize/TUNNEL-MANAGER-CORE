@@ -18,25 +18,34 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// An origin that sends back whatever it is given. Only the routing is the test's own: the session,
+// the resequencer and the download records are the production pieces, so this cannot drift away from
+// the wire format the way a hand-written copy of it did.
 func echoHTTPC() *httptest.Server {
-	type sess struct {
-		pr   *io.PipeReader
-		pw   *io.PipeWriter
-		mu   sync.Mutex
-		next uint64
-		pend map[uint64][]byte
-	}
 	var mu sync.Mutex
-	sessions := map[string]*sess{}
-	get := func(sid string) *sess {
+	sessions := map[string]*httpcSession{}
+	get := func(sid string) *httpcSession {
 		mu.Lock()
 		defer mu.Unlock()
 		if s := sessions[sid]; s != nil {
 			return s
 		}
-		pr, pw := io.Pipe()
-		s := &sess{pr: pr, pw: pw, pend: map[uint64][]byte{}}
+		s := newHTTPCSession()
 		sessions[sid] = s
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				n, err := s.upR.Read(buf)
+				if n > 0 {
+					if _, werr := s.down.write(buf[:n], 0); werr != nil {
+						return
+					}
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
 		return s
 	}
 	mux := http.NewServeMux()
@@ -45,38 +54,14 @@ func echoHTTPC() *httptest.Server {
 		if r.Method == http.MethodPost {
 			seq, _ := strconv.ParseUint(r.URL.Query().Get("seq"), 10, 64)
 			data, _ := io.ReadAll(r.Body)
-			s.mu.Lock()
-			s.pend[seq] = data
-			for {
-				d, ok := s.pend[s.next]
-				if !ok {
-					break
-				}
-				delete(s.pend, s.next)
-				s.next++
-				if len(d) > 0 {
-					s.pw.Write(d)
-				}
-			}
-			s.mu.Unlock()
+			s.up.deliver(seq, data)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		fl := w.(http.Flusher)
 		w.WriteHeader(200)
 		fl.Flush()
-		go func() { <-r.Context().Done(); s.pw.Close() }()
-		buf := make([]byte, 4096)
-		for {
-			n, e := s.pr.Read(buf)
-			if n > 0 {
-				w.Write(buf[:n])
-				fl.Flush()
-			}
-			if e != nil {
-				return
-			}
-		}
+		s.down.serve(r.Context(), w, fl.Flush, http.NewResponseController(w).SetWriteDeadline)
 	})
 	return httptest.NewServer(mux)
 }

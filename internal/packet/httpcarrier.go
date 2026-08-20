@@ -48,7 +48,7 @@ type httpcConn struct {
 	r     io.Reader
 	w     io.Writer
 	flush func()
-	up    *httpcUp
+	aw    asyncWriter
 
 	wmu     sync.Mutex
 	wdl     atomic.Int64
@@ -78,8 +78,8 @@ func (c *httpcConn) armWrite() func() {
 }
 
 func (c *httpcConn) Write(p []byte) (int, error) {
-	if c.up != nil {
-		return c.up.write(p, c.wdl.Load())
+	if c.aw != nil {
+		return c.aw.write(p, c.wdl.Load())
 	}
 
 	c.mu.Lock()
@@ -685,53 +685,83 @@ func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Conte
 	return conn, nil
 }
 
-func (b *TCP) dialHTTPCPost(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request), budget time.Duration) (net.Conn, error) {
-	greq, err := http.NewRequestWithContext(ctx, "GET", base+"?s="+sid, nil)
+// One download stream. Each carries its own index so the edge sees distinct URLs rather than n
+// identical requests it may collapse or cache.
+func (b *TCP) openDownStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", base+"?s="+sid+"&d="+strconv.Itoa(i), nil)
 	if err != nil {
-		cancel()
 		return nil, err
 	}
-	setHdr(greq)
-	gresp, err := doWithHeaderTimeout(hc, greq, httpcHeaderWait(budget))
+	setHdr(req)
+	resp, err := doWithHeaderTimeout(hc, req, httpcHeaderWait(budget))
 	if err != nil {
-		cancel()
 		return nil, err
 	}
-	if gresp.StatusCode != http.StatusOK {
-		gresp.Body.Close()
-		cancel()
-		return nil, fmt.Errorf("httpc: down got HTTP %d (want 200)", gresp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("httpc: down got HTTP %d (want 200)", resp.StatusCode)
 	}
-
-	if enc := gresp.Header.Get("Content-Encoding"); downstreamUnusable(enc) {
-		gresp.Body.Close()
-		cancel()
+	if enc := resp.Header.Get("Content-Encoding"); downstreamUnusable(enc) {
+		resp.Body.Close()
 		return nil, fmt.Errorf("httpc: down came back %s-encoded — this edge compresses the downstream, "+
 			"which the carrier cannot decode; turn compression off for this path at the CDN", enc)
+	}
+	return resp, nil
+}
+
+// One download stream, reopened for as long as the carrier lives. Neither failing to open nor dying
+// once open ends the tunnel: the server puts back whatever a dead stream did not deliver, and the
+// carrier runs on whichever streams are up. A path that drops a burst of SYNs will not bring them all
+// up at once, and on a censored one they come and go for the life of the tunnel.
+func (b *TCP) runDownStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration, q *reseq, fail func()) {
+	for {
+		if resp, err := b.openDownStream(hc, ctx, base, sid, i, setHdr, budget); err == nil {
+			readStripe(resp.Body, q, fail)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(stripeRetry):
+		}
+	}
+}
+
+func (b *TCP) dialHTTPCPost(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request), budget time.Duration) (net.Conn, error) {
+	first, err := b.openDownStream(hc, ctx, base, sid, 0, setHdr, budget)
+	if err != nil {
+		cancel()
+		return nil, err
 	}
 	urlFor := func(seq uint64) string {
 		return base + "?s=" + sid + "&seq=" + strconv.FormatUint(seq, 10)
 	}
+	pr, pw := io.Pipe()
 	conn := &httpcConn{
-		r:  gresp.Body,
+		r:  pr,
 		ra: strAddr(dialAddr), la: strAddr("http-client"),
 	}
-	conn.closeFn = func() { cancel(); gresp.Body.Close(); closeIdle() }
-	conn.up = newHTTPCUp(ctx, hc, urlFor, setHdr, func() { conn.Close() })
+	conn.closeFn = func() { cancel(); pw.Close(); closeIdle() }
+	fail := func() { conn.Close() }
+	q := newReseq(pw, maxStripePend(carrierStreams))
+	go func() {
+		readStripe(first.Body, q, fail)
+		b.runDownStream(hc, ctx, base, sid, 0, setHdr, budget, q, fail)
+	}()
+	for i := 1; i < carrierStreams; i++ {
+		go b.runDownStream(hc, ctx, base, sid, i, setHdr, budget, q, fail)
+	}
+	conn.aw = newHTTPCUp(ctx, hc, urlFor, setHdr, fail)
 	return conn, nil
 }
 
 type httpcSession struct {
 	upR   *io.PipeReader
 	upW   *io.PipeWriter
+	up    *reseq
+	down  *stripeTx
 	done  chan struct{}
 	start sync.Once
 	end   sync.Once
-
-	upMu    sync.Mutex
-	nextSeq uint64
-	pend    map[uint64][]byte
-	pendLen int
 }
 
 func (b *TCP) httpcGetOrCreate(sid string) *httpcSession {
@@ -740,10 +770,15 @@ func (b *TCP) httpcGetOrCreate(sid string) *httpcSession {
 	if s := b.httpcSessions[sid]; s != nil {
 		return s
 	}
-	pr, pw := io.Pipe()
-	s := &httpcSession{upR: pr, upW: pw, done: make(chan struct{}), pend: map[uint64][]byte{}}
+	s := newHTTPCSession()
 	b.httpcSessions[sid] = s
 	return s
+}
+
+func newHTTPCSession() *httpcSession {
+	pr, pw := io.Pipe()
+	done := make(chan struct{})
+	return &httpcSession{upR: pr, upW: pw, up: newReseq(pw, maxPendBytes()), down: newStripeTx(done), done: done}
 }
 
 func (b *TCP) httpcLookup(sid string) *httpcSession {
@@ -759,39 +794,6 @@ func maxPendBytes() int {
 	return 4 << 20
 }
 
-func (s *httpcSession) deliver(seq uint64, data []byte) bool {
-	s.upMu.Lock()
-	defer s.upMu.Unlock()
-	if seq < s.nextSeq {
-
-		return true
-	}
-
-	if len(s.pend) > 1024 || s.pendLen+len(data) > maxPendBytes() {
-		return false
-	}
-	if old, ok := s.pend[seq]; ok {
-		s.pendLen -= len(old)
-	}
-	s.pend[seq] = data
-	s.pendLen += len(data)
-	for {
-		d, ok := s.pend[s.nextSeq]
-		if !ok {
-			break
-		}
-		delete(s.pend, s.nextSeq)
-		s.pendLen -= len(d)
-		s.nextSeq++
-		if len(d) > 0 {
-			if _, err := s.upW.Write(d); err != nil {
-				return false
-			}
-		}
-	}
-	return true
-}
-
 func (s *httpcSession) close(b *TCP, sid string) {
 	s.end.Do(func() {
 		close(s.done)
@@ -803,6 +805,8 @@ func (s *httpcSession) close(b *TCP, sid string) {
 	})
 }
 
+// The conn for a carrier that writes straight into one response. The parallel download does not use
+// it: there its writes go to the session queue, and the deadline is set per stream in writeRecord.
 func newHTTPCServerConn(w http.ResponseWriter, rd io.Reader, wr io.Writer, flush func(), remote string, closeFn func()) *httpcConn {
 	return &httpcConn{
 		r: rd, w: wr, flush: flush,
@@ -860,7 +864,7 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}
-		if !s.deliver(seq, data) {
+		if !s.up.deliver(seq, data) {
 
 			http.Error(w, "", http.StatusBadRequest)
 			return
@@ -884,10 +888,19 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	fl.Flush()
-	conn := newHTTPCServerConn(w, s.upR, w, fl.Flush, r.RemoteAddr, func() { s.close(b, sid) })
 
-	s.start.Do(func() { go b.handleServerConn(conn) })
-	<-s.done
+	// The carrier belongs to the session, not to this request: the first GET starts it and every GET
+	// after it is one more stream the same queue can write down.
+	s.start.Do(func() {
+		go b.handleServerConn(&httpcConn{
+			r:       s.upR,
+			aw:      s.down,
+			ra:      strAddr(r.RemoteAddr),
+			la:      strAddr("http-server"),
+			closeFn: func() { s.close(b, sid) },
+		})
+	})
+	s.down.serve(r.Context(), w, fl.Flush, http.NewResponseController(w).SetWriteDeadline)
 }
 
 func (b *TCP) runHTTPCServer() {
