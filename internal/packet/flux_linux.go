@@ -631,6 +631,7 @@ func (f *Flux) SetPeerPool(pp *PeerPool) {
 	if f.isClient {
 		f.pp = pp
 		if pp != nil {
+			pp.setEvent("dst", f.st.event)
 
 			m := buildSrcAllow(pp.all())
 			f.poolIPs = m
@@ -661,6 +662,7 @@ func (f *Flux) SetSourcePool(sp *PeerPool) {
 	f.sp = sp
 
 	if sp != nil {
+		sp.setEvent("src", f.st.event)
 		if ip := adoptableSource("flux", sp, sp.current(), &f.srcWarned); ip != nil {
 			f.localIP.Store(&net.IPAddr{IP: ip})
 		} else {

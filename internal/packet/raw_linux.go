@@ -1066,6 +1066,7 @@ func (r *Raw) SetPeerPool(pp *PeerPool) {
 	if r.isClient {
 		r.pp = pp
 		if pp != nil {
+			pp.setEvent("dst", r.st.event)
 
 			m := buildSrcAllow(pp.all())
 			r.poolIPs = m
@@ -1113,6 +1114,7 @@ func (r *Raw) SetSourcePool(sp *PeerPool) {
 	r.sp = sp
 
 	if sp != nil {
+		sp.setEvent("src", r.st.event)
 		if ip := adoptableSource("raw", sp, sp.current(), &r.srcWarned); ip != nil {
 			r.localIP.Store(&net.IPAddr{IP: ip})
 		} else {

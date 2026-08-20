@@ -339,6 +339,9 @@ func (b *TCP) SetSourceIP(ip string) { b.bindIP = ip }
 func (b *TCP) SetPeerPool(pp *PeerPool) {
 	if b.isClient && !b.ws {
 		b.pp = pp
+		if pp != nil {
+			pp.setEvent("dst", b.event)
+		}
 		b.rc.bind(pp, b.sp)
 	}
 }
@@ -364,6 +367,9 @@ func (b *TCP) lastSourceUsed() string {
 func (b *TCP) SetSourcePool(sp *PeerPool) {
 	if b.isClient && !b.ws {
 		b.sp = sp
+		if sp != nil {
+			sp.setEvent("src", b.event)
+		}
 		b.rc.bind(b.pp, sp)
 	}
 }
@@ -511,41 +517,24 @@ func (b *TCP) SetStatusPath(path string) {
 func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 	d := &net.Dialer{Timeout: timeout}
 	src := b.sourceIP()
+	prev := b.lastSourceUsed()
 
 	unbound := ""
 	b.lastSrc.Store(&unbound)
-	if src != "" {
-
-		host := src
-		if h, _, e := net.SplitHostPort(src); e == nil {
-			host = h
-		}
-		if ip := net.ParseIP(host); ip != nil && canBindSource(ip) {
-			d.LocalAddr = &net.TCPAddr{IP: ip}
-			b.lastSrc.Store(&src)
-		} else {
-			b.dropUnusableSource(src, host, ip != nil)
-		}
+	if src == "" {
+		return d
 	}
+	ip := adoptableSource("tcp", b.sp, src, &b.srcWarned)
+	if ip == nil {
+		if b.sp != nil {
+
+			b.sp.rejectCandidate(prev)
+		}
+		return d
+	}
+	d.LocalAddr = &net.TCPAddr{IP: ip}
+	b.lastSrc.Store(&src)
 	return d
-}
-
-func (b *TCP) dropUnusableSource(src, host string, parsed bool) {
-	if _, dup := b.srcWarned.LoadOrStore(src, struct{}{}); !dup {
-		if parsed {
-			log.Printf("core/tcp: source IP %s is not configured on this host — dialing from the kernel default instead", host)
-		} else {
-			log.Printf("core/tcp: source %q is not a usable IP address — dialing from the kernel default instead", src)
-		}
-	}
-	if b.sp == nil {
-		return
-	}
-
-	if b.sp.pinCannotLand(src) {
-		log.Printf("core/tcp: manual jump to source %s abandoned — that IP is not configured on this host", src)
-	}
-	b.sp.fail()
 }
 
 func canBindSource(ip net.IP) bool {

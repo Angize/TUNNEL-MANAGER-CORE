@@ -44,11 +44,13 @@ func TestUnusableSourceIsBurnedNotSilentlyIgnored(t *testing.T) {
 
 func TestUnusableSourceWarnsPerEntry(t *testing.T) {
 	b := &TCP{}
-	b.dropUnusableSource("a", "a", false)
+	if ip := adoptableSource("tcp", nil, "a", &b.srcWarned); ip != nil {
+		t.Fatalf("%q is not an address the kernel can bind", "a")
+	}
 	if _, seen := b.srcWarned.Load("a"); !seen {
 		t.Fatal("the first unusable source was not recorded")
 	}
-	b.dropUnusableSource("b", "b", false)
+	adoptableSource("tcp", nil, "b", &b.srcWarned)
 	if _, seen := b.srcWarned.Load("b"); !seen {
 		t.Fatal("a SECOND unusable source was swallowed — that is the sync.Once behaviour")
 	}

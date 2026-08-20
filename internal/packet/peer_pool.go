@@ -26,6 +26,43 @@ type PeerPool struct {
 
 	chosen string
 	now    func() int64
+
+	axis string
+	ev   func(kind, code, detail string)
+}
+
+// Which half of the matrix this pool is, and where its events go. The pool cannot know either: the
+// carrier owns the status file and decides whether it is the destination axis or the source one.
+func (p *PeerPool) setEvent(axis string, ev func(kind, code, detail string)) {
+	p.mu.Lock()
+	p.axis, p.ev = axis, ev
+	p.mu.Unlock()
+}
+
+func (p *PeerPool) emit(code, reason string) {
+	p.mu.Lock()
+	axis, ev := p.axis, p.ev
+	p.mu.Unlock()
+	if ev != nil {
+		ev("pool", code, axis+":"+reason)
+	}
+}
+
+// One way a pin ends, whatever ended it. `matched` runs under the lock and decides -- and may count,
+// which is why it cannot be a plain bool.
+func (p *PeerPool) dropPin(reason string, matched func() bool) bool {
+	p.mu.Lock()
+	hit := matched()
+	if hit {
+		p.restorePinTookLocked()
+		p.pinKey, p.pinTries = "", 0
+	}
+	p.mu.Unlock()
+	if hit {
+		p.writeStatus()
+		p.emit("pin_dropped", reason)
+	}
+	return hit
 }
 
 func NewPeerPool(addrs []string, rotate time.Duration, statusPath string) *PeerPool {
@@ -260,11 +297,17 @@ func (p *PeerPool) rejectCandidate(prev string) {
 	if bad := p.addrs[p.cur]; bad != prev {
 		p.burnLocked(bad)
 	}
+	back := false
 	for idx, a := range p.addrs {
 		if a == prev {
 			p.commitLocked(idx)
+			back = true
 			break
 		}
+	}
+	if !back {
+
+		p.advanceFailLocked()
 	}
 	p.mu.Unlock()
 	p.writeStatus()
@@ -341,46 +384,21 @@ func (p *PeerPool) restorePinTookLocked() {
 }
 
 func (p *PeerPool) pinAttemptFailed(addr string) {
-	p.mu.Lock()
-	released := false
-	if p.pinKey != "" && p.pinKey == addr {
-		if p.pinTries++; p.pinTries >= pinFailRelease {
-			p.restorePinTookLocked()
-			p.pinKey, p.pinTries = "", 0
-			released = true
+	p.dropPin("cannot-land", func() bool {
+		if p.pinKey == "" || p.pinKey != addr {
+			return false
 		}
-	}
-	p.mu.Unlock()
-	if released {
-		p.writeStatus()
-	}
+		p.pinTries++
+		return p.pinTries >= pinFailRelease
+	})
 }
 
 func (p *PeerPool) pinCannotLand(key string) bool {
-	p.mu.Lock()
-	cleared := p.pinnedLocked() && p.pinKey == key
-	if cleared {
-		p.restorePinTookLocked()
-		p.pinKey = ""
-	}
-	p.mu.Unlock()
-	if cleared {
-		p.writeStatus()
-	}
-	return cleared
+	return p.dropPin("cannot-land", func() bool { return p.pinnedLocked() && p.pinKey == key })
 }
 
 func (p *PeerPool) releasePin() {
-	p.mu.Lock()
-	changed := p.pinKey != ""
-	if changed {
-		p.restorePinTookLocked()
-		p.pinKey = ""
-	}
-	p.mu.Unlock()
-	if changed {
-		p.writeStatus()
-	}
+	p.dropPin("tun-probe", func() bool { return p.pinKey != "" })
 }
 
 func (p *PeerPool) pinnedLocked() bool { return p.pinKey != "" }

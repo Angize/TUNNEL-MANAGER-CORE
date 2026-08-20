@@ -442,36 +442,34 @@ func (p *wsPool) restorePinTookAxisLocked(kind, key string) {
 	delete(p.pinTook, k)
 }
 
-func (p *wsPool) pinAttemptFailed(ip, host string) {
+// One way a pin ends here too. `matched` runs under the lock and may count.
+func (p *wsPool) dropPin(reason string, matched func() bool) bool {
 	p.mu.Lock()
-	counted := (p.pinIP != "" && p.pinIP == ip) || (p.pinSNI != "" && p.pinSNI == host)
-	released := false
-	if counted {
-		if p.pinTries++; p.pinTries >= pinFailRelease {
-			p.restorePinTookLocked()
-			p.pinIP, p.pinSNI, p.pinTries = "", "", 0
-			released = true
-		}
+	hit := matched()
+	if hit {
+		p.restorePinTookLocked()
+		p.pinIP, p.pinSNI, p.pinTries = "", "", 0
 	}
 	p.mu.Unlock()
-	if released {
+	if hit {
 		p.writeStatus()
-		p.event("pool", "pin_dropped", "cannot-land")
+		p.event("pool", "pin_dropped", "edge:"+reason)
 	}
+	return hit
+}
+
+func (p *wsPool) pinAttemptFailed(ip, host string) {
+	p.dropPin("cannot-land", func() bool {
+		if (p.pinIP == "" || p.pinIP != ip) && (p.pinSNI == "" || p.pinSNI != host) {
+			return false
+		}
+		p.pinTries++
+		return p.pinTries >= pinFailRelease
+	})
 }
 
 func (p *wsPool) releasePin() {
-	p.mu.Lock()
-	changed := p.pinIP != "" || p.pinSNI != ""
-	if changed {
-		p.restorePinTookLocked()
-	}
-	p.pinIP, p.pinSNI = "", ""
-	p.mu.Unlock()
-	if changed {
-		p.writeStatus()
-		p.event("pool", "pin_dropped", "tun-probe")
-	}
+	p.dropPin("tun-probe", func() bool { return p.pinIP != "" || p.pinSNI != "" })
 }
 
 func (p *wsPool) reassessRotation() {

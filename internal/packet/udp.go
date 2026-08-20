@@ -91,6 +91,7 @@ func (b *UDP) SetPeerPool(pp *PeerPool) {
 	if b.isClient {
 		b.pp = pp
 		if pp != nil {
+			pp.setEvent("dst", b.st.event)
 			b.poolIPs = buildSrcAllow(pp.all())
 		}
 	}
@@ -152,6 +153,7 @@ func (b *UDP) SetSourcePool(sp *PeerPool) {
 	b.sp = sp
 
 	if sp != nil {
+		sp.setEvent("src", b.st.event)
 		host := sp.current()
 		if h, _, e := net.SplitHostPort(host); e == nil {
 			host = h
