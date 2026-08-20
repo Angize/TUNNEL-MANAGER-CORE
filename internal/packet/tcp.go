@@ -282,6 +282,8 @@ type TCP struct {
 
 	odPeer odometer
 	odEdge odometer
+	port   portRung
+	rolled atomic.Bool
 
 	pinFails  atomic.Int64
 	srcWarned sync.Map
@@ -369,7 +371,19 @@ func (b *TCP) livePath() (pathKey, bool) {
 func (b *TCP) endRound() {
 	b.odPeer.restart()
 	b.odEdge.restart()
+	b.port.restart()
 	b.pinFails.Store(0)
+}
+
+func (b *TCP) rollSourcePort() bool {
+	c := b.curConn.Load()
+	if c == nil {
+
+		return true
+	}
+	b.rolled.Store(true)
+	(*c).Close()
+	return true
 }
 
 func (b *TCP) pinFailedOn(ip, host string) {
@@ -616,12 +630,13 @@ func (b *TCP) Run() error {
 	if b.isClient {
 		go b.keepaliveLoop()
 		go b.diagLoop()
+		b.port.setRoll(b.rollSourcePort)
 		if b.pool != nil {
 			b.pool.trackPath(b.livePath, b.closeCh)
 			go b.retestLoop()
 		} else {
 			b.st.trackPath(b.livePath, b.closeCh)
-			if b.pp != nil || b.sp != nil {
+			if b.pp != nil || b.sp != nil || b.st.verdictPath() != "" {
 				go b.peerPinPollLoop()
 			}
 		}
@@ -1496,16 +1511,19 @@ func (b *TCP) dialLoop() {
 
 		deliberate := false
 
-		if (b.pool != nil || b.pp != nil || b.sp != nil) && !b.closed.Load() {
+		if !b.closed.Load() {
 
 			var cause string
 			if b.pool != nil {
 				cause = b.takeLastErr()
 			}
-			if b.manualSwitch.Swap(false) || rotated.Load() {
+			switch {
+			case b.rolled.Swap(false):
+				deliberate = true
+			case b.manualSwitch.Swap(false) || rotated.Load():
 				deliberate = true
 				b.endRound()
-			} else {
+			case b.pool != nil || b.pp != nil || b.sp != nil:
 				if b.pool != nil {
 					b.pool.down(classifyErr(cause), label)
 				}
@@ -1626,12 +1644,6 @@ func (b *TCP) ProbeAllNow() {
 }
 
 func (b *TCP) peerPinPollLoop() {
-	drop := func() {
-		b.manualSwitch.Store(true)
-		if c := b.curConn.Load(); c != nil {
-			(*c).Close()
-		}
-	}
 	t := time.NewTicker(1 * time.Second)
 	defer t.Stop()
 	for {
@@ -1639,46 +1651,59 @@ func (b *TCP) peerPinPollLoop() {
 		case <-b.closeCh:
 			return
 		case <-t.C:
+			b.pollPeerCmd()
+		}
+	}
+}
 
-			if cmd, ok := readPoolCmd(b.st.verdictPath()); ok {
-				epoch := b.st.pathEpoch()
-				switch {
-				case staleVerdict(cmd, epoch):
+func (b *TCP) dropCarrier() {
+	b.manualSwitch.Store(true)
+	if c := b.curConn.Load(); c != nil {
+		(*c).Close()
+	}
+}
 
-					log.Printf("core/tcp: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
-						cmd.Epoch, epoch)
-				case cmd.Cmd == cmdOK:
+func (b *TCP) pollPeerCmd() {
+	if cmd, ok := readPoolCmd(b.st.verdictPath()); ok {
+		epoch := b.st.pathEpoch()
+		switch {
+		case staleVerdict(cmd, epoch):
 
-					if b.pp != nil && cmd.Key != "" && b.pp.clearBurn(cmd.Key) {
-						b.st.event("heal", "peer-retest", "ip:"+cmd.Key)
-					}
-					if b.sp != nil && cmd.Src != "" && b.sp.clearBurn(cmd.Src) {
-						b.st.event("heal", "src-retest", "ip:"+cmd.Src)
-					}
-				case cmd.Cmd == cmdFail:
-
-					gone := cmd.Key
-					if addr, moved := b.burnAdvance(true); moved {
-						log.Printf("core/tcp: destination %s failed by the node's tun probe — burning and advancing to %s", gone, addr)
-						b.st.event("burn", "tun-probe", "ip:"+gone)
-						drop()
-					}
-				}
+			log.Printf("core/tcp: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
+				cmd.Epoch, epoch)
+		case cmd.Cmd == cmdOK:
+			b.port.restart()
+			if b.pp != nil && cmd.Key != "" && b.pp.clearBurn(cmd.Key) {
+				b.st.event("heal", "peer-retest", "ip:"+cmd.Key)
 			}
-			if b.pp != nil {
-				if cmd, ok := b.pp.readCmd(); ok && cmd.Key != "" && b.pp.selectEntry(cmd.Key) {
-					log.Printf("core/tcp: pin destination %s (panel select)", cmd.Key)
-					b.st.setActive(b.stTag + " · " + cmd.Key)
-					drop()
-				}
+			if b.sp != nil && cmd.Src != "" && b.sp.clearBurn(cmd.Src) {
+				b.st.event("heal", "src-retest", "ip:"+cmd.Src)
 			}
-			if b.sp != nil {
+		case cmd.Cmd == cmdFail:
+			if b.port.try() {
+				b.st.event("down", "port-roll", "tcp")
+				break
+			}
+			gone := cmd.Key
+			if addr, moved := b.burnAdvance(true); moved {
+				log.Printf("core/tcp: destination %s failed by the node's tun probe — burning and advancing to %s", gone, addr)
+				b.st.event("burn", "tun-probe", "ip:"+gone)
+				b.dropCarrier()
+			}
+		}
+	}
+	if b.pp != nil {
+		if cmd, ok := b.pp.readCmd(); ok && cmd.Key != "" && b.pp.selectEntry(cmd.Key) {
+			log.Printf("core/tcp: pin destination %s (panel select)", cmd.Key)
+			b.st.setActive(b.stTag + " · " + cmd.Key)
+			b.dropCarrier()
+		}
+	}
+	if b.sp != nil {
 
-				if cmd, ok := b.sp.readCmd(); ok && cmd.Key != "" && b.sp.selectEntry(cmd.Key) {
-					log.Printf("core/tcp: pin source %s (panel select)", cmd.Key)
-					drop()
-				}
-			}
+		if cmd, ok := b.sp.readCmd(); ok && cmd.Key != "" && b.sp.selectEntry(cmd.Key) {
+			log.Printf("core/tcp: pin source %s (panel select)", cmd.Key)
+			b.dropCarrier()
 		}
 	}
 }
@@ -1692,7 +1717,7 @@ func (b *TCP) pollWsCmd() {
 			log.Printf("core/ws: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
 				cmd.Epoch, epoch)
 		case cmd.Cmd == cmdOK:
-
+			b.port.restart()
 			if cmd.IP != "" && b.pool.clearBurn("ip", cmd.IP) {
 				b.pool.event("heal", "tun-probe", "ip:"+cmd.IP)
 			}
@@ -1700,15 +1725,15 @@ func (b *TCP) pollWsCmd() {
 				b.pool.event("heal", "tun-probe", "sni:"+cmd.SNI)
 			}
 		case cmd.Cmd == cmdFail:
-
 			ip, sni := b.pool.activeCombo()
 			if cmd.IP == ip && cmd.SNI == sni {
+				if b.port.try() {
+					b.pool.event("down", "port-roll", "ws")
+					break
+				}
 				if b.burnAdvanceWS(ip, sni) {
 					log.Printf("core/ws: %s%s%s failed by the node's tun probe — burning the axis the walk varies and advancing", ip, activeSep, sni)
-					b.manualSwitch.Store(true)
-					if c := b.curConn.Load(); c != nil {
-						(*c).Close()
-					}
+					b.dropCarrier()
 				}
 			} else if cmd.SNI != "" {
 

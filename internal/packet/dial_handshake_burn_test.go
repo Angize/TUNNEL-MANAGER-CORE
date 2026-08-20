@@ -57,15 +57,17 @@ func TestDialFailureLeavesTheDirectPoolAlone(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	if werr := os.WriteFile(b.st.verdictPath(), []byte(`{"cmd":"fail","key":"`+addr+`"}`), 0o644); werr != nil {
-		t.Fatalf("write cmd: %v", werr)
-	}
-	deadline = time.Now().Add(10 * time.Second)
+	// One verdict is no longer one burn: the ladder spends its free re-dials first. Keep re-arming the
+	// mailbox -- the sweep that produced this verdict repeats every few seconds on a real node.
+	deadline = time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
+		if werr := os.WriteFile(b.st.verdictPath(), []byte(`{"cmd":"fail","key":"`+addr+`"}`), 0o644); werr != nil {
+			t.Fatalf("write cmd: %v", werr)
+		}
 		if pp.current() != addr {
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 	}
 	t.Fatalf("the node's fail command never moved the pool off %s", addr)
 }
