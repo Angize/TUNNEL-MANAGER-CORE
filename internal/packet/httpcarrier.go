@@ -644,49 +644,102 @@ func (g *grpcDeframingReader) Close() error {
 	return nil
 }
 
-func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request), budget time.Duration) (net.Conn, error) {
+// One gRPC call: a request whose body the client keeps writing and a response it keeps reading. The
+// index is in the URL so the edge sees distinct calls rather than n identical ones.
+func (b *TCP) openGrpcStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration, dialAddr string) (*http.Response, *io.PipeWriter, error) {
 	pr, pw := io.Pipe()
-	req, err := http.NewRequestWithContext(ctx, "POST", base+"?s="+sid, pr)
+	req, err := http.NewRequestWithContext(ctx, "POST", base+"?s="+sid+"&d="+strconv.Itoa(i), pr)
 	if err != nil {
-		cancel()
 		pw.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	setHdr(req)
 	req.Header.Set("Content-Type", "application/grpc")
 	req.Header.Set("TE", "trailers")
-
 	req.ContentLength = -1
 	resp, err := doWithHeaderTimeout(hc, req, httpcHeaderWait(budget))
 	if err != nil {
-		cancel()
 		pw.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		cancel()
 		pw.Close()
-
 		if resp.StatusCode == http.StatusForbidden {
-			return nil, fmt.Errorf("http/grpc: the CDN edge refused the gRPC request with HTTP 403 — "+
+			return nil, nil, fmt.Errorf("http/grpc: the CDN edge refused the gRPC request with HTTP 403 — "+
 				"measured on a live edge, this is the Content-Type: application/grpc header alone, and "+
 				"Cloudflare needs gRPC enabled on the zone (Network -> gRPC) before it will proxy it. "+
 				"Turn it on for %s, or use the plain ws / http carrier shape instead", dialAddr)
 		}
-		return nil, fmt.Errorf("http/grpc: got HTTP %d (want 200)", resp.StatusCode)
+		return nil, nil, fmt.Errorf("http/grpc: got HTTP %d (want 200)", resp.StatusCode)
 	}
+	return resp, pw, nil
+}
+
+// One gRPC stream, reopened for as long as the carrier lives. Its two halves are tied together: when
+// the reader ends it closes the request body, so the writer's next record fails and goes back on the
+// queue for another stream rather than into a call nobody is answering.
+func (b *TCP) runGrpcStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration, dialAddr string, tx *stripeTx, q *reseq, fail func(), first *http.Response, firstPW *io.PipeWriter) {
+	resp, pw := first, firstPW
+	for {
+		if resp == nil {
+			var err error
+			if resp, pw, err = b.openGrpcStream(hc, ctx, base, sid, i, setHdr, budget, dialAddr); err != nil {
+				resp = nil
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(stripeRetry):
+				}
+				continue
+			}
+		}
+		q.attach(1)
+		read := make(chan struct{})
+		go func(resp *http.Response, pw *io.PipeWriter) {
+			readStripe(&grpcDeframingReader{r: resp.Body}, q, fail)
+			pw.Close()
+			close(read)
+		}(resp, pw)
+		tx.serve(ctx, &grpcFramingWriter{w: pw}, func() {}, nil)
+		pw.Close()
+		resp.Body.Close()
+		<-read
+		if q.attach(-1) == 0 {
+			fail()
+			return
+		}
+		resp, pw = nil, nil
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(stripeRetry):
+		}
+	}
+}
+
+func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request), budget time.Duration) (net.Conn, error) {
+	first, firstPW, err := b.openGrpcStream(hc, ctx, base, sid, 0, setHdr, budget, dialAddr)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	pr, pw := io.Pipe()
+	tx := newStripeTx(ctx.Done())
 	conn := &httpcConn{
-		r:  &grpcDeframingReader{r: resp.Body},
-		w:  &grpcFramingWriter{w: pw},
+		r: pr, aw: tx,
 		ra: strAddr(dialAddr), la: strAddr("http-client"),
 	}
-	conn.closeFn = func() { cancel(); pw.Close(); resp.Body.Close(); closeIdle() }
+	conn.closeFn = func() { cancel(); pw.Close(); closeIdle() }
+	fail := func() { conn.Close() }
+	q := newReseq(pw, maxStripePend(1))
+	go b.runGrpcStream(hc, ctx, base, sid, 0, setHdr, budget, dialAddr, tx, q, fail, first, firstPW)
+	for i := 1; i < carrierStreams; i++ {
+		go b.runGrpcStream(hc, ctx, base, sid, i, setHdr, budget, dialAddr, tx, q, fail, nil, nil)
+	}
 	return conn, nil
 }
 
-// One download stream. Each carries its own index so the edge sees distinct URLs rather than n
-// identical requests it may collapse or cache.
 func (b *TCP) openDownStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", base+"?s="+sid+"&d="+strconv.Itoa(i), nil)
 	if err != nil {
@@ -817,7 +870,9 @@ func newHTTPCServerConn(w http.ResponseWriter, rd io.Reader, wr io.Writer, flush
 	}
 }
 
-func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request) {
+// One attached gRPC stream of a session. Same shape as the http carrier's download half, in both
+// directions at once: records in, records out, and the session is what ties the streams together.
+func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request, sid string) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "", http.StatusInternalServerError)
@@ -828,9 +883,30 @@ func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Trailer", "grpc-status")
 	w.WriteHeader(http.StatusOK)
 	fl.Flush()
-	conn := newHTTPCServerConn(w, &grpcDeframingReader{r: r.Body}, &grpcFramingWriter{w: w}, fl.Flush, r.RemoteAddr, nil)
-	b.handleServerConn(conn)
-	conn.Close()
+
+	s := b.httpcGetOrCreate(sid)
+	s.start.Do(func() {
+		go b.handleServerConn(&httpcConn{
+			r:       s.upR,
+			aw:      s.down,
+			ra:      strAddr(r.RemoteAddr),
+			la:      strAddr("http-server"),
+			closeFn: func() { s.close(b, sid) },
+		})
+	})
+	s.up.attach(1)
+	defer func() {
+		if s.up.attach(-1) == 0 {
+			s.close(b, sid)
+		}
+	}()
+	read := make(chan struct{})
+	go func() {
+		readStripe(&grpcDeframingReader{r: r.Body}, s.up, func() { s.close(b, sid) })
+		close(read)
+	}()
+	s.down.serve(r.Context(), &grpcFramingWriter{w: w}, fl.Flush, http.NewResponseController(w).SetWriteDeadline)
+	<-read
 	w.Header().Set("grpc-status", "0")
 }
 
@@ -842,7 +918,7 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost && strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
-		b.serveHTTPCGrpc(w, r)
+		b.serveHTTPCGrpc(w, r, sid)
 		return
 	}
 	if r.Method == http.MethodPost {

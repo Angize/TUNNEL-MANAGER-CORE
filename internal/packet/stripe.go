@@ -213,13 +213,15 @@ func readStripe(body io.ReadCloser, q *reseq, fail func()) {
 // Puts numbered chunks back in order and writes out whatever run has become contiguous. Both
 // directions of the http carrier arrive out of order, and both bound the gap they will hold.
 type reseq struct {
-	pw   *io.PipeWriter
-	max  int
-	maxN int
-	mu   sync.Mutex
-	next uint64
-	pend map[uint64][]byte
-	n    int
+	pw      *io.PipeWriter
+	floor   int
+	max     int
+	maxN    int
+	streams int
+	mu      sync.Mutex
+	next    uint64
+	pend    map[uint64][]byte
+	n       int
 }
 
 // The entry cap is derived from the byte cap rather than fixed, because the two directions do not
@@ -227,11 +229,36 @@ type reseq struct {
 // tunnel handed over. A fixed 1024 is a 128 MB gap upstream and a 25 MB one downstream, so downstream
 // it — and only it — ended the carrier while the byte cap it was given sat untouched.
 func newReseq(pw *io.PipeWriter, max int) *reseq {
-	n := max / (8 << 10)
-	if n < 1024 {
-		n = 1024
+	q := &reseq{pw: pw, floor: max, pend: map[uint64][]byte{}}
+	q.setMax(max)
+	return q
+}
+
+// One h2 stream can hold a flow-control window and no more, so the gap a striped sender opens grows
+// with the streams it has attached. Counting them is what stops a peer that has authenticated nothing
+// from parking the whole budget on a single stream.
+const perStreamPend = 4 << 20
+
+// Returns how many streams are attached after the change. A carrier lives while at least one is: at
+// zero it has nothing left to carry, and both ends end it rather than hold a session open for an idle
+// timeout with nobody on the other side.
+func (q *reseq) attach(n int) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.streams += n
+	m := q.floor + q.streams*perStreamPend
+	if lim := maxStripePend(16); m > lim {
+		m = lim
 	}
-	return &reseq{pw: pw, max: max, maxN: n, pend: map[uint64][]byte{}}
+	q.setMax(m)
+	return q.streams
+}
+
+func (q *reseq) setMax(max int) {
+	q.max = max
+	if q.maxN = max / (8 << 10); q.maxN < 1024 {
+		q.maxN = 1024
+	}
 }
 
 // False means the gap outgrew the buffer, or the far side is gone: the caller must drop the carrier.
