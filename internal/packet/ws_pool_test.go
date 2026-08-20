@@ -455,12 +455,17 @@ func TestPinReleasesOnProvenBlock(t *testing.T) {
 	if !p.isPinned() {
 		t.Fatal("one burn released the pin — the operator's pick costs a second opinion to override")
 	}
+	if !p.ipHealth.healthy("b") {
+		t.Fatal("the burn landed on the pinned edge; while the pin is in force the pin's own counter is " +
+			"what ends it")
+	}
 
 	p.releasePin()
 	if p.isPinned() || p.pinIP != "" {
 		t.Fatalf("pin state not cleared: pinIP=%q", p.pinIP)
 	}
 
+	p.markSuspect("ip", "b", "tun-probe")
 	if ip, _, ok := p.current(); !ok || ip != "a" {
 		t.Fatalf("after the pin released, current() must fall back to healthy a, got %q ok=%v", ip, ok)
 	}

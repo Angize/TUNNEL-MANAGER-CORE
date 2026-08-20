@@ -255,8 +255,8 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 					p.clearBurn(k, v)
 				case 4:
 					k, v := axis()
-					log = append(log, "retestOK:"+k+":"+v)
-					p.retestResult(k, v, true)
+					log = append(log, "dialFail:"+k+":"+v)
+					p.markSuspect(k, v, "dial")
 				case 5:
 					k, v := axis()
 					log = append(log, "retestFail:"+k+":"+v)

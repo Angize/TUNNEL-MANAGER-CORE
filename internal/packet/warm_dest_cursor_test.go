@@ -66,9 +66,12 @@ func TestFailedWarmBuildLeavesTheDestinationCursorWhereTheTunnelIs(t *testing.T)
 	if _, moved := b.pp.rotateOnce(); !moved {
 		t.Fatal("rotateOnce did not move in a 3-endpoint pool")
 	}
-	if b.buildWarm(b.sourceIP(), true, live) {
+	// buildWarm no longer knows which pool it dialled for, so the cursor restore is the CALLER's, and the
+	// dial loop does exactly this pair. Driving only half of it would prove nothing about either.
+	if b.buildWarm(b.sourceIP(), true) {
 		t.Fatal("buildWarm reported success against an endpoint that closes before a single core frame")
 	}
+	b.pp.keepCursorOn(live)
 	if w := b.takeWarm(); w != nil {
 		w.conn.Close()
 		t.Fatal("a failed warm build parked a carrier")

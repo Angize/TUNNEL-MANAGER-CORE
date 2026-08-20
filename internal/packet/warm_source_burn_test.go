@@ -47,7 +47,7 @@ func TestFailedWarmBuildDoesNotBurnOrAnnounceTheLiveSource(t *testing.T) {
 	b.SetSourcePool(sp)
 
 	for range dests {
-		if b.buildWarm(b.sourceIP(), true, "") {
+		if b.buildWarm(b.sourceIP(), true) {
 			t.Fatal("buildWarm reported success against an endpoint that closes before a single core frame")
 		}
 		if w := b.takeWarm(); w != nil {
