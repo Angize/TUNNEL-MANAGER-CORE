@@ -50,3 +50,14 @@ func TestCraftedHeadersLookLikeTheFlowTheyJoin(t *testing.T) {
 			"the same tell as ID=0 wearing a different number", len(seen))
 	}
 }
+
+func TestTheCraftedIPIDNeverWrapsToZero(t *testing.T) {
+	// One draw in 65536 lands on the wrap, so a spot check proves nothing: stand the counter one below
+	// it and take the id that would reach the wire.
+	defer func(prev uint32) { ipIDCounter.Store(prev) }(ipIDCounter.Load())
+	ipIDCounter.Store(0xFFFF)
+	if id := nextIPID(); id == 0 {
+		t.Fatal("a crafted header went out with Identification 0 — the AF_PACKET decoys write this " +
+			"verbatim, and the flow they are joining never shows it")
+	}
+}
