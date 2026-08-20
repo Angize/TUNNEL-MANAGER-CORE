@@ -258,9 +258,8 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 					log = append(log, "dialFail:"+k+":"+v)
 					p.markSuspect(k, v, "dial")
 				case 5:
-					k, v := axis()
-					log = append(log, "retestFail:"+k+":"+v)
-					p.retestResult(k, v, false)
+					log = append(log, "probeAllNow")
+					p.probeAllNow()
 				case 6:
 					clk += int64(rng.Intn(4000))
 					log = append(log, fmt.Sprintf("clock=%d", clk))

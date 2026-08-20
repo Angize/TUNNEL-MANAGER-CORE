@@ -99,7 +99,7 @@ func TestPoolAdvanceReportsRealMove(t *testing.T) {
 		}
 	}
 
-	p2.retestResult("ip", "b", true)
+	p2.clearBurn("ip", "b")
 	if !p2.advance() {
 		t.Fatal("after edge b healed, advance() must report a move again")
 	}
@@ -202,97 +202,81 @@ func TestMarkSuspectPullsFromRotation(t *testing.T) {
 	}
 }
 
-func TestSuspectBackoffThenDead(t *testing.T) {
+func TestABurnDeepensOnlyOnceThePreviousWaitIsSpent(t *testing.T) {
 	p, now := clockPool([]string{"a", "b"}, snis("x"), "")
 	p.markSuspect("ip", "a", "test")
 	if got := p.ipHealth.recs["a"].nextRetest; got != *now+suspectBackoff[0] {
 		t.Fatalf("entry retest should be now+%d, got %d (now=%d)", suspectBackoff[0], got, *now)
 	}
-	wantNext := suspectBackoff[1:]
-	for i, w := range wantNext {
-		p.retestResult("ip", "a", false)
+
+	p.markSuspect("ip", "a", "test")
+	if r := p.ipHealth.recs["a"]; r.fails != 0 || r.nextRetest != *now+suspectBackoff[0] {
+		t.Fatalf("a second verdict inside the SAME wait deepened the backoff (fails=%d next=%d): the "+
+			"edge would reach dead in seconds on one outage", r.fails, r.nextRetest-*now)
+	}
+
+	for i, w := range suspectBackoff[1:] {
+		*now = p.ipHealth.recs["a"].nextRetest
+		p.markSuspect("ip", "a", "test")
 		r := p.ipHealth.recs["a"]
 		if r.state != stateSuspect {
-			t.Fatalf("retest %d: still suspect expected, got %q", i+1, r.state)
+			t.Fatalf("burn %d: still suspect expected, got %q", i+1, r.state)
 		}
 		if r.fails != i+1 {
-			t.Fatalf("retest %d: fails=%d, want %d", i+1, r.fails, i+1)
+			t.Fatalf("burn %d: fails=%d, want %d", i+1, r.fails, i+1)
 		}
 		if r.nextRetest != *now+w {
-			t.Fatalf("retest %d: nextRetest=%d, want %d", i+1, r.nextRetest, *now+w)
+			t.Fatalf("burn %d: nextRetest=%d, want %d", i+1, r.nextRetest-*now, w)
 		}
 	}
 
-	p.retestResult("ip", "a", false)
+	*now = p.ipHealth.recs["a"].nextRetest
+	p.markSuspect("ip", "a", "test")
 	r := p.ipHealth.recs["a"]
 	if r.state != stateDead || r.nextRetest != *now+deadRetest {
-		t.Fatalf("expected dead at now+%d, got state=%q next=%d", deadRetest, r.state, r.nextRetest)
+		t.Fatalf("expected dead at now+%d, got state=%q next=%d", deadRetest, r.state, r.nextRetest-*now)
 	}
 
-	*now = 5000
-	p.retestResult("ip", "a", false)
-	if r := p.ipHealth.recs["a"]; r.state != stateDead || r.nextRetest != 5000+deadRetest {
-		t.Fatalf("dead entry should stay dead at 5000+%d, got state=%q next=%d", deadRetest, r.state, r.nextRetest)
+	*now = r.nextRetest
+	p.markSuspect("ip", "a", "test")
+	if r := p.ipHealth.recs["a"]; r.state != stateDead || r.nextRetest != *now+deadRetest {
+		t.Fatalf("dead entry should stay dead at now+%d, got state=%q next=%d", deadRetest, r.state,
+			r.nextRetest-*now)
 	}
 }
 
-func TestARetestNeverHealsAnEdge(t *testing.T) {
-	p, _ := clockPool([]string{"a", "b"}, snis("x"), "")
+func TestNothingButTheTunProbeReadmitsABurnedEdge(t *testing.T) {
+	p, now := clockPool([]string{"a", "b"}, snis("x"), "")
 	p.markSuspect("ip", "a", "test")
 	base := len(p.events)
 
-	p.retestResult("ip", "a", false)
-	if len(p.events) != base {
-		t.Fatalf("a failed retest must not emit an event, got %+v", p.events[base:])
+	if p.ipHealth.due("a") {
+		t.Fatal("a fresh burn must not be due -- the wait is the whole point of the backoff")
 	}
 
-	p.retestResult("ip", "a", true)
-	if p.ipHealth.rec("a") == nil {
-		t.Fatal("a passing retest CLEARED the burn — only the tun probe, which watches DATA cross, may " +
-			"readmit an edge")
+	*now += suspectBackoff[0] + 1
+	if p.ipHealth.healthy("a") {
+		t.Fatal("the wait elapsing HEALED the edge. Nothing inside the pool may readmit an edge on a " +
+			"clock: only the tun probe, which watches DATA cross, has evidence")
 	}
 	if !p.ipHealth.due("a") {
-		t.Fatal("a passing retest must at least make the edge DUE, or the rotation never hands it live " +
+		t.Fatal("the wait elapsed and the edge is still not due, so the rotation never hands it live " +
 			"traffic and the tun probe never gets to judge it")
 	}
-	for _, e := range p.events[base:] {
-		if e.Kind == "heal" {
-			t.Fatalf("a retest announced a heal: %+v", e)
-		}
+	if len(p.events) != base {
+		t.Fatalf("time passing announced something: %+v", p.events[base:])
 	}
-	if len(p.events) != base+1 || p.events[base].Kind != "pool" || p.events[base].Code != "restored" {
-		t.Fatalf("want exactly one pool/restored — the rotation can reach both edges again — got %+v",
+
+	if !p.clearBurn("ip", "a") {
+		t.Fatal("clearBurn is the tun probe's cmdOK path and must report it cleared something")
+	}
+	if !p.ipHealth.healthy("a") {
+		t.Fatal("clearBurn left the record behind")
+	}
+	if n := len(p.events); n != base+1 || p.events[base].Kind != "pool" || p.events[base].Code != "restored" {
+		t.Fatalf("want exactly one pool/restored -- the rotation can reach both edges again -- got %+v",
 			p.events[base:])
 	}
-
-	n := len(p.events)
-	p.retestResult("ip", "a", true)
-	if len(p.events) != n {
-		t.Fatalf("a repeat retest must be silent, got %+v", p.events[n:])
-	}
-}
-
-func TestASuccessfulRetestOffersALiveTryItDoesNotHeal(t *testing.T) {
-	p, now := clockPool([]string{"a", "b"}, snis("x"), "")
-	p.markSuspect("ip", "a", "test")
-	p.retestResult("ip", "a", false)
-	if p.ipHealth.due("a") {
-		t.Fatal("a FAILED retest must push the wait out, not leave it due")
-	}
-	p.retestResult("ip", "a", true)
-	if p.ipHealth.recs["a"] == nil {
-		t.Fatal("a passing probe healed the entry — only the tun probe may do that; a control handshake " +
-			"says nothing about whether DATA crosses")
-	}
-	if !p.ipHealth.due("a") {
-		t.Fatal("a passing probe must leave the entry DUE, so current()'s pass 2 can offer it live traffic")
-	}
-
-	p.clearBurn("ip", "a")
-	if p.ipHealth.recs["a"] != nil {
-		t.Fatal("clearBurn is the tun probe's cmdOK path and must clear outright")
-	}
-	_ = now
 }
 
 func TestCurrentFallbackLeastBad(t *testing.T) {
@@ -360,29 +344,27 @@ func TestStatusSnapshotStates(t *testing.T) {
 	}
 }
 
-func TestDueRetestsAndProbeAllNow(t *testing.T) {
+func TestProbeAllNowEndsEveryWait(t *testing.T) {
 	p, now := clockPool([]string{"a", "b"}, snis("x", "y"), "")
 	p.markSuspect("ip", "a", "test")
-	if due := p.dueRetests(); len(due) != 0 {
-		t.Fatalf("nothing should be due yet, got %v", due)
+	p.markSuspect("sni", "x", "test")
+	if p.ipHealth.due("a") || p.sniHealth.due("x") {
+		t.Fatal("nothing should be due yet")
 	}
+
 	p.probeAllNow()
-	due := p.dueRetests()
-	if len(due) != 1 || due[0].kind != "ip" || due[0].key != "a" {
-		t.Fatalf("probeAllNow should make the suspect due, got %v", due)
+	if !p.ipHealth.due("a") || !p.sniHealth.due("x") {
+		t.Fatal("probeAllNow must end the wait on BOTH axes -- it is the operator saying try everything now")
 	}
-	if due[0].ip != "a" {
-		t.Fatalf("retest spec should dial the entry itself, got %q", due[0].ip)
-	}
-	if p.sniHealth.recs[due[0].sni.host] != nil {
-		t.Fatalf("retest partner SNI must be healthy, got %q", due[0].sni.host)
+	if p.ipHealth.healthy("a") || p.sniHealth.healthy("x") {
+		t.Fatal("probeAllNow CLEARED a burn; it may only end the wait, and the tun probe decides the rest")
 	}
 
 	p2, now2 := clockPool([]string{"a"}, snis("x"), "")
 	p2.markSuspect("ip", "a", "test")
 	*now2 = *now + suspectBackoff[0] + 1
-	if due := p2.dueRetests(); len(due) != 1 {
-		t.Fatalf("entry should be due once its backoff elapses, got %v", due)
+	if !p2.ipHealth.due("a") {
+		t.Fatal("entry should be due once its backoff elapses")
 	}
 }
 

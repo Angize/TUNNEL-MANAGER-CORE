@@ -112,7 +112,7 @@ func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 	run(func() { p.pinApplied("e1", "s1") })
 	run(func() { p.pinAttemptFailed("e2", "s2") })
 	run(func() { p.clearBurn("sni", "s2") })
-	run(func() { p.retestResult("ip", "e3", true) })
+	run(func() { p.clearBurn("ip", "e3") })
 	run(func() { _ = p.eligibleSNIs() })
 	run(func() { _ = p.isPinned() })
 

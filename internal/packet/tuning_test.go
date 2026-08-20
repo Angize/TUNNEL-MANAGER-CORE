@@ -8,13 +8,12 @@ import (
 
 func TestApplyTuning(t *testing.T) {
 	save := struct {
-		sb      []int64
-		dr      int64
-		ml, pto time.Duration
-	}{suspectBackoff, deadRetest, minLiveness, probeTimeout}
+		sb []int64
+		dr int64
+		ml time.Duration
+	}{suspectBackoff, deadRetest, minLiveness}
 	defer func() {
-		suspectBackoff, deadRetest = save.sb, save.dr
-		minLiveness, probeTimeout = save.ml, save.pto
+		suspectBackoff, deadRetest, minLiveness = save.sb, save.dr, save.ml
 	}()
 
 	ApplyTuning(TuningInput{})
@@ -24,7 +23,7 @@ func TestApplyTuning(t *testing.T) {
 
 	ApplyTuning(TuningInput{
 		SuspectBackoff: []int64{5, 10, 20}, DeadRetestSecs: 900,
-		MinLivenessSecs: 12, ProbeTimeoutSecs: 7,
+		MinLivenessSecs: 12,
 	})
 	if !reflect.DeepEqual(suspectBackoff, []int64{5, 10, 20}) {
 		t.Errorf("suspectBackoff=%v", suspectBackoff)
@@ -32,13 +31,13 @@ func TestApplyTuning(t *testing.T) {
 	if deadRetest != 900 {
 		t.Errorf("health FSM: deadRetest=%d", deadRetest)
 	}
-	if minLiveness != 12*time.Second || probeTimeout != 7*time.Second {
-		t.Errorf("durations: minLiveness=%v probeTimeout=%v", minLiveness, probeTimeout)
+	if minLiveness != 12*time.Second {
+		t.Errorf("durations: minLiveness=%v", minLiveness)
 	}
 
-	ApplyTuning(TuningInput{ProbeTimeoutSecs: 999999})
-	if probeTimeout != 120*time.Second {
-		t.Errorf("probeTimeout not clamped: %v", probeTimeout)
+	ApplyTuning(TuningInput{MinLivenessSecs: 999999})
+	if minLiveness != 3600*time.Second {
+		t.Errorf("minLiveness not clamped: %v", minLiveness)
 	}
 }
 

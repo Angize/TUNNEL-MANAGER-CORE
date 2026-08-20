@@ -58,7 +58,8 @@ func TestHealthSetLadder(t *testing.T) {
 			t.Fatalf("step %d waits %ds, no longer than the previous %ds — the ladder ran backwards", i, wait, prev)
 		}
 		prev = wait
-		h.retestFailed(r)
+		clk = r.nextRetest
+		h.burn("a")
 	}
 	if r := h.rec("a"); r.state != stateDead || r.nextRetest != clk+deadRetest {
 		t.Fatalf("after the schedule ran out: state=%v nextRetest-now=%d, want dead on %d",

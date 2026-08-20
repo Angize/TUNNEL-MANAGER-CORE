@@ -143,10 +143,9 @@ type Config struct {
 }
 
 type TuningCfg struct {
-	SuspectBackoff   []int64 `json:"suspect_backoff"`
-	DeadRetestSecs   int64   `json:"dead_retest_secs"`
-	MinLivenessSecs  int64   `json:"min_liveness_secs"`
-	ProbeTimeoutSecs int64   `json:"probe_timeout_secs"`
+	SuspectBackoff  []int64 `json:"suspect_backoff"`
+	DeadRetestSecs  int64   `json:"dead_retest_secs"`
+	MinLivenessSecs int64   `json:"min_liveness_secs"`
 }
 
 func loadConfig(path string) (*Config, error) {
