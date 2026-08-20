@@ -8,6 +8,7 @@ import (
 func TestASingleSNIPoolBurnsTheEdge(t *testing.T) {
 	p := newWSPool([]string{"e1", "e2", "e3"}, snis("only.example"), filepath.Join(t.TempDir(), "st.json"))
 	b := &TCP{pool: p}
+	b.armEdgeWalk()
 	ip, sni, _ := p.current()
 	p.setActive(activeLabel(ip, sni.host))
 
@@ -37,6 +38,7 @@ func TestASingleSNIPoolBurnsTheEdge(t *testing.T) {
 func TestAMultiSNIPoolStillBurnsTheSNI(t *testing.T) {
 	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2", "s3"), filepath.Join(t.TempDir(), "st.json"))
 	b := &TCP{pool: p}
+	b.armEdgeWalk()
 	ip, sni, _ := p.current()
 	p.setActive(activeLabel(ip, sni.host))
 

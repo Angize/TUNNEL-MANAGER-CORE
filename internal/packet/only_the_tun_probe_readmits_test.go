@@ -49,6 +49,7 @@ func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 		p.setActive(activeLabel(ip, sni.host))
 
 		b := &TCP{pool: p}
+		b.armEdgeWalk()
 		if !b.burnAdvanceWS(ip, sni.host) {
 			t.Fatal("the verdict did nothing")
 		}

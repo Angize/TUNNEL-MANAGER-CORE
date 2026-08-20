@@ -15,6 +15,7 @@ func TestLoopWholeEdgeOutage(t *testing.T) {
 	ip, sni, _ := p.current()
 	p.setActive(activeLabel(ip, sni.host))
 	b := &TCP{pool: p}
+	b.armEdgeWalk()
 	armAndSpendTheFreeRungs(t, b)
 
 	send := func(c poolCmd) {

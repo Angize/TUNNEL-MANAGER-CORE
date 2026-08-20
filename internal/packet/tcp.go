@@ -281,10 +281,9 @@ type TCP struct {
 	bindIP   string
 
 	rc     rotationController
-	odEdge odometer
+	wsw    walkPolicy
 	rolled atomic.Bool
 
-	pinFails  atomic.Int64
 	srcWarned sync.Map
 	probing   atomic.Bool
 
@@ -317,7 +316,8 @@ func (b *TCP) SetSourceIP(ip string) { b.bindIP = ip }
 
 func (b *TCP) SetPeerPool(pp *PeerPool) {
 	if b.isClient && !b.ws {
-		b.pp, b.rc.dst = pp, pp
+		b.pp = pp
+		b.rc.bind(pp, b.sp)
 	}
 }
 
@@ -341,7 +341,8 @@ func (b *TCP) lastSourceUsed() string {
 
 func (b *TCP) SetSourcePool(sp *PeerPool) {
 	if b.isClient && !b.ws {
-		b.sp, b.rc.src = sp, sp
+		b.sp = sp
+		b.rc.bind(b.pp, sp)
 	}
 }
 
@@ -369,8 +370,7 @@ func (b *TCP) livePath() (pathKey, bool) {
 
 func (b *TCP) endRound() {
 	b.rc.success()
-	b.odEdge.restart()
-	b.pinFails.Store(0)
+	b.wsw.reset()
 }
 
 func (b *TCP) rollSourcePort() bool {
@@ -548,9 +548,26 @@ func DialWS(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, 
 }
 
 func DialWSPool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, pool *wsPool, rotate time.Duration, httpc bool, httpcMode string) (*TCP, error) {
-	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
+	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, pool: pool, rotate: rotate,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}, nil
+		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
+	b.armEdgeWalk()
+	return b, nil
+}
+
+// The SNI is the low digit and the EDGE the high one -- but only while there is more than one SNI to
+// vary. With one, nothing varies under the edge, so the edge itself is what a fail condemns.
+func (b *TCP) armEdgeWalk() {
+	if b.pool == nil {
+		return
+	}
+	b.wsw.mu.Lock()
+	defer b.wsw.mu.Unlock()
+	b.wsw.pins = []pinnable{b.pool}
+	b.wsw.high = wsEdges{b.pool}
+	if b.pool.snisCount() >= 2 {
+		b.wsw.low = wsSNIs{b.pool}
+	}
 }
 
 func newWSPoolFromCfg(ips []string, snis []wsSNIEntry, statusPath string) *wsPool {
@@ -1687,6 +1704,7 @@ func (b *TCP) pollWsCmd() {
 				cmd.Epoch, epoch)
 		case cmd.Cmd == cmdOK:
 			b.rc.port.restart()
+			b.wsw.reset()
 			if cmd.IP != "" && b.pool.clearBurn("ip", cmd.IP) {
 				b.pool.event("heal", "tun-probe", "ip:"+cmd.IP)
 			}
@@ -1717,31 +1735,22 @@ func (b *TCP) pollWsCmd() {
 }
 
 func (b *TCP) burnAdvanceWS(ip, sni string) bool {
+	burnEdge := func(bool) { b.pool.advanceIP() }
+	if !b.wsw.hasLow() {
 
-	if b.pool.isPinned() {
-		if n := b.pinFails.Add(1); int(n) < pinFailRelease {
-			return false
+		burnEdge = func(bool) {
+			b.pool.markSuspect("ip", ip, "tun-probe")
+			b.pool.advanceIP()
 		}
-		b.pinFails.Store(0)
-		b.pool.releasePin()
-
-	} else {
-		b.pinFails.Store(0)
 	}
+	burns := b.pool.burnCount()
+	wasIP, wasSNI, _ := b.pool.current()
+	b.wsw.walk(func(bool) { b.pool.markSuspect("sni", sni, "tun-probe") }, burnEdge)
+	nowIP, nowSNI, _ := b.pool.current()
 
-	if b.pool.snisCount() < 2 {
-		b.pool.markSuspect("ip", ip, "tun-probe")
-		b.pool.advanceIP()
-		b.odEdge.restart()
-		return true
-	}
-
-	lap := b.odEdge.failed(b.pool.eligibleSNIs)
-	b.pool.markSuspect("sni", sni, "tun-probe")
-	if lap {
-		b.pool.advanceEdgeFreshRow()
-	}
-	return true
+	// The cursor is not the endpoint: advanceIP always turns it, while current() keeps serving the best
+	// entry once every edge is burned.
+	return b.pool.burnCount() != burns || nowIP != wasIP || nowSNI.host != wasSNI.host
 }
 
 func (b *TCP) SelectEdge(kind, key string) {

@@ -226,6 +226,7 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 			p := newWSPool(ips, snis(hosts...), filepath.Join(t.TempDir(), "st.json"))
 			p.now = func() int64 { return clk }
 			b := &TCP{pool: p}
+			b.armEdgeWalk()
 			axis := func() (string, string) {
 				if rng.Intn(2) == 0 {
 					return "ip", ips[rng.Intn(len(ips))]
@@ -267,8 +268,9 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 					log = append(log, "advanceIP")
 					p.advanceIP()
 				case 8:
-					log = append(log, "advanceEdgeFreshRow")
-					p.advanceEdgeFreshRow()
+					log = append(log, "advanceIP+restoreSNIs")
+					p.advanceIP()
+					p.restoreSNIs()
 				case 9:
 					ip := ips[rng.Intn(len(ips))]
 					log = append(log, "pinApplied:"+ip)

@@ -40,6 +40,7 @@ func newVerdictPool(t *testing.T, ips, hosts []string) *TCP {
 	}
 	p.setActive(activeLabel(ip, sni.host))
 	b := &TCP{pool: p}
+	b.armEdgeWalk()
 	armAndSpendTheFreeRungs(t, b)
 	return b
 }
@@ -49,6 +50,7 @@ func newVerdictPool(t *testing.T, ips, hosts []string) *TCP {
 // were written to ask: WHICH entry a verdict condemns, once the free steps are gone.
 func armLikeRun(b *TCP) {
 	b.rc.port.setRoll(b.rollSourcePort)
+	b.armEdgeWalk()
 	if b.st != nil {
 		b.rc.setVerdict(b.st.verdictPath())
 	}

@@ -64,6 +64,7 @@ func TestPinAbsorbsExactlyOneSecondOpinion_TCP(t *testing.T) {
 func TestPinAbsorbsExactlyOneSecondOpinion_CDN(t *testing.T) {
 	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
 	b := &TCP{pool: p}
+	b.armEdgeWalk()
 	if !p.selectEntry("ip", "e2") {
 		t.Fatal("could not pin")
 	}
@@ -183,14 +184,16 @@ func TestAHealthySessionEndsTheRound(t *testing.T) {
 	t.Run("the edge pool's counters", func(t *testing.T) {
 		p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2", "s3"), filepath.Join(t.TempDir(), "st.json"))
 		b := &TCP{pool: p}
-		b.odEdge.rot = 2
-		b.pinFails.Store(1)
+		b.armEdgeWalk()
+		b.armEdgeWalk()
+		b.wsw.od.rot = 2
+		b.wsw.pinFails = 1
 		b.endRound()
-		if got := b.odEdge.rot; got != 0 {
+		if got := b.wsw.od.rot; got != 0 {
 			t.Fatalf("the edge pool's half-walked lap survived a healthy session (rot=%d) — the next "+
 				"outage would convict the edge after one verdict", got)
 		}
-		if got := b.pinFails.Load(); got != 0 {
+		if got := b.wsw.pinFails; got != 0 {
 			t.Fatalf("the edge pool's pin allowance survived a healthy session (pinFails=%d)", got)
 		}
 	})

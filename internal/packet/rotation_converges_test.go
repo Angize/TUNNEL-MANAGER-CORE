@@ -99,6 +99,7 @@ func TestTheEdgeWalkFindsTheOneComboThatWorks(t *testing.T) {
 			p := newWSPool(ips, snis(hosts...), filepath.Join(t.TempDir(), "st.json"))
 			p.now = func() int64 { return clk }
 			b := &TCP{pool: p}
+			b.armEdgeWalk()
 
 			found := 0
 			var seen []string
@@ -162,6 +163,7 @@ func TestNothingWorksAndTheNodeHandsItAllBack(t *testing.T) {
 		p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
 		p.now = func() int64 { return clk }
 		b := &TCP{pool: p}
+		b.armEdgeWalk()
 		for i := 0; i < 12; i++ {
 			ip, sni, _ := p.current()
 			p.setActive(activeLabel(ip, sni.host))
