@@ -23,7 +23,7 @@ func TestUDPRefusesASourceThisHostCannotBind(t *testing.T) {
 		if sp.isPinned() {
 			t.Error("the jump is still in progress: it holds the whole pinTTL forcing a source that will not bind, and the next success releases it as LANDED over a tunnel that never moved")
 		}
-		if len(poolBurned(sp)) == 0 {
+		if len(burnedIn(sp)) == 0 {
 			t.Error("the unbindable source was not burned, so rotation comes straight back to it")
 		}
 		if cur := sp.current(); cur == unusableIP {
@@ -36,7 +36,7 @@ func TestUDPRefusesASourceThisHostCannotBind(t *testing.T) {
 		b := &UDP{isClient: true}
 		b.SetSourcePool(sp)
 
-		if len(poolBurned(sp)) == 0 {
+		if len(burnedIn(sp)) == 0 {
 			t.Error("the initial bind failed and nothing marked the entry bad: the socket is on the kernel default while the pool publishes that IP as Active, and with rotate=0 it is never retried")
 		}
 		if cur := sp.current(); cur == unusableIP {
@@ -48,14 +48,14 @@ func TestUDPRefusesASourceThisHostCannotBind(t *testing.T) {
 		sp := NewPeerPool([]string{usableLoopbackIP, "127.0.0.2"}, 0, "")
 		b := &UDP{isClient: true}
 		b.SetSourcePool(sp)
-		if burned := poolBurned(sp); len(burned) > 0 {
+		if burned := burnedIn(sp); len(burned) > 0 {
 			t.Fatalf("seeding a bindable source burned %v", burned)
 		}
 		if !sp.selectEntry("127.0.0.2") {
 			t.Fatal("selectEntry rejected a pool member")
 		}
 		b.adoptSourceUDP()
-		if burned := poolBurned(sp); len(burned) > 0 {
+		if burned := burnedIn(sp); len(burned) > 0 {
 			t.Errorf("a pin onto a bindable source burned %v", burned)
 		}
 	})

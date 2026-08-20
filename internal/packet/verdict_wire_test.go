@@ -44,6 +44,14 @@ const testPathEpoch = 7
 
 func atPathEpoch() int64 { return testPathEpoch }
 
+// The one walk policy, driven through the carrier's own swap funcs -- production reaches it via
+// rc.pollPins -> judge -> fail -> walk. Returns whether an ENDPOINT WAS BURNED, which is the only
+// honest answer: a walk that finds nothing better leaves the pool where it is.
+func tcpWalk(b *TCP) bool {
+	_, burned := b.rc.walk(b.rotateDestTCP, b.rotateSrcTCP)
+	return burned
+}
+
 func burnedIn(p *PeerPool) map[string]bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()

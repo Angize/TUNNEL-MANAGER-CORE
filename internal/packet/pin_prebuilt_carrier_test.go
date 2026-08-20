@@ -51,7 +51,7 @@ func TestPinIsNotConsumedByAPreBuiltRotationCarrier(t *testing.T) {
 		return liveRemote(cli) == a1
 	})
 
-	if !cli.buildWarm(func() {}, "", true, "") {
+	if !cli.buildWarm("", true, "") {
 		t.Fatal("buildWarm did not park a carrier — the test cannot reproduce the race")
 	}
 

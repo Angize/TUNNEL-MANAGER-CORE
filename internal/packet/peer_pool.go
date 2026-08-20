@@ -434,30 +434,131 @@ const cmdOK = "ok"
 
 func (p *PeerPool) readCmd() (poolCmd, bool) { return readPoolCmd(p.cmdPath()) }
 
-type rotationController struct {
+type pinnable interface {
+	isPinned() bool
+	releasePin()
+}
+
+// The digit a fail condemns every round.
+type lowAxis interface {
+	eligibleCount() int
+	burnCount() uint64
+	restoreAll()
+}
+
+// The digit that turns once a whole row of the low one has been tried.
+type highAxis interface {
+	activeIdx() int
+}
+
+type walkPolicy struct {
 	mu       sync.Mutex
+	pinFails int
+	od       odometer
+	pins     []pinnable
+	low      lowAxis
+	high     highAxis
+}
+
+func (w *walkPolicy) pinnedLocked() bool {
+	for _, p := range w.pins {
+		if p.isPinned() {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *walkPolicy) hasLow() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.low != nil
+}
+
+func (w *walkPolicy) reset() {
+	w.mu.Lock()
+	w.pinFails = 0
+	w.mu.Unlock()
+	w.od.restart()
+}
+
+func (w *walkPolicy) walk(rotLow, rotHigh func(proactive bool)) (stepped, lowBurned bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.pinnedLocked() {
+
+		w.pinFails++
+		if w.pinFails < pinFailRelease {
+			return false, false
+		}
+		w.pinFails = 0
+		for _, p := range w.pins {
+			p.releasePin()
+		}
+
+	} else {
+		w.pinFails = 0
+	}
+	switch {
+	case w.low != nil:
+
+		lap := w.od.failed(w.low.eligibleCount)
+		before := w.low.burnCount()
+		rotLow(false)
+		lowBurned = w.low.burnCount() != before
+		if w.high != nil && lap {
+			at := w.high.activeIdx()
+			rotHigh(false)
+			if w.high.activeIdx() != at {
+				w.low.restoreAll()
+			}
+		}
+		return true, lowBurned
+	case w.high != nil:
+		rotHigh(false)
+		return true, false
+	}
+	return false, false
+}
+
+type rotationController struct {
+	walkPolicy
 	dst, src *PeerPool
 	verdict  string
 	port     portRung
 	session  sessionRung
-	od       odometer
-	pinFails int
 	rotate   time.Duration
 	rotateAt time.Time
 }
 
 func newRotationController(dst, src *PeerPool) *rotationController {
-	c := &rotationController{dst: dst, src: src}
-	if dst != nil {
-		c.rotate = dst.rotate
-	}
-	if src != nil && src.rotate > c.rotate {
-		c.rotate = src.rotate
-	}
+	c := &rotationController{}
+	c.bind(dst, src)
 	if c.rotate > 0 {
 		c.rotateAt = time.Now().Add(c.rotate)
 	}
 	return c
+}
+
+// The destination is the digit a fail condemns; the source turns once every destination has been tried
+// against it. One place decides that, so a pool can never be wired to the policy the wrong way round.
+func (c *rotationController) bind(dst, src *PeerPool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.dst, c.src = dst, src
+	c.pins, c.low, c.high, c.rotate = nil, nil, nil, 0
+	if dst != nil {
+		c.pins = append(c.pins, dst)
+		c.low = dst
+		c.rotate = dst.rotate
+	}
+	if src != nil {
+		c.pins = append(c.pins, src)
+		c.high = src
+		if src.rotate > c.rotate {
+			c.rotate = src.rotate
+		}
+	}
 }
 
 func (c *rotationController) active() bool { return c != nil && (c.dst != nil || c.src != nil) }
@@ -466,10 +567,6 @@ func (c *rotationController) setVerdict(path string) { c.verdict = path }
 
 func (c *rotationController) polls() bool {
 	return c != nil && (c.active() || c.verdict != "")
-}
-
-func (c *rotationController) pinned() bool {
-	return (c.dst != nil && c.dst.isPinned()) || (c.src != nil && c.src.isPinned())
 }
 
 func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurned bool) {
@@ -488,55 +585,8 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurne
 	return burned
 }
 
-func (c *rotationController) walk(rotDst, rotSrc func(proactive bool)) (moved, dstBurned bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.pinned() {
-
-		c.pinFails++
-		if c.pinFails < pinFailRelease {
-			return false, false
-		}
-		c.pinFails = 0
-		if c.dst != nil {
-			c.dst.releasePin()
-		}
-		if c.src != nil {
-			c.src.releasePin()
-		}
-
-	} else {
-		c.pinFails = 0
-	}
-	switch {
-	case c.dst != nil:
-
-		lap := c.od.failed(c.dst.eligibleCount)
-		before := c.dst.burnCount()
-		rotDst(false)
-		dstBurned = c.dst.burnCount() != before
-		if c.src != nil && lap {
-			at := c.src.activeIdx()
-			rotSrc(false)
-			if c.src.activeIdx() != at {
-				c.dst.restoreAll()
-			}
-		}
-		return true, dstBurned
-	case c.src != nil:
-		rotSrc(false)
-		return true, false
-	}
-	return false, false
-}
-
 func (c *rotationController) success() {
-
-	c.mu.Lock()
-	c.pinFails = 0
-	c.mu.Unlock()
-
-	c.od.restart()
+	c.reset()
 	c.port.restart()
 	c.session.restart()
 }
@@ -547,7 +597,7 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 	if c.rotate <= 0 || c.rotateAt.IsZero() || !now.After(c.rotateAt) {
 		return
 	}
-	if c.pinned() {
+	if c.pinnedLocked() {
 		c.rotateAt = now.Add(c.rotate)
 		return
 	}

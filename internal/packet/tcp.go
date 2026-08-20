@@ -302,12 +302,10 @@ type TCP struct {
 	addr     string
 	bindIP   string
 
-	odPeer odometer
-	odEdge odometer
-	port   portRung
+	rc     rotationController
+	wsw    walkPolicy
 	rolled atomic.Bool
 
-	pinFails  atomic.Int64
 	srcWarned sync.Map
 	probing   atomic.Bool
 
@@ -341,6 +339,7 @@ func (b *TCP) SetSourceIP(ip string) { b.bindIP = ip }
 func (b *TCP) SetPeerPool(pp *PeerPool) {
 	if b.isClient && !b.ws {
 		b.pp = pp
+		b.rc.bind(pp, b.sp)
 	}
 }
 
@@ -365,6 +364,7 @@ func (b *TCP) lastSourceUsed() string {
 func (b *TCP) SetSourcePool(sp *PeerPool) {
 	if b.isClient && !b.ws {
 		b.sp = sp
+		b.rc.bind(b.pp, sp)
 	}
 }
 
@@ -391,21 +391,26 @@ func (b *TCP) livePath() (pathKey, bool) {
 }
 
 func (b *TCP) endRound() {
-	b.odPeer.restart()
-	b.odEdge.restart()
-	b.port.restart()
-	b.pinFails.Store(0)
+	b.rc.success()
+	b.wsw.reset()
 }
 
 func (b *TCP) rollSourcePort() bool {
-	c := b.curConn.Load()
-	if c == nil {
-
-		return true
+	if c := b.curConn.Load(); c != nil {
+		b.rolled.Store(true)
+		(*c).Close()
 	}
-	b.rolled.Store(true)
-	(*c).Close()
+
+	b.event("down", "port-roll", b.stTag)
 	return true
+}
+
+func (b *TCP) event(kind, code, detail string) {
+	if b.pool != nil {
+		b.pool.event(kind, code, detail)
+		return
+	}
+	b.st.event(kind, code, detail)
 }
 
 func (b *TCP) pinFailedOn(ip, host string) {
@@ -417,38 +422,31 @@ func (b *TCP) pinFailedOn(ip, host string) {
 	}
 }
 
-func (b *TCP) burnAdvance(carrierGone bool) (string, bool) {
-
-	if (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned()) {
-		if n := b.pinFails.Add(1); int(n) < pinFailRelease {
-			return "", false
-		}
-		b.pinFails.Store(0)
-		if b.pp != nil {
-			b.pp.releasePin()
-		}
-		if b.sp != nil {
-			b.sp.releasePin()
-		}
-
-	} else {
-		b.pinFails.Store(0)
-	}
+func (b *TCP) rotateDestTCP(proactive bool) {
 	if b.pp == nil {
-		if b.sp != nil {
-			b.rotateSourceTCP(!carrierGone)
-		}
-		return "", false
+		return
 	}
+	if addr, moved := b.pp.nextEndpoint(proactive); moved {
+		log.Printf("core/tcp: rotated destination to %s", addr)
+	}
+}
 
-	lap := b.odPeer.failed(b.pp.eligibleCount)
-	addr, _ := b.pp.fail()
-	if b.sp != nil && lap {
-		if _, moved := b.rotateSourceTCP(!carrierGone); moved {
-			b.pp.restoreAll()
-		}
+func (b *TCP) rotateSrcTCP(proactive bool) { b.rotateSourceTCP(proactive) }
+
+func (b *TCP) adoptPeerTCP() {
+	if b.pp == nil {
+		return
 	}
-	return addr, true
+	addr := b.pp.current()
+	log.Printf("core/tcp: pin destination %s (panel select)", addr)
+	b.st.setActive(b.stTag + " · " + addr)
+}
+
+func (b *TCP) adoptSourceTCP() {
+	if b.sp == nil {
+		return
+	}
+	log.Printf("core/tcp: pin source %s (panel select)", b.sp.current())
 }
 
 func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
@@ -572,9 +570,26 @@ func DialWS(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, 
 }
 
 func DialWSPool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, pool *wsPool, rotate time.Duration, httpc bool, httpcMode string) (*TCP, error) {
-	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
+	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, pool: pool, rotate: rotate,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}, nil
+		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
+	b.armEdgeWalk()
+	return b, nil
+}
+
+// The SNI is the low digit and the EDGE the high one -- but only while there is more than one SNI to
+// vary. With one, nothing varies under the edge, so the edge itself is what a fail condemns.
+func (b *TCP) armEdgeWalk() {
+	if b.pool == nil {
+		return
+	}
+	b.wsw.mu.Lock()
+	defer b.wsw.mu.Unlock()
+	b.wsw.pins = []pinnable{b.pool}
+	b.wsw.high = wsEdges{b.pool}
+	if b.pool.snisCount() >= 2 {
+		b.wsw.low = wsSNIs{b.pool}
+	}
 }
 
 func newWSPoolFromCfg(ips []string, snis []wsSNIEntry, statusPath string) *wsPool {
@@ -651,13 +666,14 @@ func (b *TCP) Run() error {
 	if b.isClient {
 		go b.keepaliveLoop()
 		go b.diagLoop()
-		b.port.setRoll(b.rollSourcePort)
+		b.rc.port.setRoll(b.rollSourcePort)
 		if b.pool != nil {
 			b.pool.trackPath(b.livePath, b.closeCh)
 			go b.retestLoop()
 		} else {
 			b.st.trackPath(b.livePath, b.closeCh)
-			if b.pp != nil || b.sp != nil || b.st.verdictPath() != "" {
+			b.rc.setVerdict(b.st.verdictPath())
+			if b.rc.polls() {
 				go b.peerPinPollLoop()
 			}
 		}
@@ -1294,20 +1310,18 @@ type warmDial struct {
 	dstMoved bool
 }
 
-func (b *TCP) buildWarm(burn func(), srcAddr string, dstMoved bool, dstPrev string) bool {
+func (b *TCP) buildWarm(srcAddr string, dstMoved bool, dstPrev string) bool {
 	if b.closed.Load() {
 		return false
 	}
 	conn, label, combo, err := b.dialCarrier()
 	if err != nil {
-		burn()
 		b.pp.keepCursorOn(dstPrev)
 		return false
 	}
 	cf, err := b.handshakeAndPrime(conn)
 	if err != nil {
 		conn.Close()
-		burn()
 		b.pp.keepCursorOn(dstPrev)
 		return false
 	}
@@ -1493,7 +1507,7 @@ func (b *TCP) dialLoop() {
 					if _, m := b.pp.rotateOnce(); m {
 						dstMoved = true
 					}
-					lap = b.odPeer.beat(dstMoved, b.pp.eligibleCount)
+					lap = b.rc.od.beat(dstMoved, b.pp.eligibleCount)
 				}
 				moved := dstMoved
 
@@ -1509,7 +1523,7 @@ func (b *TCP) dialLoop() {
 					return
 				}
 
-				if !b.buildWarm(func() {}, srcMovedTo, dstMoved, dstPrev) {
+				if !b.buildWarm(srcMovedTo, dstMoved, dstPrev) {
 
 					rearm(iv)
 					return
@@ -1691,47 +1705,19 @@ func (b *TCP) dropCarrier() {
 }
 
 func (b *TCP) pollPeerCmd() {
-	if cmd, ok := readPoolCmd(b.st.verdictPath()); ok {
-		epoch := b.st.pathEpoch()
-		switch {
-		case staleVerdict(cmd, epoch):
-
-			log.Printf("core/tcp: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
-				cmd.Epoch, epoch)
-		case cmd.Cmd == cmdOK:
-			b.port.restart()
-			if b.pp != nil && cmd.Key != "" && b.pp.clearBurn(cmd.Key) {
-				b.st.event("heal", "peer-retest", "ip:"+cmd.Key)
-			}
-			if b.sp != nil && cmd.Src != "" && b.sp.clearBurn(cmd.Src) {
-				b.st.event("heal", "src-retest", "ip:"+cmd.Src)
-			}
-		case cmd.Cmd == cmdFail:
-			if b.port.try() {
-				b.st.event("down", "port-roll", "tcp")
-				break
-			}
-			gone := cmd.Key
-			if addr, moved := b.burnAdvance(true); moved {
-				log.Printf("core/tcp: destination %s failed by the node's tun probe — burning and advancing to %s", gone, addr)
-				b.st.event("burn", "tun-probe", "ip:"+gone)
-				b.dropCarrier()
-			}
-		}
-	}
+	dropped := false
+	drop := func() { dropped = true; b.dropCarrier() }
+	was := ""
 	if b.pp != nil {
-		if cmd, ok := b.pp.readCmd(); ok && cmd.Key != "" && b.pp.selectEntry(cmd.Key) {
-			log.Printf("core/tcp: pin destination %s (panel select)", cmd.Key)
-			b.st.setActive(b.stTag + " · " + cmd.Key)
-			b.dropCarrier()
-		}
+		was = b.pp.current()
 	}
-	if b.sp != nil {
+	b.rc.pollPins(
+		func() { b.adoptPeerTCP(); drop() },
+		func() { b.adoptSourceTCP(); drop() },
+		b.rotateDestTCP, b.rotateSrcTCP, b.event, b.st.pathEpoch)
 
-		if cmd, ok := b.sp.readCmd(); ok && cmd.Key != "" && b.sp.selectEntry(cmd.Key) {
-			log.Printf("core/tcp: pin source %s (panel select)", cmd.Key)
-			b.dropCarrier()
-		}
+	if !dropped && b.pp != nil && b.pp.current() != was {
+		b.dropCarrier()
 	}
 }
 
@@ -1744,7 +1730,8 @@ func (b *TCP) pollWsCmd() {
 			log.Printf("core/ws: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
 				cmd.Epoch, epoch)
 		case cmd.Cmd == cmdOK:
-			b.port.restart()
+			b.rc.port.restart()
+			b.wsw.reset()
 			if cmd.IP != "" && b.pool.clearBurn("ip", cmd.IP) {
 				b.pool.event("heal", "tun-probe", "ip:"+cmd.IP)
 			}
@@ -1754,8 +1741,7 @@ func (b *TCP) pollWsCmd() {
 		case cmd.Cmd == cmdFail:
 			ip, sni := b.pool.activeCombo()
 			if cmd.IP == ip && cmd.SNI == sni {
-				if b.port.try() {
-					b.pool.event("down", "port-roll", "ws")
+				if b.rc.port.try() {
 					break
 				}
 				if b.burnAdvanceWS(ip, sni) {
@@ -1776,31 +1762,22 @@ func (b *TCP) pollWsCmd() {
 }
 
 func (b *TCP) burnAdvanceWS(ip, sni string) bool {
+	burnEdge := func(bool) { b.pool.advanceIP() }
+	if !b.wsw.hasLow() {
 
-	if b.pool.isPinned() {
-		if n := b.pinFails.Add(1); int(n) < pinFailRelease {
-			return false
+		burnEdge = func(bool) {
+			b.pool.markSuspect("ip", ip, "tun-probe")
+			b.pool.advanceIP()
 		}
-		b.pinFails.Store(0)
-		b.pool.releasePin()
-
-	} else {
-		b.pinFails.Store(0)
 	}
+	burns := b.pool.burnCount()
+	wasIP, wasSNI, _ := b.pool.current()
+	b.wsw.walk(func(bool) { b.pool.markSuspect("sni", sni, "tun-probe") }, burnEdge)
+	nowIP, nowSNI, _ := b.pool.current()
 
-	if b.pool.snisCount() < 2 {
-		b.pool.markSuspect("ip", ip, "tun-probe")
-		b.pool.advanceIP()
-		b.odEdge.restart()
-		return true
-	}
-
-	lap := b.odEdge.failed(b.pool.eligibleSNIs)
-	b.pool.markSuspect("sni", sni, "tun-probe")
-	if lap {
-		b.pool.advanceEdgeFreshRow()
-	}
-	return true
+	// The cursor is not the endpoint: advanceIP always turns it, while current() keeps serving the best
+	// entry once every edge is burned.
+	return b.pool.burnCount() != burns || nowIP != wasIP || nowSNI.host != wasSNI.host
 }
 
 func (b *TCP) SelectEdge(kind, key string) {

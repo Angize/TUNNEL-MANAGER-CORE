@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
@@ -61,6 +62,7 @@ type wsPool struct {
 	ipHealth    healthSet
 	sniHealth   healthSet
 	i, j        int
+	burns       atomic.Uint64
 	statusPath  string
 	active      string
 	rotDegraded bool
@@ -340,12 +342,8 @@ func (p *wsPool) advanceIP() {
 	p.mu.Unlock()
 }
 
-func (p *wsPool) advanceEdgeFreshRow() {
+func (p *wsPool) restoreSNIs() {
 	p.mu.Lock()
-	p.chosen = ""
-	if len(p.ips) > 0 {
-		p.i = (p.i + 1) % len(p.ips)
-	}
 	cleared := len(p.sniHealth.recs) > 0
 	p.sniHealth = newHealthSet(&p.now)
 	p.mu.Unlock()
@@ -353,6 +351,24 @@ func (p *wsPool) advanceEdgeFreshRow() {
 		p.writeStatus()
 	}
 }
+
+func (p *wsPool) activeIPIdx() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.i
+}
+
+func (p *wsPool) burnCount() uint64 { return p.burns.Load() }
+
+type wsSNIs struct{ p *wsPool }
+
+func (a wsSNIs) eligibleCount() int { return a.p.eligibleSNIs() }
+func (a wsSNIs) burnCount() uint64  { return a.p.burnCount() }
+func (a wsSNIs) restoreAll()        { a.p.restoreSNIs() }
+
+type wsEdges struct{ p *wsPool }
+
+func (a wsEdges) activeIdx() int { return a.p.activeIPIdx() }
 
 func (p *wsPool) advanceSNI() {
 	p.mu.Lock()
@@ -390,6 +406,7 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 	fresh := p.healthMap(kind).burn(key)
 	p.mu.Unlock()
 	if fresh {
+		p.burns.Add(1)
 		p.event("burn", reason, kind+":"+key)
 	}
 	p.writeStatus()

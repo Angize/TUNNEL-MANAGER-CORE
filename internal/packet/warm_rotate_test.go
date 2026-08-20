@@ -47,12 +47,12 @@ func TestBuildWarmFailurePublishesNoRotation(t *testing.T) {
 		t.Fatal("proactive source rotate should move in a 2-entry pool")
 	}
 
-	burns := 0
-	if b.buildWarm(func() { burns++ }, b.sourceIP(), true, "") {
+	if b.buildWarm(b.sourceIP(), true, "") {
 		t.Fatal("buildWarm reported success against an endpoint that closes before a single core frame")
 	}
-	if burns != 1 {
-		t.Fatalf("a warm build that fails its handshake must burn the endpoint exactly once, got %d", burns)
+	if got := burnedIn(b.pp); len(got) > 0 {
+		t.Fatalf("a failed warm build condemned %v. A build that loses its handshake is the same evidence "+
+			"a dial failure gives, and only the node's tun probe burns on that", got)
 	}
 	if w := b.takeWarm(); w != nil {
 		w.conn.Close()

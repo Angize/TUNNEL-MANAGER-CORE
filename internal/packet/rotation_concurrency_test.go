@@ -76,6 +76,7 @@ func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
 	p := newWSPool([]string{"e1", "e2", "e3"}, snis("s1", "s2"), filepath.Join(t.TempDir(), "st.json"))
 	b := &TCP{pool: p}
+	b.armEdgeWalk()
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -96,7 +97,7 @@ func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 
 	run(func() { p.current() })
 	run(func() { p.advance() })
-	run(func() { p.advanceEdgeFreshRow() })
+	run(func() { p.advanceIP(); p.restoreSNIs() })
 	run(func() {
 		ip, sni := p.activeCombo()
 		if ip != "" {
