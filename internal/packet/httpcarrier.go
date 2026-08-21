@@ -393,6 +393,7 @@ func (b *TCP) httpcEdge() (dialAddr, host string, ech []byte, path string, err e
 	if host == "" {
 		host = dialAddr
 	}
+	b.noteAttempt(host, dialAddr)
 	return dialAddr, host, ech, path, nil
 }
 

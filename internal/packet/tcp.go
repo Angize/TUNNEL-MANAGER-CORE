@@ -271,8 +271,6 @@ type TCP struct {
 
 	lastRxData atomic.Int64
 
-	warmNext chan *warmDial
-
 	pp *PeerPool
 
 	sp *PeerPool
@@ -320,6 +318,7 @@ type TCP struct {
 
 	liveSNI  atomic.Pointer[string]
 	livePair atomic.Pointer[pairNow]
+	tryPair  atomic.Pointer[pairNow]
 	closed   atomic.Bool
 	closeCh  chan struct{}
 	preAuth  chan struct{}
@@ -339,17 +338,31 @@ func (b *TCP) SetPeerPool(pp *PeerPool) {
 	}
 }
 
-// What the node's probe is measuring RIGHT NOW. The connected pair while a carrier is up -- the cursor
-// may already have stepped ahead of it during a warm rotation -- and the cursor once it is down, because
-// that is what the next dial will use and a stale last-connect would name a pair nothing is trying.
+// What a verdict may be keyed on, in order: the pair traffic is actually on; else the one being
+// dialled right now; else -- only before this carrier has ever dialled -- the cursor, which is what
+// the first dial will use.
+//
+// The middle rung is the point. Without it the answer falls straight to the cursor, and the cursor is
+// where we would go NEXT: an outage measured while a dial to some other endpoint was failing gets
+// charged to whatever the cursor happens to rest on, which no frame was ever sent to.
 func (b *TCP) livePairNow() (low, high string) {
 	if lp := b.livePair.Load(); lp != nil && b.cur.Load() != nil {
 		return lp.low, lp.high
+	}
+	if a := b.tryPair.Load(); a != nil {
+		return a.low, a.high
 	}
 	if b.rc.pair == nil {
 		return "", ""
 	}
 	return b.rc.pair.live()
+}
+
+// The endpoint this carrier is about to dial. Recorded before the dial, not after: a dial can take
+// seconds, and the node reads the status file every second throughout.
+func (b *TCP) noteAttempt(low, high string) {
+	b.tryPair.Store(&pairNow{low: low, high: high})
+	b.st.write()
 }
 
 func (b *TCP) publishPair() {
@@ -362,10 +375,6 @@ func (b *TCP) dialTarget() string {
 		return b.pp.current()
 	}
 	return b.addr
-}
-
-func (b *TCP) directPinInForce() bool {
-	return (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned())
 }
 
 func (b *TCP) lastSourceUsed() string {
@@ -1066,6 +1075,7 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 	if host == "" {
 		host = dialAddr
 	}
+	b.noteAttempt(host, dialAddr)
 	conn, err := b.dialer(connectTimeout).Dial("tcp", dialAddr)
 	if err != nil {
 		b.pinFailedOn(dialAddr, host)
@@ -1182,63 +1192,7 @@ func nextReconnectDelay(cur time.Duration) time.Duration {
 	return jitterFrac(next)
 }
 
-type warmDial struct {
-	cf    *connFramer
-	conn  net.Conn
-	label string
-	combo string
-
-	srcAddr string
-
-	dstMoved bool
-}
-
-func (b *TCP) buildWarm(srcAddr string, dstMoved bool) bool {
-	if b.closed.Load() {
-		return false
-	}
-	conn, label, combo, err := b.dialCarrier()
-	if err != nil {
-		return false
-	}
-	cf, err := b.handshakeAndPrime(conn)
-	if err != nil {
-		conn.Close()
-		return false
-	}
-
-	if stale := b.takeWarm(); stale != nil {
-		stale.conn.Close()
-	}
-	select {
-	case b.warmNext <- &warmDial{cf: cf, conn: conn, label: label, combo: combo, srcAddr: srcAddr, dstMoved: dstMoved}:
-		return true
-	default:
-		conn.Close()
-		return false
-	}
-}
-
-func (b *TCP) takeWarm() *warmDial {
-	if b.warmNext == nil {
-		return nil
-	}
-	select {
-	case w := <-b.warmNext:
-		return w
-	default:
-		return nil
-	}
-}
-
 func (b *TCP) dialLoop() {
-	b.warmNext = make(chan *warmDial, 1)
-	defer func() {
-		if w := b.takeWarm(); w != nil {
-			w.conn.Close()
-		}
-	}()
-
 	backoff := time.Duration(0)
 
 	youngDeaths := 0
@@ -1250,54 +1204,28 @@ func (b *TCP) dialLoop() {
 			log.Printf("core/ws: live ECH key updated for %s (single edge, no rebuild)", b.wsHost)
 		}
 
-		w := b.takeWarm()
-		if w != nil && b.directPinInForce() {
-
-			log.Printf("core/tcp: dropping the pre-built rotation carrier — an operator pin is pending")
-			w.conn.Close()
-			w = nil
+		conn, label, combo, err := b.dialCarrier()
+		if err != nil {
+			if b.pool != nil {
+				b.pool.advance()
+			}
+			backoff = nextReconnectDelay(backoff)
+			if b.sleep(backoff) {
+				return
+			}
+			continue
 		}
-		var conn net.Conn
-		var label, combo string
-		var cf *connFramer
-		if w != nil {
-			conn, label, combo, cf = w.conn, w.label, w.combo, w.cf
-
-			if b.pp != nil && w.dstMoved {
-				b.st.setActive(b.stTag + " · " + label)
-				b.st.event("down", "peer-rotate", "ip:"+label)
+		cf, err := b.handshakeAndPrime(conn)
+		if err != nil {
+			conn.Close()
+			if b.pool != nil {
+				b.pool.advance()
 			}
-
-			if w.srcAddr != "" && b.lastSourceUsed() == w.srcAddr {
-				b.st.event("down", "src-rotate", "ip:"+w.srcAddr)
+			backoff = nextReconnectDelay(backoff)
+			if b.sleep(backoff) {
+				return
 			}
-		} else {
-			var err error
-			conn, label, combo, err = b.dialCarrier()
-			if err != nil {
-				if b.pool != nil {
-					b.pool.advance()
-				}
-
-				backoff = nextReconnectDelay(backoff)
-				if b.sleep(backoff) {
-					return
-				}
-				continue
-			}
-			cf, err = b.handshakeAndPrime(conn)
-			if err != nil {
-				conn.Close()
-
-				if b.pool != nil {
-					b.pool.advance()
-				}
-				backoff = nextReconnectDelay(backoff)
-				if b.sleep(backoff) {
-					return
-				}
-				continue
-			}
+			continue
 		}
 		log.Printf("core/tcp: connected to %s", label)
 		backoff = 0
@@ -1359,21 +1287,8 @@ func (b *TCP) dialLoop() {
 					return
 				}
 
-				prevIP, prevSNI, ok := b.pool.current()
-				if !ok || !b.pool.advance() {
+				if _, _, ok := b.pool.current(); !ok || !b.pool.advance() {
 					rearm(b.rotate)
-					return
-				}
-				if !b.buildWarm("", true) {
-
-					b.pool.keepCursorOn(prevIP, prevSNI.host)
-					rearm(b.rotate)
-					return
-				}
-				if !timerLive.Load() || b.closed.Load() {
-					if w := b.takeWarm(); w != nil {
-						w.conn.Close()
-					}
 					return
 				}
 				rotated.Store(true)
@@ -1400,41 +1315,24 @@ func (b *TCP) dialLoop() {
 				}
 
 				dstMoved := false
-				dstPrev := ""
-
 				lap := true
 				if b.pp != nil {
-					dstPrev = b.pp.current()
-					if _, m := b.pp.rotateOnce(); m {
+					if a, m := b.pp.rotateOnce(); m {
 						dstMoved = true
+						b.st.setActive(b.stTag + activeSep + a)
+						b.st.event("down", "peer-rotate", "ip:"+a)
 					}
 					lap = b.rc.od.beat(dstMoved, b.pp.eligibleCount)
 				}
 				moved := dstMoved
-
-				srcMovedTo := ""
 				if lap {
 					if a, m := b.rotateSourceTCP(true); m {
 						moved = true
-						srcMovedTo = a
+						b.st.event("down", "src-rotate", "ip:"+a)
 					}
 				}
 				if !moved {
 					rearm(iv)
-					return
-				}
-
-				if !b.buildWarm(srcMovedTo, dstMoved) {
-
-					b.pp.keepCursorOn(dstPrev)
-					rearm(iv)
-					return
-				}
-				if !timerLive.Load() || b.closed.Load() {
-
-					if w := b.takeWarm(); w != nil {
-						w.conn.Close()
-					}
 					return
 				}
 				rotated.Store(true)
@@ -1520,6 +1418,7 @@ func (b *TCP) dialCarrier() (net.Conn, string, string, error) {
 		return c, edge, combo, nil
 	}
 	target := b.dialTarget()
+	b.noteAttempt(target, b.sourceIP())
 	c, err := b.dialer(connectTimeout).Dial("tcp", target)
 	if err != nil {
 		log.Printf("core/tcp: dial %s failed: %v", target, err)

@@ -275,8 +275,8 @@ func (p *wsPool) tierLocked(kind, key string) (tier int, next int64) {
 	return p.healthMap(kind).tier(key)
 }
 
-// Put the cursor back on a combination, the way the direct pool does after a warm dial it could not
-// build. Compares the RAW cursor, not currentLocked(), which would resolve and step.
+// Put the cursor on a combination. Compares the RAW cursor, not currentLocked(), which would resolve
+// and step.
 func (p *wsPool) keepCursorOn(ip, sni string) {
 	if p == nil || ip == "" {
 		return

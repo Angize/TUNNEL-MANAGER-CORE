@@ -118,9 +118,12 @@ func TestASourcePooledTunnelHearsItsVerdict(t *testing.T) {
 	rotSrc := func(bool) { src.fail("tun-probe") }
 
 	rc.session.setDrop(func() bool { return true })
+	// What the node writes for a tunnel like this: no destination axis to name, the source named from
+	// the pair the core published. A verdict that named NOTHING is a different case -- see
+	// TestANamelessVerdictSpendsTheRungsAndBurnsNobody -- and must not reach a burn.
 	burned, cur := false, ""
 	for i := 0; i < portTries+4 && !burned; i++ {
-		liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdFail})
+		liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdFail, High: "s1"})
 		rc.poll(func(bool) {}, rotSrc, nil, atPathEpoch)
 		src.mu.Lock()
 		burned, cur = src.health.recs["s1"] != nil, src.addrs[src.cur]

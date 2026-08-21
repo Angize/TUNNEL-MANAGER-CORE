@@ -725,13 +725,17 @@ func (c *rotationController) polls() bool {
 	return c != nil && (c.active() || c.verdict != "" || c.pinbox != "")
 }
 
-func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurned bool) {
-
+// The rungs a verdict may spend before it accuses anyone: a redrawn source port, then a fresh
+// handshake. Reports true once both are gone and only a burn is left.
+func (c *rotationController) spendFreeRungs() bool {
 	if c.port.try() {
 		return false
 	}
+	return !c.session.try()
+}
 
-	if c.session.try() {
+func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurned bool) {
+	if !c.spendFreeRungs() {
 		return false
 	}
 	moved, burned := c.walk(rotDst, rotSrc)
@@ -820,6 +824,13 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 		// endpoint. Refusing it here would leave those tunnels with no ladder at all.
 		if c.pair == nil {
 			c.fail(rotLow, rotHigh)
+			return false
+		}
+		// A verdict that names nothing has measured an outage with no endpoint behind it -- the carrier
+		// was between dials, or had not made its first one. The free rungs still apply; a burn would be
+		// a guess, and the guess lands on whatever the cursor happens to rest on.
+		if cmd.Low == "" && cmd.High == "" {
+			c.spendFreeRungs()
 			return false
 		}
 		lowKind, highKind := c.pair.kinds()

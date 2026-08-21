@@ -102,11 +102,9 @@ func TestAStaleComboVerdictBurnsTheAxisTheWalkVaries(t *testing.T) {
 	}
 }
 
-// The rotation's own sequence: look at where we are, step, try to build a carrier there, and on failure
-// put the cursor back. The live carrier is never let go -- and the edge that would not answer is burned
-// on the way, by the dial itself, so the next rotation has nothing eligible to walk onto and stops
-// hammering it until its backoff elapses.
-func TestARotationOntoADeadEdgeKeepsTheCarrierAndBurnsIt(t *testing.T) {
+// A rotation steps onto an edge that will not answer. The dial that follows is what condemns it, so
+// the pool must not be left sitting on it: the next ask has to offer the edge that still works.
+func TestARotationOntoADeadEdgeBurnsItAndMovesOn(t *testing.T) {
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	dead := ln.Addr().String()
 	ln.Close()
@@ -115,11 +113,9 @@ func TestARotationOntoADeadEdgeKeepsTheCarrierAndBurnsIt(t *testing.T) {
 	p := newWSPool([]string{live, dead}, snis("x"))
 	b := &TCP{isClient: true, ws: true, wsPath: "/", pool: p, closeCh: make(chan struct{})}
 	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
-	b.warmNext = make(chan *warmDial, 1)
 
-	prevIP, prevSNI, ok := p.current()
-	if !ok || prevIP != live {
-		t.Fatalf("setup: the pool starts on %q, want %q", prevIP, live)
+	if got, _, ok := p.current(); !ok || got != live {
+		t.Fatalf("setup: the pool starts on %q, want %q", got, live)
 	}
 	if !p.advance() {
 		t.Fatal("setup: the pool would not step onto the second edge")
@@ -128,28 +124,27 @@ func TestARotationOntoADeadEdgeKeepsTheCarrierAndBurnsIt(t *testing.T) {
 		t.Fatalf("setup: the step landed on %q, want the dead edge %q", got, dead)
 	}
 
-	if b.buildWarm("", true) {
-		t.Fatal("a warm dial to a closed port reported success")
+	if c, _, _, err := b.dialCarrier(); err == nil {
+		c.Close()
+		t.Fatal("a dial to a closed port reported success")
 	}
-	p.keepCursorOn(prevIP, prevSNI.host)
 
 	p.mu.Lock()
 	burned := !p.ipHealth.healthy(dead)
 	liveStillOK := p.ipHealth.healthy(live)
 	p.mu.Unlock()
 	if !burned {
-		t.Fatalf("%s refused the warm dial and was not burned — the next rotation walks straight back "+
-			"onto it, and the panel keeps calling it healthy", dead)
+		t.Fatalf("%s refused the dial and was not burned — the next rotation walks straight back onto "+
+			"it, and the panel keeps calling it healthy", dead)
 	}
 	if !liveStillOK {
 		t.Fatalf("%s was burned for a failure on another edge", live)
 	}
+	// What dialLoop does next, in the same breath as the failed dial.
+	p.advance()
 	if got, _, _ := p.current(); got != live {
-		t.Fatalf("after the failed warm dial the pool sits on %q — the carrier is still on %q and the "+
-			"status would name an edge nothing is using", got, live)
-	}
-	if p.advance() {
-		t.Fatal("the next rotation stepped onto the edge it just burned; its backoff must hold it out")
+		t.Fatalf("after the refused dial and the step that follows it, the pool offers %q; the only edge "+
+			"left that answers is %q", got, live)
 	}
 }
 
