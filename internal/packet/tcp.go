@@ -1204,11 +1204,12 @@ func (b *TCP) dialLoop() {
 			log.Printf("core/ws: live ECH key updated for %s (single edge, no rebuild)", b.wsHost)
 		}
 
+		// A refused dial does NOT step the pool. The tun probe is the one judge, and it can only key a
+		// verdict on an endpoint the carrier stayed long enough to name; stepping here would make that
+		// name change under it every retry. The reconnect backoff is what paces this, exactly as it
+		// paces a direct carrier whose destination will not answer.
 		conn, label, combo, err := b.dialCarrier()
 		if err != nil {
-			if b.pool != nil {
-				b.pool.advance()
-			}
 			backoff = nextReconnectDelay(backoff)
 			if b.sleep(backoff) {
 				return
@@ -1218,9 +1219,6 @@ func (b *TCP) dialLoop() {
 		cf, err := b.handshakeAndPrime(conn)
 		if err != nil {
 			conn.Close()
-			if b.pool != nil {
-				b.pool.advance()
-			}
 			backoff = nextReconnectDelay(backoff)
 			if b.sleep(backoff) {
 				return
@@ -1408,11 +1406,6 @@ func (b *TCP) dialCarrier() (net.Conn, string, string, error) {
 		}
 		if err != nil {
 			log.Printf("core/ws: connect via %s failed: %v", edge, err)
-
-			// An edge that cannot answer a handshake is evidence no probe can fake.
-			if b.pool != nil {
-				b.pool.markSuspect("ip", edge, "dial")
-			}
 			return nil, edge, "", err
 		}
 		return c, edge, combo, nil
