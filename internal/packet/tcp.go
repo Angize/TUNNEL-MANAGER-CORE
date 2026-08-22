@@ -1527,14 +1527,11 @@ func (b *TCP) rotateHighTCP(proactive bool) {
 		b.rotateSrcTCP(proactive)
 		return
 	}
-	// Only if there is a second domain to turn onto. With one, the walk would be condemning the digit
-	// it never varied -- nothing rotates away from it, currentLocked keeps serving it from the
-	// fallback, and the panel tells the operator their only domain is blocked when what the probe
-	// measured was the edges under it.
-	if b.pool.snisCount() >= 2 {
-		_, sni := b.livePairNow()
-		b.pool.markSuspect("sni", sni, "tun-probe")
-	}
+	// A lone domain is condemned too, for the same reason a lone destination is: nothing rotates away
+	// from it and the record changes no behaviour, but a green row under a dead tunnel is a lie and
+	// these rows are what the operator reads to decide what to replace.
+	_, sni := b.livePairNow()
+	b.pool.markSuspect("sni", sni, "tun-probe")
 	b.pool.advanceSNI()
 }
 

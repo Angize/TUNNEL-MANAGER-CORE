@@ -6,10 +6,9 @@ import (
 )
 
 // core13's real shape on 2026-08-21: three edges, ONE domain. The walk varies the edge and turns the
-// domain once the row is spent -- but turning it here means turning it onto itself, and condemning it
-// leaves the operator a red row they cannot act on while currentLocked keeps handing it out anyway.
-// The evidence belongs to the axis that actually varied.
-func TestALoneDomainIsNeverCondemned(t *testing.T) {
+// domain once the row is spent. Turning it here means turning it onto itself -- but the burn is still
+// recorded, because a green domain under a dead tunnel is the one thing the operator must not be told.
+func TestALoneDomainIsStillCondemned(t *testing.T) {
 	p := newWSPool([]string{"ip1", "ip2", "ip3"}, snis("cdn.example"))
 	b := &TCP{isClient: true, ws: true, wsPath: "/", pool: p, closeCh: make(chan struct{})}
 	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
@@ -24,10 +23,9 @@ func TestALoneDomainIsNeverCondemned(t *testing.T) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.sniHealth.healthy("cdn.example") {
-		t.Error("the only domain the tunnel has was condemned. There is nothing to rotate to, the pool " +
-			"keeps serving it from the fallback, and the panel tells the operator their domain is " +
-			"blocked when what the probe measured was the edges")
+	if p.sniHealth.healthy("cdn.example") {
+		t.Error("the only domain stayed green after every edge under it had failed — nothing rotates " +
+			"away from it, but the panel then shows a healthy domain on a tunnel carrying nothing")
 	}
 	burned := 0
 	for _, k := range p.ips {
@@ -36,8 +34,7 @@ func TestALoneDomainIsNeverCondemned(t *testing.T) {
 		}
 	}
 	if burned == 0 {
-		t.Error("and nothing was condemned at all — the edges are the axis that varied, so they are " +
-			"what the evidence is about")
+		t.Error("and the edges — the axis that actually varied — were left green")
 	}
 }
 

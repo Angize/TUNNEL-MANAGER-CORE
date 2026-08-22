@@ -238,7 +238,11 @@ func (p *PeerPool) advanceEligibleLocked() bool {
 func (p *PeerPool) fail(reason string) (addr string, moved bool) {
 	p.mu.Lock()
 
-	if len(p.addrs) < 2 || p.pinnedLocked() {
+	// A pool of one still records its burn. There is nowhere to rotate to and currentLocked keeps
+	// serving the entry from the fallback, so the record changes no behaviour -- but a green row under
+	// a dead tunnel tells the operator that endpoint is fine, and it is not. Only the operator's pin
+	// still stops it: that one they can see and undo.
+	if p.pinnedLocked() {
 		a := p.addrs[p.cur]
 		p.mu.Unlock()
 		return a, false

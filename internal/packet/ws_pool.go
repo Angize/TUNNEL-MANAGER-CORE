@@ -390,12 +390,6 @@ type wsSNIs struct{ p *wsPool }
 
 func (a wsSNIs) activeIdx() int { return a.p.activeSNIIdx() }
 
-func (p *wsPool) snisCount() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.snis)
-}
-
 func (p *wsPool) comboCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
