@@ -86,22 +86,22 @@ func TestAnAbandonedPinPutsTheBurnBack(t *testing.T) {
 func TestThePublishedPairFollowsThePinWhileDown(t *testing.T) {
 	b, p := edgeCarrier(t, []string{"e1", "e2"}, snis("s1"))
 	b.pretendDown()
-	if _, high := b.livePairNow(); high != "e1" {
-		t.Fatalf("setup: the pair names %q, want e1", high)
+	if low, _ := b.livePairNow(); low != "e1" {
+		t.Fatalf("setup: the pair names %q, want e1", low)
 	}
 
 	if !p.selectEntry("ip", "e2") {
 		t.Fatal("could not pin e2")
 	}
-	_, high := b.livePairNow()
-	if high == "e1" {
+	low, _ := b.livePairNow()
+	if low == "e1" {
 		t.Fatal("the pair still names e1 after pinning e2 — a verdict arriving now would burn the edge " +
 			"the tunnel just left, not the one it is attempting")
 	}
-	if high != "e2" {
-		t.Fatalf("the pair names %q after pinning e2", high)
+	if low != "e2" {
+		t.Fatalf("the pair names %q after pinning e2", low)
 	}
-	if got := b.readStatus(t).Pair.High; got != "e2" {
+	if got := b.readStatus(t).Pair.Low; got != "e2" {
 		t.Fatalf("the status file the node reads still says %q", got)
 	}
 

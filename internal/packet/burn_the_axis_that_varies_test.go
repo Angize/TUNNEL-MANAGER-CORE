@@ -2,12 +2,12 @@ package packet
 
 import "testing"
 
-func TestASingleSNIPoolBurnsTheEdge(t *testing.T) {
+func TestAMultiEdgePoolBurnsTheEdgeFirst(t *testing.T) {
 	b, p := edgeCarrier(t, []string{"e1", "e2", "e3"}, snis("only.example"))
 	ip, sni, _ := p.current()
-	b.pretendConnected(sni.host, ip)
+	b.pretendConnected(ip, sni.host)
 
-	if !b.tunFail(t, sni.host, ip) {
+	if !b.tunFail(t, ip, sni.host) {
 		t.Fatal("the verdict did nothing")
 	}
 
@@ -17,25 +17,25 @@ func TestASingleSNIPoolBurnsTheEdge(t *testing.T) {
 	p.mu.Unlock()
 
 	if !edgeBurned {
-		t.Fatalf("the dead edge %s was not blacklisted — with one SNI the EDGE is the only thing the "+
-			"walk varies, so it is the only thing a verdict can blame. Nothing is ever set aside and the "+
-			"pool just cycles back onto it.", ip)
+		t.Fatalf("the dead edge %s was not blacklisted — the edge is the digit the walk varies, and it "+
+			"is the cheap one: it comes back in ten minutes and it is what the filter actually blocks. "+
+			"Nothing is set aside and the pool just cycles back onto it.", ip)
 	}
 	if sniBurned {
-		t.Fatalf("the lone SNI %s was burned — it never varied, so nothing measured it, and with one "+
-			"domain burning it also strands the only SNI the pool has", sni.host)
+		t.Fatalf("the domain %s was burned on the FIRST beat — a domain is only condemned once every "+
+			"edge under it has failed, because losing it loses it on every edge at once", sni.host)
 	}
 	if got, _, _ := p.current(); got == ip {
 		t.Fatalf("still on %s after its verdict — the walk must move off it", ip)
 	}
 }
 
-func TestAMultiSNIPoolStillBurnsTheSNI(t *testing.T) {
-	b, p := edgeCarrier(t, []string{"e1", "e2"}, snis("s1", "s2", "s3"))
+func TestASingleEdgePoolBurnsTheDomain(t *testing.T) {
+	b, p := edgeCarrier(t, []string{"only.edge"}, snis("s1", "s2", "s3"))
 	ip, sni, _ := p.current()
-	b.pretendConnected(sni.host, ip)
+	b.pretendConnected(ip, sni.host)
 
-	if !b.tunFail(t, sni.host, ip) {
+	if !b.tunFail(t, ip, sni.host) {
 		t.Fatal("the verdict did nothing")
 	}
 	p.mu.Lock()
@@ -44,11 +44,12 @@ func TestAMultiSNIPoolStillBurnsTheSNI(t *testing.T) {
 	p.mu.Unlock()
 
 	if !sniBurned {
-		t.Fatalf("with %d SNIs the walk varies the SNI, so the SNI is what a verdict names", 3)
+		t.Fatal("with ONE edge there is no cheaper digit to vary, so the walk arrives at the domain " +
+			"every round and the domain is what a verdict names")
 	}
 	if edgeBurned {
-		t.Fatal("the edge was convicted on its FIRST beat — it is only guilty once a whole row of SNIs " +
-			"has failed on it, which is the only thing that makes it the axis that did not vary")
+		t.Fatalf("the only edge %s was burned — it never varied, so nothing distinguished it, and "+
+			"burning it strands the only edge the pool has", ip)
 	}
 }
 

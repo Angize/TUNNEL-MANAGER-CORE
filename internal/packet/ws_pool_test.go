@@ -484,12 +484,13 @@ func TestAdvanceIPAndSNIIndependently(t *testing.T) {
 	if ip1 != "b" || sni1.host != "x" {
 		t.Fatalf("after advanceIP = %s/%s, want b/x (SNI unchanged)", ip1, sni1.host)
 	}
+	// One step varies the EDGE and leaves the domain alone: the edge is the cheap digit.
 	p.stepLocked()
 	ip2, sni2, _ := p.current()
-	if ip2 != "b" || sni2.host != "y" {
-		t.Fatalf("after one step = %s/%s, want b/y (IP unchanged)", ip2, sni2.host)
+	if ip2 != "c" || sni2.host != "x" {
+		t.Fatalf("after one step = %s/%s, want c/x (the domain must not turn until the row is spent)",
+			ip2, sni2.host)
 	}
-	p.advanceIP()
 	p.advanceIP()
 	ip3, _, _ := p.current()
 	if ip3 != "a" {
