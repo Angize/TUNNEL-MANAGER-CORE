@@ -12,10 +12,10 @@ func TestLoopWholeEdgeOutage(t *testing.T) {
 	edges := map[string]bool{}
 	for round := 1; round <= 4; round++ {
 		ip, e, _ := p.current()
-		b.pretendConnected(e.host, ip)
+		b.pretendConnected(ip, e.host)
 		seen[ip+"|"+e.host]++
 		edges[ip] = true
-		if !b.tunFailUntilItMoves(t, e.host, ip) {
+		if !b.tunFailUntilItMoves(t, ip, e.host) {
 			t.Fatalf("round %d: the pool would not move off %s/%s", round, ip, e.host)
 		}
 	}
@@ -27,10 +27,10 @@ func TestLoopWholeEdgeOutage(t *testing.T) {
 	}
 
 	ip, e, _ := p.current()
-	b.pretendConnected(e.host, ip)
+	b.pretendConnected(ip, e.host)
 	p.markSuspect("ip", ip, "test")
 	p.markSuspect("sni", e.host, "test")
-	b.tunOK(t, e.host, ip)
+	b.tunOK(t, ip, e.host)
 	p.mu.Lock()
 	stillIP, stillSNI := !p.ipHealth.healthy(ip), !p.sniHealth.healthy(e.host)
 	p.mu.Unlock()

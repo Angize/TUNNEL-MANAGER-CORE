@@ -101,7 +101,7 @@ func TestTheEdgeWalkFindsTheOneComboThatWorks(t *testing.T) {
 			var seen []string
 			for round := 1; round <= convergeRounds; round++ {
 				ip, sni, _ := p.current()
-				b.pretendConnected(sni.host, ip)
+				b.pretendConnected(ip, sni.host)
 				seen = append(seen, ip+"/"+sni.host)
 				if ip == goodE && sni.host == goodH {
 					p.clearBurn("ip", ip)
@@ -159,7 +159,7 @@ func TestNothingWorksAndTheNodeHandsItAllBack(t *testing.T) {
 		p.now = func() int64 { return clk }
 		for i := 0; i < 12; i++ {
 			ip, sni, _ := p.current()
-			b.pretendConnected(sni.host, ip)
+			b.pretendConnected(ip, sni.host)
 			b.rc.fail(b.rotateLowTCP, b.rotateHighTCP)
 			clk += 30
 		}

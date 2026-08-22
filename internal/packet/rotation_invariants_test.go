@@ -240,7 +240,7 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 					p.advance()
 				case 1:
 					ip, sni, _ := p.current()
-					b.pretendConnected(sni.host, ip)
+					b.pretendConnected(ip, sni.host)
 					log = append(log, "verdict:"+ip+"/"+sni.host)
 					b.rc.fail(b.rotateLowTCP, b.rotateHighTCP)
 				case 2:
@@ -268,7 +268,7 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 				case 8:
 					log = append(log, "advanceIP+restoreSNIs")
 					p.advanceIP()
-					p.restoreSNIs()
+					p.restoreIPs()
 				case 9:
 					ip := ips[rng.Intn(len(ips))]
 					log = append(log, "pinApplied:"+ip)

@@ -158,10 +158,10 @@ func TestTheEdgePoolClimbsTheSameLadder(t *testing.T) {
 	liveCarrier(t, b)
 
 	ip, sni, _ := pool.current()
-	b.pretendConnected(sni.host, ip)
+	b.pretendConnected(ip, sni.host)
 	b.st.tracker.observe(pathKey{Dst: ip, Dport: 443, Sport: 40001, SNI: sni.host}, true)
 	epoch := b.st.pathEpoch()
-	fail := poolCmd{Cmd: cmdFail, Low: sni.host, High: ip}
+	fail := poolCmd{Cmd: cmdFail, Low: ip, High: sni.host}
 
 	burned := func() bool {
 		pool.mu.Lock()

@@ -21,7 +21,7 @@ func newVerdictPool(t *testing.T, ips, hosts []string) *TCP {
 	if !ok {
 		t.Fatal("fresh pool has no current edge")
 	}
-	b.pretendConnected(sni.host, ip)
+	b.pretendConnected(ip, sni.host)
 	armAndSpendTheFreeRungs(t, b)
 	return b
 }
@@ -50,41 +50,45 @@ func TestWSFailBurnsWhatItMeasured(t *testing.T) {
 	measuredLow, measuredHigh := b.livePairNow()
 	b.pool.advance()
 	ip, sni, _ := b.pool.current()
-	b.pretendConnected(sni.host, ip)
-	if sni.host == measuredLow {
-		t.Fatalf("advance() did not change the SNI (%s) — the test cannot show the stale case", sni.host)
+	b.pretendConnected(ip, sni.host)
+	if ip == measuredLow {
+		t.Fatalf("advance() did not change the edge (%s) — the test cannot show the stale case", ip)
 	}
 
 	b.tunFail(t, measuredLow, measuredHigh)
 
-	burned := wsBurned(b.pool, "sni")
+	burned := wsBurned(b.pool, "ip")
 	if !burned[measuredLow] {
-		t.Fatalf("the SNI the probe MEASURED (%s) was not burned; burned=%v", measuredLow, burned)
+		t.Fatalf("the edge the probe MEASURED (%s) was not burned; burned=%v", measuredLow, burned)
 	}
-	if burned[sni.host] {
-		t.Fatalf("burned %s — the combo the carrier moved TO, which nothing measured", sni.host)
+	if burned[ip] {
+		t.Fatalf("burned %s — the combo the carrier moved TO, which nothing measured", ip)
 	}
 	if got, _, _ := b.pool.current(); got != ip {
-		t.Fatalf("a stale verdict moved the edge (%s -> %s); it must stay put", ip, got)
+		t.Fatalf("a stale verdict moved the pool off %s; it must stay put, got %s", ip, got)
 	}
 }
 
+// Every edge under one domain, then the next domain. The edge is the cheap digit: it is what the
+// filter blocks and it comes back on a ten-minute backoff. A domain is only condemned once every edge
+// under it has failed, because losing a domain loses it on every edge at once.
 func TestWSVerdictWalksTheMatrix(t *testing.T) {
-	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2", "s3"})
-	startIP, _, _ := b.pool.current()
+	b := newVerdictPool(t, []string{"e1", "e2", "e3"}, []string{"s1", "s2"})
+	_, startSNI, _ := b.pool.current()
 
 	for i := 1; i <= 3; i++ {
 		ip, sni, _ := b.pool.current()
-		b.pretendConnected(sni.host, ip)
-		if !b.tunFailUntilItMoves(t, sni.host, ip) {
-			t.Fatalf("SNI %d of 3 on %s: the pool would not move", i, startIP)
+		b.pretendConnected(ip, sni.host)
+		if !b.tunFailUntilItMoves(t, ip, sni.host) {
+			t.Fatalf("edge %d of 3 under %s: the pool would not move", i, startSNI.host)
 		}
-		if got, _, _ := b.pool.current(); i < 3 && got != startIP {
-			t.Fatalf("the edge moved after %d of 3 SNIs (%s -> %s) — it is convicted too early", i, startIP, got)
+		if _, got, _ := b.pool.current(); i < 3 && got.host != startSNI.host {
+			t.Fatalf("the domain turned after %d of 3 edges (%s -> %s) — it is convicted too early, and "+
+				"a burned domain is burned on every edge at once", i, startSNI.host, got.host)
 		}
 	}
-	if got, _, _ := b.pool.current(); got == startIP {
-		t.Fatalf("every SNI on %s failed and the edge still did not move", startIP)
+	if _, got, _ := b.pool.current(); got.host == startSNI.host {
+		t.Fatalf("every edge under %s failed and the domain still did not turn", startSNI.host)
 	}
 }
 
@@ -93,7 +97,7 @@ func TestWSOKClearsBothAxes(t *testing.T) {
 	b.pool.markSuspect("ip", "e1", "test")
 	b.pool.markSuspect("sni", "s1", "test")
 
-	b.tunOK(t, "s1", "e1")
+	b.tunOK(t, "e1", "s1")
 
 	if wsBurned(b.pool, "ip")["e1"] {
 		t.Fatal("the edge stayed burned while the probe watched it carry")
@@ -108,7 +112,7 @@ func TestWSStaleOKClearsOnlyWhatItMeasured(t *testing.T) {
 	b.pool.markSuspect("sni", "s1", "test")
 	b.pool.markSuspect("sni", "s2", "test")
 
-	b.tunOK(t, "s1", "e1")
+	b.tunOK(t, "e1", "s1")
 
 	if wsBurned(b.pool, "sni")["s1"] {
 		t.Fatal("s1 was measured carrying and stayed burned")

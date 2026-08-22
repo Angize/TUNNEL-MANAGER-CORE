@@ -109,6 +109,10 @@ func (p *PeerPool) currentLocked() string {
 	}
 	n := len(p.addrs)
 
+	// Health does NOT override this one. Here a commitment means the socket is bound to that source,
+	// or the datagram path has adopted that destination -- rejectCandidate commits back to an address
+	// it knows is burned, precisely because it is the one in use. Overriding it would publish an
+	// endpoint nothing is on. The edge pool's `chosen` is only a cursor, and there health does win.
 	if p.chosen != "" && p.addrs[p.cur] == p.chosen {
 		return p.chosen
 	}
@@ -628,10 +632,10 @@ func (c *rotationController) bindEdges(p *wsPool) {
 	defer c.mu.Unlock()
 	c.pair = edgePair{p}
 	c.pins = []pinnable{p}
-	c.high = wsEdges{p}
+	c.high = wsSNIs{p}
 	c.setLowLocked(nil)
-	if p.snisCount() >= 2 {
-		c.setLowLocked(wsSNIs{p})
+	if p.ipsCount() >= 2 {
+		c.setLowLocked(wsEdges{p})
 	}
 }
 

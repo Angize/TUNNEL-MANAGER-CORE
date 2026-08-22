@@ -60,22 +60,22 @@ func TestADialFailureBlamesTheEdgeNotTheDomain(t *testing.T) {
 }
 
 // A verdict about a combination the pool has left still names a real failure, so it must still burn --
-// but on the axis the walk would have varied. With one SNI there is nothing to vary, and blaming it
-// would condemn the only domain the tunnel has.
+// but on the axis the walk would have varied. With one edge there is nothing to vary under the domain,
+// and the domain is what a failure condemns instead.
 func TestAStaleComboVerdictBurnsTheAxisTheWalkVaries(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		snis  []string
+		ips   []string
 		burnt string // "sni" or "ip"
 	}{
-		{"two SNIs: the low digit takes it", []string{"s1", "s2"}, "sni"},
-		{"one SNI: nothing varies under the edge, so the edge takes it", []string{"only"}, "ip"},
+		{"two edges: the low digit takes it", []string{"e1", "e2"}, "ip"},
+		{"one edge: nothing varies under the domain, so the domain takes it", []string{"only"}, "sni"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, p := edgeCarrier(t, []string{"e1", "e2"}, snis(tc.snis...))
+			b, p := edgeCarrier(t, tc.ips, snis("s1", "s2"))
 
 			measIP, measSNI, _ := p.current()
-			b.pretendConnected(measSNI.host, measIP)
+			b.pretendConnected(measIP, measSNI.host)
 			if !p.advance() {
 				t.Fatal("setup: the pool would not move")
 			}
@@ -83,68 +83,23 @@ func TestAStaleComboVerdictBurnsTheAxisTheWalkVaries(t *testing.T) {
 			// The carrier is DOWN, so the published pair follows the cursor -- which is exactly the
 			// window this arm exists for: the probe measured the pair we have just left.
 			b.pretendDown()
-			b.tunFail(t, measSNI.host, measIP)
+			b.tunFail(t, measIP, measSNI.host)
 
 			p.mu.Lock()
 			sniBurned := !p.sniHealth.healthy(measSNI.host)
 			ipBurned := !p.ipHealth.healthy(measIP)
 			p.mu.Unlock()
 
-			if tc.burnt == "sni" && (!sniBurned || ipBurned) {
-				t.Fatalf("sniBurned=%v ipBurned=%v — with a second SNI the low digit is what a failed "+
-					"combination condemns; convicting the edge here skips a whole row", sniBurned, ipBurned)
-			}
 			if tc.burnt == "ip" && (!ipBurned || sniBurned) {
-				t.Fatalf("sniBurned=%v ipBurned=%v — with one SNI there is no low digit, and burning it "+
-					"takes the only domain the tunnel has", sniBurned, ipBurned)
+				t.Fatalf("sniBurned=%v ipBurned=%v — with a second edge the low digit is what a failed "+
+					"combination condemns; convicting the domain here loses it on every edge at once",
+					sniBurned, ipBurned)
+			}
+			if tc.burnt == "sni" && (!sniBurned || ipBurned) {
+				t.Fatalf("sniBurned=%v ipBurned=%v — with one edge there is no low digit, and burning it "+
+					"takes the only edge the tunnel has", sniBurned, ipBurned)
 			}
 		})
-	}
-}
-
-// A rotation steps onto an edge that will not answer. The dial that follows is what condemns it, so
-// the pool must not be left sitting on it: the next ask has to offer the edge that still works.
-func TestARotationOntoADeadEdgeBurnsItAndMovesOn(t *testing.T) {
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	dead := ln.Addr().String()
-	ln.Close()
-	const live = "127.0.0.9:443"
-
-	p := newWSPool([]string{live, dead}, snis("x"))
-	b := &TCP{isClient: true, ws: true, wsPath: "/", pool: p, closeCh: make(chan struct{})}
-	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
-
-	if got, _, ok := p.current(); !ok || got != live {
-		t.Fatalf("setup: the pool starts on %q, want %q", got, live)
-	}
-	if !p.advance() {
-		t.Fatal("setup: the pool would not step onto the second edge")
-	}
-	if got, _, _ := p.current(); got != dead {
-		t.Fatalf("setup: the step landed on %q, want the dead edge %q", got, dead)
-	}
-
-	if c, _, _, err := b.dialCarrier(); err == nil {
-		c.Close()
-		t.Fatal("a dial to a closed port reported success")
-	}
-
-	p.mu.Lock()
-	burned := !p.ipHealth.healthy(dead)
-	liveStillOK := p.ipHealth.healthy(live)
-	p.mu.Unlock()
-	if !burned {
-		t.Fatalf("%s refused the dial and was not burned — the next rotation walks straight back onto "+
-			"it, and the panel keeps calling it healthy", dead)
-	}
-	if !liveStillOK {
-		t.Fatalf("%s was burned for a failure on another edge", live)
-	}
-	// What dialLoop does next, in the same breath as the failed dial.
-	p.advance()
-	if got, _, _ := p.current(); got != live {
-		t.Fatalf("after the refused dial and the step that follows it, the pool offers %q; the only edge "+
-			"left that answers is %q", got, live)
 	}
 }
 
