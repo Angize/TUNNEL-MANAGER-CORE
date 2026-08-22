@@ -17,18 +17,18 @@ func TestTheStatusNamesWhatIsBeingTriedNotTheCursor(t *testing.T) {
 	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
 
 	// Before the first dial the cursor is a fair prediction: it is what that dial will use.
-	if _, high := b.livePairNow(); high != was {
-		t.Fatalf("before any dial the carrier names %q, want the cursor %q", high, was)
+	if low, _ := b.livePairNow(); low != was {
+		t.Fatalf("before any dial the carrier names %q, want the cursor %q", low, was)
 	}
 
-	b.noteAttempt("x", pinned)
+	b.noteAttempt(pinned, "x")
 	low, high := b.livePairNow()
-	if high != pinned {
+	if low != pinned {
 		t.Fatalf("while dialling %s the carrier reports %q; a probe that measures this outage must name "+
-			"the edge being TRIED, not one the pool merely points at", pinned, high)
+			"the edge being TRIED, not one the pool merely points at", pinned, low)
 	}
-	if low != "x" {
-		t.Fatalf("the domain half reads %q, want %q", low, "x")
+	if high != "x" {
+		t.Fatalf("the domain half reads %q, want %q", high, "x")
 	}
 
 	// The pin is dropped and the pool walks on: the cursor is now somewhere else entirely. The last
@@ -38,9 +38,9 @@ func TestTheStatusNamesWhatIsBeingTriedNotTheCursor(t *testing.T) {
 	if cur, _, _ := p.current(); cur == pinned {
 		t.Fatal("setup: the pool did not move off the burned edge")
 	}
-	if _, high := b.livePairNow(); high != pinned {
+	if low, _ := b.livePairNow(); low != pinned {
 		t.Fatalf("the pool moved to %q and the carrier followed it in the status; the cursor is where we "+
-			"would go NEXT, not what the probe just measured", high)
+			"would go NEXT, not what the probe just measured", low)
 	}
 }
 

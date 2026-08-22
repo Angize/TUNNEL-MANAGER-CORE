@@ -19,8 +19,16 @@ func TestCondemnedIsOnlyARealBurn(t *testing.T) {
 			"per verdict for as long as the outage lasts")
 	}
 
+	// A one-entry pool has nowhere to go but still records the burn, so the FIRST verdict is charged.
 	single := NewPeerPool([]string{"10.0.0.9"}, 0)
-	if newRotationController(single, nil).fail(func(bool) { single.nextEndpoint(false) }, nil) {
-		t.Error("a one-entry pool refuses to burn, so no endpoint was charged")
+	sc := newRotationController(single, nil)
+	rotOne := func(bool) { single.nextEndpoint(false) }
+	if !sc.fail(rotOne, nil) {
+		t.Error("a one-entry pool left its only endpoint green; nothing rotates away from it, but the " +
+			"panel then calls it healthy while the tunnel carries nothing")
+	}
+	if sc.fail(rotOne, nil) {
+		t.Error("and the SECOND verdict was charged again — the backoff it already stamped has not " +
+			"elapsed, so this is one burn, not one event per sweep")
 	}
 }

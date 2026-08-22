@@ -45,15 +45,15 @@ func TestPinEndsOnTheFirstSecondOpinion_CDN(t *testing.T) {
 		t.Fatal("could not pin")
 	}
 	ip, sni, _ := p.current()
-	b.pretendConnected(sni.host, ip)
+	b.pretendConnected(ip, sni.host)
 
-	if !b.tunFail(t, sni.host, ip) {
+	if !b.tunFail(t, ip, sni.host) {
 		t.Fatal("the first verdict under a pin must release it and burn")
 	}
 	if p.isPinned() {
 		t.Fatal("the pin still holds the edge after a proven-dead verdict")
 	}
-	if p.sniHealth.healthy(sni.host) {
+	if p.ipHealth.healthy(ip) {
 		t.Fatal("the pin released but nothing was burned — the same round must do both")
 	}
 }

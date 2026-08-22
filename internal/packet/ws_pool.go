@@ -137,10 +137,14 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 		return p.resolvePinIPLocked(), p.resolvePinSNILocked(), true
 	}
 
+	// A committed combination is stable, not immortal: if it has since been condemned, the commitment
+	// is stale and the scan below has to run. Without this the walk burns an entry and the very next
+	// dial goes straight back to it.
 	if p.chosen != "" {
 		ip := p.ips[p.i%len(p.ips)]
 		sni := p.snis[p.j%len(p.snis)]
-		if activeLabel(ip, sni.host) == p.chosen {
+		if activeLabel(ip, sni.host) == p.chosen &&
+			p.ipHealth.eligible(ip) && p.sniHealth.eligible(sni.host) {
 			return ip, sni, true
 		}
 	}
@@ -302,14 +306,17 @@ func (p *wsPool) keepCursorOn(ip, sni string) {
 	}
 }
 
+// The EDGE is the digit that varies every step: an edge is cheap to lose and cheap to get back, and
+// it is the thing the filter actually blocks. The domain turns only once every edge under it has been
+// tried, because losing a domain loses it on every edge at once.
 func (p *wsPool) stepLocked() {
 	p.chosen = ""
-	p.j++
-	if p.j >= len(p.snis) {
-		p.j = 0
-		p.i++
-		if p.i >= len(p.ips) {
-			p.i = 0
+	p.i++
+	if p.i >= len(p.ips) {
+		p.i = 0
+		p.j++
+		if p.j >= len(p.snis) {
+			p.j = 0
 		}
 	}
 }
@@ -341,39 +348,47 @@ func (p *wsPool) advanceIP() {
 	p.mu.Unlock()
 }
 
-func (p *wsPool) restoreSNIs() {
+func (p *wsPool) advanceSNI() {
 	p.mu.Lock()
-	cleared := len(p.sniHealth.recs) > 0
-	p.sniHealth = newHealthSet(&p.now)
+	p.chosen = ""
+	if len(p.snis) > 0 {
+		p.j = (p.j + 1) % len(p.snis)
+	}
+	p.mu.Unlock()
+}
+
+// A fresh domain deserves a fresh row of edges: the burns under the previous one said nothing about
+// this one.
+func (p *wsPool) restoreIPs() {
+	p.mu.Lock()
+	cleared := len(p.ipHealth.recs) > 0
+	p.ipHealth = newHealthSet(&p.now)
 	p.mu.Unlock()
 	if cleared {
 		p.publish()
+		p.reassessRotation()
 	}
 }
 
-func (p *wsPool) activeIPIdx() int {
+func (p *wsPool) activeSNIIdx() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.i
+	return p.j
 }
 
 func (p *wsPool) burnCount() uint64 { return p.burns.Load() }
 
-type wsSNIs struct{ p *wsPool }
-
-func (a wsSNIs) eligibleCount() int { return a.p.eligibleSNIs() }
-func (a wsSNIs) burnCount() uint64  { return a.p.burnCount() }
-func (a wsSNIs) restoreAll()        { a.p.restoreSNIs() }
-
+// The digit a fail condemns every round.
 type wsEdges struct{ p *wsPool }
 
-func (a wsEdges) activeIdx() int { return a.p.activeIPIdx() }
+func (a wsEdges) eligibleCount() int { return a.p.eligibleIPs() }
+func (a wsEdges) burnCount() uint64  { return a.p.burnCount() }
+func (a wsEdges) restoreAll()        { a.p.restoreIPs() }
 
-func (p *wsPool) snisCount() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.snis)
-}
+// The digit that turns once a whole row of edges has been tried.
+type wsSNIs struct{ p *wsPool }
+
+func (a wsSNIs) activeIdx() int { return a.p.activeSNIIdx() }
 
 func (p *wsPool) comboCount() int {
 	p.mu.Lock()
@@ -381,14 +396,16 @@ func (p *wsPool) comboCount() int {
 	return len(p.ips) * len(p.snis)
 }
 
-func (p *wsPool) eligibleSNIs() int {
+func (p *wsPool) eligibleIPs() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	keys := make([]string, len(p.snis))
-	for i, e := range p.snis {
-		keys[i] = e.host
-	}
-	return p.sniHealth.countEligible(keys)
+	return p.ipHealth.countEligible(p.ips)
+}
+
+func (p *wsPool) ipsCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.ips)
 }
 
 func (p *wsPool) markSuspect(kind, key, reason string) {
@@ -648,17 +665,17 @@ func (p *wsPool) stepToCurrentLocked() {
 // The pair a verdict speaks about on an edge pool: the SNI is the digit a fail condemns.
 type edgePair struct{ p *wsPool }
 
-func (e edgePair) kinds() (string, string) { return "sni", "ip" }
+func (e edgePair) kinds() (string, string) { return "ip", "sni" }
 
 func (e edgePair) live() (low, high string) {
 	ip, sni, ok := e.p.current()
 	if !ok {
 		return "", ""
 	}
-	return sni.host, ip
+	return ip, sni.host
 }
 
-func (e edgePair) keepCursorOn(low, high string) { e.p.keepCursorOn(high, low) }
+func (e edgePair) keepCursorOn(low, high string) { e.p.keepCursorOn(low, high) }
 
 func (e edgePair) clear(kind, key string) bool {
 	return key != "" && e.p.clearBurn(kind, key)

@@ -1514,21 +1514,25 @@ func (b *TCP) rotateLowTCP(proactive bool) {
 		return
 	}
 	low, _ := b.livePairNow()
-	b.pool.markSuspect("sni", low, "tun-probe")
+	b.pool.markSuspect("ip", low, "tun-probe")
+	b.pool.advanceIP()
 }
 
-// The digit that turns once a whole row of the low one has been tried. With ONE SNI there is no low
-// digit to vary, so the walk arrives here every round and the edge is what a fail condemns.
+// The digit that turns once a whole row of edges has been tried -- and by then the domain HAS been
+// judged: every edge under it was offered live traffic and none carried. That is the one thing a lap
+// proves, so the domain is condemned here and the walk moves to the next one. With ONE edge there is
+// no low digit to vary and the walk arrives every round, which is the same statement made sooner.
 func (b *TCP) rotateHighTCP(proactive bool) {
 	if b.pool == nil {
 		b.rotateSrcTCP(proactive)
 		return
 	}
-	if !b.rc.hasLow() {
-		_, edge := b.livePairNow()
-		b.pool.markSuspect("ip", edge, "tun-probe")
-	}
-	b.pool.advanceIP()
+	// A lone domain is condemned too, for the same reason a lone destination is: nothing rotates away
+	// from it and the record changes no behaviour, but a green row under a dead tunnel is a lie and
+	// these rows are what the operator reads to decide what to replace.
+	_, sni := b.livePairNow()
+	b.pool.markSuspect("sni", sni, "tun-probe")
+	b.pool.advanceSNI()
 }
 
 // The operator's pick took. Only the direct destination needs saying here: the panel reads the edge

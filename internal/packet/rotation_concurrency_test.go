@@ -94,7 +94,7 @@ func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 
 	run(func() { p.current() })
 	run(func() { p.advance() })
-	run(func() { p.advanceIP(); p.restoreSNIs() })
+	run(func() { p.advanceIP(); p.restoreIPs() })
 	run(func() {
 		low, high := b.livePairNow()
 		if high != "" {
@@ -104,14 +104,14 @@ func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 	})
 	run(func() {
 		ip, sni, _ := p.current()
-		b.pretendConnected(sni.host, ip)
+		b.pretendConnected(ip, sni.host)
 	})
 	run(func() { p.selectEntry("ip", "e2") })
 	run(func() { p.pinLandedOn("e1", "s1") })
 	run(func() { p.pinCannotLand("e2", "s2") })
 	run(func() { p.clearBurn("sni", "s2") })
 	run(func() { p.clearBurn("ip", "e3") })
-	run(func() { _ = p.eligibleSNIs() })
+	run(func() { _ = p.eligibleIPs() })
 	run(func() { _ = p.isPinned() })
 
 	time.Sleep(400 * time.Millisecond)

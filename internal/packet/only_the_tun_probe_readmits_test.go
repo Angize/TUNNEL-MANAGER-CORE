@@ -49,8 +49,8 @@ func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 		b.pool = p
 		b.rc.bindEdges(p)
 		b.publishPair()
-		b.pretendConnected(sni.host, ip)
-		if !b.tunFail(t, sni.host, ip) {
+		b.pretendConnected(ip, sni.host)
+		if !b.tunFail(t, ip, sni.host) {
 			t.Fatal("the verdict did nothing")
 		}
 		if p.ipHealth.due("e2") {

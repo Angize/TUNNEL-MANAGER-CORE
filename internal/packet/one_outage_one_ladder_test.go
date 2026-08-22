@@ -121,7 +121,9 @@ func TestTheBurnedAxisFollowsThePoolShape(t *testing.T) {
 		wantDst, wantSrc bool
 	}{
 		{"one server, many clients", nil, []string{"s1", "s2"}, false, true},
-		{"many servers, one client", []string{"d1", "d2"}, []string{"s1"}, true, false},
+		// A lone source is condemned too. It cannot be rotated away from, but the walk did reach it,
+		// and leaving it green under a dead tunnel is the one thing the operator must not be told.
+		{"many servers, one client", []string{"d1", "d2"}, []string{"s1"}, true, true},
 		{"many of both", []string{"d1", "d2"}, []string{"s1", "s2"}, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
