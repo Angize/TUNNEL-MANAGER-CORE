@@ -3,18 +3,20 @@ package packet
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
 
 type coreStatus struct {
-	mu      sync.Mutex
-	writeMu sync.Mutex
-	path    string
-	active  string
-	events  []coreEvent
-	evSeq   int64
-	wasDown bool
+	mu          sync.Mutex
+	writeMu     sync.Mutex
+	path        string
+	active      string
+	events      []coreEvent
+	evSeq       int64
+	wasDown     bool
+	rollPending bool
 
 	// What the pools publish through this one file. Registered once at startup; read on every write.
 	health []func() []healthStatus
@@ -136,14 +138,41 @@ func (s *coreStatus) down(code, detail string) {
 	s.event("down", code, detail)
 }
 
-func (s *coreStatus) reconnected(detail string) {
+// One rotation the operator did not ask for. A proactive step is a scheduled move; a failover follows
+// a fault, so it also arms the "up" that will report the recovery.
+func (s *coreStatus) rotated(axis, detail string, proactive bool) {
+	if proactive {
+		s.event("down", axis+"-rotate", detail)
+		return
+	}
+	s.down(axis+"-rotate", detail)
+}
+
+// A source-port redraw is only worth a line if it WORKED, and then only for the port that worked. The
+// rung draws one on every verdict for as long as the outage lasts; writing at the draw meant a line
+// per draw for a tunnel that never came back, burying the burn and the re-handshake that follow it.
+// So the draw is only remembered here, and reconnected() decides.
+func (s *coreStatus) portRedrawn() {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
-	pending := s.wasDown
-	s.wasDown = false
+	s.rollPending = true
 	s.mu.Unlock()
+}
+
+// The carrier is carrying again, on source port `sport` (0 when the carrier has no port of its own).
+func (s *coreStatus) reconnected(detail string, sport uint16) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	pending, rolled := s.wasDown, s.rollPending
+	s.wasDown, s.rollPending = false, false
+	s.mu.Unlock()
+	if rolled && sport != 0 {
+		s.event("down", "port-roll", "sport:"+strconv.Itoa(int(sport)))
+	}
 	if pending {
 		s.event("up", "reconnect", detail)
 	}

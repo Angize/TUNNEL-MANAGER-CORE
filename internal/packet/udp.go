@@ -134,13 +134,10 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 	log.Printf("core/udp: rotated destination to %s", addr)
 
 	b.st.setActive("udp · " + ua.String())
+	b.st.rotated("peer", "ip:"+addr, proactive)
 	if proactive {
-
-		b.st.event("down", "peer-rotate", "ip:"+addr)
-		return
+		return // a scheduled move keeps its session: there is nothing for the loop to redo
 	}
-	b.st.down("peer-rotate", "ip:"+addr)
-
 	wakeLoop(b.wake)
 }
 
@@ -188,7 +185,7 @@ func (b *UDP) rotateSourceUDP(proactive bool) {
 	if host, ok := b.rebindSourceTo(addr); ok {
 		log.Printf("core/udp: rotated source to %s", host)
 
-		b.st.event("down", "src-rotate", "ip:"+host)
+		b.st.rotated("src", "ip:"+host, true)
 		return
 	}
 
@@ -764,7 +761,7 @@ func (b *UDP) tryHandshake(pkt []byte, addr *net.UDPAddr) {
 
 		b.ci.Store(nil)
 		b.provenFrom(addr.IP)
-		b.st.reconnected("udp")
+		b.st.reconnected("udp", 0)
 		return
 	}
 
@@ -839,7 +836,7 @@ func (b *UDP) clientLoop() {
 			}
 
 			if !b.cryptoOn && b.peerAnswered.Load() {
-				b.st.reconnected("udp")
+				b.st.reconnected("udp", 0)
 			}
 
 			b.send(typePing, nil, b.peer.Load())

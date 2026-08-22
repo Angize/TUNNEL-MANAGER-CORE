@@ -545,7 +545,7 @@ func (f *Flux) tryHandshake(body []byte, addr *net.IPAddr) {
 
 		f.ci.Store(nil)
 		f.provenFrom(addr.IP)
-		f.st.reconnected("flux")
+		f.st.reconnected("flux", 0)
 		return
 	}
 
@@ -690,7 +690,7 @@ func (f *Flux) rotateSourceFlux(proactive bool) {
 	f.localIP.Store(&net.IPAddr{IP: ip})
 	log.Printf("flux: rotated source to %s", addr)
 
-	f.st.event("down", "src-rotate", "ip:"+addr)
+	f.st.rotated("src", "ip:"+addr, true)
 }
 
 func (f *Flux) rotatePeerFlux(proactive bool) {
@@ -717,13 +717,10 @@ func (f *Flux) rotatePeerFlux(proactive bool) {
 
 	f.peerAnswered.Store(false)
 	log.Printf("flux: rotated destination to %s", addr)
+	f.st.rotated("peer", "ip:"+addr, proactive)
 	if proactive {
-
-		f.st.event("down", "peer-rotate", "ip:"+addr)
-		return
+		return // a scheduled move keeps its session: there is nothing for the loop to redo
 	}
-	f.st.down("peer-rotate", "ip:"+addr)
-
 	wakeLoop(f.wake)
 }
 

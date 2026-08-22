@@ -422,8 +422,7 @@ func (b *TCP) rollSourcePort() bool {
 		b.rolled.Store(true)
 		(*c).Close()
 	}
-
-	b.st.event("down", "port-roll", b.stTag)
+	b.st.portRedrawn()
 	return true
 }
 
@@ -453,7 +452,7 @@ func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
 		log.Printf("core/tcp: rotated source to %s", addr)
 		if !proactive {
 
-			b.st.event("down", "src-rotate", "ip:"+addr)
+			b.st.rotated("src", "ip:"+addr, true)
 		}
 	}
 	return addr, moved
@@ -1235,7 +1234,8 @@ func (b *TCP) dialLoop() {
 		if combo != "" {
 			back = combo
 		}
-		b.st.reconnected(back)
+		_, sport := addrParts(conn.LocalAddr())
+		b.st.reconnected(back, sport)
 
 		b.manualSwitch.Store(false)
 		b.cur.Store(cf)
@@ -1285,9 +1285,20 @@ func (b *TCP) dialLoop() {
 					return
 				}
 
-				if _, _, ok := b.pool.current(); !ok || !b.pool.advance() {
+				prevIP, prevSNI, ok := b.pool.current()
+				if !ok || !b.pool.advance() {
 					rearm(b.rotate)
 					return
+				}
+				// Say so. The panel could only ever infer this from `active` changing between polls --
+				// fifteen seconds apart, silent when the rotation does not land, and muted for a while
+				// after an operator pin. The carrier knows the moment it happens and which digit moved.
+				nowIP, nowSNI, _ := b.pool.current()
+				if nowIP != prevIP {
+					b.st.rotated("edge", "ip:"+nowIP, true)
+				}
+				if nowSNI.host != prevSNI.host {
+					b.st.rotated("sni", "sni:"+nowSNI.host, true)
 				}
 				rotated.Store(true)
 				c.Close()
@@ -1318,7 +1329,7 @@ func (b *TCP) dialLoop() {
 					if a, m := b.pp.rotateOnce(); m {
 						dstMoved = true
 						b.st.setActive(b.stTag + activeSep + a)
-						b.st.event("down", "peer-rotate", "ip:"+a)
+						b.st.rotated("peer", "ip:"+a, true)
 					}
 					lap = b.rc.od.beat(dstMoved, b.pp.eligibleCount)
 				}
@@ -1326,7 +1337,7 @@ func (b *TCP) dialLoop() {
 				if lap {
 					if a, m := b.rotateSourceTCP(true); m {
 						moved = true
-						b.st.event("down", "src-rotate", "ip:"+a)
+						b.st.rotated("src", "ip:"+a, true)
 					}
 				}
 				if !moved {

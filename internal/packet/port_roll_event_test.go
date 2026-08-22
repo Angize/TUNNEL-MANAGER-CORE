@@ -3,6 +3,7 @@ package packet
 import (
 	"net"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
@@ -27,23 +28,18 @@ func greenSession(t *testing.T, r *Raw) {
 	}
 	r.session.Store(&sealerBox{s: sl})
 	if r.link == nil {
-
 		r.link = &capturingLink{r: r}
 	}
 }
 
-func rollEvents(t *testing.T, path string) []coreEvent {
-	t.Helper()
-	var out []coreEvent
-	for _, e := range coreStatusEvents(t, path) {
-		if e.Code == "port-roll" {
-			out = append(out, e)
-		}
-	}
-	return out
-}
-
-func TestARollingPortSaysSoOncePerOutage(t *testing.T) {
+// The draw itself says nothing, however many times the ladder spends it. What the operator needs is
+// the port the tunnel CAME BACK on, and until it comes back there is no such port -- so an outage that
+// never recovers writes no port line at all. Driven through the real rung: rollSourcePort is what the
+// ladder calls.
+//
+// This covers the silent half end to end. The other half -- one line naming the port, once the carrier
+// reports it is up -- is coreStatus's rule and is tested there, in TestAPortRedrawIsOnlyNewsIfItWorked.
+func TestDrawsAloneWriteNothing(t *testing.T) {
 	r, path := rollingPort(t)
 
 	for i := 0; i < 5; i++ {
@@ -51,44 +47,29 @@ func TestARollingPortSaysSoOncePerOutage(t *testing.T) {
 			t.Fatalf("draw %d did not move the port", i+1)
 		}
 	}
-	if ev := rollEvents(t, path); len(ev) != 1 {
-		t.Fatalf("%d port-roll events for 5 draws in one outage, want exactly 1. The ring is 500 lines "+
-			"fleet-wide and the ladder redraws every few seconds — a line each buries the burn that follows", len(ev))
+	if ev := coreStatusEvents(t, path); len(ev) != 0 {
+		t.Fatalf("five draws in an outage that never recovered wrote %d event(s): %+v. The ladder "+
+			"redraws every few seconds; a line each is the spam that buries the burn that follows", len(ev), ev)
 	}
 }
 
-func TestTheNextOutageSaysSoAgain(t *testing.T) {
+// And once it does come back, the line names the port it came back on -- not the one it left.
+func TestTheLineNamesThePortItRecoveredOn(t *testing.T) {
 	r, path := rollingPort(t)
-	cur := r.peer.Load().IP
 
 	r.rollSourcePort()
 	r.rollSourcePort()
-	if n := len(rollEvents(t, path)); n != 1 {
-		t.Fatalf("first outage wrote %d events, want 1", n)
+	came := r.cport()
+	r.st.reconnected("raw", came)
+
+	ev := coreStatusEvents(t, path)
+	if len(ev) != 1 || ev[0].Code != "port-roll" {
+		t.Fatalf("after recovery: %+v, want exactly one port-roll", ev)
 	}
-
-	r.markRx(cur)
-	r.rollSourcePort()
-	if n := len(rollEvents(t, path)); n != 2 {
-		t.Fatalf("a second outage wrote %d events in total, want 2 — the latch never re-armed", n)
+	if want := "sport:" + strconv.Itoa(int(came)); ev[0].Detail != want {
+		t.Fatalf("the line says %q, want %q -- the operator needs the port that WORKS", ev[0].Detail, want)
 	}
-}
-
-func TestOnlyTheCurrentDestinationEndsTheOutage(t *testing.T) {
-	r, path := rollingPort(t)
-	cur, other := r.peer.Load().IP, net.IPv4(10, 30, 0, 3)
-
-	r.rollSourcePort()
-	r.markRx(other)
-	r.rollSourcePort()
-	if n := len(rollEvents(t, path)); n != 1 {
-		t.Fatalf("a reply from the endpoint we are NOT on ended the outage on behalf of the one we are "+
-			"on: %d events, want 1", n)
-	}
-
-	r.markRx(cur)
-	r.rollSourcePort()
-	if n := len(rollEvents(t, path)); n != 2 {
-		t.Fatalf("the current destination answered and the next outage stayed silent: %d events, want 2", n)
+	if came == 40000 {
+		t.Fatal("setup: the draws never moved the port, so this proves nothing")
 	}
 }
