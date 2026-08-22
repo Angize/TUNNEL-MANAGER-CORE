@@ -6,10 +6,11 @@ import (
 	"testing"
 )
 
-// A dial that never came up is the one fact about an edge that cannot be faked. A filtered edge passes
-// a probe and swallows the payload; it cannot answer a handshake it dropped. So the dial itself is
-// evidence, and it is the only evidence the core produces without the node.
-func TestAnEdgeThatWillNotDialIsBurned(t *testing.T) {
+// A refused dial condemns nothing on its own -- the tun probe is the one judge, on the edge pool
+// exactly as on a direct carrier. What the dial must do is STAY: the pool holds its combination while
+// the reconnect backoff paces the retries, so the endpoint the probe measures is still the endpoint
+// the verdict will name. Stepping here would make that name change under it every retry.
+func TestARefusedDialCondemnsNothingAndStaysPut(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -25,43 +26,47 @@ func TestAnEdgeThatWillNotDialIsBurned(t *testing.T) {
 	if ip != dead {
 		t.Fatalf("setup: the pool starts on %q, want %q", ip, dead)
 	}
-	if _, _, _, err := b.dialCarrier(); err == nil {
-		t.Fatal("setup: the dial to a closed port succeeded")
+	for i := 0; i < 3; i++ {
+		if _, _, _, err := b.dialCarrier(); err == nil {
+			t.Fatal("setup: the dial to a closed port succeeded")
+		}
 	}
 
 	p.mu.Lock()
-	burned := !p.ipHealth.healthy(dead)
+	burned := len(p.ipHealth.recs) + len(p.sniHealth.recs)
 	p.mu.Unlock()
-	if !burned {
-		t.Fatalf("%s refused the connection and stayed healthy. Nothing else in the core will ever say "+
-			"so: the node's probe only judges the tunnel it is carried on, and this one never came up", dead)
+	if burned != 0 {
+		t.Errorf("three refused dials condemned %d entr(ies). The dial is not the judge here; the tun "+
+			"probe is, and it is the only thing that can tell a filtered edge from a broken one", burned)
+	}
+	if got, _, _ := p.current(); got != dead {
+		t.Errorf("the pool stepped to %q while retrying %q. The status then names a different edge on "+
+			"every attempt, and the verdict that arrives cannot be charged to what it measured", got, dead)
 	}
 }
 
-// The SNI is not what a refused connection proves anything about — the bytes never got far enough to
-// carry one. A one-SNI pool would otherwise condemn the only domain it has.
-func TestADialFailureBlamesTheEdgeNotTheDomain(t *testing.T) {
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	dead := ln.Addr().String()
-	ln.Close()
-
-	p := newWSPool([]string{dead, "127.0.0.2:1"}, snis("only.example"))
+// ...and the slow path still gets there: the probe names the edge the carrier is stuck on, and the
+// ladder condemns it once the free rungs are spent.
+func TestTheProbeStillCondemnsTheEdgeTheDialCouldNotReach(t *testing.T) {
+	p := newWSPool([]string{"e1", "e2"}, snis("x"))
 	b := &TCP{isClient: true, ws: true, wsPath: "/", pool: p, closeCh: make(chan struct{})}
 	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
-	b.dialCarrier()
+	b.rc.port.setRoll(func() bool { return true })
+
+	b.noteAttempt("e1", "x") // what the failing dial published
+	for i := 0; i <= portTries; i++ {
+		low, high := b.livePairNow()
+		b.rc.judge(poolCmd{Cmd: cmdFail, Low: low, High: high}, b.rotateLowTCP, b.rotateHighTCP, 0)
+	}
 
 	p.mu.Lock()
-	sniBurned := !p.sniHealth.healthy("only.example")
-	p.mu.Unlock()
-	if sniBurned {
-		t.Fatal("a refused TCP connection condemned the domain — the handshake that carries an SNI never " +
-			"happened, and this pool has no second domain to fall back to")
+	defer p.mu.Unlock()
+	if p.ipHealth.healthy("e1") {
+		t.Error("the edge the dial could not reach was never condemned. Removing the dial burn only " +
+			"moves the evidence to the probe; it must not lose it")
 	}
 }
 
-// A verdict about a combination the pool has left still names a real failure, so it must still burn --
-// but on the axis the walk would have varied. With one edge there is nothing to vary under the domain,
-// and the domain is what a failure condemns instead.
 func TestAStaleComboVerdictBurnsTheAxisTheWalkVaries(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

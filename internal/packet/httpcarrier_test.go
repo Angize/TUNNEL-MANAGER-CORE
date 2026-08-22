@@ -66,7 +66,7 @@ func echoHTTPC() *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
-func TestAnHTTPCOriginThatAnswers502IsADialFailureAndBurns(t *testing.T) {
+func TestAnHTTPCOriginThatAnswers502FailsTheDialWithoutCondemning(t *testing.T) {
 	good := echoHTTPC()
 	defer good.Close()
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -98,9 +98,9 @@ func TestAnHTTPCOriginThatAnswers502IsADialFailureAndBurns(t *testing.T) {
 		t.Fatal("a 502-origin behind a reachable front must fail the dial (a TLS-only reach would wrongly " +
 			"pass it, and the carrier would be handed a socket that swallows every frame)")
 	}
-	if p.ipHealth.healthy(addr) {
-		t.Fatal("the 502 edge was not burned: an origin that refuses the upgrade is the one thing about " +
-			"an edge that cannot be faked, and the rotation must be told")
+	if !p.ipHealth.healthy(addr) {
+		t.Fatal("the 502 edge was condemned by the dial itself. The tun probe is the one judge on this " +
+			"pool, the same as on a direct carrier; the dial only reports that it could not carry")
 	}
 }
 
