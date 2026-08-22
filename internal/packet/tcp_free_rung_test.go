@@ -61,13 +61,12 @@ func TestTheFreeRungIsSpentBeforeAnyDestinationBurns(t *testing.T) {
 		liveCarrier(t, b)
 	}
 
-	if got := codes(coreStatusEvents(t, path)); len(got) != portTries {
-		t.Fatalf("events after %d free draws = %v, want %d port-roll and nothing else", portTries, got, portTries)
-	}
-	for _, c := range codes(coreStatusEvents(t, path)) {
-		if c != "port-roll" {
-			t.Fatalf("a free draw published %q; only port-roll says «nobody is blamed yet»", c)
-		}
+	// The draws themselves are silent. What the operator gets is one line once the tunnel comes back,
+	// naming the port it came back ON -- see TestAPortRedrawIsOnlyNewsIfItWorked. An outage that never
+	// recovers writes nothing, which is the whole point: the ladder redraws every few seconds.
+	if got := codes(coreStatusEvents(t, path)); len(got) != 0 {
+		t.Fatalf("%d free draws published %v; a draw that has not been proven to work says nothing",
+			portTries, got)
 	}
 
 	liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Low: first})
@@ -117,8 +116,8 @@ func TestAPoolLessCarrierStillSpendsItsFreeRung(t *testing.T) {
 			"moves the tunnel nowhere and needs no second endpoint, so it is exactly what a pool-less " +
 			"carrier can still spend")
 	}
-	if got := codes(coreStatusEvents(t, path)); len(got) != 1 || got[0] != "port-roll" {
-		t.Fatalf("events = %v, want exactly one port-roll", got)
+	if got := codes(coreStatusEvents(t, path)); len(got) != 0 {
+		t.Fatalf("events = %v; the draw is spent but unproven, so it is not news yet", got)
 	}
 }
 
@@ -147,8 +146,8 @@ func TestWithNoCarrierTheRungIsSpentAndNothingIsTornDown(t *testing.T) {
 			"always fails leaves the dial loop between carriers for ever, and a direct pool has no other "+
 			"way off it -- so the rungs must still run out", burned)
 	}
-	if got := codes(coreStatusEvents(t, path)); len(got) != portTries+1 {
-		t.Fatalf("events = %v, want %d port-roll then one burn", got, portTries)
+	if got := codes(coreStatusEvents(t, path)); len(got) != 1 || got[0] != "tun-probe" {
+		t.Fatalf("events = %v, want exactly the burn: the draws before it never proved themselves", got)
 	}
 }
 

@@ -72,8 +72,6 @@ type Raw struct {
 	tsStart atomic.Int64
 	tsEcr   atomic.Uint32
 
-	portRolling atomic.Bool
-
 	peerAnswered atomic.Bool
 
 	fecEnc  *fecEncoder
@@ -679,9 +677,7 @@ func (r *Raw) rollSourcePort() bool {
 	r.usePort(p)
 	r.sendInit()
 
-	if !r.portRolling.Swap(true) {
-		r.st.event("down", "port-roll", "raw")
-	}
+	r.st.portRedrawn()
 	return true
 }
 
@@ -969,7 +965,7 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 		r.ci.Store(nil)
 		r.markRx(addr.IP)
 		r.provenFrom(addr.IP)
-		r.st.reconnected("raw")
+		r.st.reconnected("raw", r.cport())
 		return
 	}
 
@@ -1050,9 +1046,6 @@ func (r *Raw) rehandshake() bool {
 
 func (r *Raw) markRx(from net.IP) {
 	if p := r.peer.Load(); p != nil && from != nil && p.IP.Equal(from) {
-		if r.portRolling.Load() {
-			r.portRolling.Store(false)
-		}
 	}
 }
 
@@ -1150,7 +1143,7 @@ func (r *Raw) rotateSourceRaw(proactive bool) {
 	r.freshTuple()
 	log.Printf("raw: rotated source to %s", addr)
 
-	r.st.event("down", "src-rotate", "ip:"+addr)
+	r.st.rotated("src", "ip:"+addr, true)
 }
 
 func (r *Raw) rotatePeerRaw(proactive bool) {
@@ -1177,13 +1170,10 @@ func (r *Raw) rotatePeerRaw(proactive bool) {
 
 	r.peerAnswered.Store(false)
 	log.Printf("raw: rotated destination to %s", addr)
+	r.st.rotated("peer", "ip:"+addr, proactive)
 	if proactive {
-
-		r.st.event("down", "peer-rotate", "ip:"+addr)
-		return
+		return // a scheduled move keeps its session: there is nothing for the loop to redo
 	}
-	r.st.down("peer-rotate", "ip:"+addr)
-
 	wakeLoop(r.wake)
 }
 

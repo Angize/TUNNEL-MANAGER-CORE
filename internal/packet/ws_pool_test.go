@@ -171,19 +171,19 @@ func TestPoolDownReconnectPairing(t *testing.T) {
 	}
 
 	b.st.down("reset", "a · x")
-	b.st.reconnected("b · x")
+	b.st.reconnected("b · x", 0)
 	e := evs()
 	if len(e) != 2 || e[0].Kind != "down" || e[1].Kind != "up" || e[1].Code != "reconnect" {
 		t.Fatalf("want down then up/reconnect, got %+v", e)
 	}
 
-	b.st.reconnected("a · x")
+	b.st.reconnected("a · x", 0)
 	if len(evs()) != 2 {
 		t.Fatalf("rotation without a pending down must be silent, got %d events", len(evs()))
 	}
 
 	b.st.down("throttle", "a · x")
-	b.st.reconnected("a · x")
+	b.st.reconnected("a · x", 0)
 	if e = evs(); len(e) != 4 || e[3].Kind != "up" {
 		t.Fatalf("a same-edge reconnect after a down must still emit up, got %+v", e)
 	}
