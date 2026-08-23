@@ -17,6 +17,9 @@ func rollingPort(t *testing.T) (*Raw, string) {
 	r.link = &capturingLink{r: r}
 	path := filepath.Join(t.TempDir(), "core.status")
 	r.SetStatusPath(path)
+	// The one line Run() adds: the live path, which is where the port the tunnel is actually on lives.
+	r.st.trackPath(r.livePath, r.closeCh)
+	t.Cleanup(func() { close(r.closeCh) })
 	return r, path
 }
 
@@ -53,14 +56,16 @@ func TestDrawsAloneWriteNothing(t *testing.T) {
 	}
 }
 
-// And once it does come back, the line names the port it came back on -- not the one it left.
+// And once the PROBE says traffic is crossing, the line names the port it is crossing on -- not the
+// one it left, and not one the carrier merely got a handshake answer on.
 func TestTheLineNamesThePortItRecoveredOn(t *testing.T) {
 	r, path := rollingPort(t)
+	greenSession(t, r)
 
 	r.rollSourcePort()
 	r.rollSourcePort()
 	came := r.cport()
-	r.st.reconnected("raw", came)
+	r.st.carrying()
 
 	ev := coreStatusEvents(t, path)
 	if len(ev) != 1 || ev[0].Code != "port-roll" {
@@ -71,5 +76,63 @@ func TestTheLineNamesThePortItRecoveredOn(t *testing.T) {
 	}
 	if came == 40000 {
 		t.Fatal("setup: the draws never moved the port, so this proves nothing")
+	}
+}
+
+// The carrier's own reconnect must never write that line. A source-port draw SENDS A HANDSHAKE, and an
+// answered handshake is exactly what a filtered path still gives -- so wiring the line here announced
+// every draw as a success while the ladder climbed straight past it. Two "came back with this port"
+// lines two seconds apart, then a re-handshake, then a burn, then the walk that actually fixed it.
+func TestTheCarriersOwnReconnectNeverClaimsThePort(t *testing.T) {
+	r, path := rollingPort(t)
+	greenSession(t, r)
+
+	r.rollSourcePort()
+	r.st.reconnected("raw") // the handshake was answered: true, and says nothing about carrying
+	r.rollSourcePort()
+	r.st.reconnected("raw")
+
+	for _, e := range coreStatusEvents(t, path) {
+		if e.Code == "port-roll" {
+			t.Fatalf("a handshake answer announced the port as working: %+v", e)
+		}
+	}
+	r.st.carrying()
+	n := 0
+	for _, e := range coreStatusEvents(t, path) {
+		if e.Code == "port-roll" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("the probe found traffic crossing and got %d port lines, want exactly 1", n)
+	}
+}
+
+// ...and through the real ladder: once it has spent both draws and moved on to the handshake rung, the
+// recovery that follows is not the port's doing and must not be credited to it.
+func TestAPortLineDiesWhenTheLadderClimbsPastIt(t *testing.T) {
+	r, path := rollingPort(t)
+	greenSession(t, r)
+
+	// The three lines Raw.clientLoop wires.
+	rc := newRotationController(nil, nil)
+	rc.session.setDrop(func() bool { return true })
+	rc.port.setRoll(r.rollSourcePort)
+	rc.attachStatus(r.st)
+
+	epoch := r.st.pathEpoch()
+	for i := 0; i <= portTries; i++ { // portTries draws, then one verdict past them
+		liveVerdict(t, rc.verdict, epoch, poolCmd{Cmd: cmdFail})
+		rc.poll(func(bool) {}, func(bool) {}, nil, r.st.pathEpoch)
+	}
+	liveVerdict(t, rc.verdict, r.st.pathEpoch(), poolCmd{Cmd: cmdOK})
+	rc.poll(func(bool) {}, func(bool) {}, nil, r.st.pathEpoch)
+
+	for _, e := range coreStatusEvents(t, path) {
+		if e.Code == "port-roll" {
+			t.Fatalf("the ladder had already moved past the source port, and the recovery was still "+
+				"credited to it: %+v", e)
+		}
 	}
 }

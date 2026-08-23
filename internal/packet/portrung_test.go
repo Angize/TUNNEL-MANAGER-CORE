@@ -11,7 +11,7 @@ func rungHarness(t *testing.T, withRung bool) (rc *rotationController, rolls *in
 	dst := NewPeerPool([]string{"d1", "d2", "d3"}, 0)
 	src := NewPeerPool([]string{"s1", "s2"}, 0)
 	rc = newRotationController(dst, src)
-	rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
+	rc.attachStatus(newCoreStatus(filepath.Join(dir, "core.json"), ""))
 	rolls, burns = new(int), new(int)
 	if withRung {
 		rc.port.setRoll(func() bool { *rolls++; return true })

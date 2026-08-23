@@ -12,7 +12,7 @@ func judgedPool(t *testing.T, addrs ...string) (*PeerPool, *rotationController) 
 	dir := t.TempDir()
 	p := NewPeerPool(addrs, 0)
 	rc := newRotationController(p, nil)
-	rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
+	rc.attachStatus(newCoreStatus(filepath.Join(dir, "core.json"), ""))
 	return p, rc
 }
 

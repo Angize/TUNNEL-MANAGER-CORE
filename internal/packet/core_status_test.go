@@ -39,7 +39,7 @@ func TestCoreStatusEventPairing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "core-x.status")
 	s := newCoreStatus(path, "udp · 1.2.3.4:443")
 
-	s.reconnected("udp", 0)
+	s.reconnected("udp")
 	if got := readEvents(t, path); len(got) != 0 {
 		t.Fatalf("initial connect should be silent; got %d events: %+v", len(got), got)
 	}
@@ -50,7 +50,7 @@ func TestCoreStatusEventPairing(t *testing.T) {
 		t.Fatalf("after down: want 1 down/stale, got %+v", evs)
 	}
 
-	s.reconnected("udp", 0)
+	s.reconnected("udp")
 	evs = readEvents(t, path)
 	if len(evs) != 2 || evs[1].Kind != "up" || evs[1].Code != "reconnect" {
 		t.Fatalf("after recovery: want down then up/reconnect, got %+v", evs)
@@ -59,45 +59,65 @@ func TestCoreStatusEventPairing(t *testing.T) {
 		t.Fatalf("seq must be monotonic: %d then %d", evs[0].Seq, evs[1].Seq)
 	}
 
-	s.reconnected("udp", 0)
+	s.reconnected("udp")
 	if evs = readEvents(t, path); len(evs) != 2 {
 		t.Fatalf("recovery without a pending down must be silent; got %d events", len(evs))
 	}
 
 	var off *coreStatus
 	off.down("stale", "udp")
-	off.reconnected("udp", 0)
+	off.reconnected("udp")
 	off.event("down", "stale", "udp")
 }
 
-// A source-port redraw earns a line only when it WORKED, and the line names the port that worked.
-// The rung draws one per verdict for as long as an outage lasts, so writing at the draw meant a line
-// per draw for a tunnel that never came back.
+// A status whose live source port the test owns, the way a carrier owns its own.
+func statusOnPort(t *testing.T, sport *uint16) (*coreStatus, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "core-x.status")
+	s := newCoreStatus(path, "raw · 1.2.3.4")
+	s.tracker.setLive(func() (pathKey, bool) {
+		return pathKey{Src: "10.0.0.1", Sport: *sport, Dst: "10.0.0.2", Dport: 443}, true
+	})
+	return s, path
+}
+
+// A source-port redraw earns a line only when the PROBE says the tunnel is carrying, and the line
+// names the port it is carrying on. The carrier's own reconnect cannot say this: the draw sends a
+// handshake of its own, and an answered handshake is exactly what a filtered path still gives -- so
+// every draw announced itself as a success while the ladder climbed straight past it, twice an outage.
 func TestAPortRedrawIsOnlyNewsIfItWorked(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		draws  int
-		sport  uint16
-		wantEv []string
+		name    string
+		draws   int
+		climbed bool // the ladder went past the source port before anything came back
+		carried bool
+		wantEv  []string
 	}{
-		{"never came back: silence", 5, 0, nil},
-		{"came back: one line, naming the port", 5, 41337, []string{"port-roll"}},
-		{"no redraw, no line", 0, 41337, nil},
+		{"never came back: silence", 5, false, false, nil},
+		{"came back: one line, naming the port", 5, false, true, []string{"port-roll"}},
+		{"no redraw, no line", 0, false, true, nil},
+		{"came back AFTER the ladder moved on: not the port's doing", 2, true, true, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "core-x.status")
-			s := newCoreStatus(path, "raw · 1.2.3.4")
+			sport := uint16(41337)
+			s, path := statusOnPort(t, &sport)
 			for i := 0; i < tc.draws; i++ {
 				s.portRedrawn()
 			}
-			s.reconnected("raw", tc.sport)
+			if tc.climbed {
+				s.portClaimLost()
+			}
+			if tc.carried {
+				s.carrying()
+			}
 
 			var got []string
 			for _, e := range readEvents(t, path) {
 				got = append(got, e.Code)
 			}
 			if len(got) != len(tc.wantEv) {
-				t.Fatalf("%d draws + sport %d wrote %v, want %v", tc.draws, tc.sport, got, tc.wantEv)
+				t.Fatalf("%d draws (climbed=%v carried=%v) wrote %v, want %v",
+					tc.draws, tc.climbed, tc.carried, got, tc.wantEv)
 			}
 			for i, c := range tc.wantEv {
 				if got[i] != c {
@@ -115,14 +135,15 @@ func TestAPortRedrawIsOnlyNewsIfItWorked(t *testing.T) {
 
 // ...and the next outage gets its own line: the pending draw is consumed, not latched for ever.
 func TestEachOutageGetsItsOwnPortLine(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "core-x.status")
-	s := newCoreStatus(path, "raw · 1.2.3.4")
+	sport := uint16(40001)
+	s, path := statusOnPort(t, &sport)
 
 	s.portRedrawn()
-	s.reconnected("raw", 40001)
-	s.reconnected("raw", 40001) // no redraw since: silent
+	s.carrying()
+	s.carrying() // no redraw since: silent
 	s.portRedrawn()
-	s.reconnected("raw", 40002)
+	sport = 40002
+	s.carrying()
 
 	var ports []string
 	for _, e := range readEvents(t, path) {

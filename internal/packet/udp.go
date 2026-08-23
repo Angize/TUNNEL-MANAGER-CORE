@@ -761,7 +761,7 @@ func (b *UDP) tryHandshake(pkt []byte, addr *net.UDPAddr) {
 
 		b.ci.Store(nil)
 		b.provenFrom(addr.IP)
-		b.st.reconnected("udp", 0)
+		b.st.reconnected("udp")
 		return
 	}
 
@@ -818,7 +818,7 @@ func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {
 func (b *UDP) clientLoop() {
 	rc := newRotationController(b.pp, b.sp)
 	rc.session.setDrop(b.rehandshake)
-	rc.setMailboxes(b.st.verdictPath(), b.st.pinPath())
+	rc.attachStatus(b.st)
 	b.st.setPair(rc.pairStatus)
 	if rc.polls() {
 		go b.pinPollLoop(rc)
@@ -836,7 +836,7 @@ func (b *UDP) clientLoop() {
 			}
 
 			if !b.cryptoOn && b.peerAnswered.Load() {
-				b.st.reconnected("udp", 0)
+				b.st.reconnected("udp")
 			}
 
 			b.send(typePing, nil, b.peer.Load())

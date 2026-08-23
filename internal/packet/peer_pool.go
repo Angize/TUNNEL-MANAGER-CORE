@@ -630,6 +630,7 @@ type rotationController struct {
 	pair     poolPair
 	liveFn   func() (low, high string)
 	dst, src *PeerPool
+	st       *coreStatus
 	verdict  string
 	pinbox   string
 	port     portRung
@@ -770,9 +771,12 @@ func joinStatus(st *coreStatus, p *PeerPool, axis string) {
 	st.addHealth(p.healthRows)
 }
 
-// The two mailboxes: the node writes verdicts into one, the operator writes pins and retests into the
-// other. Two paths, because one file with two writers loses whichever arrived first.
-func (c *rotationController) setMailboxes(verdict, pin string) { c.verdict, c.pinbox = verdict, pin }
+// The tunnel's one status file: the two mailboxes it owns -- the node writes verdicts into one, the
+// operator writes pins and retests into the other -- and the ring the ladder reports its own steps to.
+func (c *rotationController) attachStatus(st *coreStatus) {
+	c.st = st
+	c.verdict, c.pinbox = st.verdictPath(), st.pinPath()
+}
 
 func (c *rotationController) polls() bool {
 	return c != nil && (c.active() || c.verdict != "" || c.pinbox != "")
@@ -784,6 +788,8 @@ func (c *rotationController) spendFreeRungs() bool {
 	if c.port.try() {
 		return false
 	}
+	// Past the source port now, so it no longer has a recovery to be credited with.
+	c.st.portClaimLost()
 	return !c.session.try()
 }
 
@@ -874,6 +880,9 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 	case cmd.Cmd == cmdOK:
 
 		c.success()
+		// The probe is the only thing that knows the tunnel is carrying, so it is the only thing that
+		// may say a rung worked.
+		c.st.carrying()
 		if c.pair == nil {
 			return false
 		}

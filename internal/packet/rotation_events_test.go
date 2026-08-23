@@ -48,7 +48,7 @@ func TestASourceRotationSaysWhichKindItWas(t *testing.T) {
 		t.Fatalf("a scheduled source rotation must be announced once: %+v", ev)
 	}
 	// A scheduled move is not an outage, so it must not arm the "up" that reports a recovery.
-	b.st.reconnected("d0:443", 0)
+	b.st.reconnected("d0:443")
 	if ev := coreStatusEvents(t, path); len(ev) != 1 {
 		t.Fatalf("a scheduled rotation armed a recovery report: %+v", ev)
 	}
@@ -68,7 +68,7 @@ func TestASourceRotationSaysWhichKindItWas(t *testing.T) {
 	if ev[2].Kind != "down" || ev[2].Code != "src-rotate" {
 		t.Fatalf("third event should be the rotation, got %+v", ev[2])
 	}
-	b.st.reconnected("d0:443", 0)
+	b.st.reconnected("d0:443")
 	ev = coreStatusEvents(t, path)
 	if len(ev) != 4 || ev[3].Kind != "up" {
 		t.Fatalf("a forced rotation must arm the report that the tunnel came back: %+v", ev)

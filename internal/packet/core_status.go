@@ -149,9 +149,8 @@ func (s *coreStatus) rotated(axis, detail string, proactive bool) {
 }
 
 // A source-port redraw is only worth a line if it WORKED, and then only for the port that worked. The
-// rung draws one on every verdict for as long as the outage lasts; writing at the draw meant a line
-// per draw for a tunnel that never came back, burying the burn and the re-handshake that follow it.
-// So the draw is only remembered here, and reconnected() decides.
+// rung draws one on every verdict for as long as the outage lasts, so the draw is only remembered
+// here; carrying() and portClaimLost() are the two ways the claim ends.
 func (s *coreStatus) portRedrawn() {
 	if s == nil {
 		return
@@ -161,18 +160,49 @@ func (s *coreStatus) portRedrawn() {
 	s.mu.Unlock()
 }
 
-// The carrier is carrying again, on source port `sport` (0 when the carrier has no port of its own).
-func (s *coreStatus) reconnected(detail string, sport uint16) {
+// The node's probe found traffic crossing. The ONLY place a source-port redraw may be credited for a
+// recovery: the draw sends a handshake of its own, and an answered handshake is exactly what a
+// filtered path still gives while carrying nothing -- so the carrier's own reconnect announced every
+// draw as a success while the ladder climbed straight past it, twice per outage.
+func (s *coreStatus) carrying() {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
-	pending, rolled := s.wasDown, s.rollPending
-	s.wasDown, s.rollPending = false, false
+	rolled := s.rollPending
+	s.rollPending = false
 	s.mu.Unlock()
-	if rolled && sport != 0 {
-		s.event("down", "port-roll", "sport:"+strconv.Itoa(int(sport)))
+	if !rolled {
+		return
 	}
+	// Sampled, not read: a draw changes the port without publishing anything, so the last snapshot can
+	// still be holding the port the tunnel LEFT.
+	s.tracker.sample()
+	if _, path, _ := s.tracker.snapshot(); path.Sport != 0 {
+		s.event("down", "port-roll", "sport:"+strconv.Itoa(int(path.Sport)))
+	}
+}
+
+// The ladder climbed past the source port. Whatever brings the tunnel back now is the handshake's
+// doing or the walk's, and crediting the port for it would be a guess.
+func (s *coreStatus) portClaimLost() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.rollPending = false
+	s.mu.Unlock()
+}
+
+// The carrier has a session again. A fact about the CARRIER, not about the path -- see carrying().
+func (s *coreStatus) reconnected(detail string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	pending := s.wasDown
+	s.wasDown = false
+	s.mu.Unlock()
 	if pending {
 		s.event("up", "reconnect", detail)
 	}

@@ -28,7 +28,7 @@ func newLadderRig(t *testing.T, dsts, srcs []string) *ladderRig {
 		rig.src = NewPeerPool(srcs, 0)
 	}
 	rig.rc = newRotationController(rig.dst, rig.src)
-	rig.rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
+	rig.rc.attachStatus(newCoreStatus(filepath.Join(dir, "core.json"), ""))
 	return rig
 }
 

@@ -965,7 +965,7 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 		r.ci.Store(nil)
 		r.markRx(addr.IP)
 		r.provenFrom(addr.IP)
-		r.st.reconnected("raw", r.cport())
+		r.st.reconnected("raw")
 		return
 	}
 
@@ -1241,7 +1241,7 @@ func (r *Raw) clientLoop() {
 	if r.sportRandom {
 		rc.port.setRoll(r.rollSourcePort)
 	}
-	rc.setMailboxes(r.st.verdictPath(), r.st.pinPath())
+	rc.attachStatus(r.st)
 	r.st.setPair(rc.pairStatus)
 	if rc.polls() {
 		go r.pinPollLoop(rc)
