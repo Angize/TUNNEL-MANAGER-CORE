@@ -1074,7 +1074,7 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 	if host == "" {
 		host = dialAddr
 	}
-	b.noteAttempt(host, dialAddr)
+	b.noteAttempt(dialAddr, host)
 	conn, err := b.dialer(connectTimeout).Dial("tcp", dialAddr)
 	if err != nil {
 		b.pinFailedOn(dialAddr, host)
@@ -1247,7 +1247,10 @@ func (b *TCP) dialLoop() {
 			b.st.setActive(combo)
 			sni := strings.TrimPrefix(combo, label+activeSep)
 			b.liveSNI.Store(&sni)
-			b.livePair.Store(&pairNow{low: sni, high: label})
+			// low is the EDGE and high the domain, the order edgePair.kinds() reports. Storing them the
+			// other way round publishes a domain in the ip slot, and the walk then burns it into the
+			// edge's health map.
+			b.livePair.Store(&pairNow{low: label, high: sni})
 
 			b.pool.pinLandedOn(label, sni)
 		} else {
