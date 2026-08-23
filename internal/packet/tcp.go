@@ -324,9 +324,12 @@ type TCP struct {
 	liveSNI  atomic.Pointer[string]
 	livePair atomic.Pointer[pairNow]
 	tryPair  atomic.Pointer[pairNow]
-	closed   atomic.Bool
-	closeCh  chan struct{}
-	preAuth  chan struct{}
+
+	// Whether this outage has had its dial yet. One accusation per outage: see noteAttempt.
+	attempted atomic.Bool
+	closed    atomic.Bool
+	closeCh   chan struct{}
+	preAuth   chan struct{}
 
 	authMu    sync.Mutex
 	authConns []*connFramer
@@ -343,9 +346,9 @@ func (b *TCP) SetPeerPool(pp *PeerPool) {
 	}
 }
 
-// What a verdict may be keyed on, in order: the pair traffic is actually on; else the one being
-// dialled right now; else -- only before this carrier has ever dialled -- the cursor, which is what
-// the first dial will use.
+// What a verdict may be keyed on, in order: the pair traffic is actually on; else the one this outage
+// opened on; else -- only before this carrier has ever dialled -- the cursor, which is what the first
+// dial will use.
 //
 // The middle rung is the point. Without it the answer falls straight to the cursor, and the cursor is
 // where we would go NEXT: an outage measured while a dial to some other endpoint was failing gets
@@ -363,9 +366,20 @@ func (b *TCP) livePairNow() (low, high string) {
 	return b.rc.pair.live()
 }
 
-// The endpoint this carrier is about to dial. Recorded before the dial, not after: a dial can take
-// seconds, and the node reads the status file every second throughout.
+// The endpoint this carrier is about to dial, recorded ONCE per outage. A dial can take seconds and
+// the node reads the status file every second throughout, so the name has to be published -- but it
+// must not change while the ladder is spending its rungs on it.
+//
+// Every other way the published pair moves goes through a reconnect, and that bumps the path epoch, so
+// the node's own staleness guard drops a verdict that spanned the move. This one does not: a retry
+// that resolves to a different endpoint renames the accused mid-outage with the epoch unchanged, and
+// the burn lands on whoever happens to be named when the rungs run out. Measured in production: three
+// verdicts for one outage, the first two naming the edge that refused and the third naming the healthy
+// one the retry had moved to -- which is the one that burned.
 func (b *TCP) noteAttempt(low, high string) {
+	if !b.attempted.CompareAndSwap(false, true) {
+		return
+	}
 	b.tryPair.Store(&pairNow{low: low, high: high})
 	b.st.write()
 }
@@ -1383,7 +1397,12 @@ func (b *TCP) dialLoop() {
 		}
 		b.curConn.CompareAndSwap(&cc, nil)
 		b.liveSNI.Store(nil)
-		b.livePair.Store(nil)
+		// The outage opens on the pair it interrupted, and the first dial after this replaces it with
+		// whatever the carrier actually reaches for. Nothing in between: with no accused at all the
+		// answer falls through to the cursor, and the teardown publishes the file (the down event
+		// below) while it is standing there.
+		b.tryPair.Store(b.livePair.Swap(nil))
+		b.attempted.Store(false)
 		b.cur.CompareAndSwap(cf, nil)
 
 		deliberate := false
@@ -1543,7 +1562,7 @@ func (b *TCP) rotateLowTCP(proactive bool) {
 		b.rotateDestTCP(proactive)
 		return
 	}
-	low, _ := b.livePairNow()
+	low, _ := b.rc.underJudgement()
 	b.pool.markSuspect("ip", low, "tun-probe")
 	// Announced, the same way the direct walk and the timed CDN rotation announce theirs. A burn says
 	// which edge was condemned; it does not say where the traffic went next.
@@ -1564,7 +1583,7 @@ func (b *TCP) rotateHighTCP(proactive bool) {
 	// A lone domain is condemned too, for the same reason a lone destination is: nothing rotates away
 	// from it and the record changes no behaviour, but a green row under a dead tunnel is a lie and
 	// these rows are what the operator reads to decide what to replace.
-	_, sni := b.livePairNow()
+	_, sni := b.rc.underJudgement()
 	b.pool.markSuspect("sni", sni, "tun-probe")
 	if now := b.pool.advanceSNI(); now != "" {
 		b.st.rotated("sni", "sni:"+now, proactive)

@@ -415,6 +415,9 @@ func (p *wsPool) ipsCount() int {
 }
 
 func (p *wsPool) markSuspect(kind, key, reason string) {
+	if key == "" {
+		return // nothing was measured, so there is nobody to condemn
+	}
 	p.mu.Lock()
 	// A pinned entry holds its health record in pinTook; burning it here would be undone the moment the
 	// pin is restored. The pin's own counter releases it instead. Same rule as PeerPool.nextEndpoint.
