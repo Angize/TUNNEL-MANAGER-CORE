@@ -46,7 +46,7 @@ func TestALandingElsewhereDoesNotSettleThePin(t *testing.T) {
 		if !p.isPinned() {
 			t.Fatal("a landing somewhere else released the pin")
 		}
-		p.pinCannotLand("e2", "")
+		p.pinCannotLand("e2")
 		p.mu.Lock()
 		after := p.ipHealth.rec("e2")
 		p.mu.Unlock()
@@ -83,7 +83,7 @@ func TestALandingElsewhereDoesNotDisarmThePin(t *testing.T) {
 			t.Fatal("could not pin e2")
 		}
 		for i := 0; i < 20; i++ {
-			p.pinCannotLand("e2", "")
+			p.pinCannotLand("e2")
 			p.pinLandedOn("e1", "s1")
 			if !p.isPinned() {
 				return
@@ -125,7 +125,7 @@ func TestRepinningKeepsTheFirstTargetsBurn(t *testing.T) {
 
 		p.selectEntry("ip", "e2")
 		p.selectEntry("ip", "e3")
-		p.pinCannotLand("e3", "")
+		p.pinCannotLand("e3")
 		p.mu.Lock()
 		after := p.ipHealth.rec("e2")
 		p.mu.Unlock()

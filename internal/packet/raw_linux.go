@@ -1143,7 +1143,7 @@ func (r *Raw) rotateSourceRaw(proactive bool) {
 	r.freshTuple()
 	log.Printf("raw: rotated source to %s", addr)
 
-	r.st.rotated("src", "ip:"+addr, true)
+	r.st.rotated("src", "ip:"+addr, proactive)
 }
 
 func (r *Raw) rotatePeerRaw(proactive bool) {

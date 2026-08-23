@@ -1,6 +1,7 @@
 package packet
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 	"os"
@@ -312,8 +313,10 @@ func (p *PeerPool) keepCursorOn(addr string) {
 
 func (p *PeerPool) rejectCandidate(prev string) {
 	p.mu.Lock()
-	if bad := p.addrs[p.cur]; bad != prev {
-		p.burnLocked(bad)
+	burned := ""
+	if bad := p.addrs[p.cur]; bad != prev && p.burnLocked(bad) {
+		p.burns.Add(1)
+		burned = bad
 	}
 	back := false
 	for idx, a := range p.addrs {
@@ -327,7 +330,13 @@ func (p *PeerPool) rejectCandidate(prev string) {
 
 		p.advanceFailLocked()
 	}
+	axis, ev := p.axis, p.ev
 	p.mu.Unlock()
+	// Say so. This burn is not the ladder's -- it is a local fact, that address cannot be bound on this
+	// host -- and a row that turns suspect with nothing in the log behind it reads as a mystery.
+	if burned != "" && ev != nil {
+		ev("burn", "unbindable", axis+":"+burned)
+	}
 	p.publish()
 }
 
@@ -378,12 +387,12 @@ func (p *PeerPool) markSuspect(addr, reason string) {
 		return
 	}
 	fresh := p.health.burn(addr)
-	axis := p.axis
+	axis, ev := p.axis, p.ev
 	p.mu.Unlock()
 	if fresh {
 		p.burns.Add(1)
-		if p.ev != nil {
-			p.ev("burn", reason, axis+":"+addr)
+		if ev != nil {
+			ev("burn", reason, axis+":"+addr)
 		}
 	}
 	p.publish()
@@ -391,26 +400,31 @@ func (p *PeerPool) markSuspect(addr, reason string) {
 
 func (p *PeerPool) selectEntry(key string) bool {
 	p.mu.Lock()
-	ok := false
-	for idx, a := range p.addrs {
+	idx := -1
+	for i, a := range p.addrs {
 		if a == key {
-
-			if p.pinKey != "" && p.pinKey != key {
-				p.restorePinTookLocked()
-			}
-			p.pinKey = key
-			p.pinTook = p.health.rec(key)
-			p.health.clear(key)
-			p.pickLocked(idx)
-			ok = true
+			idx = i
 			break
 		}
 	}
-	p.mu.Unlock()
-	if ok {
-		p.publish()
+	if idx < 0 {
+		p.mu.Unlock()
+		return false
 	}
-	return ok
+	// Re-pinning what is already pinned must not stash again: the first pin cleared that record, so a
+	// second stash saves nothing over the burn it is holding and the burn is gone for good.
+	if p.pinKey != key {
+		if p.pinKey != "" {
+			p.restorePinTookLocked()
+		}
+		p.pinTook = p.health.rec(key)
+		p.health.clear(key)
+	}
+	p.pinKey = key
+	p.pickLocked(idx)
+	p.mu.Unlock()
+	p.publish()
+	return true
 }
 
 func (p *PeerPool) pinLandedOn(addr string) {
@@ -469,19 +483,50 @@ func staleVerdict(c poolCmd, epoch int64) bool {
 	return (c.Cmd == cmdOK || c.Cmd == cmdFail) && c.Epoch != epoch
 }
 
-func readPoolCmd(path string) (c poolCmd, ok bool) {
+// Claim a mailbox by renaming it, then read the copy nobody can replace. Reading first and unlinking
+// after leaves a window in which a command written in between is deleted unread.
+func claimMailbox(path string) ([]byte, bool) {
 	if path == "" {
-		return c, false
+		return nil, false
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return c, false
+	taken := path + ".taken"
+	if os.Rename(path, taken) != nil {
+		return nil, false
 	}
-	os.Remove(path)
-	if json.Unmarshal(data, &c) != nil || (c.Key == "" && c.Cmd == "") {
+	data, err := os.ReadFile(taken)
+	os.Remove(taken)
+	return data, err == nil
+}
+
+// The node's verdict: one per sweep, and only the newest matters, so this mailbox is a slot.
+func readPoolCmd(path string) (c poolCmd, ok bool) {
+	data, ok := claimMailbox(path)
+	if !ok || json.Unmarshal(data, &c) != nil || (c.Key == "" && c.Cmd == "") {
 		return poolCmd{}, false
 	}
 	return c, true
+}
+
+// The operator's mailbox is an append log, one command per line. A slot loses the first of two clicks
+// in the same tick while the panel reports both as done, and pins and retests are independent orders
+// on different entries -- neither supersedes the other.
+func readPoolCmds(path string) []poolCmd {
+	data, ok := claimMailbox(path)
+	if !ok {
+		return nil
+	}
+	var out []poolCmd
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		var c poolCmd
+		if len(bytes.TrimSpace(line)) == 0 || json.Unmarshal(line, &c) != nil {
+			continue
+		}
+		if c.Key == "" && c.Cmd == "" {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 const cmdFail = "fail"
@@ -790,7 +835,17 @@ func (c *rotationController) poll(rotLow, rotHigh func(proactive bool), applied 
 	if cmd, ok := readPoolCmd(c.verdict); ok {
 		moved = c.judge(cmd, rotLow, rotHigh, pathEpoch())
 	}
-	if cmd, ok := readPoolCmd(c.pinbox); ok && cmd.Key != "" && c.pair != nil {
+	// Drained whether or not there is a pool to apply them to: a tunnel with no pool has no answer for
+	// these, and leaving them would mean the operator's next real click arrives behind a queue of
+	// commands nobody can act on.
+	cmds := readPoolCmds(c.pinbox)
+	if c.pair == nil {
+		return moved
+	}
+	for _, cmd := range cmds {
+		if cmd.Key == "" {
+			continue
+		}
 		switch cmd.Cmd {
 		case cmdRetest:
 			if c.pair.retest(cmd.Kind, cmd.Key) {

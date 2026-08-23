@@ -31,6 +31,12 @@ func addrParts(a net.Addr) (host string, port uint16) {
 }
 
 type pathTracker struct {
+	// One sampler at a time. live() runs with mu released -- taking it there would mean holding this
+	// lock across the carrier's own -- so without this two samplers can commit their observations in
+	// the opposite order to the one they took them in, and the tracker publishes a path older than one
+	// it has already published, with a fresh epoch on it. Every event site calls write(), which samples.
+	sampleMu sync.Mutex
+
 	mu    sync.Mutex
 	cur   pathKey
 	epoch int64
@@ -46,6 +52,8 @@ func (t *pathTracker) setLive(live func() (pathKey, bool)) {
 }
 
 func (t *pathTracker) sample() (changed bool) {
+	t.sampleMu.Lock()
+	defer t.sampleMu.Unlock()
 	t.mu.Lock()
 	live := t.live
 	t.mu.Unlock()

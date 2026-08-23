@@ -108,7 +108,7 @@ func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 	})
 	run(func() { p.selectEntry("ip", "e2") })
 	run(func() { p.pinLandedOn("e1", "s1") })
-	run(func() { p.pinCannotLand("e2", "s2") })
+	run(func() { p.pinCannotLand("e2") })
 	run(func() { p.clearBurn("sni", "s2") })
 	run(func() { p.clearBurn("ip", "e3") })
 	run(func() { _ = p.eligibleIPs() })

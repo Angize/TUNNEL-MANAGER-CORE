@@ -29,7 +29,11 @@ func coreStatusEvents(t *testing.T, path string) []coreEvent {
 	return doc.Events
 }
 
-func TestRotateSourceTCPProactiveDefersEvent(t *testing.T) {
+// Both kinds of source rotation are announced, from the ONE site that performs them, and the two are
+// told apart by whether they arm the recovery. They were not: the rotator announced only the failover
+// and the rotation timer announced only the scheduled move, and both passed `true`, so a forced move
+// read as a scheduled one and the "up" that should follow it was never armed.
+func TestASourceRotationSaysWhichKindItWas(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "src.status")
 	b := &TCP{isClient: true, stTag: "tcp", addr: "d0:443"}
 	b.SetStatusPath(path)
@@ -39,25 +43,35 @@ func TestRotateSourceTCPProactiveDefersEvent(t *testing.T) {
 	if !moved || addr != "10.0.0.6" {
 		t.Fatalf("proactive rotate: addr=%q moved=%v, want 10.0.0.6/true", addr, moved)
 	}
-	if ev := coreStatusEvents(t, path); len(ev) != 0 {
-		t.Fatalf("a proactive source rotation published %d event(s); it must defer to the adoption site: %+v", len(ev), ev)
+	ev := coreStatusEvents(t, path)
+	if len(ev) != 1 || ev[0].Code != "src-rotate" || ev[0].Detail != "ip:10.0.0.6" {
+		t.Fatalf("a scheduled source rotation must be announced once: %+v", ev)
+	}
+	// A scheduled move is not an outage, so it must not arm the "up" that reports a recovery.
+	b.st.reconnected("d0:443", 0)
+	if ev := coreStatusEvents(t, path); len(ev) != 1 {
+		t.Fatalf("a scheduled rotation armed a recovery report: %+v", ev)
 	}
 
 	if _, moved := b.rotateSourceTCP(false); !moved {
 		t.Fatal("failover rotate should move in a 2-entry pool")
 	}
-	// Two, and both are true: the pool announces the burn it just made, and the carrier announces the
-	// rotation it caused. The burn used to be announced by the judge instead, which named the endpoint
-	// the VERDICT carried rather than the one that was actually burned.
-	ev := coreStatusEvents(t, path)
-	if len(ev) != 2 {
+	// Three now: the pool announces the burn it just made, the carrier announces the rotation it
+	// caused, and the rotation is marked as a failover, so the reconnect reports the recovery.
+	ev = coreStatusEvents(t, path)
+	if len(ev) != 3 {
 		t.Fatalf("failover source rotation: events=%+v, want a burn and a src-rotate", ev)
 	}
-	if ev[0].Kind != "burn" || ev[0].Detail != "src:10.0.0.6" {
-		t.Fatalf("first event should be the pool naming what IT burned, got %+v", ev[0])
+	if ev[1].Kind != "burn" || ev[1].Detail != "src:10.0.0.6" {
+		t.Fatalf("second event should be the pool naming what IT burned, got %+v", ev[1])
 	}
-	if ev[1].Kind != "down" || ev[1].Code != "src-rotate" {
-		t.Fatalf("second event should be the rotation, got %+v", ev[1])
+	if ev[2].Kind != "down" || ev[2].Code != "src-rotate" {
+		t.Fatalf("third event should be the rotation, got %+v", ev[2])
+	}
+	b.st.reconnected("d0:443", 0)
+	ev = coreStatusEvents(t, path)
+	if len(ev) != 4 || ev[3].Kind != "up" {
+		t.Fatalf("a forced rotation must arm the report that the tunnel came back: %+v", ev)
 	}
 }
 

@@ -414,7 +414,7 @@ func TestPinOneShot(t *testing.T) {
 		t.Fatalf("a burn of a non-pinned edge must not override the pin, got %q", ip)
 	}
 
-	p.pinCannotLand("c", "")
+	p.pinCannotLand("c")
 	if p.isPinned() {
 		t.Fatal("the pin survived the first refused dial on the pinned edge")
 	}

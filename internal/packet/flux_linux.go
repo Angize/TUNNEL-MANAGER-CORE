@@ -690,7 +690,7 @@ func (f *Flux) rotateSourceFlux(proactive bool) {
 	f.localIP.Store(&net.IPAddr{IP: ip})
 	log.Printf("flux: rotated source to %s", addr)
 
-	f.st.rotated("src", "ip:"+addr, true)
+	f.st.rotated("src", "ip:"+addr, proactive)
 }
 
 func (f *Flux) rotatePeerFlux(proactive bool) {

@@ -276,7 +276,7 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 				case 10:
 					ip := ips[rng.Intn(len(ips))]
 					log = append(log, "pinFailed:"+ip)
-					p.pinCannotLand(ip, hosts[rng.Intn(len(hosts))])
+					p.pinCannotLand(ip)
 				}
 				edgeInvariants(t, p, step, log)
 			}

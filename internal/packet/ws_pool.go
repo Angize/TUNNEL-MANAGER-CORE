@@ -339,22 +339,28 @@ func (p *wsPool) advance() bool {
 	return ip != beforeIP || sni.host != beforeSNI.host
 }
 
-func (p *wsPool) advanceIP() {
+// Reports where the cursor landed, and "" when there was nowhere to go: one entry on that axis, so the
+// step is a no-op and there is nothing to announce.
+func (p *wsPool) advanceIP() (now string) {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.chosen = ""
-	if len(p.ips) > 0 {
-		p.i = (p.i + 1) % len(p.ips)
+	if len(p.ips) < 2 {
+		return ""
 	}
-	p.mu.Unlock()
+	p.i = (p.i + 1) % len(p.ips)
+	return p.ips[p.i]
 }
 
-func (p *wsPool) advanceSNI() {
+func (p *wsPool) advanceSNI() (now string) {
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.chosen = ""
-	if len(p.snis) > 0 {
-		p.j = (p.j + 1) % len(p.snis)
+	if len(p.snis) < 2 {
+		return ""
 	}
-	p.mu.Unlock()
+	p.j = (p.j + 1) % len(p.snis)
+	return p.snis[p.j].host
 }
 
 // A fresh domain deserves a fresh row of edges: the burns under the previous one said nothing about
@@ -428,24 +434,18 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 	}
 }
 
-func (p *wsPool) restorePinTookLocked() {
-	for k, rec := range p.pinTook {
-		if rec == nil {
-			continue
-		}
-		if kind, key, found := strings.Cut(k, ":"); found {
-			p.healthMap(kind).recs[key] = rec
-		}
+func (p *wsPool) pinnedOnLocked(kind string) string {
+	if kind == "sni" {
+		return p.pinSNI
 	}
-	clear(p.pinTook)
+	return p.pinIP
 }
 
-func (p *wsPool) restorePinTookAxisLocked(kind, key string) {
-	live := p.pinIP
-	if kind == "sni" {
-		live = p.pinSNI
-	}
-	if live == "" || live == key {
+// Hand an axis' pinned entry its health record back and forget the stash. The pin field itself belongs
+// to the caller: selectEntry replaces it, the two drops empty it.
+func (p *wsPool) unstashLocked(kind string) {
+	live := p.pinnedOnLocked(kind)
+	if live == "" {
 		return
 	}
 	k := kind + ":" + live
@@ -455,12 +455,15 @@ func (p *wsPool) restorePinTookAxisLocked(kind, key string) {
 	delete(p.pinTook, k)
 }
 
-// One way a pin ends here too. `matched` runs under the lock and may count.
+// Both picks end at once. Only the tun probe gets to do this: it measures the PAIR, so both halves have
+// been judged together.
 func (p *wsPool) dropPin(reason string, matched func() bool) bool {
 	p.mu.Lock()
 	hit := matched()
 	if hit {
-		p.restorePinTookLocked()
+		p.unstashLocked("ip")
+		p.unstashLocked("sni")
+		clear(p.pinTook)
 		p.pinIP, p.pinSNI = "", ""
 	}
 	p.mu.Unlock()
@@ -471,12 +474,32 @@ func (p *wsPool) dropPin(reason string, matched func() bool) bool {
 	return hit
 }
 
-// The operator's pick could not be reached. One refused dial is the whole answer -- waiting for a second
-// only delays the burn that is coming anyway, and forces traffic onto an edge that will not open.
-func (p *wsPool) pinCannotLand(ip, host string) bool {
-	return p.dropPin("cannot-land", func() bool {
-		return (p.pinIP != "" && p.pinIP == ip) || (p.pinSNI != "" && p.pinSNI == host)
-	})
+// ONE axis' pick ends. `key` empty means whatever is pinned there.
+func (p *wsPool) dropPinAxis(kind, key, reason string) bool {
+	p.mu.Lock()
+	live := p.pinnedOnLocked(kind)
+	hit := live != "" && (key == "" || live == key)
+	if hit {
+		p.unstashLocked(kind)
+		if kind == "sni" {
+			p.pinSNI = ""
+		} else {
+			p.pinIP = ""
+		}
+	}
+	p.mu.Unlock()
+	if hit {
+		p.publish()
+		p.event("pool", "pin_dropped", kind+":"+reason)
+	}
+	return hit
+}
+
+// A refused dial says the EDGE did not open. TLS never started, so the domain was never sent and
+// nothing was learned about it -- ending a domain pin here would throw away the operator's expensive
+// pick over a cheap one. The domain is judged by the tun probe, on the lap.
+func (p *wsPool) pinCannotLand(ip string) bool {
+	return p.dropPinAxis("ip", ip, "cannot-land")
 }
 
 func (p *wsPool) releasePin() {
@@ -519,48 +542,49 @@ func (p *wsPool) retestNow(kind, key string) bool {
 
 func (p *wsPool) selectEntry(kind, key string) bool {
 	p.mu.Lock()
-	p.chosen = ""
-	ok := false
-	if p.pinTook == nil {
-		p.pinTook = map[string]*healthRec{}
-	}
-
-	p.restorePinTookAxisLocked(kind, key)
+	idx := -1
 	if kind == "sni" {
-		for idx, s := range p.snis {
+		for i, s := range p.snis {
 			if s.host == key {
-				p.j = idx
-				p.pinSNI = key
-				p.pinTook["sni:"+key] = p.sniHealth.rec(key)
-				p.sniHealth.clear(key)
-				ok = true
+				idx = i
 				break
 			}
 		}
 	} else {
-		for idx, ip := range p.ips {
+		for i, ip := range p.ips {
 			if ip == key {
-				p.i = idx
-				p.pinIP = key
-				p.pinTook["ip:"+key] = p.ipHealth.rec(key)
-				p.ipHealth.clear(key)
-				ok = true
+				idx = i
 				break
 			}
 		}
 	}
-	if ok {
-		p.stepToCurrentLocked()
+	if idx < 0 {
+		p.mu.Unlock()
+		return false
 	}
+	if p.pinTook == nil {
+		p.pinTook = map[string]*healthRec{}
+	}
+	p.chosen = ""
+	// Re-pinning what is already pinned must not stash again: the first pin cleared that record, so a
+	// second stash saves nothing over the burn it is holding and the burn is gone for good.
+	if p.pinnedOnLocked(kind) != key {
+		p.unstashLocked(kind)
+		p.pinTook[kind+":"+key] = p.healthMap(kind).rec(key)
+		p.healthMap(kind).clear(key)
+	}
+	if kind == "sni" {
+		p.j, p.pinSNI = idx, key
+	} else {
+		p.i, p.pinIP = idx, key
+	}
+	p.stepToCurrentLocked()
 	p.mu.Unlock()
-	if ok {
-		p.publish()
-		if kind == "ip" {
-
-			p.reassessRotation()
-		}
+	p.publish()
+	if kind == "ip" {
+		p.reassessRotation()
 	}
-	return ok
+	return true
 }
 
 func (p *wsPool) pinLandedOn(ip, host string) {
