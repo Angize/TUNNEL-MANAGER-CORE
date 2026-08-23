@@ -40,7 +40,7 @@ func TestPinHeldUntilAppliedThenReleased(t *testing.T) {
 	if !p.selectEntry("ip", "1.1.1.1") {
 		t.Fatal("selectEntry: unknown key")
 	}
-	p.pinCannotLand("1.1.1.1", "")
+	p.pinCannotLand("1.1.1.1")
 	if _, _, ok := p.current(); !ok {
 		t.Fatal("current: pool empty")
 	}

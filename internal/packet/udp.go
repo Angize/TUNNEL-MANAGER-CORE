@@ -185,7 +185,7 @@ func (b *UDP) rotateSourceUDP(proactive bool) {
 	if host, ok := b.rebindSourceTo(addr); ok {
 		log.Printf("core/udp: rotated source to %s", host)
 
-		b.st.rotated("src", "ip:"+host, true)
+		b.st.rotated("src", "ip:"+host, proactive)
 		return
 	}
 

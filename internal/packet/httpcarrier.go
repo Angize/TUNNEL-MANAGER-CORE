@@ -382,7 +382,7 @@ func (u *httpcUp) post(sc seqChunk) error {
 }
 
 func (b *TCP) httpcEdge() (dialAddr, host string, ech []byte, path string, err error) {
-	dialAddr, host, ech, path = b.addr, b.wsHost, b.wsECH, b.wsPath
+	dialAddr, host, ech, path = b.addr, b.wsHost, b.ech(), b.wsPath
 	if b.pool != nil {
 		ip, sni, ok := b.pool.current()
 		if !ok {
@@ -418,7 +418,7 @@ func (b *TCP) establishHTTPC() (net.Conn, string, string, error) {
 	}
 
 	if err != nil {
-		b.pinFailedOn(dialAddr, host)
+		b.pinFailedOn(dialAddr)
 		return nil, dialAddr, "", err
 	}
 	return conn, dialAddr, activeLabel(dialAddr, host), nil

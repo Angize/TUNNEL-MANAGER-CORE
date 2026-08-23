@@ -261,7 +261,12 @@ type TCP struct {
 	wsHost string
 	wsPath string
 	wsTLS  bool
-	wsECH  []byte
+
+	// The single-edge ECH key. Two goroutines touch it: the dial loop reads it on every attempt, and
+	// the pin-poll loop rewrites it when the panel pushes a fresh one. Both sides check-then-act, so a
+	// lock and not an atomic.
+	echMu sync.Mutex
+	wsECH []byte
 
 	pool   *wsPool
 	rotate time.Duration
@@ -426,36 +431,57 @@ func (b *TCP) rollSourcePort() bool {
 	return true
 }
 
-func (b *TCP) pinFailedOn(ip, host string) {
+func (b *TCP) ech() []byte {
+	b.echMu.Lock()
+	defer b.echMu.Unlock()
+	return b.wsECH
+}
+
+// Reports whether it changed anything, so the two callers can decide what to say about it.
+func (b *TCP) setECH(ech []byte) bool {
+	b.echMu.Lock()
+	defer b.echMu.Unlock()
+	if bytes.Equal(b.wsECH, ech) {
+		return false
+	}
+	b.wsECH = ech
+	return true
+}
+
+func (b *TCP) pinFailedOn(ip string) {
 	if b.pool != nil {
-		b.pool.pinCannotLand(ip, host)
+		b.pool.pinCannotLand(ip)
 	}
 }
 
-func (b *TCP) rotateDestTCP(proactive bool) {
+func (b *TCP) rotateDestTCP(proactive bool) (addr string, moved bool) {
 	if b.pp == nil {
-		return
+		return "", false
 	}
-	if addr, moved := b.pp.nextEndpoint(proactive); moved {
-		log.Printf("core/tcp: rotated destination to %s", addr)
+	addr, moved = b.pp.nextEndpoint(proactive)
+	if !moved {
+		return addr, false
 	}
+	log.Printf("core/tcp: rotated destination to %s", addr)
+	b.st.setActive(b.stTag + activeSep + addr)
+	b.st.rotated("peer", "ip:"+addr, proactive)
+	return addr, true
 }
-
-func (b *TCP) rotateSrcTCP(proactive bool) { b.rotateSourceTCP(proactive) }
 
 func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
 	if b.sp == nil {
 		return "", false
 	}
 	addr, moved = b.sp.nextEndpoint(proactive)
-	if moved {
-		log.Printf("core/tcp: rotated source to %s", addr)
-		if !proactive {
-
-			b.st.rotated("src", "ip:"+addr, true)
-		}
+	if !moved {
+		return addr, false
 	}
-	return addr, moved
+	// If this source cannot be bound the next dial finds out, and rejectCandidate burns it and steps
+	// back with a burn event of its own. Testing it here as well would mean two bind probes for one
+	// move, and two places to keep in step.
+	log.Printf("core/tcp: rotated source to %s", addr)
+	b.st.rotated("src", "ip:"+addr, proactive)
+	return addr, true
 }
 
 func (b *TCP) SetDesync(on bool, ttl, count int, mode string) {
@@ -895,8 +921,7 @@ func (b *TCP) noteECHSelfHeal(host string, ech []byte) {
 		return
 	}
 
-	if !bytes.Equal(b.wsECH, ech) {
-		b.wsECH = ech
+	if b.setECH(ech) {
 		b.st.event("ech", "self_heal", detail)
 	}
 }
@@ -1063,7 +1088,7 @@ func chromeSpec(alpn []string) (utls.ClientHelloSpec, error) {
 }
 
 func (b *TCP) establishWS() (net.Conn, string, string, error) {
-	dialAddr, host, ech, path := b.addr, b.wsHost, b.wsECH, b.wsPath
+	dialAddr, host, ech, path := b.addr, b.wsHost, b.ech(), b.wsPath
 	if b.pool != nil {
 		ip, sni, ok := b.pool.current()
 		if !ok {
@@ -1077,7 +1102,7 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 	b.noteAttempt(dialAddr, host)
 	conn, err := b.dialer(connectTimeout).Dial("tcp", dialAddr)
 	if err != nil {
-		b.pinFailedOn(dialAddr, host)
+		b.pinFailedOn(dialAddr)
 		return nil, dialAddr, "", err
 	}
 
@@ -1169,10 +1194,9 @@ func (b *TCP) readECHCmd() []string {
 		return nil
 	}
 	ech, derr := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
-	if derr != nil || len(ech) == 0 || bytes.Equal(b.wsECH, ech) {
+	if derr != nil || len(ech) == 0 || !b.setECH(ech) {
 		return nil
 	}
-	b.wsECH = ech
 	return []string{b.wsHost}
 }
 
@@ -1228,29 +1252,22 @@ func (b *TCP) dialLoop() {
 		backoff = 0
 		connectedAt := time.Now()
 
-		// Name the whole pair on an edge pool: the operator reading the ring wants to know which
-		// edge AND which domain came back, not just the address.
-		back := label
-		if combo != "" {
-			back = combo
-		}
-		_, sport := addrParts(conn.LocalAddr())
-		b.st.reconnected(back, sport)
-
 		b.manualSwitch.Store(false)
 		b.cur.Store(cf)
 		b.adoptRx(cf)
 		cc := conn
 		b.curConn.Store(&cc)
 		if b.pool != nil {
-
-			b.st.setActive(combo)
+			// The whole path before anything publishes it. setActive flushes the status file, and a
+			// flush taken with the SNI still missing is a path of its own: two epochs per reconnect,
+			// the first of them a lie, and every verdict keyed on it dropped as stale.
 			sni := strings.TrimPrefix(combo, label+activeSep)
 			b.liveSNI.Store(&sni)
 			// low is the EDGE and high the domain, the order edgePair.kinds() reports. Storing them the
 			// other way round publishes a domain in the ip slot, and the walk then burns it into the
 			// edge's health map.
 			b.livePair.Store(&pairNow{low: label, high: sni})
+			b.st.setActive(combo)
 
 			b.pool.pinLandedOn(label, sni)
 		} else {
@@ -1263,6 +1280,15 @@ func (b *TCP) dialLoop() {
 				b.sp.pinLandedOn(b.lastSourceUsed())
 			}
 		}
+
+		// Name the whole pair on an edge pool: the operator reading the ring wants to know which
+		// edge AND which domain came back, not just the address.
+		back := label
+		if combo != "" {
+			back = combo
+		}
+		_, sport := addrParts(conn.LocalAddr())
+		b.st.reconnected(back, sport)
 
 		var rot *time.Timer
 		var rotated atomic.Bool
@@ -1326,21 +1352,19 @@ func (b *TCP) dialLoop() {
 					return
 				}
 
+				// Through the same two rotators the ladder walks with. Repeating their side effects
+				// here is how the destination walk came to announce nothing: one of the two callers
+				// carried the announcement and the other did not.
 				dstMoved := false
 				lap := true
 				if b.pp != nil {
-					if a, m := b.pp.rotateOnce(); m {
-						dstMoved = true
-						b.st.setActive(b.stTag + activeSep + a)
-						b.st.rotated("peer", "ip:"+a, true)
-					}
+					_, dstMoved = b.rotateDestTCP(true)
 					lap = b.rc.od.beat(dstMoved, b.pp.eligibleCount)
 				}
 				moved := dstMoved
 				if lap {
-					if a, m := b.rotateSourceTCP(true); m {
+					if _, m := b.rotateSourceTCP(true); m {
 						moved = true
-						b.st.rotated("src", "ip:"+a, true)
 					}
 				}
 				if !moved {
@@ -1522,7 +1546,11 @@ func (b *TCP) rotateLowTCP(proactive bool) {
 	}
 	low, _ := b.livePairNow()
 	b.pool.markSuspect("ip", low, "tun-probe")
-	b.pool.advanceIP()
+	// Announced, the same way the direct walk and the timed CDN rotation announce theirs. A burn says
+	// which edge was condemned; it does not say where the traffic went next.
+	if now := b.pool.advanceIP(); now != "" {
+		b.st.rotated("edge", "ip:"+now, proactive)
+	}
 }
 
 // The digit that turns once a whole row of edges has been tried -- and by then the domain HAS been
@@ -1531,7 +1559,7 @@ func (b *TCP) rotateLowTCP(proactive bool) {
 // no low digit to vary and the walk arrives every round, which is the same statement made sooner.
 func (b *TCP) rotateHighTCP(proactive bool) {
 	if b.pool == nil {
-		b.rotateSrcTCP(proactive)
+		b.rotateSourceTCP(proactive)
 		return
 	}
 	// A lone domain is condemned too, for the same reason a lone destination is: nothing rotates away
@@ -1539,7 +1567,9 @@ func (b *TCP) rotateHighTCP(proactive bool) {
 	// these rows are what the operator reads to decide what to replace.
 	_, sni := b.livePairNow()
 	b.pool.markSuspect("sni", sni, "tun-probe")
-	b.pool.advanceSNI()
+	if now := b.pool.advanceSNI(); now != "" {
+		b.st.rotated("sni", "sni:"+now, proactive)
+	}
 }
 
 // The operator's pick took. Only the direct destination needs saying here: the panel reads the edge

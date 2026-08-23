@@ -51,7 +51,7 @@ func TestAnAbandonedPinPutsTheBurnBack(t *testing.T) {
 			t.Fatal("the pin must clear the burn")
 		}
 
-		p.pinCannotLand("e2", "")
+		p.pinCannotLand("e2")
 		p.mu.Lock()
 		after := p.ipHealth.rec("e2")
 		p.mu.Unlock()
@@ -105,7 +105,7 @@ func TestThePublishedPairFollowsThePinWhileDown(t *testing.T) {
 		t.Fatalf("the status file the node reads still says %q", got)
 	}
 
-	p.pinCannotLand("e2", "")
+	p.pinCannotLand("e2")
 	if p.isPinned() {
 		t.Fatal("the pin should have been released")
 	}
