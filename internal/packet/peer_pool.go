@@ -633,6 +633,11 @@ type rotationController struct {
 	st       *coreStatus
 	verdict  string
 	pinbox   string
+
+	// The pair THIS verdict is about, held while the walk runs. An arm that asked the carrier again
+	// would be asking a second time, and between the two reads the dial loop can connect -- so the
+	// burn would land on the endpoint that just started working.
+	measured atomic.Pointer[pairNow]
 	port     portRung
 	session  sessionRung
 	rotate   time.Duration
@@ -750,6 +755,14 @@ func (c *rotationController) livePair() (low, high string) {
 		return "", ""
 	}
 	return c.pair.live()
+}
+
+// The pair the running walk is judging. Empty outside a walk.
+func (c *rotationController) underJudgement() (low, high string) {
+	if m := c.measured.Load(); m != nil {
+		return m.low, m.high
+	}
+	return "", ""
 }
 
 func (c *rotationController) pairStatus() (low, high, lowKind, highKind string) {
@@ -929,7 +942,9 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 		// before the walk: it steps PAST a burned entry, which would undo the cursor placed here and
 		// land the burn on the entry after it.
 		c.pair.keepCursorOn(liveLow, liveHigh)
+		c.measured.Store(&pairNow{low: liveLow, high: liveHigh})
 		burned := c.fail(rotLow, rotHigh)
+		c.measured.Store(nil)
 
 		// The walk turns the CURSOR. The live pair does not move until the carrier reconnects onto it,
 		// so asking that instead would report no movement and leave the session on a burned entry.
