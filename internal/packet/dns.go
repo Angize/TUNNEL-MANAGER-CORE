@@ -94,7 +94,7 @@ func (d *DNS) Run() error {
 			continue
 		}
 		log.Printf("core/dns: session established (%s zone=%s)", d.role(), d.zone)
-		d.st.reconnected("dns", 0)
+		d.st.reconnected("dns")
 		backoff = dnsBackoffMin
 		d.conn.Store(&conn)
 		d.netToTun(conn)

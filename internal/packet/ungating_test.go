@@ -71,7 +71,7 @@ func TestAPoolLessTunnelHearsTheJudge(t *testing.T) {
 func TestAPoolLessLadderSpendsItsStepsAndCondemnsNobody(t *testing.T) {
 	dir := t.TempDir()
 	rc := newRotationController(nil, nil)
-	rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
+	rc.attachStatus(newCoreStatus(filepath.Join(dir, "core.json"), ""))
 	rolls, drops, moves := 0, 0, 0
 	rc.port.setRoll(func() bool { rolls++; return true })
 	rc.session.setDrop(func() bool { drops++; return true })
@@ -114,7 +114,7 @@ func TestASourcePooledTunnelHearsItsVerdict(t *testing.T) {
 	dir := t.TempDir()
 	src := NewPeerPool([]string{"s1", "s2"}, 0)
 	rc := newRotationController(nil, src)
-	rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
+	rc.attachStatus(newCoreStatus(filepath.Join(dir, "core.json"), ""))
 	rotSrc := func(bool) { src.fail("tun-probe") }
 
 	rc.session.setDrop(func() bool { return true })

@@ -530,7 +530,7 @@ func (b *TCP) SetStatusPath(path string) {
 	}
 	b.st = newCoreStatus(path, active)
 	b.stTag = carrier
-	b.rc.setMailboxes(b.st.verdictPath(), b.st.pinPath())
+	b.rc.attachStatus(b.st)
 	if b.pool != nil {
 		b.pool.attach(b.st.event, b.st.write)
 		b.st.addHealth(b.pool.healthRows)
@@ -1287,8 +1287,7 @@ func (b *TCP) dialLoop() {
 		if combo != "" {
 			back = combo
 		}
-		_, sport := addrParts(conn.LocalAddr())
-		b.st.reconnected(back, sport)
+		b.st.reconnected(back)
 
 		var rot *time.Timer
 		var rotated atomic.Bool

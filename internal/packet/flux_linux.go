@@ -545,7 +545,7 @@ func (f *Flux) tryHandshake(body []byte, addr *net.IPAddr) {
 
 		f.ci.Store(nil)
 		f.provenFrom(addr.IP)
-		f.st.reconnected("flux", 0)
+		f.st.reconnected("flux")
 		return
 	}
 
@@ -776,7 +776,7 @@ func (f *Flux) pinPollLoop(rc *rotationController) {
 func (f *Flux) clientLoop() {
 	rc := newRotationController(f.pp, f.sp)
 	rc.session.setDrop(f.rehandshake)
-	rc.setMailboxes(f.st.verdictPath(), f.st.pinPath())
+	rc.attachStatus(f.st)
 	f.st.setPair(rc.pairStatus)
 	if rc.polls() {
 		go f.pinPollLoop(rc)

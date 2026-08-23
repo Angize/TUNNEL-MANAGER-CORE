@@ -35,7 +35,7 @@ func TestAStaleVerdictChangesNothingAndACurrentOneStillBurns(t *testing.T) {
 	dir := t.TempDir()
 	dst := NewPeerPool([]string{"d1", "d2"}, 0)
 	rc := newRotationController(dst, nil)
-	rc.setMailboxes(filepath.Join(dir, "core.json.verdict"), filepath.Join(dir, "core.json.pin"))
+	rc.attachStatus(newCoreStatus(filepath.Join(dir, "core.json"), ""))
 	rot := func(bool) { dst.fail("tun-probe") }
 
 	stale := int64(testPathEpoch - 1)
