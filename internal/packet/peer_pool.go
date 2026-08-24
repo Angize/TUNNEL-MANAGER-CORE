@@ -952,14 +952,21 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 		// come back somewhere else in the middle of one -- a pin that could not land, a young death, a
 		// walk. The verdict that follows is honest about the pair it names, but the rungs behind it
 		// were spent on the pair before, so landing that climb here hands the burn to whoever happens
-		// to be up. Start a fresh climb on the newcomer instead.
-		if a := c.accused.Load(); a == nil || a.low != liveLow || a.high != liveHigh {
-			if a != nil {
-				log.Printf("core: the tunnel came back on %s · %s while the ladder was climbing for "+
-					"%s · %s — starting over rather than charging this one", liveLow, liveHigh, a.low, a.high)
-				c.restart()
-			}
+		// to be up.
+		//
+		// Hand the newcomer a fresh climb and SPEND NOTHING on this verdict. The first rung tears the
+		// carrier down to redraw its source port, so spending one here would close the connection that
+		// has just come up -- and then the next verdict finds nothing crossing again, for a reason we
+		// caused. The new climb starts with the verdict after this one.
+		switch a := c.accused.Load(); {
+		case a == nil:
 			c.accused.Store(&pairNow{low: liveLow, high: liveHigh})
+		case a.low != liveLow || a.high != liveHigh:
+			log.Printf("core: the tunnel came back on %s · %s while the ladder was climbing for "+
+				"%s · %s — starting over rather than charging this one", liveLow, liveHigh, a.low, a.high)
+			c.restart()
+			c.accused.Store(&pairNow{low: liveLow, high: liveHigh})
+			return false
 		}
 
 		// The walk burns whatever the CURSOR is on, so put the cursor back on what the probe measured
@@ -976,6 +983,10 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 		nowLow, nowHigh := c.pair.live()
 		moved = burned || nowLow != liveLow || nowHigh != liveHigh
 		if moved {
+			// The climb is finished. Leaving the accusation standing would make the next verdict --
+			// about wherever the walk just moved to -- look like the carrier had wandered off on its
+			// own, and every second verdict of an outage would be spent on that instead of advancing.
+			c.accused.Store(nil)
 			log.Printf("core: %s · %s failed by the node's tun probe — the ladder walked off it",
 				cmd.Low, cmd.High)
 		}
