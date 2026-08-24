@@ -134,6 +134,50 @@ func TestNoticingTheMoveCostsTheNewcomerNothing(t *testing.T) {
 	}
 }
 
+// Every session gets its own epoch, even when it reconnects to exactly what it left.
+//
+// The epoch is the only thing keeping a verdict measured on one session from being charged to the
+// next: the node stamps it before the probe, re-reads it after, and the core drops a verdict whose
+// epoch has moved. On an http or grpc carrier the published path has NO local half -- src "" and
+// sport 0 -- so a reconnect to the same edge under the same domain produced a byte-identical path and
+// the epoch stood still. Measured on core13, at 50 ms resolution:
+//
+//	t+00.051  epoch=1  pair=185  ready=false    the outage opens on the pinned edge
+//	t+11.618  epoch=1  pair=104  ready=true     back on the good edge -- SAME epoch
+//	t+12.022  verdict: fail 104                 the probe had run while it was down
+//	t+12.073  104 burned
+func TestEverySessionGetsItsOwnEpoch(t *testing.T) {
+	b, _ := edgeCarrier(t, []string{"ip1:443"}, snis("front-a"))
+	// What an http carrier's path looks like: no local address at all.
+	live := pathKey{Dst: "ip1", Dport: 443, SNI: "front-a"}
+	up := false
+	b.st.tracker.setLive(func() (pathKey, bool) {
+		if !up {
+			return pathKey{}, false
+		}
+		return live, true
+	})
+
+	up = true
+	b.st.newSession()
+	b.st.write()
+	first := b.st.pathEpoch()
+	if first == 0 {
+		t.Fatal("setup: the first session never took an epoch")
+	}
+
+	up = false // the carrier drops; the path goes empty, which observe ignores
+	b.st.write()
+	up = true // ...and comes back on exactly the same edge and domain
+	b.st.newSession()
+	b.st.write()
+
+	if got := b.st.pathEpoch(); got == first {
+		t.Errorf("a whole session came and went and the epoch is still %d. Every verdict measured "+
+			"on the session before it now looks current", got)
+	}
+}
+
 // The judge is one piece of code for every carrier, so the direct pools inherit the same rule -- and
 // the same exposure, which was measured on core11 (raw): four verdicts naming one destination and a
 // fifth naming the one the walk had just moved to, one second before it started carrying.

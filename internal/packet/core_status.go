@@ -56,6 +56,15 @@ func (s *coreStatus) trackPath(live func() (pathKey, bool), closeCh <-chan struc
 	go samplePathLoop(&s.tracker, s.write, closeCh)
 }
 
+// The carrier has established a session. Called BEFORE anything publishes the new pair, so the first
+// status file carrying it also carries the epoch that goes with it -- see pathTracker.freshen.
+func (s *coreStatus) newSession() {
+	if s == nil {
+		return
+	}
+	s.tracker.freshen()
+}
+
 func (s *coreStatus) pathEpoch() int64 {
 	if s == nil {
 		return 0
