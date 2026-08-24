@@ -638,6 +638,10 @@ type rotationController struct {
 	// would be asking a second time, and between the two reads the dial loop can connect -- so the
 	// burn would land on the endpoint that just started working.
 	measured atomic.Pointer[pairNow]
+
+	// The pair the climb in progress is about. A climb spends its rungs across several verdicts, and
+	// the carrier can come back somewhere else in the middle of one.
+	accused  atomic.Pointer[pairNow]
 	port     portRung
 	session  sessionRung
 	rotate   time.Duration
@@ -817,10 +821,17 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurne
 	return burned
 }
 
-func (c *rotationController) success() {
+// The ladder starts over: full rungs, fresh odometer. Not a success -- nothing is cleared and nobody
+// is exonerated.
+func (c *rotationController) restart() {
 	c.reset()
 	c.port.restart()
 	c.session.restart()
+}
+
+func (c *rotationController) success() {
+	c.accused.Store(nil)
+	c.restart()
 }
 
 func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now time.Time) {
@@ -935,6 +946,20 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 				"%s · %s — burning what was measured, staying put", cmd.Low, cmd.High, liveLow, liveHigh)
 			c.pair.burn(kind, key, "tun-probe")
 			return false
+		}
+
+		// A climb is about ONE pair. It spends its rungs across several verdicts, and the carrier can
+		// come back somewhere else in the middle of one -- a pin that could not land, a young death, a
+		// walk. The verdict that follows is honest about the pair it names, but the rungs behind it
+		// were spent on the pair before, so landing that climb here hands the burn to whoever happens
+		// to be up. Start a fresh climb on the newcomer instead.
+		if a := c.accused.Load(); a == nil || a.low != liveLow || a.high != liveHigh {
+			if a != nil {
+				log.Printf("core: the tunnel came back on %s · %s while the ladder was climbing for "+
+					"%s · %s — starting over rather than charging this one", liveLow, liveHigh, a.low, a.high)
+				c.restart()
+			}
+			c.accused.Store(&pairNow{low: liveLow, high: liveHigh})
 		}
 
 		// The walk burns whatever the CURSOR is on, so put the cursor back on what the probe measured

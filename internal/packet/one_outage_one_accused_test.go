@@ -62,6 +62,75 @@ func TestPinningARefusingEdgeDoesNotBurnAHealthyOne(t *testing.T) {
 	}
 }
 
+// ...and the accusation has to survive the RECONNECT, which is where freezing only the dial target was
+// not enough. Replayed from core13 with the frozen target already in place:
+//
+//	1787533929  fail 185.143.23.238   the pinned edge -- the freeze held
+//	1787533931  fail 185.143.23.238   ...and here
+//	1787533933  fail 172.67.214.138   the tunnel came back here a second ago, and the rungs were gone
+//	1787533934  ok   104.21.42.53 carrying
+//
+// The last verdict is honest about the pair it names: nothing was crossing on it yet. What is not
+// honest is spending a climb on one endpoint and landing it on another.
+func TestAClimbDoesNotLandOnWhoeverCameBack(t *testing.T) {
+	const dead, back, sni = "dead:443", "back:443", "front-a"
+	b, p := edgeCarrier(t, []string{dead, back}, snis(sni))
+	// The two rungs Run() wires. Without a budget every verdict walks, and there is no climb to
+	// protect in the first place.
+	b.rc.port.setRoll(func() bool { return true })
+	b.rc.session.setDrop(func() bool { return true })
+
+	// The outage runs on the edge that will not open, spending the rungs.
+	b.pretendDown()
+	b.noteAttempt(dead, sni)
+	for i := 0; i < portTries+1; i++ {
+		b.tunFailAsTheNodeWould(t)
+	}
+	if got := stateOf(p.healthRows(), "ip", dead); got != "healthy" {
+		t.Fatalf("setup: the free rungs should not have condemned anything yet (%s is %q)", dead, got)
+	}
+
+	// Now it comes back somewhere else, and the very next sweep judges THAT.
+	b.pretendConnected(back, sni)
+	for i := 0; i < 2; i++ {
+		b.tunFailAsTheNodeWould(t)
+	}
+
+	if got := stateOf(p.healthRows(), "ip", back); got != "healthy" {
+		t.Errorf("the edge the tunnel had just come back on is %q; the climb was about %s", got, dead)
+	}
+	if got := stateOf(p.healthRows(), "sni", sni); got != "healthy" {
+		t.Errorf("the domain is %q; the lap it rode in on belonged to the other edge's climb", got)
+	}
+}
+
+// The judge is one piece of code for every carrier, so the direct pools inherit the same rule -- and
+// the same exposure, which was measured on core11 (raw): four verdicts naming one destination and a
+// fifth naming the one the walk had just moved to, one second before it started carrying.
+func TestAClimbDoesNotLandOnWhoeverCameBackOnADirectPool(t *testing.T) {
+	const gone, back = "1.1.1.1:443", "2.2.2.2:443"
+	b, pp, _ := peerCarrier(t, []string{gone, back}, nil)
+	b.rc.port.setRoll(func() bool { return true })
+	b.rc.session.setDrop(func() bool { return true })
+
+	b.pretendConnected(gone, "")
+	for i := 0; i < portTries+1; i++ {
+		b.tunFailAsTheNodeWould(t)
+	}
+	if got := stateOf(pp.healthRows(), "dst", gone); got != "healthy" {
+		t.Fatalf("setup: the free rungs should not have condemned anything yet (%s is %q)", gone, got)
+	}
+
+	b.pretendConnected(back, "")
+	for i := 0; i < 2; i++ {
+		b.tunFailAsTheNodeWould(t)
+	}
+
+	if got := stateOf(pp.healthRows(), "dst", back); got != "healthy" {
+		t.Errorf("the destination the tunnel had just come back on is %q; the climb was about %s", got, gone)
+	}
+}
+
 // And the same rule one level down: the walk must condemn the pair the verdict was ABOUT, not whatever
 // the carrier reports by the time the arm runs. The dial loop connects on another goroutine, and the
 // likeliest moment for it to succeed is the end of the outage the walk is answering.
