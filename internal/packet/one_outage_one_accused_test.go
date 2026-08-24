@@ -104,6 +104,36 @@ func TestAClimbDoesNotLandOnWhoeverCameBack(t *testing.T) {
 	}
 }
 
+// ...and it must cost the newcomer NOTHING. The first rung tears the carrier down to redraw its
+// source port, so spending one on the verdict that noticed the move closes the connection that has
+// just come up -- and the next verdict then finds nothing crossing for a reason we caused. Measured on
+// core13 with that spend in place: connected at 435.858, torn down at 437.233, burned at 438.233.
+func TestNoticingTheMoveCostsTheNewcomerNothing(t *testing.T) {
+	const dead, back, sni = "dead:443", "back:443", "front-a"
+	b, _ := edgeCarrier(t, []string{dead, back}, snis(sni))
+	rolls := 0
+	b.rc.port.setRoll(func() bool { rolls++; return true })
+	b.rc.session.setDrop(func() bool { return true })
+
+	b.pretendDown()
+	b.noteAttempt(dead, sni)
+	b.tunFailAsTheNodeWould(t)
+	spent := rolls
+
+	b.pretendConnected(back, sni)
+	b.tunFailAsTheNodeWould(t)
+	if rolls != spent {
+		t.Errorf("the verdict that noticed the move spent a rung (%d -> %d). On tcp that rung is a "+
+			"teardown, so it closes the connection that just came up", spent, rolls)
+	}
+
+	// ...and the climb resumes on the newcomer with the verdict after it.
+	b.tunFailAsTheNodeWould(t)
+	if rolls == spent {
+		t.Errorf("the new climb never started: still %d rungs spent", rolls)
+	}
+}
+
 // The judge is one piece of code for every carrier, so the direct pools inherit the same rule -- and
 // the same exposure, which was measured on core11 (raw): four verdicts naming one destination and a
 // fifth naming the one the walk had just moved to, one second before it started carrying.
