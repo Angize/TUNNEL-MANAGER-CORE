@@ -26,7 +26,7 @@ func movingRaw(t *testing.T, dsts, srcs []string) *Raw {
 		port: 443, psk: "a-new-path-is-a-new-flow-psk-0123", cipher: "chacha20-poly1305",
 		closeCh: make(chan struct{})}
 	r.link = &capturingLink{r: r}
-	r.setSportMode(true)
+	r.setSportMode(true, 0)
 	if !r.sportRandom {
 		t.Fatal("the tcp profile did not arm the source-port axis")
 	}
@@ -129,7 +129,7 @@ func TestPinningWhereWeAlreadyAreMovesNothing(t *testing.T) {
 
 func TestAFixedPortTunnelKeepsItsPortAcrossAPathChange(t *testing.T) {
 	r := movingRaw(t, []string{"10.30.0.2", "10.30.0.3"}, nil)
-	r.setSportMode(false)
+	r.setSportMode(false, 0)
 	r.cliPort.Store(uint32(rawClientPort))
 	was := r.tuple()
 

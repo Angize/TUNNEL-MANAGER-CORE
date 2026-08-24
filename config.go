@@ -51,6 +51,8 @@ type Config struct {
 
 	RawPort int `json:"raw_port"`
 
+	RawSport int `json:"raw_sport"`
+
 	RawSportRandom bool `json:"raw_sport_random"`
 
 	SpoofSrc string `json:"spoof_src_ip"`
@@ -331,6 +333,21 @@ func (c *Config) validate() error {
 			return errors.New("raw_sport_random rolls the forged SOURCE port of the \"udp\" and \"tcp\"" +
 				" profiles only (raw_profile \"" + c.RawProfile + "\" forges no ports)")
 		}
+		if c.RawSport != 0 {
+			if !packet.RawProfileHasPorts(c.RawProfile) {
+				return errors.New("raw_sport sets the forged client source port of the \"udp\" and \"tcp\"" +
+					" profiles only (raw_profile \"" + c.RawProfile + "\" forges no ports)")
+			}
+			if c.RawSport < 1 || c.RawSport > 65535 {
+				return errors.New("raw_sport must be in 1..65535 (0 = the profile default 51820)")
+			}
+			// A fixed number and a rolling one are two different answers to the same question. Taking
+			// either silently would leave the operator reading a port the wire does not carry.
+			if c.RawSportRandom {
+				return errors.New("raw_sport fixes the forged client source port and raw_sport_random rolls it" +
+					" -- set one or the other, not both")
+			}
+		}
 		if !c.Crypto.Enabled {
 			return errors.New("raw transport requires crypto enabled (the AEAD both encrypts and authenticates each raw packet)")
 		}
@@ -353,6 +370,9 @@ func (c *Config) validate() error {
 		}
 		if c.RawSportRandom {
 			return errors.New("raw_sport_random rolls a forged L4 source port, and the spoof carrier writes no L4 header at all")
+		}
+		if c.RawSport != 0 {
+			return errors.New("raw_sport sets a forged L4 source port, and the spoof carrier writes no L4 header at all")
 		}
 		if c.SpoofSrc != "" && net.ParseIP(c.SpoofSrc).To4() == nil {
 			return errors.New("spoof_src_ip must be an IPv4 address")

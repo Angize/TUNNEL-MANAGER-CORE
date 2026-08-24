@@ -12,7 +12,7 @@ func TestARolledSourcePortStartsANewFlow(t *testing.T) {
 
 	r := &Raw{profile: "tcp", proto: protoTCP, isClient: true, port: 443, closeCh: make(chan struct{})}
 	r.link = &capturingLink{r: r}
-	r.setSportMode(true)
+	r.setSportMode(true, 0)
 	if !r.sportRandom {
 		t.Fatal("the tcp profile did not arm the port rotation")
 	}

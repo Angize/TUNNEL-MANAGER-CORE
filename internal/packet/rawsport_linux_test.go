@@ -42,7 +42,7 @@ func TestRolledSportIsInTheEphemeralRangeAndSpreads(t *testing.T) {
 func TestSportModeOnlyArmsWhereThereArePorts(t *testing.T) {
 	for _, profile := range RawProfileNames() {
 		r := &Raw{profile: profile, isClient: true}
-		r.setSportMode(true)
+		r.setSportMode(true, 0)
 		want := RawProfileHasPorts(profile)
 		if r.sportRandom != want {
 			t.Errorf("%s: sportRandom=%v want %v", profile, r.sportRandom, want)
@@ -59,13 +59,13 @@ func TestSportModeOnlyArmsWhereThereArePorts(t *testing.T) {
 
 func TestTheServerStampsBackTheClientsRolledPort(t *testing.T) {
 	cli := &Raw{profile: "tcp", isClient: true}
-	cli.setSportMode(true)
+	cli.setSportMode(true, 0)
 	rolled := cli.cport()
 	if rolled == 0 {
 		t.Fatal("client did not draw an opening port")
 	}
 	srv := &Raw{profile: "tcp", isClient: false}
-	srv.setSportMode(true)
+	srv.setSportMode(true, 0)
 	if srv.cport() != 0 {
 		t.Fatal("the server must not invent a client port; it learns one")
 	}
@@ -84,7 +84,7 @@ func TestTheServerStampsBackTheClientsRolledPort(t *testing.T) {
 
 func TestTheClientNeverAdoptsThePeersPort(t *testing.T) {
 	cli := &Raw{profile: "tcp", isClient: true}
-	cli.setSportMode(true)
+	cli.setSportMode(true, 0)
 	mine := cli.cport()
 	cli.learnClientPort(443)
 	if cli.cport() != mine {
@@ -146,7 +146,7 @@ func TestDecapReadsTheSourcePortTheEncapWrote(t *testing.T) {
 func TestTheAntiLeakRuleCoversTheWholeRotation(t *testing.T) {
 	rng := strconv.Itoa(rawSportLo) + ":" + strconv.Itoa(rawSportHi)
 	for _, isClient := range []bool{true, false} {
-		got := rawDropMatches(testDst, "tcp", 0, isClient, false, true)
+		got := rawDropMatches(testDst, "tcp", 0, 0, isClient, false, true)
 		if len(got) != 1 {
 			t.Fatalf("isClient=%v: %d rules, want exactly 1", isClient, len(got))
 		}
@@ -166,7 +166,7 @@ func TestTheAntiLeakRuleCoversTheWholeRotation(t *testing.T) {
 	}
 
 	for _, isClient := range []bool{true, false} {
-		rule := strings.Join(rawDropMatches(testDst, "tcp", 0, isClient, false, false)[0], " ")
+		rule := strings.Join(rawDropMatches(testDst, "tcp", 0, 0, isClient, false, false)[0], " ")
 		if strings.Contains(rule, ":") {
 			t.Errorf("isClient=%v: fixed mode widened to a range: %q", isClient, rule)
 		}
@@ -177,7 +177,7 @@ func TestTheAntiLeakRuleCoversTheWholeRotation(t *testing.T) {
 
 	for _, random := range []bool{false, true} {
 		for _, isClient := range []bool{true, false} {
-			got := rawDropMatches(testDst, "udp", 0, isClient, false, random)
+			got := rawDropMatches(testDst, "udp", 0, 0, isClient, false, random)
 			if len(got) != 1 || strings.Contains(strings.Join(got[0], " "), "port ") {
 				t.Errorf("udp isClient=%v random=%v: %v", isClient, random, got)
 			}
@@ -190,7 +190,7 @@ func TestTheHandshakeReplyGoesToTheRolledPort(t *testing.T) {
 	const rolled = 54321
 
 	srv := &Raw{profile: "tcp", isClient: false, psk: psk, cipher: "chacha20-poly1305"}
-	srv.setSportMode(true)
+	srv.setSportMode(true, 0)
 	cap := &capturingLink{r: srv}
 	srv.link = cap
 	srv.peer.Store(&net.IPAddr{IP: testSrc})
@@ -235,7 +235,7 @@ func TestAHandshakeAnswerGoesToTheSenderNotTheDataPath(t *testing.T) {
 
 	for _, profile := range []string{"udp", "tcp"} {
 		srv := &Raw{profile: profile, isClient: false, psk: psk, cipher: "chacha20-poly1305", port: 51820}
-		srv.setSportMode(true)
+		srv.setSportMode(true, 0)
 		cap := &capturingLink{r: srv}
 		srv.link = cap
 		srv.peer.Store(&net.IPAddr{IP: testSrc})
