@@ -545,6 +545,7 @@ func (f *Flux) tryHandshake(body []byte, addr *net.IPAddr) {
 
 		f.ci.Store(nil)
 		f.provenFrom(addr.IP)
+		f.st.newSession()
 		f.st.reconnected("flux")
 		return
 	}

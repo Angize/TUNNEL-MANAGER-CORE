@@ -974,6 +974,7 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 		r.ci.Store(nil)
 		r.markRx(addr.IP)
 		r.provenFrom(addr.IP)
+		r.st.newSession()
 		r.st.reconnected("raw")
 		return
 	}

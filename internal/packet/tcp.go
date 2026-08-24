@@ -1271,6 +1271,7 @@ func (b *TCP) dialLoop() {
 		b.adoptRx(cf)
 		cc := conn
 		b.curConn.Store(&cc)
+		b.st.newSession()
 		if b.pool != nil {
 			// The whole path before anything publishes it. setActive flushes the status file, and a
 			// flush taken with the SNI still missing is a path of its own: two epochs per reconnect,

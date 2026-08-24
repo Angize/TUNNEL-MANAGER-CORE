@@ -761,6 +761,7 @@ func (b *UDP) tryHandshake(pkt []byte, addr *net.UDPAddr) {
 
 		b.ci.Store(nil)
 		b.provenFrom(addr.IP)
+		b.st.newSession()
 		b.st.reconnected("udp")
 		return
 	}
@@ -836,6 +837,7 @@ func (b *UDP) clientLoop() {
 			}
 
 			if !b.cryptoOn && b.peerAnswered.Load() {
+				b.st.newSession()
 				b.st.reconnected("udp")
 			}
 
