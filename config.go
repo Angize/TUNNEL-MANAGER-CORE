@@ -83,6 +83,8 @@ type Config struct {
 
 	SockBuf int `json:"sock_buf"`
 
+	PortTries int `json:"port_tries"`
+
 	Workers int       `json:"workers"`
 	Crypto  CryptoCfg `json:"crypto"`
 
@@ -143,7 +145,6 @@ type TuningCfg struct {
 	SuspectBackoff  []int64 `json:"suspect_backoff"`
 	DeadRetestSecs  int64   `json:"dead_retest_secs"`
 	MinLivenessSecs int64   `json:"min_liveness_secs"`
-	PortTries       int64   `json:"port_tries"`
 }
 
 func loadConfig(path string) (*Config, error) {

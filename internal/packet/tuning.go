@@ -12,15 +12,10 @@ var (
 	minLiveness = 20 * time.Second
 )
 
-// How many source ports the ladder may draw before it moves on. Each draw is one verdict, and a
-// tunnel with a single endpoint has nothing after them.
-var portTries = 2
-
 type TuningInput struct {
 	SuspectBackoff  []int64
 	DeadRetestSecs  int64
 	MinLivenessSecs int64
-	PortTries       int64
 }
 
 func ApplyTuning(t TuningInput) {
@@ -40,9 +35,6 @@ func ApplyTuning(t TuningInput) {
 	}
 	if t.MinLivenessSecs > 0 {
 		minLiveness = time.Duration(tclamp(t.MinLivenessSecs, 1, 3600)) * time.Second
-	}
-	if t.PortTries > 0 {
-		portTries = int(tclamp(t.PortTries, 1, 50))
 	}
 }
 
