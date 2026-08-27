@@ -542,6 +542,7 @@ type pinnable interface {
 
 // The digit a fail condemns every round.
 type lowAxis interface {
+	activeIdx() int
 	eligibleCount() int
 	burnCount() uint64
 	restoreAll()
@@ -608,19 +609,25 @@ func (w *walkPolicy) walk(rotLow, rotHigh func(proactive bool)) (stepped, lowBur
 
 		lap := w.od.failed(w.low.eligibleCount)
 		before := w.low.burnCount()
+		// Where the cursor stands, read without disturbing it. current() cannot answer this: every
+		// path through it commits an index, which is the very thing being measured.
+		at := w.low.activeIdx()
 		rotLow(false)
 		lowBurned = w.low.burnCount() != before
+		stepped = w.low.activeIdx() != at
 		if w.high != nil && lap {
-			at := w.high.activeIdx()
+			hat := w.high.activeIdx()
 			rotHigh(false)
-			if w.high.activeIdx() != at {
+			if w.high.activeIdx() != hat {
 				w.low.restoreAll()
+				stepped = true
 			}
 		}
-		return true, lowBurned
+		return stepped, lowBurned
 	case w.high != nil:
+		at := w.high.activeIdx()
 		rotHigh(false)
-		return true, false
+		return w.high.activeIdx() != at, false
 	}
 	return false, false
 }
@@ -815,8 +822,9 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurne
 		return false
 	}
 	moved, burned := c.walk(rotDst, rotSrc)
-	// Both rungs: the walk arrived somewhere nothing has judged yet. Not the odometer -- it is counting
-	// the laps this walk is in the middle of.
+	// Both rungs, and only on a walk that ARRIVED somewhere: a new cell is a new lottery. A rotation
+	// the pool declined leaves the tunnel where it was, and refilling there is a ladder that never
+	// ends. Not the odometer -- it counts the laps this walk is inside.
 	if moved {
 		c.port.restart()
 		c.session.restart()

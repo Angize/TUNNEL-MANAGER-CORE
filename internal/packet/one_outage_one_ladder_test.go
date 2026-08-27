@@ -48,7 +48,7 @@ func TestEveryCellOfTheWalkGetsItsOwnDraws(t *testing.T) {
 	rig := newLadderRig(t, []string{"d1", "d2", "d3"}, nil)
 	rolls, burns := 0, 0
 	rig.rc.port.setRoll(func() bool { rolls++; return true })
-	rot := func(bool) { burns++ }
+	rot := func(p bool) { burns++; rig.rotDst(p) }
 
 	for i := 1; i <= portTries; i++ {
 		rig.rc.fail(rot, nil)
