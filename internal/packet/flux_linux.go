@@ -606,12 +606,17 @@ func (f *Flux) livePath() (pathKey, bool) {
 	return k, f.sealer() != nil
 }
 
+// The live session stays: it is what carries if the path comes back on its own, and a fresh key would
+// only cost a round trip. What has to change is the ephemeral -- this rung asks for a NEW session, and
+// clientLoop keeps asking until it gets one.
 func (f *Flux) rehandshake() bool {
 	if !f.cryptoOn || f.peer.Load() == nil {
 		return false
 	}
+	f.ci.Store(nil)
 	f.sendInit()
 	f.st.down("rehandshake", "flux")
+	wakeLoop(f.wake)
 	return true
 }
 
@@ -784,9 +789,10 @@ func (f *Flux) clientLoop() {
 	}
 	for {
 		rc.proactive(f.rotatePeerFlux, f.rotateSourceFlux, time.Now())
-		if f.cryptoOn && f.sealer() == nil {
+		if handshakeOutstanding(f.cryptoOn, f.sealer(), f.ci.Load()) {
 			f.sendInit()
-		} else {
+		}
+		if !f.cryptoOn || f.sealer() != nil {
 
 			if f.pp != nil && f.peerAnswered.Load() {
 				if pa := f.peer.Load(); pa != nil {
@@ -802,7 +808,7 @@ func (f *Flux) clientLoop() {
 			}
 		}
 		wait := keepaliveInterval(f.ping, f.psk)
-		if f.cryptoOn && f.sealer() == nil {
+		if handshakeOutstanding(f.cryptoOn, f.sealer(), f.ci.Load()) {
 			wait = handshakeRetransmitWait()
 		}
 		select {

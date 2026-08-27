@@ -687,6 +687,7 @@ func (r *Raw) rollSourcePort() bool {
 	r.sendInit()
 
 	r.st.portRedrawn()
+	wakeLoop(r.wake)
 	return true
 }
 
@@ -1045,12 +1046,17 @@ func (r *Raw) livePath() (pathKey, bool) {
 	return k, r.sealer() != nil
 }
 
+// The live session stays: it is what carries if the path comes back on its own, and a fresh key would
+// only cost a round trip. What has to change is the ephemeral -- this rung asks for a NEW session, and
+// clientLoop keeps asking until it gets one.
 func (r *Raw) rehandshake() bool {
 	if r.peer.Load() == nil {
 		return false
 	}
+	r.ci.Store(nil)
 	r.sendInit()
 	r.st.down("rehandshake", "raw")
+	wakeLoop(r.wake)
 	return true
 }
 
@@ -1259,9 +1265,10 @@ func (r *Raw) clientLoop() {
 
 	for {
 		rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
-		if r.sealer() == nil {
+		if handshakeOutstanding(true, r.sealer(), r.ci.Load()) {
 			r.sendInit()
-		} else {
+		}
+		if r.sealer() != nil {
 
 			if r.pp != nil && r.peerAnswered.Load() {
 				if pa := r.peer.Load(); pa != nil {
@@ -1277,7 +1284,7 @@ func (r *Raw) clientLoop() {
 			}
 		}
 		wait := keepaliveInterval(r.ping, r.psk)
-		if r.sealer() == nil {
+		if handshakeOutstanding(true, r.sealer(), r.ci.Load()) {
 			wait = handshakeRetransmitWait()
 		}
 		select {

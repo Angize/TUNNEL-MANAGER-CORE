@@ -105,6 +105,13 @@ const handshakeRetransmit = time.Second
 
 func handshakeRetransmitWait() time.Duration { return jitterFrac(handshakeRetransmit) }
 
+// Whether the client owes the peer a handshake: it has no session to carry with, or it has sent an
+// ephemeral nobody has answered. clientLoop retransmits for as long as this holds, so a rung that
+// asks once is not the tunnel's whole answer to an outage.
+func handshakeOutstanding(cryptoOn bool, s Sealer, ci *crypto.Ephemeral) bool {
+	return cryptoOn && (s == nil || ci != nil)
+}
+
 func wakeLoop(ch chan struct{}) {
 	select {
 	case ch <- struct{}{}:
@@ -308,12 +315,17 @@ func (b *UDP) livePath() (pathKey, bool) {
 	return k, b.peerAnswered.Load()
 }
 
+// The live session stays: it is what carries if the path comes back on its own, and a fresh key would
+// only cost a round trip. What has to change is the ephemeral -- this rung asks for a NEW session, and
+// clientLoop keeps asking until it gets one.
 func (b *UDP) rehandshake() bool {
 	if !b.cryptoOn || b.peer.Load() == nil {
 		return false
 	}
+	b.ci.Store(nil)
 	b.sendInit()
 	b.st.down("rehandshake", "udp")
+	wakeLoop(b.wake)
 	return true
 }
 
@@ -826,9 +838,10 @@ func (b *UDP) clientLoop() {
 	}
 	for {
 		rc.proactive(b.rotatePeerUDP, b.rotateSourceUDP, time.Now())
-		if b.sealer() == nil && b.cryptoOn {
+		if handshakeOutstanding(b.cryptoOn, b.sealer(), b.ci.Load()) {
 			b.sendInit()
-		} else {
+		}
+		if !b.cryptoOn || b.sealer() != nil {
 
 			if b.pp != nil && b.peerAnswered.Load() {
 				if pa := b.peer.Load(); pa != nil {
@@ -848,11 +861,9 @@ func (b *UDP) clientLoop() {
 				continue
 			}
 		}
-		var wait time.Duration
-		if b.sealer() == nil && b.cryptoOn {
+		wait := keepaliveInterval(b.ping, b.psk)
+		if handshakeOutstanding(b.cryptoOn, b.sealer(), b.ci.Load()) {
 			wait = handshakeRetransmitWait()
-		} else {
-			wait = keepaliveInterval(b.ping, b.psk)
 		}
 		select {
 		case <-b.closeCh:
