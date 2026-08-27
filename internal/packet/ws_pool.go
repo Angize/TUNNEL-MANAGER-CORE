@@ -376,6 +376,12 @@ func (p *wsPool) restoreIPs() {
 	}
 }
 
+func (p *wsPool) activeIPIdx() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.i
+}
+
 func (p *wsPool) activeSNIIdx() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -387,6 +393,7 @@ func (p *wsPool) burnCount() uint64 { return p.burns.Load() }
 // The digit a fail condemns every round.
 type wsEdges struct{ p *wsPool }
 
+func (a wsEdges) activeIdx() int     { return a.p.activeIPIdx() }
 func (a wsEdges) eligibleCount() int { return a.p.eligibleIPs() }
 func (a wsEdges) burnCount() uint64  { return a.p.burnCount() }
 func (a wsEdges) restoreAll()        { a.p.restoreIPs() }
