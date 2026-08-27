@@ -480,6 +480,7 @@ func (f *Flux) handleCrypto(body []byte, addr *net.IPAddr) {
 	}
 	if s := f.sealer(); s != nil {
 		if typ, session, seq, payload, oerr := f.openWith(s, body); oerr == nil && f.rp.ok(session, seq) {
+			settleHandshake(&f.ci)
 			f.provenFrom(addr.IP)
 			f.learnPeer(addr)
 			f.dispatch(typ, payload, addr)
@@ -606,9 +607,8 @@ func (f *Flux) livePath() (pathKey, bool) {
 	return k, f.sealer() != nil
 }
 
-// The live session stays: it is what carries if the path comes back on its own, and a fresh key would
-// only cost a round trip. What has to change is the ephemeral -- this rung asks for a NEW session, and
-// clientLoop keeps asking until it gets one.
+// The live session stays -- it is what carries if the path returns before a new key lands. What the
+// rung changes is the ephemeral, and clientLoop keeps asking until that is answered.
 func (f *Flux) rehandshake() bool {
 	if !f.cryptoOn || f.peer.Load() == nil {
 		return false
@@ -789,7 +789,8 @@ func (f *Flux) clientLoop() {
 	}
 	for {
 		rc.proactive(f.rotatePeerFlux, f.rotateSourceFlux, time.Now())
-		if handshakeOutstanding(f.cryptoOn, f.sealer(), f.ci.Load()) {
+		asking := f.cryptoOn && handshakeOutstanding(f.sealer(), &f.ci)
+		if asking {
 			f.sendInit()
 		}
 		if !f.cryptoOn || f.sealer() != nil {
@@ -808,7 +809,7 @@ func (f *Flux) clientLoop() {
 			}
 		}
 		wait := keepaliveInterval(f.ping, f.psk)
-		if handshakeOutstanding(f.cryptoOn, f.sealer(), f.ci.Load()) {
+		if asking {
 			wait = handshakeRetransmitWait()
 		}
 		select {

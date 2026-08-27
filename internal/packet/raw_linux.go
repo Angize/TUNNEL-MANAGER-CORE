@@ -909,6 +909,7 @@ func (r *Raw) openWith(s Sealer, body []byte) (typ byte, session, seq uint64, pa
 func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
 	if s := r.sealer(); s != nil {
 		if typ, session, seq, payload, oerr := r.openWith(s, body); oerr == nil && r.rp.ok(session, seq) {
+			settleHandshake(&r.ci)
 			r.markRx(addr.IP)
 			r.provenFrom(addr.IP)
 			r.learnPeer(addr)
@@ -1046,9 +1047,8 @@ func (r *Raw) livePath() (pathKey, bool) {
 	return k, r.sealer() != nil
 }
 
-// The live session stays: it is what carries if the path comes back on its own, and a fresh key would
-// only cost a round trip. What has to change is the ephemeral -- this rung asks for a NEW session, and
-// clientLoop keeps asking until it gets one.
+// The live session stays -- it is what carries if the path returns before a new key lands. What the
+// rung changes is the ephemeral, and clientLoop keeps asking until that is answered.
 func (r *Raw) rehandshake() bool {
 	if r.peer.Load() == nil {
 		return false
@@ -1265,7 +1265,8 @@ func (r *Raw) clientLoop() {
 
 	for {
 		rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
-		if handshakeOutstanding(true, r.sealer(), r.ci.Load()) {
+		asking := handshakeOutstanding(r.sealer(), &r.ci)
+		if asking {
 			r.sendInit()
 		}
 		if r.sealer() != nil {
@@ -1284,7 +1285,7 @@ func (r *Raw) clientLoop() {
 			}
 		}
 		wait := keepaliveInterval(r.ping, r.psk)
-		if handshakeOutstanding(true, r.sealer(), r.ci.Load()) {
+		if asking {
 			wait = handshakeRetransmitWait()
 		}
 		select {

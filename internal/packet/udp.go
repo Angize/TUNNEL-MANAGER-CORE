@@ -105,11 +105,18 @@ const handshakeRetransmit = time.Second
 
 func handshakeRetransmitWait() time.Duration { return jitterFrac(handshakeRetransmit) }
 
-// Whether the client owes the peer a handshake: it has no session to carry with, or it has sent an
-// ephemeral nobody has answered. clientLoop retransmits for as long as this holds, so a rung that
-// asks once is not the tunnel's whole answer to an outage.
-func handshakeOutstanding(cryptoOn bool, s Sealer, ci *crypto.Ephemeral) bool {
-	return cryptoOn && (s == nil || ci != nil)
+// Whether the client owes the peer a handshake: no session to carry with, or an ephemeral it staged
+// that nobody has answered. clientLoop retransmits for as long as this holds.
+func handshakeOutstanding(s Sealer, ci *atomic.Pointer[crypto.Ephemeral]) bool {
+	return s == nil || ci.Load() != nil
+}
+
+// ...and any frame the live session opens settles it: the ask exists because the ladder doubted that
+// session, and the peer has just answered on it. Left standing, the ask outlives the outage.
+func settleHandshake(ci *atomic.Pointer[crypto.Ephemeral]) {
+	if ci.Load() != nil {
+		ci.Store(nil)
+	}
 }
 
 func wakeLoop(ch chan struct{}) {
@@ -315,9 +322,8 @@ func (b *UDP) livePath() (pathKey, bool) {
 	return k, b.peerAnswered.Load()
 }
 
-// The live session stays: it is what carries if the path comes back on its own, and a fresh key would
-// only cost a round trip. What has to change is the ephemeral -- this rung asks for a NEW session, and
-// clientLoop keeps asking until it gets one.
+// The live session stays -- it is what carries if the path returns before a new key lands. What the
+// rung changes is the ephemeral, and clientLoop keeps asking until that is answered.
 func (b *UDP) rehandshake() bool {
 	if !b.cryptoOn || b.peer.Load() == nil {
 		return false
@@ -728,7 +734,7 @@ func (b *UDP) openWith(s Sealer, pkt []byte) (typ byte, session, seq uint64, pay
 func (b *UDP) handleCrypto(pkt []byte, addr *net.UDPAddr) {
 	if s := b.sealer(); s != nil {
 		if typ, session, seq, payload, oerr := b.openWith(s, pkt); oerr == nil && b.rp.ok(session, seq) {
-
+			settleHandshake(&b.ci)
 			b.provenFrom(addr.IP)
 
 			if b.pp == nil {
@@ -838,7 +844,8 @@ func (b *UDP) clientLoop() {
 	}
 	for {
 		rc.proactive(b.rotatePeerUDP, b.rotateSourceUDP, time.Now())
-		if handshakeOutstanding(b.cryptoOn, b.sealer(), b.ci.Load()) {
+		asking := b.cryptoOn && handshakeOutstanding(b.sealer(), &b.ci)
+		if asking {
 			b.sendInit()
 		}
 		if !b.cryptoOn || b.sealer() != nil {
@@ -862,7 +869,7 @@ func (b *UDP) clientLoop() {
 			}
 		}
 		wait := keepaliveInterval(b.ping, b.psk)
-		if handshakeOutstanding(b.cryptoOn, b.sealer(), b.ci.Load()) {
+		if asking {
 			wait = handshakeRetransmitWait()
 		}
 		select {
