@@ -814,9 +814,13 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurne
 	if !c.spendFreeRungs() {
 		return false
 	}
+	// Both rungs, not just the port: the walk has moved the tunnel somewhere nothing has judged yet,
+	// and the free steps are what it is owed before anyone is accused for the new place. The odometer
+	// is deliberately left alone -- it counts the laps this walk is in the middle of.
 	moved, burned := c.walk(rotDst, rotSrc)
 	if moved {
 		c.port.restart()
+		c.session.restart()
 	}
 	return burned
 }
