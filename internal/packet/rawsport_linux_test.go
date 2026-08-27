@@ -12,30 +12,57 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
-func TestRolledSportIsInTheEphemeralRangeAndSpreads(t *testing.T) {
+// The pool itself: what the draw is allowed to return, and what must never be in it.
+func TestTheSourcePortPoolIsWellFormed(t *testing.T) {
+	in := map[uint16]bool{}
+	for i, p := range rawSportPool {
+		if p == 0 {
+			t.Fatalf("entry %d is 0, which rawPorts reads as \"use the default\"", i)
+		}
+		if in[p] {
+			t.Errorf("port %d appears twice — a duplicate skews the draw toward it", p)
+		}
+		in[p] = true
+		if i > 0 && rawSportPool[i-1] >= p {
+			t.Errorf("entry %d (%d) is not after %d — an unsorted pool makes review by eye impossible",
+				i, p, rawSportPool[i-1])
+		}
+	}
+	if len(rawSportPool) < 100 {
+		t.Errorf("only %d ports: too few to vary between draws", len(rawSportPool))
+	}
+	// The ports a filter reaches for first, and the four that were MEASURED dead IR->DE (3 rounds
+	// each, 2026-08-28) while 400 sampled ephemeral ports were all alive. A draw that lands on one of
+	// these is a rung spent on nothing.
+	for _, bad := range []uint16{500, 1194, 1701, 1723, 4500, 51820, 9050, 9051, 9150,
+		23, 25, 465, 3389} {
+		if in[bad] {
+			t.Errorf("%d must not be drawn: it is a VPN/Tor port or one measured dead on the path", bad)
+		}
+	}
+}
+
+func TestTheDrawComesFromThePoolAndSpreads(t *testing.T) {
 	const draws = 4000
-	lowHalf, seen := 0, map[uint16]bool{}
+	in := map[uint16]bool{}
+	for _, p := range rawSportPool {
+		in[p] = true
+	}
+	seen := map[uint16]bool{}
 	for i := 0; i < draws; i++ {
 		p := rawRollSport()
 		if p == 0 {
 			t.Fatalf("draw %d failed", i)
 		}
-		if p < rawSportLo || p > rawSportHi {
-			t.Fatalf("port %d outside the ephemeral range %d..%d — a port outside it is not what an "+
-				"ordinary client's source port looks like, which is the whole point", p, rawSportLo, rawSportHi)
+		if !in[p] {
+			t.Fatalf("draw %d returned %d, which is not in the pool — the anti-leak rule and the "+
+				"measured block rates are both about the pool", i, p)
 		}
 		seen[p] = true
-		if int(p) < rawSportLo+(rawSportHi-rawSportLo)/2 {
-			lowHalf++
-		}
 	}
-
-	if lowHalf < draws*2/5 || lowHalf > draws*3/5 {
-		t.Errorf("%d/%d draws in the low half — the draw is skewed, so the port distribution is a tell",
-			lowHalf, draws)
-	}
-	if len(seen) < draws/2 {
-		t.Errorf("only %d distinct ports in %d draws — the rotation is not actually varying", len(seen), draws)
+	if len(seen) < len(rawSportPool)*9/10 {
+		t.Errorf("%d of %d pool ports seen in %d draws — the draw is not spreading over the pool",
+			len(seen), len(rawSportPool), draws)
 	}
 }
 
@@ -143,44 +170,42 @@ func TestDecapReadsTheSourcePortTheEncapWrote(t *testing.T) {
 	}
 }
 
-func TestTheAntiLeakRuleCoversTheWholeRotation(t *testing.T) {
-	rng := strconv.Itoa(rawSportLo) + ":" + strconv.Itoa(rawSportHi)
+// The rule has to cover EVERY port the draw can return, and the draw can return any of 200. So it
+// names the one end that never moves -- the server port -- and says nothing about the client's, which
+// is what makes it hold across a redraw instead of going stale on it.
+func TestTheAntiLeakRuleCoversEveryPortTheDrawCanReturn(t *testing.T) {
 	for _, isClient := range []bool{true, false} {
-		got := rawDropMatches(testDst, "tcp", 0, 0, isClient, false, true)
+		got := rawDropMatches(testDst, "tcp", 0, isClient, false)
 		if len(got) != 1 {
 			t.Fatalf("isClient=%v: %d rules, want exactly 1", isClient, len(got))
 		}
 		rule := strings.Join(got[0], " ")
 
 		wantFlag := "--dport"
-		if isClient {
+		if !isClient {
 			wantFlag = "--sport"
 		}
-		if !strings.Contains(rule, wantFlag+" "+rng) {
-			t.Errorf("isClient=%v: rule %q does not carry %s %s — a rolled port outside it leaves the "+
-				"kernel free to RST the peer", isClient, rule, wantFlag, rng)
+		if !strings.Contains(rule, wantFlag+" "+strconv.Itoa(rawServerPort)) {
+			t.Errorf("isClient=%v: rule %q does not scope by %s %d", isClient, rule, wantFlag, rawServerPort)
 		}
-		if strings.Contains(rule, strconv.Itoa(rawClientPort)) {
-			t.Errorf("isClient=%v: rule %q still pins the fixed client port", isClient, rule)
+		for _, flag := range []string{"--sport", "--dport"} {
+			if flag != wantFlag && strings.Contains(rule, flag) {
+				t.Errorf("isClient=%v: rule %q pins the CLIENT port; the next draw moves it and the "+
+					"kernel is then free to RST the peer", isClient, rule)
+			}
+		}
+		for _, p := range rawSportPool {
+			if strings.Contains(rule, " "+strconv.Itoa(int(p))+" ") && int(p) != rawServerPort {
+				t.Errorf("isClient=%v: rule %q names pool port %d, so it does not cover the others",
+					isClient, rule, p)
+			}
 		}
 	}
 
 	for _, isClient := range []bool{true, false} {
-		rule := strings.Join(rawDropMatches(testDst, "tcp", 0, 0, isClient, false, false)[0], " ")
-		if strings.Contains(rule, ":") {
-			t.Errorf("isClient=%v: fixed mode widened to a range: %q", isClient, rule)
-		}
-		if !strings.Contains(rule, strconv.Itoa(rawClientPort)) {
-			t.Errorf("isClient=%v: fixed mode lost the client port: %q", isClient, rule)
-		}
-	}
-
-	for _, random := range []bool{false, true} {
-		for _, isClient := range []bool{true, false} {
-			got := rawDropMatches(testDst, "udp", 0, 0, isClient, false, random)
-			if len(got) != 1 || strings.Contains(strings.Join(got[0], " "), "port ") {
-				t.Errorf("udp isClient=%v random=%v: %v", isClient, random, got)
-			}
+		got := rawDropMatches(testDst, "udp", 0, isClient, false)
+		if len(got) != 1 || strings.Contains(strings.Join(got[0], " "), "port ") {
+			t.Errorf("udp isClient=%v: %v", isClient, got)
 		}
 	}
 }

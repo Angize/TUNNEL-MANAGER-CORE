@@ -63,11 +63,33 @@ const (
 	rawClientPort = 51820
 	rawServerPort = 443
 
-	rawSportLo = 32768
-	rawSportHi = 60999
-
 	rawTCPWindow = 0xFAF0
 )
+
+// The ports the forged client source port is drawn from: service ports a filter cannot blanket-drop
+// without taking real traffic with it, which an ephemeral range costs it nothing to drop whole. Every
+// one was reachable IR->DE when it was added; 23, 25, 465 and 3389 were measured dead and are out, as
+// are the VPN (500/1194/1701/1723/4500/51820) and Tor (9050/9051/9150) ports a filter reaches for
+// first. Re-measure before trusting it: the filtering is time-varying.
+var rawSportPool = [...]uint16{
+	20, 21, 22, 53, 69, 80, 88, 110, 111, 113, 115, 123,
+	135, 137, 138, 139, 143, 161, 162, 179, 199, 209, 220, 389,
+	427, 443, 445, 464, 497, 514, 515, 520, 543, 544, 546, 547,
+	548, 587, 591, 593, 601, 623, 636, 646, 749, 830, 853, 873,
+	902, 992, 993, 995, 1080, 1099, 1110, 1214, 1400, 1433, 1434, 1521,
+	1645, 1646, 1755, 1812, 1813, 1830, 1883, 1935, 2000, 2001, 2049, 2052,
+	2053, 2082, 2083, 2086, 2087, 2095, 2096, 2181, 2375, 2376, 2379, 2380,
+	2525, 3000, 3050, 3074, 3100, 3128, 3283, 3306, 3307, 3478, 3479, 3480,
+	3690, 3724, 3725, 4000, 4222, 4369, 4380, 4443, 5000, 5004, 5005, 5060,
+	5061, 5062, 5140, 5222, 5223, 5228, 5229, 5269, 5353, 5432, 5433, 5601,
+	5671, 5672, 5800, 5900, 5901, 5938, 6112, 6113, 6379, 6443, 6588, 6881,
+	6969, 7000, 7001, 7199, 7946, 8000, 8008, 8009, 8010, 8053, 8080, 8081,
+	8086, 8088, 8090, 8100, 8123, 8181, 8200, 8285, 8291, 8301, 8302, 8443,
+	8444, 8472, 8500, 8554, 8600, 8880, 8883, 8888, 9000, 9001, 9042, 9080,
+	9090, 9091, 9092, 9093, 9100, 9101, 9102, 9160, 9200, 9300, 9418, 9443,
+	10000, 10050, 10051, 10248, 10249, 10250, 10255, 10256, 11211, 19302, 19303, 19305,
+	25565, 27017, 27018, 27019, 28015, 50000, 61613, 61616,
+}
 
 func rawPorts(isClient bool, srv, cli uint16) (sport, dport uint16) {
 	if srv == 0 {
@@ -83,15 +105,15 @@ func rawPorts(isClient bool, srv, cli uint16) (sport, dport uint16) {
 }
 
 func rawRollSport() uint16 {
-	const span = rawSportHi - rawSportLo + 1
-	limit := 65536 - (65536 % span)
+	n := len(rawSportPool)
+	limit := 65536 - (65536 % n)
 	for i := 0; i < 8; i++ {
 		var rb [2]byte
 		if _, err := io.ReadFull(rand.Reader, rb[:]); err != nil {
 			return 0
 		}
 		if v := int(binary.BigEndian.Uint16(rb[:])); v < limit {
-			return uint16(rawSportLo + v%span)
+			return rawSportPool[v%n]
 		}
 	}
 	return 0

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -125,8 +126,11 @@ func TestAPortRedrawIsOnlyNewsIfItWorked(t *testing.T) {
 				}
 			}
 			if len(tc.wantEv) > 0 {
-				if d := readEvents(t, path)[0].Detail; d != "sport:41337" {
-					t.Fatalf("the line does not name the port that worked: %q", d)
+				want := "sport:41337 tries:" + strconv.Itoa(tc.draws)
+				if d := readEvents(t, path)[0].Detail; d != want {
+					t.Fatalf("the line reads %q, want %q -- it must name the port that worked AND how "+
+						"many draws it cost, or the operator cannot tell a first-try recovery from a "+
+						"budget that was nearly spent", d, want)
 				}
 			}
 		})
@@ -151,8 +155,9 @@ func TestEachOutageGetsItsOwnPortLine(t *testing.T) {
 			ports = append(ports, e.Detail)
 		}
 	}
-	if len(ports) != 2 || ports[0] != "sport:40001" || ports[1] != "sport:40002" {
-		t.Fatalf("port lines = %v, want one per outage naming the port it recovered on", ports)
+	if len(ports) != 2 || ports[0] != "sport:40001 tries:1" || ports[1] != "sport:40002 tries:1" {
+		t.Fatalf("port lines = %v, want one per outage naming the port it recovered on and its own "+
+			"count -- a count that carried over would describe the previous outage", ports)
 	}
 }
 

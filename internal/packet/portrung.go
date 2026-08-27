@@ -2,8 +2,6 @@ package packet
 
 import "sync"
 
-const portTries = 2
-
 type portRung struct {
 	mu sync.Mutex
 

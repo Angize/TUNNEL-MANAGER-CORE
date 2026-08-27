@@ -80,7 +80,6 @@ type Raw struct {
 	rxSport atomic.Uint32
 
 	cliPort     atomic.Uint32
-	sportFix    uint16
 	sportRandom bool
 
 	leak     antiLeaker
@@ -557,7 +556,7 @@ func openAfpacket(prog []unix.SockFilter, what string) (int, error) {
 
 const rawSendMark = 0x746e6c01
 
-func rawDropMatches(peer net.IP, profile string, port, cliPort uint16, isClient, marked, sportRandom bool) [][]string {
+func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked bool) [][]string {
 	d := peer.String()
 	switch profile {
 	case "icmp":
@@ -571,31 +570,25 @@ func rawDropMatches(peer net.IP, profile string, port, cliPort uint16, isClient,
 		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "port-unreachable"}}
 	case "tcp":
 
-		psp, pdp := rawPorts(!isClient, port, cliPort)
-		sp, dp := strconv.Itoa(int(pdp)), strconv.Itoa(int(psp))
-
-		if sportRandom {
-			rng := strconv.Itoa(rawSportLo) + ":" + strconv.Itoa(rawSportHi)
-			if isClient {
-				sp = rng
-			} else {
-				dp = rng
-			}
+		// Scoped by the end that never moves: the server port. The client's own is drawn per flow, so
+		// naming it would need a rule per candidate and would go stale on the next draw.
+		srv, _ := rawPorts(false, port, 0)
+		side := "--dport"
+		if !isClient {
+			side = "--sport"
 		}
-		return [][]string{{"-d", d, "-p", "tcp",
-			"--sport", sp, "--dport", dp,
-			"--tcp-flags", "RST", "RST"}}
+		return [][]string{{"-d", d, "-p", "tcp", side, strconv.Itoa(int(srv)), "--tcp-flags", "RST", "RST"}}
 	}
 
 	return nil
 }
 
-func addRawDrop(peer net.IP, profile, tun string, port, cliPort uint16, isClient, marked, sportRandom bool) (func(), bool) {
+func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked bool) (func(), bool) {
 	type installed struct {
 		match, owner []string
 	}
 	var added []installed
-	want := rawDropMatches(peer, profile, port, cliPort, isClient, marked, sportRandom)
+	want := rawDropMatches(peer, profile, port, isClient, marked)
 	for _, m := range want {
 		args := append([]string{"-I", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
 		own, ok := runRule(args, ownerMatch(tun), "raw: anti-leak")
@@ -633,14 +626,12 @@ func setSendMark(conn *net.IPConn) error {
 func (r *Raw) cport() uint16 { return uint16(r.cliPort.Load()) }
 
 // setSportMode fixes or rolls the forged CLIENT source port. `fix` is the operator's number, 0 for the
-// profile default. It is kept on the struct as well as in cliPort: cliPort is live state that the
-// server LEARNS and a rolling client REDRAWS, while the anti-leak rule has to be built from the
-// configured value, which both ends are handed and which is true before the first frame arrives.
+// profile default. Either way it lands in cliPort, which is the only place the wire is built from: the
+// server LEARNS that number and a rolling client REDRAWS it.
 func (r *Raw) setSportMode(on bool, fix int) {
 	r.sportRandom = on && RawProfileHasPorts(r.profile)
 	if RawProfileHasPorts(r.profile) && fix > 0 && fix <= 65535 && !r.sportRandom {
-		r.sportFix = uint16(fix)
-		r.cliPort.Store(uint32(r.sportFix))
+		r.cliPort.Store(uint32(fix))
 	}
 	if r.sportRandom && r.isClient {
 		if p := rawRollSport(); p != 0 {
@@ -708,7 +699,7 @@ func (r *Raw) wireAntiLeak() {
 		}
 	}
 	r.leak.init(r.closeCh, func(peer net.IP) (func(), bool) {
-		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.sportFix, r.isClient, marked, r.sportRandom)
+		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked)
 	})
 	if p := r.peer.Load(); p != nil {
 		r.leak.scope(p.IP)

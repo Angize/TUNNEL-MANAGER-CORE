@@ -30,9 +30,9 @@ func TestAFixedSourcePortReachesTheWireThePathAndTheAntiLeakRule(t *testing.T) {
 				t.Errorf("raw/%s isClient=%v: cport()=%d, want the configured %d",
 					profile, isClient, got, custom)
 			}
-			if r.sportFix != custom {
-				t.Errorf("raw/%s isClient=%v: sportFix=%d, want %d — the anti-leak rule reads this one",
-					profile, isClient, r.sportFix, custom)
+			if int(r.cport()) != custom {
+				t.Errorf("raw/%s isClient=%v: cport=%d, want %d — this is what the wire is built from",
+					profile, isClient, r.cport(), custom)
 			}
 
 			// the wire
@@ -66,56 +66,55 @@ func TestAFixedSourcePortReachesTheWireThePathAndTheAntiLeakRule(t *testing.T) {
 		}
 	}
 
-	// the anti-leak rule
+	// The anti-leak rule is scoped by the SERVER port in every mode -- fixed, default or drawn -- so a
+	// configured source port changes the wire without needing a second rule shape.
 	for _, isClient := range []bool{true, false} {
-		got := rawDropMatches(testDst, "tcp", rawServerPort, custom, isClient, false, false)
+		got := rawDropMatches(testDst, "tcp", rawServerPort, isClient, false)
 		if len(got) != 1 {
 			t.Fatalf("isClient=%v: %d rules, want exactly 1", isClient, len(got))
 		}
 		rule := strings.Join(got[0], " ")
-		if !strings.Contains(rule, strconv.Itoa(custom)) {
-			t.Errorf("isClient=%v: the rule does not carry the configured source port %d: %s",
-				isClient, custom, rule)
+		if !strings.Contains(rule, strconv.Itoa(rawServerPort)) {
+			t.Errorf("isClient=%v: the rule lost the server port %d: %s", isClient, rawServerPort, rule)
 		}
-		if strings.Contains(rule, strconv.Itoa(rawClientPort)) {
-			t.Errorf("isClient=%v: the rule still matches the default client port %d, so it no longer "+
-				"describes the packet the kernel would send: %s", isClient, rawClientPort, rule)
+		if strings.Contains(rule, strconv.Itoa(custom)) {
+			t.Errorf("isClient=%v: the rule pins the client's port %d, which the draw moves: %s",
+				isClient, custom, rule)
 		}
 	}
 }
 
 // The number must not survive where it cannot be honoured: a profile that forges no L4 header at all, or a
-// tunnel whose source port rolls. In both cases sportFix has to stay 0 so every reader falls back to what
-// the wire really does.
+// tunnel whose source port rolls. In both cases cport has to stay 0 so rawPorts falls back to the
+// profile default, which is what the wire really carries.
 func TestAFixedSourcePortIsDroppedWhereItCannotHold(t *testing.T) {
 	for _, profile := range []string{"bare", "icmp", "gre", "esp", "ipip"} {
 		r := &Raw{profile: profile, isClient: true}
 		r.setSportMode(false, 4500)
-		if r.sportFix != 0 || r.cport() != 0 {
-			t.Errorf("raw/%s forges no ports: sportFix=%d cport=%d, want 0/0",
-				profile, r.sportFix, r.cport())
+		if r.cport() != 0 {
+			t.Errorf("raw/%s forges no ports: cport=%d, want 0", profile, r.cport())
 		}
 	}
 
 	r := &Raw{profile: "tcp", isClient: true}
 	r.setSportMode(true, 4500)
-	if r.sportFix != 0 {
-		t.Errorf("a rolling tunnel pinned sportFix=%d — the anti-leak rule would narrow to one port "+
-			"while the client redraws across the whole range", r.sportFix)
+	if r.cport() == 4500 {
+		t.Error("a rolling tunnel kept the operator's fixed number; the two are different answers to " +
+			"the same question and taking both is how the wire stops matching what is configured")
 	}
 	if !r.sportRandom {
 		t.Error("setSportMode(true, …) did not enable rolling")
 	}
-	if p := r.cport(); p < rawSportLo || p > rawSportHi {
-		t.Errorf("rolled port %d is outside %d:%d", p, rawSportLo, rawSportHi)
+	inPool := false
+	for _, p := range rawSportPool {
+		inPool = inPool || p == r.cport()
+	}
+	if !inPool {
+		t.Errorf("rolled port %d is not in the pool the draw is allowed to return", r.cport())
 	}
 
-	rng := strconv.Itoa(rawSportLo) + ":" + strconv.Itoa(rawSportHi)
 	for _, isClient := range []bool{true, false} {
-		rule := strings.Join(rawDropMatches(testDst, "tcp", rawServerPort, 4500, isClient, false, true)[0], " ")
-		if !strings.Contains(rule, rng) {
-			t.Errorf("isClient=%v: rolling mode lost the range %s: %s", isClient, rng, rule)
-		}
+		rule := strings.Join(rawDropMatches(testDst, "tcp", rawServerPort, isClient, false)[0], " ")
 		if strings.Contains(rule, "4500") {
 			t.Errorf("isClient=%v: rolling mode pinned 4500: %s", isClient, rule)
 		}
@@ -128,9 +127,9 @@ func TestNoFixedSourcePortKeepsTheDefault(t *testing.T) {
 		for _, isClient := range []bool{true, false} {
 			r := &Raw{profile: profile, isClient: isClient, port: rawServerPort}
 			r.setSportMode(false, 0)
-			if r.sportFix != 0 || r.cport() != 0 {
-				t.Errorf("raw/%s isClient=%v: sportFix=%d cport=%d, want 0/0 so rawPorts uses the default",
-					profile, isClient, r.sportFix, r.cport())
+			if r.cport() != 0 {
+				t.Errorf("raw/%s isClient=%v: cport=%d, want 0 so rawPorts uses the default",
+					profile, isClient, r.cport())
 			}
 			s, d := rawPorts(isClient, r.port, r.cport())
 			wantS, wantD := rawServerPort, rawClientPort
@@ -143,9 +142,9 @@ func TestNoFixedSourcePortKeepsTheDefault(t *testing.T) {
 		}
 	}
 	for _, isClient := range []bool{true, false} {
-		rule := strings.Join(rawDropMatches(testDst, "tcp", rawServerPort, 0, isClient, false, false)[0], " ")
-		if !strings.Contains(rule, strconv.Itoa(rawClientPort)) {
-			t.Errorf("isClient=%v: the default rule lost the client port %d: %s",
+		rule := strings.Join(rawDropMatches(testDst, "tcp", rawServerPort, isClient, false)[0], " ")
+		if strings.Contains(rule, strconv.Itoa(rawClientPort)) {
+			t.Errorf("isClient=%v: the default rule pins the client port %d, which the draw moves: %s",
 				isClient, rawClientPort, rule)
 		}
 	}
