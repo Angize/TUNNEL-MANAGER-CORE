@@ -104,18 +104,18 @@ func TestAWalkRefillsBothFreeRungs(t *testing.T) {
 	}
 }
 
-// The operator's number, honoured by the rung itself and not merely stored. A tunnel with one
-// destination and one source has nothing after these draws and a re-handshake, so this is the whole
-// recovery budget for the commonest shape on the fleet -- which is why it is a knob at all.
+// The operator's number for THIS tunnel, honoured by the rung itself and not merely stored. A tunnel
+// with one destination and one source has nothing after these draws and a re-handshake, so this is its
+// whole recovery budget -- and how long a path is worth trying belongs to the path, not to the fleet.
 func TestTheDrawBudgetIsTheOperatorsNumber(t *testing.T) {
 	was := portTries
 	t.Cleanup(func() { portTries = was })
 
 	for _, want := range []int{1, 5, 12} {
 		portTries = was
-		ApplyTuning(TuningInput{PortTries: int64(want)})
+		SetPortTries(want)
 		if portTries != want {
-			t.Fatalf("ApplyTuning(%d) left portTries=%d", want, portTries)
+			t.Fatalf("SetPortTries(%d) left portTries=%d", want, portTries)
 		}
 		src := NewPeerPool([]string{"94.182.131.47"}, 0)
 		rc, rolls, drops := ladderOn(t, nil, src)
@@ -128,6 +128,21 @@ func TestTheDrawBudgetIsTheOperatorsNumber(t *testing.T) {
 		}
 		if *drops != 1 {
 			t.Errorf("port_tries=%d: %d re-handshakes, want 1 — the handshake rung is not the knob", want, *drops)
+		}
+	}
+}
+
+// 0 means "leave it alone", and the ceiling is the panel's.
+func TestTheDrawBudgetIsClamped(t *testing.T) {
+	was := portTries
+	t.Cleanup(func() { portTries = was })
+	for _, tc := range []struct {
+		in, want int
+	}{{0, was}, {-3, was}, {1, 1}, {50, 50}, {999, 50}} {
+		portTries = was
+		SetPortTries(tc.in)
+		if portTries != tc.want {
+			t.Errorf("SetPortTries(%d) -> %d, want %d", tc.in, portTries, tc.want)
 		}
 	}
 }
