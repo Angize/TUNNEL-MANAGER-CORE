@@ -14,9 +14,9 @@ import (
 
 const rungPSK = "rehandshake-psk-0123456789abcdef"
 
-func rungSealer(t *testing.T) Sealer {
+func rungSealer(t *testing.T, isClient bool) Sealer {
 	t.Helper()
-	s, err := crypto.NewSealer(crypto.CipherChaCha, rungPSK, true)
+	s, err := crypto.NewSealer(crypto.CipherChaCha, rungPSK, isClient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func rungSealer(t *testing.T) Sealer {
 type rungRig struct {
 	st      *coreStatus
 	drop    func() bool
-	asking  func() bool
+	asked   func() bool
 	carries func() bool
 	wake    chan struct{}
 }
@@ -38,12 +38,12 @@ func rawRung(t *testing.T) rungRig {
 	r := &Raw{isClient: true, profile: "udp", psk: rungPSK, cipher: crypto.CipherChaCha,
 		ping: pingEvery, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
 	r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
-	r.session.Store(&sealerBox{s: rungSealer(t)})
+	r.session.Store(&sealerBox{s: rungSealer(t, true)})
 	r.link = &capturingLink{r: r}
 	r.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
 	t.Cleanup(func() { close(r.closeCh) })
 	return rungRig{st: r.st, drop: r.rehandshake, wake: r.wake,
-		asking:  func() bool { return handshakeOutstanding(true, r.sealer(), r.ci.Load()) },
+		asked:   func() bool { return r.ci.Load() != nil },
 		carries: func() bool { return r.sealer() != nil }}
 }
 
@@ -52,11 +52,11 @@ func udpRung(t *testing.T) rungRig {
 	b := &UDP{isClient: true, cryptoOn: true, psk: rungPSK, cipher: crypto.CipherChaCha,
 		ping: pingEvery, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
 	b.peer.Store(&net.UDPAddr{IP: net.IPv4(10, 30, 0, 2), Port: 443})
-	b.session.Store(&sealerBox{s: rungSealer(t)})
+	b.session.Store(&sealerBox{s: rungSealer(t, true)})
 	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
 	t.Cleanup(func() { close(b.closeCh) })
 	return rungRig{st: b.st, drop: b.rehandshake, wake: b.wake,
-		asking:  func() bool { return handshakeOutstanding(b.cryptoOn, b.sealer(), b.ci.Load()) },
+		asked:   func() bool { return b.ci.Load() != nil },
 		carries: func() bool { return b.sealer() != nil }}
 }
 
@@ -66,11 +66,11 @@ func fluxRung(t *testing.T) rungRig {
 		ping: pingEvery, carrier: "udp", sendFd: -1, pktFd: -1,
 		closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
 	f.peer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
-	f.session.Store(&sealerBox{s: rungSealer(t)})
+	f.session.Store(&sealerBox{s: rungSealer(t, true)})
 	f.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
 	t.Cleanup(func() { close(f.closeCh) })
 	return rungRig{st: f.st, drop: f.rehandshake, wake: f.wake,
-		asking:  func() bool { return handshakeOutstanding(f.cryptoOn, f.sealer(), f.ci.Load()) },
+		asked:   func() bool { return f.ci.Load() != nil },
 		carries: func() bool { return f.sealer() != nil }}
 }
 
@@ -100,9 +100,9 @@ func TestTheSessionRungLeavesAHandshakeOutstanding(t *testing.T) {
 			liveVerdict(t, rc.verdict, rig.st.pathEpoch(), poolCmd{Cmd: cmdFail})
 			rc.poll(func(bool) {}, func(bool) {}, nil, rig.st.pathEpoch)
 
-			if !rig.asking() {
-				t.Fatal("the session rung fired and left nothing outstanding — clientLoop goes back " +
-					"to the keepalive branch, so this outage gets one Init and then silence")
+			if !rig.asked() {
+				t.Fatal("the session rung fired and staged no ephemeral — nothing is outstanding, so " +
+					"clientLoop goes back to the keepalive branch and this outage gets one Init")
 			}
 			if !rig.carries() {
 				t.Fatal("the rung threw the live session away — nothing crosses from here until the " +
@@ -118,25 +118,33 @@ func TestTheSessionRungLeavesAHandshakeOutstanding(t *testing.T) {
 	}
 }
 
-// Counts the handshakes on the wire. An Init body is at least crypto.HandshakeCoreSize; a sealed
-// keepalive is far shorter, and neither is padded with obfs off.
+// Splits the wire by shape. An Init body is at least crypto.HandshakeCoreSize; a sealed keepalive is
+// far shorter, and with obfs off neither is padded, so the two never overlap.
 type countingLink struct {
-	mu  sync.Mutex
-	big int
+	mu             sync.Mutex
+	shakes, alives int
 }
 
 func (c *countingLink) send(pkt []byte, _ *net.IPAddr) {
+	c.mu.Lock()
 	if len(pkt) >= rawHeaderLen("udp")+crypto.HandshakeCoreSize {
-		c.mu.Lock()
-		c.big++
-		c.mu.Unlock()
+		c.shakes++
+	} else {
+		c.alives++
 	}
+	c.mu.Unlock()
 }
 
-func (c *countingLink) count() int {
+func (c *countingLink) count() (shakes, alives int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.big
+	return c.shakes, c.alives
+}
+
+func (c *countingLink) reset() {
+	c.mu.Lock()
+	c.shakes, c.alives = 0, 0
+	c.mu.Unlock()
 }
 
 func (c *countingLink) recvLoop() error                     { return nil }
@@ -156,7 +164,7 @@ func loopRaw(t *testing.T, sportRandom bool) (*Raw, *countingLink) {
 		ping: pingEvery, sportRandom: sportRandom,
 		closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
 	r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
-	r.session.Store(&sealerBox{s: rungSealer(t)})
+	r.session.Store(&sealerBox{s: rungSealer(t, true)})
 	r.link = link
 	r.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
 	r.st.trackPath(r.livePath, r.closeCh)
@@ -185,10 +193,63 @@ func TestTheLoopKeepsAskingAfterARung(t *testing.T) {
 			liveVerdict(t, r.st.verdictPath(), r.st.pathEpoch(), poolCmd{Cmd: cmdFail})
 			time.Sleep(3500 * time.Millisecond)
 
-			if n := link.count(); n < 2 {
+			if n, _ := link.count(); n < 2 {
 				t.Fatalf("the client put %d handshake(s) on the wire in the 3.5s after the rung, want "+
 					"at least 2 — one and then silence is exactly the outage that never ends", n)
 			}
 		})
+	}
+}
+
+// The other half, and the one the first version of this fix got wrong: it has to STOP.
+//
+// The ask exists because the ladder doubted the session. A frame that session opens is the peer
+// answering on it, so the doubt is settled -- otherwise a path that carries frames but eats
+// handshakes leaves the client asking at the retransmit interval for the rest of the tunnel's life:
+// a fixed cadence on a green tunnel, and a keepalive pinned at one second next to it.
+func TestTheLoopStopsAskingOnceTheLiveSessionAnswers(t *testing.T) {
+	r, link := loopRaw(t, true)
+	peer := rungSealer(t, false)
+	addr := r.peer.Load()
+
+	go r.clientLoop()
+	time.Sleep(300 * time.Millisecond)
+
+	liveVerdict(t, r.st.verdictPath(), r.st.pathEpoch(), poolCmd{Cmd: cmdFail})
+	time.Sleep(1500 * time.Millisecond)
+	if n, _ := link.count(); n < 1 {
+		t.Fatal("setup: the rung never asked, so there is nothing here to stop")
+	}
+
+	// The peer answers on the session the client already holds -- and never on the handshake.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tk := time.NewTicker(200 * time.Millisecond)
+		defer tk.Stop()
+		for i := 0; i < 25; i++ {
+			<-tk.C
+			body, err := sealBody(peer, false, typePong, nil, padMaxFor(typePong))
+			if err != nil {
+				return
+			}
+			r.handleCrypto(body, addr, 443)
+		}
+	}()
+	time.Sleep(600 * time.Millisecond) // one retransmit interval for the loop to notice
+	link.reset()
+	<-done
+
+	shakes, alives := link.count()
+	if r.sealer() == nil {
+		t.Fatal("setup: the session went away — this is about the one that stayed")
+	}
+	if shakes > 0 {
+		t.Errorf("the peer is answering on the live session and the client asked %d more time(s) for "+
+			"a new one — that is a fixed-cadence handshake beacon on a tunnel that is carrying", shakes)
+	}
+	if alives > 2 {
+		t.Errorf("%d keepalives in ~4.5s: the loop is still on the retransmit interval instead of "+
+			"going back to the jittered keepalive", alives)
 	}
 }
