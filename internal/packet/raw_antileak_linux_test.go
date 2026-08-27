@@ -130,7 +130,7 @@ func TestRawAntiLeakNeverMatchesOurOwnFrames(t *testing.T) {
 		for _, isClient := range []bool{true, false} {
 			for _, marked := range []bool{true, false} {
 				ours := ourFrame(profile, isClient, marked)
-				for _, m := range rawDropMatches(leakPeer, profile, 0, 0, isClient, marked, false) {
+				for _, m := range rawDropMatches(leakPeer, profile, 0, isClient, marked) {
 					if ruleMatches(t, m, ours) {
 						t.Fatalf("raw/%s (isClient=%v marked=%v): the anti-leak rule %v matches %s — this silently black-holes the tunnel",
 							profile, isClient, marked, m, ours.what)
@@ -151,7 +151,7 @@ func TestRawAntiLeakSuppressesEveryMeasuredKernelAnswer(t *testing.T) {
 		for _, isClient := range roles {
 			for _, ans := range kernelAnswers(profile, isClient) {
 				covered := false
-				for _, m := range rawDropMatches(leakPeer, profile, 0, 0, isClient, true, false) {
+				for _, m := range rawDropMatches(leakPeer, profile, 0, isClient, true) {
 					if ruleMatches(t, m, ans) {
 						covered = true
 					}
@@ -166,15 +166,15 @@ func TestRawAntiLeakSuppressesEveryMeasuredKernelAnswer(t *testing.T) {
 }
 
 func TestRawIcmpRuleIsSkippedWithoutTheMark(t *testing.T) {
-	if got := rawDropMatches(leakPeer, "icmp", 0, 0, false, false, false); len(got) != 0 {
+	if got := rawDropMatches(leakPeer, "icmp", 0, false, false); len(got) != 0 {
 		t.Fatalf("an icmp server with no SO_MARK still installed %v — that drops its own downstream frames", got)
 	}
-	if got := rawDropMatches(leakPeer, "icmp", 0, 0, false, true, false); len(got) != 1 {
+	if got := rawDropMatches(leakPeer, "icmp", 0, false, true); len(got) != 1 {
 		t.Fatalf("an icmp server WITH the mark should install exactly one rule, got %v", got)
 	}
 
 	for _, marked := range []bool{true, false} {
-		if got := rawDropMatches(leakPeer, "icmp", 0, 0, true, marked, false); len(got) != 0 {
+		if got := rawDropMatches(leakPeer, "icmp", 0, true, marked); len(got) != 0 {
 			t.Fatalf("an icmp CLIENT (marked=%v) installed %v; nothing answers its echo replies", marked, got)
 		}
 	}
@@ -204,7 +204,7 @@ func TestRawPortedProfilesReverseTheFlow(t *testing.T) {
 func TestRawAntiLeakLeavesQuietProfilesAlone(t *testing.T) {
 	for _, profile := range []string{"bare", "ipip", "gre", "esp"} {
 		for _, isClient := range []bool{true, false} {
-			if got := rawDropMatches(leakPeer, profile, 0, 0, isClient, true, false); len(got) != 0 {
+			if got := rawDropMatches(leakPeer, profile, 0, isClient, true); len(got) != 0 {
 				t.Fatalf("raw/%s installed %v; no kernel handler answers that protocol", profile, got)
 			}
 		}

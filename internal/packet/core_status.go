@@ -9,14 +9,14 @@ import (
 )
 
 type coreStatus struct {
-	mu          sync.Mutex
-	writeMu     sync.Mutex
-	path        string
-	active      string
-	events      []coreEvent
-	evSeq       int64
-	wasDown     bool
-	rollPending bool
+	mu        sync.Mutex
+	writeMu   sync.Mutex
+	path      string
+	active    string
+	events    []coreEvent
+	evSeq     int64
+	wasDown   bool
+	rollTries int
 
 	// What the pools publish through this one file. Registered once at startup; read on every write.
 	health []func() []healthStatus
@@ -165,7 +165,7 @@ func (s *coreStatus) portRedrawn() {
 		return
 	}
 	s.mu.Lock()
-	s.rollPending = true
+	s.rollTries++
 	s.mu.Unlock()
 }
 
@@ -178,17 +178,18 @@ func (s *coreStatus) carrying() {
 		return
 	}
 	s.mu.Lock()
-	rolled := s.rollPending
-	s.rollPending = false
+	tries := s.rollTries
+	s.rollTries = 0
 	s.mu.Unlock()
-	if !rolled {
+	if tries == 0 {
 		return
 	}
 	// Sampled, not read: a draw changes the port without publishing anything, so the last snapshot can
 	// still be holding the port the tunnel LEFT.
 	s.tracker.sample()
 	if _, path, _ := s.tracker.snapshot(); path.Sport != 0 {
-		s.event("down", "port-roll", "sport:"+strconv.Itoa(int(path.Sport)))
+		s.event("down", "port-roll",
+			"sport:"+strconv.Itoa(int(path.Sport))+" tries:"+strconv.Itoa(tries))
 	}
 }
 
@@ -199,7 +200,7 @@ func (s *coreStatus) portClaimLost() {
 		return
 	}
 	s.mu.Lock()
-	s.rollPending = false
+	s.rollTries = 0
 	s.mu.Unlock()
 }
 

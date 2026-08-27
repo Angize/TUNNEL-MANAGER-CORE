@@ -71,8 +71,11 @@ func TestTheLineNamesThePortItRecoveredOn(t *testing.T) {
 	if len(ev) != 1 || ev[0].Code != "port-roll" {
 		t.Fatalf("after recovery: %+v, want exactly one port-roll", ev)
 	}
-	if want := "sport:" + strconv.Itoa(int(came)); ev[0].Detail != want {
-		t.Fatalf("the line says %q, want %q -- the operator needs the port that WORKS", ev[0].Detail, want)
+	// Two draws were spent, so the line has to say two: "it came back" alone does not tell the
+	// operator whether the budget was nearly gone.
+	if want := "sport:" + strconv.Itoa(int(came)) + " tries:2"; ev[0].Detail != want {
+		t.Fatalf("the line says %q, want %q -- the operator needs the port that WORKS and what it cost",
+			ev[0].Detail, want)
 	}
 	if came == 40000 {
 		t.Fatal("setup: the draws never moved the port, so this proves nothing")
