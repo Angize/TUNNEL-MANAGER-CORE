@@ -175,10 +175,10 @@ func TestAnUnusableReviveWaitKeepsTheDefault(t *testing.T) {
 	}
 }
 
-// Three ladder shapes exist and no carrier has both rungs unconditionally: raw with a random source
-// port installs the draw AND the handshake, tcp/ws installs only the draw, and udp/flux/raw-with-a-fixed
-// -port installs only the handshake. The revive sits under spendFreeRungs and cannot see which it has,
-// so prove it on each rather than on the one shape the tests above happen to use.
+// Three ladder shapes exist, and no carrier installs both rungs unconditionally: raw with a random
+// source port gets the draw and the handshake, tcp/ws gets only the draw, and udp, flux and raw on a
+// fixed port get only the handshake. The revive sits under spendFreeRungs and cannot see which rungs it
+// has, so prove it on each rather than on the one shape the tests above happen to use.
 func TestTheReviveWorksOnEveryLadderShape(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
