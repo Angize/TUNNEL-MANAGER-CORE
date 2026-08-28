@@ -651,6 +651,7 @@ type rotationController struct {
 	accused  atomic.Pointer[pairNow]
 	port     portRung
 	session  sessionRung
+	revive   reviveClock
 	rotate   time.Duration
 	rotateAt time.Time
 }
@@ -828,6 +829,16 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurne
 	if moved {
 		c.port.restart()
 		c.session.restart()
+		c.revive.restart()
+		return burned
+	}
+	// Nowhere to walk, so this climb is over and nothing above it would ever begin another. Hand the
+	// rungs back on a growing wait: soon enough that a path needing one more draw is not stranded until
+	// the process restarts, slowly enough that a path which is simply gone is not churned.
+	if c.revive.due(time.Now()) {
+		c.port.restart()
+		c.session.restart()
+		c.st.event("down", "ladder-revive", "")
 	}
 	return burned
 }
@@ -842,6 +853,10 @@ func (c *rotationController) restart() {
 
 func (c *rotationController) success() {
 	c.accused.Store(nil)
+	// Only a MEASURED recovery forgives the backoff. restart() is also the "start this climb over"
+	// path, and forgiving it there would let a pool that keeps re-arriving hold the wait at its
+	// shortest for a whole outage.
+	c.revive.restart()
 	c.restart()
 }
 
