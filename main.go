@@ -38,6 +38,17 @@ func openTUN(open tunOpener, name string, mtu int, addr string, gso bool, n int)
 	return plain, false, nil
 }
 
+// The config's tuning object as the packet layer takes it. Its own function so a knob added to one
+// side and forgotten on the other is a test failure rather than a silent default.
+func tuningFrom(t *TuningCfg) packet.TuningInput {
+	return packet.TuningInput{
+		SuspectBackoff:  t.SuspectBackoff,
+		DeadRetestSecs:  t.DeadRetestSecs,
+		MinLivenessSecs: t.MinLivenessSecs,
+		LadderRevive:    t.LadderRevive,
+	}
+}
+
 func main() {
 	cfgPath := flag.String("config", "", "path to core JSON config")
 	showVer := flag.Bool("version", false, "print version and exit")
@@ -63,10 +74,7 @@ func main() {
 	}
 
 	if t := cfg.Tuning; t != nil {
-		packet.ApplyTuning(packet.TuningInput{
-			SuspectBackoff: t.SuspectBackoff, DeadRetestSecs: t.DeadRetestSecs,
-			MinLivenessSecs: t.MinLivenessSecs,
-		})
+		packet.ApplyTuning(tuningFrom(t))
 	}
 
 	packet.SetSockBuf(cfg.SockBuf)

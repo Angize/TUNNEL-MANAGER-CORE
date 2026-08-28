@@ -31,10 +31,11 @@ func noRot(bool) {}
 // ONE, which main.go builds from bind_ip whenever src_ips is empty. That pool has nowhere to go, so
 // it declines every rotation and the tunnel never leaves the place it started.
 //
-// Nothing may hand the free rungs back there. A ladder that does redraws the forged source port every
-// few seconds for the life of the process, and a raw/tcp client that opens a brand new forged flow
-// that often is not a tunnel a stateful path will carry -- so the probe keeps failing, which is what
-// makes it redraw again.
+// Nothing may hand the free rungs back there ON THE LADDER'S OWN ACCOUNT. A ladder that does redraws
+// the forged source port every few seconds for the life of the process, and a raw/tcp client that opens
+// a brand new forged flow that often is not a tunnel a stateful path will carry -- so the probe keeps
+// failing, which is what makes it redraw again. The one way back is the revive clock, tested in
+// a_the_ladder_comes_back_test.go; these 60 verdicts all land inside its first wait.
 func TestAPoolOfOneNeverRefillsTheLadder(t *testing.T) {
 	src := NewPeerPool([]string{"94.182.131.47"}, 0)
 	rc, rolls, drops := ladderOn(t, nil, src)

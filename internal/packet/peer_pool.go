@@ -651,6 +651,7 @@ type rotationController struct {
 	accused  atomic.Pointer[pairNow]
 	port     portRung
 	session  sessionRung
+	revive   reviveClock
 	rotate   time.Duration
 	rotateAt time.Time
 }
@@ -822,26 +823,43 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurne
 		return false
 	}
 	moved, burned := c.walk(rotDst, rotSrc)
-	// Both rungs, and only on a walk that ARRIVED somewhere: a new cell is a new lottery. A rotation
-	// the pool declined leaves the tunnel where it was, and refilling there is a ladder that never
-	// ends. Not the odometer -- it counts the laps this walk is inside.
+	// A walk that ARRIVED somewhere earns both rungs back for free: a new cell is a new lottery. One the
+	// pool declined leaves the tunnel where it was, and refilling for FREE there is a ladder that never
+	// ends -- that case belongs to the revive clock below, which pays for the rungs in time instead. Not
+	// the odometer: it counts the laps this walk is inside.
 	if moved {
-		c.port.restart()
-		c.session.restart()
+		c.refill()
+		c.revive.restart()
+		return burned
+	}
+	// Nowhere to walk, so this climb is over and nothing above it would ever begin another. Hand the
+	// rungs back on a growing wait: soon enough that a path needing one more draw is not stranded until
+	// the process restarts, slowly enough that a path which is simply gone is not churned.
+	if c.revive.try(time.Now()) {
+		c.refill()
+		c.st.event("down", "ladder-revive", "")
 	}
 	return burned
 }
 
-// The ladder starts over: full rungs, fresh odometer. Not a success -- nothing is cleared and nobody
-// is exonerated.
-func (c *rotationController) restart() {
-	c.reset()
+// Every rung back at once. The ladder is all-or-nothing -- spendFreeRungs only reports a dead end once
+// both are gone -- so there is no caller that wants one without the other.
+func (c *rotationController) refill() {
 	c.port.restart()
 	c.session.restart()
 }
 
+// The ladder starts over: full rungs, fresh odometer. NOT the revive backoff: this is also the
+// "climb again for a newcomer" path, and forgiving the wait there would hold it at its shortest for a
+// whole outage.
+func (c *rotationController) restart() {
+	c.reset()
+	c.refill()
+}
+
 func (c *rotationController) success() {
 	c.accused.Store(nil)
+	c.revive.restart() // a measured recovery forgives the backoff; restart() alone does not
 	c.restart()
 }
 
