@@ -175,34 +175,51 @@ func TestAnUnusableReviveWaitKeepsTheDefault(t *testing.T) {
 	}
 }
 
-// The ws/tcp shape, which is not the shape every test above uses: tcp.go installs the port rung and
-// never a session one, so that ladder is portTries draws and then straight to the walk. The dead end
-// arrives sooner there, and with no re-handshake to spend, the revive clock is the only thing that ever
-// hands those draws back.
-func TestTheReviveWorksOnACarrierWithNoSessionRung(t *testing.T) {
-	src := NewPeerPool([]string{"94.182.131.47"}, 0)
-	rc := newRotationController(nil, src)
-	rolls := new(int)
-	rc.port.setRoll(func() bool { *rolls++; return true }) // and deliberately no setDrop
-	rc.attachStatus(newCoreStatus(filepath.Join(t.TempDir(), "core.status"), ""))
-	rot := func(bool) { src.nextEndpoint(false) }
+// Three ladder shapes exist and no carrier has both rungs unconditionally: raw with a random source
+// port installs the draw AND the handshake, tcp/ws installs only the draw, and udp/flux/raw-with-a-fixed
+// -port installs only the handshake. The revive sits under spendFreeRungs and cannot see which it has,
+// so prove it on each rather than on the one shape the tests above happen to use.
+func TestTheReviveWorksOnEveryLadderShape(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		roll, drop bool
+	}{
+		{"raw with a random source port: draw and handshake", true, true},
+		{"tcp/ws: draws only", true, false},
+		{"udp, flux, raw on a fixed port: handshake only", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := NewPeerPool([]string{"94.182.131.47"}, 0)
+			rc := newRotationController(nil, src)
+			rolls, drops := new(int), new(int)
+			budget := 0
+			if tc.roll {
+				rc.port.setRoll(func() bool { *rolls++; return true })
+				budget += portTries
+			}
+			if tc.drop {
+				rc.session.setDrop(func() bool { *drops++; return true })
+				budget++
+			}
+			rc.attachStatus(newCoreStatus(filepath.Join(t.TempDir(), "core.status"), ""))
+			rot := func(bool) { src.nextEndpoint(false) }
 
-	for i := 0; i <= portTries; i++ { // every draw, then the verdict that finds nothing left
-		failLivePair(t, rc, noRot, rot)
-	}
-	if *rolls != portTries {
-		t.Fatalf("setup: %d draws, want %d", *rolls, portTries)
-	}
+			toDeadEnd(t, rc, rolls, drops, rot)
+			if spent := *rolls + *drops; spent != budget {
+				t.Fatalf("setup: the ladder spent %d steps, want %d", spent, budget)
+			}
 
-	elapse(rc)
-	failLivePair(t, rc, noRot, rot) // the wait is up: hands the draws back, spends none
-	if *rolls != portTries {
-		t.Errorf("the reviving verdict spent a draw: %d, want %d", *rolls, portTries)
-	}
-	for i := 0; i < portTries; i++ {
-		failLivePair(t, rc, noRot, rot)
-	}
-	if *rolls != 2*portTries {
-		t.Errorf("a ws ladder must draw again after its wait: %d, want %d", *rolls, 2*portTries)
+			elapse(rc)
+			failLivePair(t, rc, noRot, rot) // the wait is up: hands the rungs back, spends none
+			if spent := *rolls + *drops; spent != budget {
+				t.Errorf("the reviving verdict spent a rung: %d steps, want %d", spent, budget)
+			}
+
+			toDeadEnd(t, rc, rolls, drops, rot)
+			if spent := *rolls + *drops; spent != 2*budget {
+				t.Errorf("after its wait the ladder must climb again in full: %d steps, want %d",
+					spent, 2*budget)
+			}
+		})
 	}
 }
