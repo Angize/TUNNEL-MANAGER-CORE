@@ -18,14 +18,12 @@ type coreStatus struct {
 	wasDown   bool
 	rollTries int
 
-	// What the pools publish through this one file. Registered once at startup; read on every write.
 	health []func() []healthStatus
 	pair   func() (low, high, lowKind, highKind string)
 
 	tracker pathTracker
 }
 
-// A pool joins the tunnel's one status file instead of writing a second one.
 func (s *coreStatus) addHealth(rows func() []healthStatus) {
 	if s == nil {
 		return
@@ -36,8 +34,6 @@ func (s *coreStatus) addHealth(rows func() []healthStatus) {
 	s.write()
 }
 
-// The live pair, in machine form. The `active` string beside it is a display label and has always been
-// parsed by eye; a verdict may not rest on that.
 func (s *coreStatus) setPair(live func() (low, high, lowKind, highKind string)) {
 	if s == nil {
 		return
@@ -56,8 +52,6 @@ func (s *coreStatus) trackPath(live func() (pathKey, bool), closeCh <-chan struc
 	go samplePathLoop(&s.tracker, s.write, closeCh)
 }
 
-// The carrier has established a session. Called BEFORE anything publishes the new pair, so the first
-// status file carrying it also carries the epoch that goes with it -- see pathTracker.freshen.
 func (s *coreStatus) newSession() {
 	if s == nil {
 		return
@@ -75,8 +69,6 @@ func (s *coreStatus) pathEpoch() int64 {
 
 func (s *coreStatus) verdictPath() string { return s.sidecar(".verdict") }
 
-// The operator's mailbox: pins and per-entry retests. Separate from the verdict's, because two writers
-// on one path means os.replace can drop whichever arrived first.
 func (s *coreStatus) pinPath() string { return s.sidecar(".pin") }
 
 func (s *coreStatus) echCmdPath() string { return s.sidecar(".echcmd") }
@@ -147,8 +139,6 @@ func (s *coreStatus) down(code, detail string) {
 	s.event("down", code, detail)
 }
 
-// One rotation the operator did not ask for. A proactive step is a scheduled move; a failover follows
-// a fault, so it also arms the "up" that will report the recovery.
 func (s *coreStatus) rotated(axis, detail string, proactive bool) {
 	if proactive {
 		s.event("down", axis+"-rotate", detail)
@@ -157,9 +147,6 @@ func (s *coreStatus) rotated(axis, detail string, proactive bool) {
 	s.down(axis+"-rotate", detail)
 }
 
-// A source-port redraw is only worth a line if it WORKED, and then only for the port that worked. The
-// rung draws one on every verdict for as long as the outage lasts, so the draw is only remembered
-// here; carrying() and portClaimLost() are the two ways the claim ends.
 func (s *coreStatus) portRedrawn() {
 	if s == nil {
 		return
@@ -169,10 +156,6 @@ func (s *coreStatus) portRedrawn() {
 	s.mu.Unlock()
 }
 
-// The node's probe found traffic crossing. The ONLY place a source-port redraw may be credited for a
-// recovery: the draw sends a handshake of its own, and an answered handshake is exactly what a
-// filtered path still gives while carrying nothing -- so the carrier's own reconnect announced every
-// draw as a success while the ladder climbed straight past it, twice per outage.
 func (s *coreStatus) carrying() {
 	if s == nil {
 		return
@@ -184,8 +167,7 @@ func (s *coreStatus) carrying() {
 	if tries == 0 {
 		return
 	}
-	// Sampled, not read: a draw changes the port without publishing anything, so the last snapshot can
-	// still be holding the port the tunnel LEFT.
+
 	s.tracker.sample()
 	if _, path, _ := s.tracker.snapshot(); path.Sport != 0 {
 		s.event("down", "port-roll",
@@ -193,8 +175,6 @@ func (s *coreStatus) carrying() {
 	}
 }
 
-// The ladder climbed past the source port. Whatever brings the tunnel back now is the handshake's
-// doing or the walk's, and crediting the port for it would be a guess.
 func (s *coreStatus) portClaimLost() {
 	if s == nil {
 		return
@@ -204,7 +184,6 @@ func (s *coreStatus) portClaimLost() {
 	s.mu.Unlock()
 }
 
-// The carrier has a session again. A fact about the CARRIER, not about the path -- see carrying().
 func (s *coreStatus) reconnected(detail string) {
 	if s == nil {
 		return
@@ -243,7 +222,6 @@ func (s *coreStatus) write() {
 	livePair := s.pair
 	s.mu.Unlock()
 
-	// Outside s.mu: these reach into the pools' own locks, and the pools call back in here to flush.
 	health := []healthStatus{}
 	for _, rows := range sources {
 		health = append(health, rows()...)

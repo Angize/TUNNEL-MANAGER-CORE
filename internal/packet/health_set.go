@@ -75,8 +75,6 @@ func (h healthSet) clearAll() bool {
 	return true
 }
 
-// End ONE entry's wait. The operator asked for this key, not for the whole pool: a single button that
-// zeroed every wait made the other entries' backoff a lie.
 func (h healthSet) retestNow(key string) bool {
 	r := h.recs[key]
 	if r == nil {

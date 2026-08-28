@@ -2,12 +2,8 @@ package packet
 
 import "sync"
 
-// How many source ports this tunnel's ladder may draw before it moves on. Each draw costs one probe
-// verdict, and a tunnel with a single destination and a single source has nothing after them.
 var portTries = 2
 
-// SetPortTries takes the operator's number for THIS tunnel. 0 keeps the default; the range matches the
-// panel's.
 func SetPortTries(n int) {
 	if n <= 0 {
 		return

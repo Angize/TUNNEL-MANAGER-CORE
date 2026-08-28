@@ -72,8 +72,6 @@ type wsPool struct {
 	flush func()
 }
 
-// Where this pool's events go, and how it asks the tunnel's one status file to be republished. Same
-// wiring as PeerPool: the carrier owns the file, the pool only owns the endpoints.
 func (p *wsPool) attach(ev func(kind, code, detail string), flush func()) {
 	p.mu.Lock()
 	p.ev, p.flush = ev, flush
@@ -137,9 +135,6 @@ func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 		return p.resolvePinIPLocked(), p.resolvePinSNILocked(), true
 	}
 
-	// A committed combination is stable, not immortal: if it has since been condemned, the commitment
-	// is stale and the scan below has to run. Without this the walk burns an entry and the very next
-	// dial goes straight back to it.
 	if p.chosen != "" {
 		ip := p.ips[p.i%len(p.ips)]
 		sni := p.snis[p.j%len(p.snis)]
@@ -279,8 +274,6 @@ func (p *wsPool) tierLocked(kind, key string) (tier int, next int64) {
 	return p.healthMap(kind).tier(key)
 }
 
-// Put the cursor on a combination. Compares the RAW cursor, not currentLocked(), which would resolve
-// and step.
 func (p *wsPool) keepCursorOn(ip, sni string) {
 	if p == nil || ip == "" {
 		return
@@ -306,9 +299,6 @@ func (p *wsPool) keepCursorOn(ip, sni string) {
 	}
 }
 
-// The EDGE is the digit that varies every step: an edge is cheap to lose and cheap to get back, and
-// it is the thing the filter actually blocks. The domain turns only once every edge under it has been
-// tried, because losing a domain loses it on every edge at once.
 func (p *wsPool) stepLocked() {
 	p.chosen = ""
 	p.i++
@@ -339,8 +329,6 @@ func (p *wsPool) advance() bool {
 	return ip != beforeIP || sni.host != beforeSNI.host
 }
 
-// Reports where the cursor landed, and "" when there was nowhere to go: one entry on that axis, so the
-// step is a no-op and there is nothing to announce.
 func (p *wsPool) advanceIP() (now string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -363,8 +351,6 @@ func (p *wsPool) advanceSNI() (now string) {
 	return p.snis[p.j].host
 }
 
-// A fresh domain deserves a fresh row of edges: the burns under the previous one said nothing about
-// this one.
 func (p *wsPool) restoreIPs() {
 	p.mu.Lock()
 	cleared := len(p.ipHealth.recs) > 0
@@ -390,7 +376,6 @@ func (p *wsPool) activeSNIIdx() int {
 
 func (p *wsPool) burnCount() uint64 { return p.burns.Load() }
 
-// The digit a fail condemns every round.
 type wsEdges struct{ p *wsPool }
 
 func (a wsEdges) activeIdx() int     { return a.p.activeIPIdx() }
@@ -398,7 +383,6 @@ func (a wsEdges) eligibleCount() int { return a.p.eligibleIPs() }
 func (a wsEdges) burnCount() uint64  { return a.p.burnCount() }
 func (a wsEdges) restoreAll()        { a.p.restoreIPs() }
 
-// The digit that turns once a whole row of edges has been tried.
 type wsSNIs struct{ p *wsPool }
 
 func (a wsSNIs) activeIdx() int { return a.p.activeSNIIdx() }
@@ -423,11 +407,10 @@ func (p *wsPool) ipsCount() int {
 
 func (p *wsPool) markSuspect(kind, key, reason string) {
 	if key == "" {
-		return // nothing was measured, so there is nobody to condemn
+		return
 	}
 	p.mu.Lock()
-	// A pinned entry holds its health record in pinTook; burning it here would be undone the moment the
-	// pin is restored. The pin's own counter releases it instead. Same rule as PeerPool.nextEndpoint.
+
 	if (kind == "ip" && p.pinIP == key) || (kind == "sni" && p.pinSNI == key) {
 		p.mu.Unlock()
 		return
@@ -451,8 +434,6 @@ func (p *wsPool) pinnedOnLocked(kind string) string {
 	return p.pinIP
 }
 
-// Hand an axis' pinned entry its health record back and forget the stash. The pin field itself belongs
-// to the caller: selectEntry replaces it, the two drops empty it.
 func (p *wsPool) unstashLocked(kind string) {
 	live := p.pinnedOnLocked(kind)
 	if live == "" {
@@ -465,8 +446,6 @@ func (p *wsPool) unstashLocked(kind string) {
 	delete(p.pinTook, k)
 }
 
-// Both picks end at once. Only the tun probe gets to do this: it measures the PAIR, so both halves have
-// been judged together.
 func (p *wsPool) dropPin(reason string, matched func() bool) bool {
 	p.mu.Lock()
 	hit := matched()
@@ -484,7 +463,6 @@ func (p *wsPool) dropPin(reason string, matched func() bool) bool {
 	return hit
 }
 
-// ONE axis' pick ends. `key` empty means whatever is pinned there.
 func (p *wsPool) dropPinAxis(kind, key, reason string) bool {
 	p.mu.Lock()
 	live := p.pinnedOnLocked(kind)
@@ -505,9 +483,6 @@ func (p *wsPool) dropPinAxis(kind, key, reason string) bool {
 	return hit
 }
 
-// A refused dial says the EDGE did not open. TLS never started, so the domain was never sent and
-// nothing was learned about it -- ending a domain pin here would throw away the operator's expensive
-// pick over a cheap one. The domain is judged by the tun probe, on the lap.
 func (p *wsPool) pinCannotLand(ip string) bool {
 	return p.dropPinAxis("ip", ip, "cannot-land")
 }
@@ -539,7 +514,6 @@ func (p *wsPool) reassessRotation() {
 	}
 }
 
-// One entry's wait ends. Nothing is dialled: it re-enters the rotation and the tun probe judges it.
 func (p *wsPool) retestNow(kind, key string) bool {
 	p.mu.Lock()
 	ok := p.healthMap(kind).retestNow(key)
@@ -576,8 +550,7 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 		p.pinTook = map[string]*healthRec{}
 	}
 	p.chosen = ""
-	// Re-pinning what is already pinned must not stash again: the first pin cleared that record, so a
-	// second stash saves nothing over the burn it is holding and the burn is gone for good.
+
 	if p.pinnedOnLocked(kind) != key {
 		p.unstashLocked(kind)
 		p.pinTook[kind+":"+key] = p.healthMap(kind).rec(key)
@@ -632,7 +605,6 @@ func (p *wsPool) clearBurn(kind, key string) bool {
 	return had
 }
 
-// The keys an ECH push actually changed. Reading the file is the carrier's job; this only applies it.
 func (p *wsPool) applyECH(snis map[string]string) []string {
 	var changed []string
 	for host, b64 := range snis {
@@ -656,7 +628,6 @@ type healthStatus struct {
 	Pin        bool   `json:"pin,omitempty"`
 }
 
-// Every entry on both axes, not only the burned ones: the panel builds its lists from this.
 func (p *wsPool) healthRows() []healthStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -678,7 +649,6 @@ func (p *wsPool) healthRows() []healthStatus {
 	return rows
 }
 
-// The cursor follows the pin, so current() keeps answering with it once the pin is gone.
 func (p *wsPool) stepToCurrentLocked() {
 	ip, sni, ok := p.currentLocked()
 	if !ok {
@@ -696,7 +666,6 @@ func (p *wsPool) stepToCurrentLocked() {
 	}
 }
 
-// The pair a verdict speaks about on an edge pool: the SNI is the digit a fail condemns.
 type edgePair struct{ p *wsPool }
 
 func (e edgePair) kinds() (string, string) { return "ip", "sni" }

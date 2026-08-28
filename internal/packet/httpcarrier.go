@@ -645,8 +645,6 @@ func (g *grpcDeframingReader) Close() error {
 	return nil
 }
 
-// One gRPC call: a request whose body the client keeps writing and a response it keeps reading. The
-// index is in the URL so the edge sees distinct calls rather than n identical ones.
 func (b *TCP) openGrpcStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration, dialAddr string) (*http.Response, *io.PipeWriter, error) {
 	pr, pw := io.Pipe()
 	req, err := http.NewRequestWithContext(ctx, "POST", base+"?s="+sid+"&d="+strconv.Itoa(i), pr)
@@ -677,9 +675,6 @@ func (b *TCP) openGrpcStream(hc *http.Client, ctx context.Context, base, sid str
 	return resp, pw, nil
 }
 
-// One gRPC stream, reopened for as long as the carrier lives. Its two halves are tied together: when
-// the reader ends it closes the request body, so the writer's next record fails and goes back on the
-// queue for another stream rather than into a call nobody is answering.
 func (b *TCP) runGrpcStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration, dialAddr string, tx *stripeTx, q *reseq, fail func(), first *http.Response, firstPW *io.PipeWriter) {
 	resp, pw := first, firstPW
 	for {
@@ -763,10 +758,6 @@ func (b *TCP) openDownStream(hc *http.Client, ctx context.Context, base, sid str
 	return resp, nil
 }
 
-// One download stream, reopened for as long as the carrier lives. Neither failing to open nor dying
-// once open ends the tunnel: the server puts back whatever a dead stream did not deliver, and the
-// carrier runs on whichever streams are up. A path that drops a burst of SYNs will not bring them all
-// up at once, and on a censored one they come and go for the life of the tunnel.
 func (b *TCP) runDownStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration, q *reseq, fail func()) {
 	for {
 		if resp, err := b.openDownStream(hc, ctx, base, sid, i, setHdr, budget); err == nil {
@@ -859,8 +850,6 @@ func (s *httpcSession) close(b *TCP, sid string) {
 	})
 }
 
-// The conn for a carrier that writes straight into one response. The parallel download does not use
-// it: there its writes go to the session queue, and the deadline is set per stream in writeRecord.
 func newHTTPCServerConn(w http.ResponseWriter, rd io.Reader, wr io.Writer, flush func(), remote string, closeFn func()) *httpcConn {
 	return &httpcConn{
 		r: rd, w: wr, flush: flush,
@@ -871,8 +860,6 @@ func newHTTPCServerConn(w http.ResponseWriter, rd io.Reader, wr io.Writer, flush
 	}
 }
 
-// One attached gRPC stream of a session. Same shape as the http carrier's download half, in both
-// directions at once: records in, records out, and the session is what ties the streams together.
 func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request, sid string) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -966,8 +953,6 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fl.Flush()
 
-	// The carrier belongs to the session, not to this request: the first GET starts it and every GET
-	// after it is one more stream the same queue can write down.
 	s.start.Do(func() {
 		go b.handleServerConn(&httpcConn{
 			r:       s.upR,
