@@ -20,12 +20,19 @@ func armedFor(rc *rotationController) time.Duration {
 	return time.Until(rc.revive.at).Round(time.Second)
 }
 
-// Drive verdicts until every rung is spent and the walk has found nowhere to go.
-func toDeadEnd(t *testing.T, rc *rotationController, rot func(bool)) {
+// Drive verdicts until every rung is spent and the walk has found nowhere to go. The dead end is the
+// first verdict that moves NEITHER counter; a fixed count would instead assume the ladder started full,
+// which is only true of the first climb.
+func toDeadEnd(t *testing.T, rc *rotationController, rolls, drops *int, rot func(bool)) {
 	t.Helper()
-	for i := 0; i <= portTries+1; i++ {
+	for i := 0; i < 4*portTries+16; i++ {
+		r, d := *rolls, *drops
 		failLivePair(t, rc, noRot, rot)
+		if *rolls == r && *drops == d {
+			return
+		}
 	}
+	t.Fatalf("the ladder never dead-ended: %d draws, %d handshakes", *rolls, *drops)
 }
 
 // The ladder a stuck raw client actually has: no destination pool, one source, nowhere to walk. Every
@@ -38,7 +45,7 @@ func TestAnExhaustedLadderIsHandedBackAfterItsWait(t *testing.T) {
 	rc, rolls, drops := ladderOn(t, nil, src)
 	rot := func(bool) { src.nextEndpoint(false) }
 
-	toDeadEnd(t, rc, rot)
+	toDeadEnd(t, rc, rolls, drops, rot)
 	spentRolls, spentDrops := *rolls, *drops
 	if spentRolls != portTries || spentDrops != 1 {
 		t.Fatalf("setup: want the whole ladder spent (%d draws, 1 handshake), got %d and %d",
@@ -52,9 +59,7 @@ func TestAnExhaustedLadderIsHandedBackAfterItsWait(t *testing.T) {
 			"first rung tears the carrier down, so spending one here manufactures the next outage",
 			*rolls, spentRolls)
 	}
-	for i := 0; i <= portTries+1; i++ {
-		failLivePair(t, rc, noRot, rot)
-	}
+	toDeadEnd(t, rc, rolls, drops, rot)
 	if *rolls != 2*portTries || *drops != 2 {
 		t.Errorf("after the wait the ladder must climb again in full: %d draws / %d handshakes, "+
 			"want %d / 2", *rolls, *drops, 2*portTries)
@@ -69,7 +74,7 @@ func TestTheLadderStaysDeadUntilItsWaitIsUp(t *testing.T) {
 	rc, rolls, drops := ladderOn(t, nil, src)
 	rot := func(bool) { src.nextEndpoint(false) }
 
-	toDeadEnd(t, rc, rot)
+	toDeadEnd(t, rc, rolls, drops, rot)
 	for i := 0; i < 60; i++ { // a minute of the node's probe, inside the first wait
 		failLivePair(t, rc, noRot, rot)
 	}
@@ -88,12 +93,12 @@ func TestEachDeadEndWaitsLongerThanTheLast(t *testing.T) {
 	t.Cleanup(func() { ladderRevive = restore })
 
 	src := NewPeerPool([]string{"94.182.131.47"}, 0)
-	rc, _, _ := ladderOn(t, nil, src)
+	rc, rolls, drops := ladderOn(t, nil, src)
 	rot := func(bool) { src.nextEndpoint(false) }
 
 	var got []time.Duration
 	for round := 0; round < 4; round++ {
-		toDeadEnd(t, rc, rot)
+		toDeadEnd(t, rc, rolls, drops, rot)
 		got = append(got, armedFor(rc))
 		elapse(rc)
 		failLivePair(t, rc, noRot, rot)
@@ -115,10 +120,10 @@ func TestCarryingForgivesTheBackoff(t *testing.T) {
 	t.Cleanup(func() { ladderRevive = restore })
 
 	src := NewPeerPool([]string{"94.182.131.47"}, 0)
-	rc, _, _ := ladderOn(t, nil, src)
+	rc, rolls, drops := ladderOn(t, nil, src)
 	rot := func(bool) { src.nextEndpoint(false) }
 
-	toDeadEnd(t, rc, rot)
+	toDeadEnd(t, rc, rolls, drops, rot)
 	elapse(rc)
 	failLivePair(t, rc, noRot, rot)
 	if w := armedFor(rc); w != 5*time.Second {
@@ -129,7 +134,7 @@ func TestCarryingForgivesTheBackoff(t *testing.T) {
 	liveVerdict(t, rc.verdict, rc.st.pathEpoch(), poolCmd{Cmd: cmdOK, Low: low, High: high})
 	rc.poll(noRot, rot, nil, rc.st.pathEpoch)
 
-	toDeadEnd(t, rc, rot)
+	toDeadEnd(t, rc, rolls, drops, rot)
 	if w := armedFor(rc); w != 2*time.Second {
 		t.Errorf("after traffic crossed, the next dead end waits %v -- want the FIRST step (2s), "+
 			"because a recovered tunnel that fails again is a new outage", w)
@@ -147,8 +152,8 @@ func TestTheReviveWaitIsTheOperatorsNumber(t *testing.T) {
 		t.Fatalf("ApplyTuning did not take the wait: %v", ladderRevive)
 	}
 	src := NewPeerPool([]string{"94.182.131.47"}, 0)
-	rc, _, _ := ladderOn(t, nil, src)
-	toDeadEnd(t, rc, func(bool) { src.nextEndpoint(false) })
+	rc, rolls, drops := ladderOn(t, nil, src)
+	toDeadEnd(t, rc, rolls, drops, func(bool) { src.nextEndpoint(false) })
 	if w := armedFor(rc); w != 7*time.Second {
 		t.Errorf("the ladder waits %v, want the operator's 7s", w)
 	}
