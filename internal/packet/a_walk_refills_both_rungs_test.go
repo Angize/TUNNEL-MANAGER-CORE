@@ -34,8 +34,8 @@ func noRot(bool) {}
 // Nothing may hand the free rungs back there ON THE LADDER'S OWN ACCOUNT. A ladder that does redraws
 // the forged source port every few seconds for the life of the process, and a raw/tcp client that opens
 // a brand new forged flow that often is not a tunnel a stateful path will carry -- so the probe keeps
-// failing, which is what makes it redraw again. The one way back is the revive clock, which is paced in
-// minutes and tested in a_the_ladder_comes_back_test.go; this loop runs inside its first wait.
+// failing, which is what makes it redraw again. The one way back is the revive clock, tested in
+// a_the_ladder_comes_back_test.go; these 60 verdicts all land inside its first wait.
 func TestAPoolOfOneNeverRefillsTheLadder(t *testing.T) {
 	src := NewPeerPool([]string{"94.182.131.47"}, 0)
 	rc, rolls, drops := ladderOn(t, nil, src)
