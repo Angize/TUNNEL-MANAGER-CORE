@@ -1,6 +1,7 @@
 package packet
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -171,5 +172,37 @@ func TestAnUnusableReviveWaitKeepsTheDefault(t *testing.T) {
 		if len(ladderRevive) != 3 || ladderRevive[0] != 45 {
 			t.Errorf("ApplyTuning(%v) replaced the default with %v", in, ladderRevive)
 		}
+	}
+}
+
+// The ws/tcp shape, which is not the shape every test above uses: tcp.go installs the port rung and
+// never a session one, so that ladder is portTries draws and then straight to the walk. The dead end
+// arrives sooner there, and with no re-handshake to spend, the revive clock is the only thing that ever
+// hands those draws back.
+func TestTheReviveWorksOnACarrierWithNoSessionRung(t *testing.T) {
+	src := NewPeerPool([]string{"94.182.131.47"}, 0)
+	rc := newRotationController(nil, src)
+	rolls := new(int)
+	rc.port.setRoll(func() bool { *rolls++; return true }) // and deliberately no setDrop
+	rc.attachStatus(newCoreStatus(filepath.Join(t.TempDir(), "core.status"), ""))
+	rot := func(bool) { src.nextEndpoint(false) }
+
+	for i := 0; i <= portTries; i++ { // every draw, then the verdict that finds nothing left
+		failLivePair(t, rc, noRot, rot)
+	}
+	if *rolls != portTries {
+		t.Fatalf("setup: %d draws, want %d", *rolls, portTries)
+	}
+
+	elapse(rc)
+	failLivePair(t, rc, noRot, rot) // the wait is up: hands the draws back, spends none
+	if *rolls != portTries {
+		t.Errorf("the reviving verdict spent a draw: %d, want %d", *rolls, portTries)
+	}
+	for i := 0; i < portTries; i++ {
+		failLivePair(t, rc, noRot, rot)
+	}
+	if *rolls != 2*portTries {
+		t.Errorf("a ws ladder must draw again after its wait: %d, want %d", *rolls, 2*portTries)
 	}
 }
