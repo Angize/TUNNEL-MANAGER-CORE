@@ -823,9 +823,10 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurne
 		return false
 	}
 	moved, burned := c.walk(rotDst, rotSrc)
-	// Both rungs, and only on a walk that ARRIVED somewhere: a new cell is a new lottery. A rotation
-	// the pool declined leaves the tunnel where it was, and refilling there is a ladder that never
-	// ends. Not the odometer -- it counts the laps this walk is inside.
+	// A walk that ARRIVED somewhere earns both rungs back for free: a new cell is a new lottery. One the
+	// pool declined leaves the tunnel where it was, and refilling for FREE there is a ladder that never
+	// ends -- that case belongs to the revive clock below, which pays for the rungs in time instead. Not
+	// the odometer: it counts the laps this walk is inside.
 	if moved {
 		c.refill()
 		c.revive.restart()
@@ -848,9 +849,9 @@ func (c *rotationController) refill() {
 	c.session.restart()
 }
 
-// The ladder starts over: full rungs, fresh odometer. NOT the revive backoff, which only a measured
-// recovery forgives; this is also the "climb again for a newcomer" path, and forgiving it here would
-// hold the wait at its shortest for a whole outage.
+// The ladder starts over: full rungs, fresh odometer. NOT the revive backoff: this is also the
+// "climb again for a newcomer" path, and forgiving the wait there would hold it at its shortest for a
+// whole outage.
 func (c *rotationController) restart() {
 	c.reset()
 	c.refill()
@@ -858,7 +859,7 @@ func (c *rotationController) restart() {
 
 func (c *rotationController) success() {
 	c.accused.Store(nil)
-	c.revive.restart() // the one thing that forgives the backoff -- see restart()
+	c.revive.restart() // a measured recovery forgives the backoff; restart() alone does not
 	c.restart()
 }
 

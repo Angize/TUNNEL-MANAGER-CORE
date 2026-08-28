@@ -6,9 +6,9 @@ import (
 )
 
 // When the ladder has spent every rung and the walk found nowhere to go, the climb is over: nothing
-// redraws the source port and nothing hands out another handshake. There is no way back from that --
-// only a probe that finds traffic crossing refills the rungs, and on a path whose one fault is the port
-// it last drew, no traffic ever crosses to say so.
+// redraws the source port and nothing hands out another handshake. What refills the rungs is arriving
+// somewhere new or a probe that finds traffic crossing -- and a tunnel with no second endpoint arrives
+// nowhere, so on a path whose one fault is the port it last drew, neither ever happens.
 //
 // This is the way back. Each dead end arms the next attempt one step further into ladderRevive, so a
 // tunnel that needed one more draw gets it in seconds while one that is truly gone backs off instead of
