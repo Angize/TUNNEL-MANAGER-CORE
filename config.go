@@ -344,8 +344,7 @@ func (c *Config) validate() error {
 			if c.RawSport < 1 || c.RawSport > 65535 {
 				return errors.New("raw_sport must be in 1..65535 (0 = the profile default 51820)")
 			}
-			// A fixed number and a rolling one are two different answers to the same question. Taking
-			// either silently would leave the operator reading a port the wire does not carry.
+
 			if c.RawSportRandom {
 				return errors.New("raw_sport fixes the forged client source port and raw_sport_random rolls it" +
 					" -- set one or the other, not both")

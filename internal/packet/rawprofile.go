@@ -66,11 +66,6 @@ const (
 	rawTCPWindow = 0xFAF0
 )
 
-// The ports the forged client source port is drawn from: service ports a filter cannot blanket-drop
-// without taking real traffic with it, which an ephemeral range costs it nothing to drop whole. Every
-// one was reachable IR->DE when it was added; 23, 25, 465 and 3389 were measured dead and are out, as
-// are the VPN (500/1194/1701/1723/4500/51820) and Tor (9050/9051/9150) ports a filter reaches for
-// first. Re-measure before trusting it: the filtering is time-varying.
 var rawSportPool = [...]uint16{
 	20, 21, 22, 53, 69, 80, 88, 110, 111, 113, 115, 123,
 	135, 137, 138, 139, 143, 161, 162, 179, 199, 209, 220, 389,

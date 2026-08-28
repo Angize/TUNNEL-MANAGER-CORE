@@ -7,8 +7,6 @@ var (
 
 	deadRetest int64 = 21600
 
-	// How long the ladder waits before it may climb again after a dead end. Same shape as
-	// suspectBackoff: each entry is one more dead end, and the last one repeats.
 	ladderRevive = []int64{45, 180, 600}
 )
 
@@ -38,8 +36,6 @@ func ApplyTuning(t TuningInput) {
 	}
 }
 
-// The seconds of a step list, keeping only the usable ones. Empty means the operator sent nothing this
-// side of sane, and the caller keeps the compiled-in default.
 func tsteps(in []int64) []int64 {
 	out := make([]int64, 0, len(in))
 	for _, v := range in {

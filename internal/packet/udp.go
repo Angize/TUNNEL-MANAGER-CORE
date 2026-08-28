@@ -105,14 +105,10 @@ const handshakeRetransmit = time.Second
 
 func handshakeRetransmitWait() time.Duration { return jitterFrac(handshakeRetransmit) }
 
-// Whether the client owes the peer a handshake: no session to carry with, or an ephemeral it staged
-// that nobody has answered. clientLoop retransmits for as long as this holds.
 func handshakeOutstanding(s Sealer, ci *atomic.Pointer[crypto.Ephemeral]) bool {
 	return s == nil || ci.Load() != nil
 }
 
-// ...and any frame the live session opens settles it: the ask exists because the ladder doubted that
-// session, and the peer has just answered on it. Left standing, the ask outlives the outage.
 func settleHandshake(ci *atomic.Pointer[crypto.Ephemeral]) {
 	if ci.Load() != nil {
 		ci.Store(nil)
@@ -150,7 +146,7 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 	b.st.setActive("udp · " + ua.String())
 	b.st.rotated("peer", "ip:"+addr, proactive)
 	if proactive {
-		return // a scheduled move keeps its session: there is nothing for the loop to redo
+		return
 	}
 	wakeLoop(b.wake)
 }
@@ -322,8 +318,6 @@ func (b *UDP) livePath() (pathKey, bool) {
 	return k, b.peerAnswered.Load()
 }
 
-// The live session stays -- it is what carries if the path returns before a new key lands. What the
-// rung changes is the ephemeral, and clientLoop keeps asking until that is answered.
 func (b *UDP) rehandshake() bool {
 	if !b.cryptoOn || b.peer.Load() == nil {
 		return false

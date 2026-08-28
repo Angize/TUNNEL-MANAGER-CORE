@@ -262,9 +262,6 @@ type TCP struct {
 	wsPath string
 	wsTLS  bool
 
-	// The single-edge ECH key. Two goroutines touch it: the dial loop reads it on every attempt, and
-	// the pin-poll loop rewrites it when the panel pushes a fresh one. Both sides check-then-act, so a
-	// lock and not an atomic.
 	echMu sync.Mutex
 	wsECH []byte
 
@@ -325,7 +322,6 @@ type TCP struct {
 	livePair atomic.Pointer[pairNow]
 	tryPair  atomic.Pointer[pairNow]
 
-	// Whether this outage has had its dial yet. One accusation per outage: see noteAttempt.
 	attempted atomic.Bool
 	closed    atomic.Bool
 	closeCh   chan struct{}
@@ -346,13 +342,6 @@ func (b *TCP) SetPeerPool(pp *PeerPool) {
 	}
 }
 
-// What a verdict may be keyed on, in order: the pair traffic is actually on; else the one this outage
-// opened on; else -- only before this carrier has ever dialled -- the cursor, which is what the first
-// dial will use.
-//
-// The middle rung is the point. Without it the answer falls straight to the cursor, and the cursor is
-// where we would go NEXT: an outage measured while a dial to some other endpoint was failing gets
-// charged to whatever the cursor happens to rest on, which no frame was ever sent to.
 func (b *TCP) livePairNow() (low, high string) {
 	if lp := b.livePair.Load(); lp != nil && b.cur.Load() != nil {
 		return lp.low, lp.high
@@ -366,16 +355,6 @@ func (b *TCP) livePairNow() (low, high string) {
 	return b.rc.pair.live()
 }
 
-// The endpoint this carrier is about to dial, recorded ONCE per outage. A dial can take seconds and
-// the node reads the status file every second throughout, so the name has to be published -- but it
-// must not change while the ladder is spending its rungs on it.
-//
-// Every other way the published pair moves goes through a reconnect, and that bumps the path epoch, so
-// the node's own staleness guard drops a verdict that spanned the move. This one does not: a retry
-// that resolves to a different endpoint renames the accused mid-outage with the epoch unchanged, and
-// the burn lands on whoever happens to be named when the rungs run out. Measured in production: three
-// verdicts for one outage, the first two naming the edge that refused and the third naming the healthy
-// one the retry had moved to -- which is the one that burned.
 func (b *TCP) noteAttempt(low, high string) {
 	if !b.attempted.CompareAndSwap(false, true) {
 		return
@@ -451,7 +430,6 @@ func (b *TCP) ech() []byte {
 	return b.wsECH
 }
 
-// Reports whether it changed anything, so the two callers can decide what to say about it.
 func (b *TCP) setECH(ech []byte) bool {
 	b.echMu.Lock()
 	defer b.echMu.Unlock()
@@ -490,9 +468,7 @@ func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
 	if !moved {
 		return addr, false
 	}
-	// If this source cannot be bound the next dial finds out, and rejectCandidate burns it and steps
-	// back with a burn event of its own. Testing it here as well would mean two bind probes for one
-	// move, and two places to keep in step.
+
 	log.Printf("core/tcp: rotated source to %s", addr)
 	b.st.rotated("src", "ip:"+addr, proactive)
 	return addr, true
@@ -1178,9 +1154,6 @@ func classifyErr(s string) string {
 	}
 }
 
-// A live ECH push: the panel writes the fresh keys, the carrier applies them without a rebuild. Reading
-// the file is the carrier's job on both shapes; a pool applies them across its list, a single edge only
-// to the one host it dials.
 func (b *TCP) readECHCmd() []string {
 	if !b.ws || b.st == nil {
 		return nil
@@ -1241,10 +1214,6 @@ func (b *TCP) dialLoop() {
 			log.Printf("core/ws: live ECH key updated for %s (single edge, no rebuild)", b.wsHost)
 		}
 
-		// A refused dial does NOT step the pool. The tun probe is the one judge, and it can only key a
-		// verdict on an endpoint the carrier stayed long enough to name; stepping here would make that
-		// name change under it every retry. The reconnect backoff is what paces this, exactly as it
-		// paces a direct carrier whose destination will not answer.
 		conn, label, combo, err := b.dialCarrier()
 		if err != nil {
 			backoff = nextReconnectDelay(backoff)
@@ -1273,14 +1242,10 @@ func (b *TCP) dialLoop() {
 		b.curConn.Store(&cc)
 		b.st.newSession()
 		if b.pool != nil {
-			// The whole path before anything publishes it. setActive flushes the status file, and a
-			// flush taken with the SNI still missing is a path of its own: two epochs per reconnect,
-			// the first of them a lie, and every verdict keyed on it dropped as stale.
+
 			sni := strings.TrimPrefix(combo, label+activeSep)
 			b.liveSNI.Store(&sni)
-			// low is the EDGE and high the domain, the order edgePair.kinds() reports. Storing them the
-			// other way round publishes a domain in the ip slot, and the walk then burns it into the
-			// edge's health map.
+
 			b.livePair.Store(&pairNow{low: label, high: sni})
 			b.st.setActive(combo)
 
@@ -1296,8 +1261,6 @@ func (b *TCP) dialLoop() {
 			}
 		}
 
-		// Name the whole pair on an edge pool: the operator reading the ring wants to know which
-		// edge AND which domain came back, not just the address.
 		back := label
 		if combo != "" {
 			back = combo
@@ -1333,9 +1296,7 @@ func (b *TCP) dialLoop() {
 					rearm(b.rotate)
 					return
 				}
-				// Say so. The panel could only ever infer this from `active` changing between polls --
-				// fifteen seconds apart, silent when the rotation does not land, and muted for a while
-				// after an operator pin. The carrier knows the moment it happens and which digit moved.
+
 				nowIP, nowSNI, _ := b.pool.current()
 				if nowIP != prevIP {
 					b.st.rotated("edge", "ip:"+nowIP, true)
@@ -1366,9 +1327,6 @@ func (b *TCP) dialLoop() {
 					return
 				}
 
-				// Through the same two rotators the ladder walks with. Repeating their side effects
-				// here is how the destination walk came to announce nothing: one of the two callers
-				// carried the announcement and the other did not.
 				dstMoved := false
 				lap := true
 				if b.pp != nil {
@@ -1398,10 +1356,7 @@ func (b *TCP) dialLoop() {
 		}
 		b.curConn.CompareAndSwap(&cc, nil)
 		b.liveSNI.Store(nil)
-		// The outage opens on the pair it interrupted, and the first dial after this replaces it with
-		// whatever the carrier actually reaches for. Nothing in between: with no accused at all the
-		// answer falls through to the cursor, and the teardown publishes the file (the down event
-		// below) while it is standing there.
+
 		b.tryPair.Store(b.livePair.Swap(nil))
 		b.attempted.Store(false)
 		b.cur.CompareAndSwap(cf, nil)
@@ -1546,8 +1501,6 @@ func (b *TCP) dropCarrier() {
 	}
 }
 
-// One tick of both mailboxes, for every carrier this file serves: a direct pool, an edge pool, or a
-// tunnel with no pool at all (which still has free rungs to spend).
 func (b *TCP) pollPeerCmd() {
 	if b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.pinApplied, b.st.pathEpoch) {
 		b.dropCarrier()
@@ -1557,7 +1510,6 @@ func (b *TCP) pollPeerCmd() {
 	}
 }
 
-// The digit a fail condemns: the destination on a direct pool, the SNI on an edge pool.
 func (b *TCP) rotateLowTCP(proactive bool) {
 	if b.pool == nil {
 		b.rotateDestTCP(proactive)
@@ -1565,25 +1517,18 @@ func (b *TCP) rotateLowTCP(proactive bool) {
 	}
 	low, _ := b.rc.underJudgement()
 	b.pool.markSuspect("ip", low, "tun-probe")
-	// Announced, the same way the direct walk and the timed CDN rotation announce theirs. A burn says
-	// which edge was condemned; it does not say where the traffic went next.
+
 	if now := b.pool.advanceIP(); now != "" {
 		b.st.rotated("edge", "ip:"+now, proactive)
 	}
 }
 
-// The digit that turns once a whole row of edges has been tried -- and by then the domain HAS been
-// judged: every edge under it was offered live traffic and none carried. That is the one thing a lap
-// proves, so the domain is condemned here and the walk moves to the next one. With ONE edge there is
-// no low digit to vary and the walk arrives every round, which is the same statement made sooner.
 func (b *TCP) rotateHighTCP(proactive bool) {
 	if b.pool == nil {
 		b.rotateSourceTCP(proactive)
 		return
 	}
-	// A lone domain is condemned too, for the same reason a lone destination is: nothing rotates away
-	// from it and the record changes no behaviour, but a green row under a dead tunnel is a lie and
-	// these rows are what the operator reads to decide what to replace.
+
 	_, sni := b.rc.underJudgement()
 	b.pool.markSuspect("sni", sni, "tun-probe")
 	if now := b.pool.advanceSNI(); now != "" {
@@ -1591,8 +1536,6 @@ func (b *TCP) rotateHighTCP(proactive bool) {
 	}
 }
 
-// The operator's pick took. Only the direct destination needs saying here: the panel reads the edge
-// pool's own rows, and a source pin shows up on the next dial.
 func (b *TCP) pinApplied(kind, key string) {
 	if b.pool == nil && kind == "dst" {
 		b.st.setActive(b.stTag + activeSep + key)
@@ -1747,8 +1690,6 @@ func (b *TCP) keepaliveLoop() {
 	}
 }
 
-// The ping does not judge. It exists so a healthy but idle tunnel keeps producing the inbound traffic
-// the read deadline measures -- the deadline is what ends a carrier that stops answering.
 func (b *TCP) pingOne(cf *connFramer) error { return cf.writeFrame(typePing, nil) }
 
 func (b *TCP) recentData() bool {
@@ -1768,5 +1709,4 @@ func (b *TCP) sleep(d time.Duration) bool {
 	}
 }
 
-// What the carrier is actually on, as opposed to where the cursor has stepped to.
 type pairNow struct{ low, high string }

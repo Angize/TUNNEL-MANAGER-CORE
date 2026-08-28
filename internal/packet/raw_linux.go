@@ -453,8 +453,6 @@ func init() {
 	ipIDCounter.Store(binary.BigEndian.Uint32(b[:]))
 }
 
-// Never 0: the counter is uint16-wrapped, so one draw in 65536 lands there, and the AF_PACKET decoys
-// put whatever this returns on the wire verbatim.
 func nextIPID() uint16 {
 	if id := uint16(ipIDCounter.Add(1)); id != 0 {
 		return id
@@ -570,8 +568,6 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked b
 		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "port-unreachable"}}
 	case "tcp":
 
-		// Scoped by the end that never moves: the server port. The client's own is drawn per flow, so
-		// naming it would need a rule per candidate and would go stale on the next draw.
 		srv, _ := rawPorts(false, port, 0)
 		side := "--dport"
 		if !isClient {
@@ -625,9 +621,6 @@ func setSendMark(conn *net.IPConn) error {
 
 func (r *Raw) cport() uint16 { return uint16(r.cliPort.Load()) }
 
-// setSportMode fixes or rolls the forged CLIENT source port. `fix` is the operator's number, 0 for the
-// profile default. Either way it lands in cliPort, which is the only place the wire is built from: the
-// server LEARNS that number and a rolling client REDRAWS it.
 func (r *Raw) setSportMode(on bool, fix int) {
 	r.sportRandom = on && RawProfileHasPorts(r.profile)
 	if RawProfileHasPorts(r.profile) && fix > 0 && fix <= 65535 && !r.sportRandom {
@@ -1038,8 +1031,6 @@ func (r *Raw) livePath() (pathKey, bool) {
 	return k, r.sealer() != nil
 }
 
-// The live session stays -- it is what carries if the path returns before a new key lands. What the
-// rung changes is the ephemeral, and clientLoop keeps asking until that is answered.
 func (r *Raw) rehandshake() bool {
 	if r.peer.Load() == nil {
 		return false
@@ -1179,7 +1170,7 @@ func (r *Raw) rotatePeerRaw(proactive bool) {
 	log.Printf("raw: rotated destination to %s", addr)
 	r.st.rotated("peer", "ip:"+addr, proactive)
 	if proactive {
-		return // a scheduled move keeps its session: there is nothing for the loop to redo
+		return
 	}
 	wakeLoop(r.wake)
 }

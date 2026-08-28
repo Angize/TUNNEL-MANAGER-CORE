@@ -607,8 +607,6 @@ func (f *Flux) livePath() (pathKey, bool) {
 	return k, f.sealer() != nil
 }
 
-// The live session stays -- it is what carries if the path returns before a new key lands. What the
-// rung changes is the ephemeral, and clientLoop keeps asking until that is answered.
 func (f *Flux) rehandshake() bool {
 	if !f.cryptoOn || f.peer.Load() == nil {
 		return false
@@ -725,7 +723,7 @@ func (f *Flux) rotatePeerFlux(proactive bool) {
 	log.Printf("flux: rotated destination to %s", addr)
 	f.st.rotated("peer", "ip:"+addr, proactive)
 	if proactive {
-		return // a scheduled move keeps its session: there is nothing for the loop to redo
+		return
 	}
 	wakeLoop(f.wake)
 }
