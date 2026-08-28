@@ -827,8 +827,7 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurne
 	// the pool declined leaves the tunnel where it was, and refilling there is a ladder that never
 	// ends. Not the odometer -- it counts the laps this walk is inside.
 	if moved {
-		c.port.restart()
-		c.session.restart()
+		c.refill()
 		c.revive.restart()
 		return burned
 	}
@@ -836,27 +835,30 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurne
 	// rungs back on a growing wait: soon enough that a path needing one more draw is not stranded until
 	// the process restarts, slowly enough that a path which is simply gone is not churned.
 	if c.revive.try(time.Now()) {
-		c.port.restart()
-		c.session.restart()
+		c.refill()
 		c.st.event("down", "ladder-revive", "")
 	}
 	return burned
 }
 
-// The ladder starts over: full rungs, fresh odometer. Not a success -- nothing is cleared and nobody
-// is exonerated.
-func (c *rotationController) restart() {
-	c.reset()
+// Every rung back at once. The ladder is all-or-nothing -- spendFreeRungs only reports a dead end once
+// both are gone -- so there is no caller that wants one without the other.
+func (c *rotationController) refill() {
 	c.port.restart()
 	c.session.restart()
 }
 
+// The ladder starts over: full rungs, fresh odometer. NOT the revive backoff, which only a measured
+// recovery forgives; this is also the "climb again for a newcomer" path, and forgiving it here would
+// hold the wait at its shortest for a whole outage.
+func (c *rotationController) restart() {
+	c.reset()
+	c.refill()
+}
+
 func (c *rotationController) success() {
 	c.accused.Store(nil)
-	// Only a MEASURED recovery forgives the backoff. restart() is also the "start this climb over"
-	// path, and forgiving it there would let a pool that keeps re-arriving hold the wait at its
-	// shortest for a whole outage.
-	c.revive.restart()
+	c.revive.restart() // the one thing that forgives the backoff -- see restart()
 	c.restart()
 }
 
