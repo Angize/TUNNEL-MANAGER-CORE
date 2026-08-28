@@ -835,7 +835,7 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurne
 	// Nowhere to walk, so this climb is over and nothing above it would ever begin another. Hand the
 	// rungs back on a growing wait: soon enough that a path needing one more draw is not stranded until
 	// the process restarts, slowly enough that a path which is simply gone is not churned.
-	if c.revive.due(time.Now()) {
+	if c.revive.try(time.Now()) {
 		c.port.restart()
 		c.session.restart()
 		c.st.event("down", "ladder-revive", "")

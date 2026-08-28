@@ -19,19 +19,20 @@ type reviveClock struct {
 	step int
 }
 
-// Whether the ladder may refill now, arming the next wait either way. The FIRST dead end only arms:
-// the rungs were spent on the way here, so there is nothing to give back yet.
-func (r *reviveClock) due(now time.Time) bool {
+// Spend this dead end: report whether the ladder may refill now, and arm the next wait either way.
+// Named for what it does to the clock, like the rungs beside it -- the FIRST dead end only arms, because
+// the rungs were spent on the way here and there is nothing yet to give back.
+func (r *reviveClock) try(now time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	armed := !r.at.IsZero()
 	if armed && now.Before(r.at) {
 		return false
 	}
+	// Clamped HERE and nowhere else: a step counter bounded on the way in as well would make this read
+	// unreachable, and the two rules would then have to be kept in agreement by hand.
 	r.at = now.Add(time.Duration(ladderRevive[min(r.step, len(ladderRevive)-1)]) * time.Second)
-	if r.step < len(ladderRevive)-1 {
-		r.step++
-	}
+	r.step++
 	return armed
 }
 
