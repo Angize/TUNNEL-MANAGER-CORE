@@ -455,7 +455,7 @@ type poolCmd struct {
 }
 
 func staleVerdict(c poolCmd, epoch int64) bool {
-	return (c.Cmd == cmdOK || c.Cmd == cmdFail) && c.Epoch != epoch
+	return c.Cmd == cmdFail && c.Epoch != epoch
 }
 
 func claimMailbox(path string) ([]byte, bool) {
