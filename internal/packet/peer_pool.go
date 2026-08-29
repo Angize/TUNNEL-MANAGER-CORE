@@ -915,7 +915,6 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 		moved = burned || nowLow != liveLow || nowHigh != liveHigh
 		if moved {
 
-			c.accused.Store(nil)
 			log.Printf("core: %s · %s failed by the node's tun probe — the ladder walked off it",
 				cmd.Low, cmd.High)
 		}

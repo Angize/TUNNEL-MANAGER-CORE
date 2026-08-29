@@ -129,8 +129,20 @@ func TestNoVerdictEverCondemnsAnEndpointTheTunnelWasNotOn(t *testing.T) {
 			}
 		}
 		if lt.live == was {
-			t.Fatalf("round %d: the verdict on %s left the tunnel on it — the experiment never moves, "+
-				"so the next sweep measures the same dead path", round, was)
+
+			if key = lt.verdict(t); key != was {
+				t.Fatalf("round %d: the second verdict keyed on %s while the carrier was on %s",
+					round, key, was)
+			}
+			for _, b := range lt.burn[n:] {
+				if b != was {
+					t.Fatalf("round %d: condemned %s, but the probe measured %s", round, b, was)
+				}
+			}
+		}
+		if lt.live == was {
+			t.Fatalf("round %d: two verdicts on %s and the tunnel is still there — the experiment "+
+				"never moves, so the next sweep measures the same dead path", round, was)
 		}
 		clk += deadRetest
 	}
