@@ -88,9 +88,7 @@ func (f *Flux) SetDesync(on bool, ttl, count int, mode string) {
 	}
 	d := newDesyncCfg(on, ttl, count, mode)
 	if d.usesBadsum() {
-
 		if inj, err := newL2Inject(); err != nil {
-
 			if d.mode == "both" {
 				log.Printf("flux: bad-checksum decoys disabled (AF_PACKET: %v) — the TTL decoys still fire", err)
 			} else {
@@ -122,7 +120,6 @@ func (f *Flux) sendFakes(to *net.IPAddr) {
 			continue
 		}
 		if sp.badSum {
-
 			if f.inj != nil {
 				f.dsSend.note("flux", f.inj.sendTo(to.IP, out))
 			}
@@ -300,7 +297,6 @@ func (f *Flux) carrierOut(body []byte, to *net.IPAddr) {
 
 	f.sendMu.RLock()
 	if !f.sendDown {
-
 		if err := syscall.Sendto(f.sendFd, out, 0, &sa); err != nil {
 			f.sendErr.note("flux", err)
 		}
@@ -399,7 +395,6 @@ func addFluxDrop(peer net.IP, carrier, tun string) (func(), bool) {
 }
 
 func (f *Flux) netToTun() error {
-
 	var graceEpoch int64 = -1
 	var graceD map[uint16]bool
 	return afpacketLoop(f.pktFd, f.closeCh, func(pkt []byte, ihl int) {
@@ -423,16 +418,13 @@ func (f *Flux) netToTun() error {
 		}
 		src := &net.IPAddr{IP: append(net.IP(nil), pkt[12:16]...)}
 		if peer := f.peer.Load(); peer != nil && !src.IP.Equal(peer.IP) && !f.srcAllowed(src.IP) {
-
 			return
 		}
 		if !f.isClient {
-
 			d := append(net.IP(nil), pkt[16:20]...)
 			f.replySrc.Store(&d)
 		}
 		if f.fecDec != nil {
-
 			f.rxSrc.Store(src)
 			f.fecDec.input(body)
 		} else {
@@ -503,7 +495,6 @@ func (f *Flux) handleCrypto(body []byte, addr *net.IPAddr) {
 }
 
 func (f *Flux) learnPeer(addr *net.IPAddr) {
-
 	if f.pp == nil {
 		f.peer.Store(addr)
 	}
@@ -577,7 +568,6 @@ func (f *Flux) tryHandshake(body []byte, addr *net.IPAddr) {
 		f.leak.scopeAsync(addr.IP)
 	}
 	if msg2 := crypto.RespMsg(f.psk, eInit, sr); msg2 != nil {
-
 		f.hsCache.put(body, msg2)
 		f.sendCtrl(msg2, addr)
 	}
@@ -588,7 +578,6 @@ func (f *Flux) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	case typePing:
 		f.send(typePong, nil, addr)
 	case typePong:
-
 	case typeData:
 		if _, err := f.dev.Write(payload); err != nil {
 			log.Printf("flux: tun write error: %v", err)
@@ -670,7 +659,6 @@ func (f *Flux) SetSourcePool(sp *PeerPool) {
 		if ip := adoptableSource("flux", sp, sp.current(), &f.srcWarned); ip != nil {
 			f.localIP.Store(&net.IPAddr{IP: ip})
 		} else {
-
 			sp.fail("unbindable")
 		}
 	}
@@ -687,7 +675,6 @@ func (f *Flux) rotateSourceFlux(proactive bool) {
 	}
 	ip := adoptableSource("flux", f.sp, addr, &f.srcWarned)
 	if ip == nil {
-
 		f.sp.rejectCandidate(prev)
 		return
 	}
@@ -770,7 +757,6 @@ func (f *Flux) adoptSourceFlux() {
 	f.localIP.Store(&net.IPAddr{IP: ip})
 	log.Printf("flux: pinned source to %s", ip)
 	f.sp.pinLandedOn(addr)
-
 }
 
 func (f *Flux) pinPollLoop(rc *rotationController) {
@@ -792,7 +778,6 @@ func (f *Flux) clientLoop() {
 			f.sendInit()
 		}
 		if !f.cryptoOn || f.sealer() != nil {
-
 			if f.pp != nil && f.peerAnswered.Load() {
 				if pa := f.peer.Load(); pa != nil {
 					f.pp.pinLandedOn(pa.IP.String())
@@ -802,7 +787,6 @@ func (f *Flux) clientLoop() {
 			f.send(typePing, nil, f.peer.Load())
 
 			if f.cryptoOn && f.sealer() == nil {
-
 				continue
 			}
 		}

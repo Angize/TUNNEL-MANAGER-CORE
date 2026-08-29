@@ -118,7 +118,6 @@ func (sc *sessionConn) sendPump() {
 }
 
 func (sc *sessionConn) recvPump(inCh <-chan []byte, onHandshake func([]byte)) {
-
 	liveProven := false
 	for {
 		select {
@@ -126,7 +125,6 @@ func (sc *sessionConn) recvPump(inCh <-chan []byte, onHandshake func([]byte)) {
 			return
 		case d, ok := <-inCh:
 			if !ok {
-
 				_ = sc.qpc.Close()
 				return
 			}
@@ -144,7 +142,6 @@ func (sc *sessionConn) recvPump(inCh <-chan []byte, onHandshake func([]byte)) {
 				sc.tryStaged(d[1:], true, &liveProven)
 			case kindPing:
 				if _, _, _, err := sc.sealer.Load().Open(d[1:], nil); err == nil {
-
 					sc.lastRx.Store(time.Now().UnixNano())
 					sc.sendKind(kindPong)
 					continue

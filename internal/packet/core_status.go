@@ -251,7 +251,6 @@ func (s *coreStatus) write() {
 }
 
 func writeFileAtomic(path string, data []byte, perm os.FileMode) {
-
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, perm); err != nil {
 		statusWriteLog.note("core/status: writing "+tmp, err)
@@ -259,7 +258,6 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) {
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {
-
 		statusWriteLog.note("core/status: replacing "+path, err)
 		_ = os.Remove(tmp)
 	}

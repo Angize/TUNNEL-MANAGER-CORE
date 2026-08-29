@@ -94,7 +94,6 @@ func (a *antiLeaker) apply() {
 		fn, ok = a.install(v4)
 	}
 	if !ok {
-
 		if fn != nil {
 			fn()
 		}

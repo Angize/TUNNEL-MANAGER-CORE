@@ -314,7 +314,6 @@ func (p *PeerPool) rejectCandidate(prev string) {
 		}
 	}
 	if !back {
-
 		p.advanceFailLocked()
 	}
 	axis, ev := p.axis, p.ev
@@ -412,7 +411,6 @@ func (p *PeerPool) pinLandedOn(addr string) {
 	p.mu.Lock()
 	changed := p.pinnedLocked() && p.pinKey == addr
 	if changed {
-
 		p.pinKey, p.pinTook = "", nil
 	}
 	p.mu.Unlock()
@@ -569,7 +567,6 @@ func (w *walkPolicy) walk(rotLow, rotHigh func(proactive bool)) (stepped, lowBur
 	}
 	switch {
 	case w.low != nil:
-
 		lap := w.od.failed(w.low.eligibleCount)
 		before := w.low.burnCount()
 
@@ -854,11 +851,9 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 	epoch int64) (moved bool) {
 	switch {
 	case staleVerdict(cmd, epoch):
-
 		log.Printf("core: dropping a tun-probe verdict for path epoch %d — the carrier is on %d now",
 			cmd.Epoch, epoch)
 	case cmd.Cmd == cmdOK:
-
 		c.success()
 
 		c.st.carrying()
@@ -869,7 +864,6 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 		c.pair.clear(lowKind, cmd.Low)
 		c.pair.clear(highKind, cmd.High)
 	case cmd.Cmd == cmdFail:
-
 		if c.pair == nil {
 			c.fail(rotLow, rotHigh)
 			return false
@@ -884,7 +878,6 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 		lowGone := cmd.Low != "" && cmd.Low != liveLow
 		highGone := cmd.High != "" && cmd.High != liveHigh
 		if lowGone || highGone {
-
 			kind, key := lowKind, cmd.Low
 			if highGone && (!lowGone || !c.hasLow()) {
 				kind, key = highKind, cmd.High
@@ -914,7 +907,6 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 		nowLow, nowHigh := c.pair.live()
 		moved = burned || nowLow != liveLow || nowHigh != liveHigh
 		if moved {
-
 			log.Printf("core: %s · %s failed by the node's tun probe — the ladder walked off it",
 				cmd.Low, cmd.High)
 		}

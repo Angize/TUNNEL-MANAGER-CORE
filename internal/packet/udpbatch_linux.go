@@ -126,7 +126,6 @@ func (t *udpTx) flush(errs *sendErrLog) int {
 			if n := t.sendGSO(segs, size); n >= 0 {
 				sent = n
 			} else {
-
 				t.noGSO = true
 			}
 		}

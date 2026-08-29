@@ -93,12 +93,10 @@ func readSeqs(raw syscall.RawConn) (snd, rcv uint32, ok bool) {
 }
 
 func (f *fragConn) writeFake(p []byte, at int) (int, error) {
-
 	fake := make([]byte, len(p))
 	copy(fake, p)
 	i := bytes.Index(fake, []byte(f.host))
 	if i < 0 {
-
 		why := "the hostname is not in the ClientHello in cleartext"
 		if f.ech {
 			why += " (ECH encrypts it)"
@@ -134,7 +132,6 @@ func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 	}
 	snd, rcv, ok := readSeqs(raw)
 	if !ok {
-
 		f.fakeDegraded("TCP_REPAIR could not read the connection's sequence numbers (needs CAP_NET_ADMIN)")
 		return f.writeDisorder(p, at)
 	}

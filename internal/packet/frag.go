@@ -92,7 +92,6 @@ func (f *fragConn) Write(p []byte) (int, error) {
 	}
 	at := f.splitAt(p)
 	if at <= 0 || at >= len(p) {
-
 		f.noSplit(p, at)
 		return f.Conn.Write(p)
 	}

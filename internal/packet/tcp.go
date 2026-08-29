@@ -542,7 +542,6 @@ func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 	ip := adoptableSource("tcp", b.sp, src, &b.srcWarned)
 	if ip == nil {
 		if b.sp != nil {
-
 			b.sp.rejectCandidate(prev)
 		}
 		return d
@@ -634,7 +633,6 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, 
 		idle: connIdle, ping: pingEvery, addr: listenAddrs[0], ln: lns[0], lns: lns, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns)}
 	if cover {
-
 		cs, err := tlscover.NewServer(psk, coverSNI)
 		if err != nil {
 			for _, l := range lns {
@@ -668,7 +666,6 @@ func (b *TCP) Run() error {
 	} else if b.httpc {
 		go func() { b.runHTTPCServer(); errc <- nil }()
 	} else {
-
 		for i := 1; i < len(b.lns); i++ {
 			go b.acceptLoopOn(b.lns[i])
 		}
@@ -775,7 +772,6 @@ func (b *TCP) acceptLoopOn(ln net.Listener) {
 }
 
 func (b *TCP) handleServerConn(conn net.Conn) {
-
 	select {
 	case b.preAuth <- struct{}{}:
 	default:
@@ -792,7 +788,6 @@ func (b *TCP) handleServerConn(conn net.Conn) {
 	defer release()
 
 	if b.ws && !b.httpc {
-
 		r, werr := wsServerHandshake(conn, b.wsPath, time.Now().Add(handshakeTimeout))
 		if werr != nil {
 			conn.Close()
@@ -802,7 +797,6 @@ func (b *TCP) handleServerConn(conn net.Conn) {
 	} else if b.cover {
 		tconn, err := b.coverSrv.Handle(conn, time.Now().Add(handshakeTimeout))
 		if err != nil {
-
 			if err != tlscover.ErrProbe {
 				conn.Close()
 			}
@@ -840,7 +834,6 @@ func (b *TCP) handleServerConn(conn net.Conn) {
 	release()
 	b.handleFrame(cf, typ, payload)
 	if b.obfs {
-
 		_ = cf.flushSalt()
 	}
 	b.serve(cf)
@@ -868,7 +861,6 @@ func (b *TCP) publishServerConn(cf *connFramer) {
 	}
 	b.authMu.Unlock()
 	for _, v := range reap {
-
 		if v == b.cur.Load() {
 			b.authMu.Lock()
 			b.authConns = append(b.authConns, v)
@@ -957,7 +949,6 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFin
 		cfg.EncryptedClientHelloConfigList = ech
 		echPub = echPublicNames(ech)
 		if len(echPub) > 0 {
-
 			cfg.EncryptedClientHelloRejectionVerify = func(utls.ConnectionState) error {
 				echRejected = true
 				return nil
@@ -967,7 +958,6 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFin
 	var uc *utls.UConn
 	var err error
 	if goFingerprint {
-
 		cfg.NextProtos = alpn
 		uc = utls.UClient(conn, cfg, utls.HelloGolang)
 	} else {
@@ -982,7 +972,6 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFin
 	}
 	conn.SetDeadline(time.Now().Add(budget))
 	if err = uc.Handshake(); err != nil {
-
 		var echErr *utls.ECHRejectionError
 		if len(echPub) > 0 && errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
 			if verr := verifyECHPublicName(uc.ConnectionState().PeerCertificates, echPub); verr != nil {
@@ -1147,7 +1136,6 @@ func classifyErr(s string) string {
 	case strings.Contains(l, "tls") || strings.Contains(l, "handshake") || strings.Contains(l, "certificate"):
 		return "tls"
 	case strings.Contains(l, "websocket") || strings.Contains(l, "ws ") || strings.Contains(l, "101 switching") || strings.Contains(l, "upgrade"):
-
 		return "ws_upgrade"
 	default:
 		return "dropped"
@@ -1242,7 +1230,6 @@ func (b *TCP) dialLoop() {
 		b.curConn.Store(&cc)
 		b.st.newSession()
 		if b.pool != nil {
-
 			sni := strings.TrimPrefix(combo, label+activeSep)
 			b.liveSNI.Store(&sni)
 
@@ -1251,7 +1238,6 @@ func (b *TCP) dialLoop() {
 
 			b.pool.pinLandedOn(label, sni)
 		} else {
-
 			b.livePair.Store(&pairNow{low: label, high: b.lastSourceUsed()})
 			if b.pp != nil {
 				b.pp.pinLandedOn(label)
@@ -1345,7 +1331,6 @@ func (b *TCP) dialLoop() {
 				}
 				rotated.Store(true)
 				c.Close()
-
 			})
 			rotp.Store(rot)
 		}
@@ -1364,7 +1349,6 @@ func (b *TCP) dialLoop() {
 		deliberate := false
 
 		if !b.closed.Load() {
-
 			var cause string
 			if b.pool != nil {
 				cause = b.takeLastErr()
@@ -1384,7 +1368,6 @@ func (b *TCP) dialLoop() {
 					youngDeaths = 0
 					b.endRound()
 				} else if b.pool != nil && youngDeaths < b.pool.comboCount() && b.pool.advance() {
-
 					if youngDeaths == 0 {
 						b.pool.event("down", "edge-walk", "ws")
 					}
@@ -1457,7 +1440,6 @@ func (b *TCP) coverProbeHint() {
 }
 
 func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
-
 	cf := b.newFramer(conn)
 	conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	if b.cryptoOn {
@@ -1547,7 +1529,6 @@ func (b *TCP) handleFrame(cf *connFramer, typ byte, payload []byte) {
 	case typePing:
 		_ = cf.writeFrame(typePong, nil)
 	case typePong:
-
 	case typeData:
 		b.lastRxData.Store(time.Now().UnixNano())
 
@@ -1583,7 +1564,6 @@ func (b *TCP) readLoop(cf *connFramer) error {
 			return err
 		}
 		if cf.sealer != nil && !cf.rp.ok(session, seq) {
-
 			continue
 		}
 		now := time.Now().UnixNano()
@@ -1674,15 +1654,12 @@ func (b *TCP) diagLoop() {
 
 func (b *TCP) keepaliveLoop() {
 	for {
-
 		select {
 		case <-b.closeCh:
 			return
 		case <-time.After(keepaliveInterval(b.ping, b.psk)):
-
 			if cf := b.cur.Load(); cf != nil && !b.recentData() {
 				if err := b.pingOne(cf); err != nil {
-
 					b.onConnErr(cf, err)
 				}
 			}

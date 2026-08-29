@@ -47,7 +47,6 @@ func newDNS(dev *tun.Device, isClient bool, addr string, resolvers []string, zon
 	}
 	mtu := codec.MaxUpstream() - dnstun.SessionOverhead
 	if mtu < dnsMinMTU {
-
 		return nil, fmt.Errorf("dns: zone %q leaves only %d bytes per query, and the carrier needs %d "+
 			"(KCP spends %d of them on its own header) — shorten the zone by about %d characters",
 			zone, mtu, dnsMinMTU, dnstun.KCPOverhead, zoneBytesToDrop(dnsMinMTU-mtu))
@@ -85,7 +84,6 @@ func (d *DNS) Run() error {
 		}
 		conn, err := d.connect()
 		if err != nil {
-
 			log.Printf("core/dns: connect: %v", err)
 			if d.sleep(backoff) {
 				return nil
@@ -138,7 +136,6 @@ func (d *DNS) connect() (net.Conn, error) {
 		conn, err = dnstun.ServeSession(t, d.cfg)
 	}
 	if err != nil {
-
 		d.mu.Lock()
 		d.curT = nil
 		d.mu.Unlock()
@@ -169,7 +166,6 @@ func (d *DNS) tunToNet() {
 			continue
 		}
 		if err := dnstun.WritePacket(*cp, buf[:n]); err != nil {
-
 		}
 	}
 }

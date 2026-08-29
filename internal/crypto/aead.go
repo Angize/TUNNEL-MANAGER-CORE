@@ -149,7 +149,6 @@ func mask(key, salt, buf []byte) error {
 }
 
 func (s *Sealer) Seal(plaintext, aad []byte) ([]byte, error) {
-
 	ns := s.sendAEAD.NonceSize()
 	out := make([]byte, maskSaltLen+ns, maskSaltLen+ns+len(plaintext)+s.sendAEAD.Overhead())
 

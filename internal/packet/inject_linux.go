@@ -88,7 +88,6 @@ func (l *l2inject) sendTo(peer net.IP, ipPkt []byte) error {
 	sa := &syscall.SockaddrLinklayer{Ifindex: rt.ifindex, Halen: 6}
 	copy(sa.Addr[:6], rt.dst[:])
 	if err := syscall.Sendto(l.fd, frame, 0, sa); err != nil {
-
 		l.rt = nil
 		return err
 	}

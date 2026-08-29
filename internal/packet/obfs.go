@@ -39,7 +39,6 @@ func randUint(max int) (int, error) {
 	limit := (0xFFFFFFFF/n)*n - 1
 	var b [4]byte
 	for {
-
 		if err := crypto.RandRead(b[:]); err != nil {
 			return 0, err
 		}

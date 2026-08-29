@@ -24,7 +24,6 @@ func (r *randPool) read(p []byte) error {
 	for len(p) > 0 {
 		if r.used == randBlock {
 			if _, err := io.ReadFull(rand.Reader, r.buf[:]); err != nil {
-
 				r.used = randBlock
 				return err
 			}

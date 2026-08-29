@@ -180,7 +180,6 @@ func (c *Config) applyDefaults() {
 		c.SockBuf = 4 << 20
 	}
 	if c.SockBuf > 0 && c.SockBuf < 64<<10 {
-
 		c.SockBuf = 64 << 10
 	}
 	if c.SockBuf > 64<<20 {
@@ -201,7 +200,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Transport == "flux" {
 		if c.FluxRotateSecs == 0 {
-
 			c.FluxRotateSecs = 600
 		}
 		if c.FluxCarrier == "" {
@@ -292,7 +290,6 @@ func (c *Config) validate() error {
 			}
 		}
 	case "client":
-
 		if c.Transport != "dns" && c.Peer == "" && len(c.PeerIPs) == 0 {
 			return errors.New("client role requires \"peer\" (or a peer_ips rotation pool)")
 		}
@@ -304,7 +301,6 @@ func (c *Config) validate() error {
 	}
 	switch c.Transport {
 	case "", "udp", "tcp":
-
 	case "raw":
 		if c.RawProfile != "" && !packet.RawProfileValid(c.RawProfile) {
 			return errors.New("raw_profile must be one of " + strings.Join(packet.RawProfileNames(), "|"))
@@ -354,7 +350,6 @@ func (c *Config) validate() error {
 			return errors.New("raw transport requires crypto enabled (the AEAD both encrypts and authenticates each raw packet)")
 		}
 	case "spoof":
-
 		if !c.Crypto.Enabled {
 			return errors.New("spoof transport requires crypto enabled (the AEAD authenticates every forged-header frame)")
 		}
@@ -387,18 +382,15 @@ func (c *Config) validate() error {
 		}
 		switch c.Role {
 		case "client":
-
 			if c.SpoofSrc == "" && c.SpoofDst == "" {
 				return errors.New("spoof transport requires at least one of spoof_src_ip / spoof_dst_ip on the client")
 			}
 		case "server":
-
 			if c.RealPeer == "" {
 				return errors.New("spoof server requires real_peer_ip (the client's real IP to reply to)")
 			}
 		}
 	case "flux":
-
 		if !c.Crypto.Enabled {
 			return errors.New("flux transport requires crypto enabled (the shape is derived from the PSK and the AEAD authenticates every frame)")
 		}
@@ -416,7 +408,6 @@ func (c *Config) validate() error {
 			return errors.New("flux_shape must be \"random\", \"quic\", \"video\", or \"webrtc\"")
 		}
 	case "dns":
-
 		if !c.Crypto.Enabled {
 			return errors.New("dns transport requires crypto enabled (the session handshake and every datagram are AEAD-authenticated)")
 		}
@@ -427,7 +418,6 @@ func (c *Config) validate() error {
 			return errors.New("dns client requires at least one dns_resolvers entry (a recursive resolver to query)")
 		}
 	case "ws":
-
 		if c.WSTLS && c.Role == "client" && c.WSHost == "" && len(c.WSEdgeIPs) == 0 {
 			return errors.New("ws_tls requires ws_host (the TLS SNI / fronting domain)")
 		}
@@ -558,7 +548,6 @@ func (c *Config) validate() error {
 		}
 	}
 	if len(c.PeerSrcIPs) > 0 {
-
 		if c.Role != "server" {
 			return errors.New("peer_src_ips is a server-side view of the client's source pool")
 		}
@@ -600,11 +589,9 @@ func (c *Config) validate() error {
 		return errors.New("obfs is not supported on the dns transport (the DNS carrier has no obfs framing)")
 	}
 	if c.Fec {
-
 		switch c.Transport {
 		case "", "udp", "raw", "flux", "spoof":
 		default:
-
 			return fmt.Errorf("fec is not supported on the %s carrier — only on the datagram carriers (udp, raw, flux, spoof)", c.Transport)
 		}
 		if c.FecData < 0 || c.FecParity < 0 {
@@ -627,7 +614,6 @@ func (c *Config) validate() error {
 		}
 	}
 	if c.FakeDesync {
-
 		switch c.Transport {
 		case "raw", "flux", "spoof", "tcp", "ws":
 		default:

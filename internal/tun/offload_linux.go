@@ -39,7 +39,6 @@ func segment(pkt []byte, gsoSize int, isTCP bool) (segs [][]byte, split bool) {
 	v6 := pkt[0]>>4 == 6
 	var ipHdrLen int
 	if v6 {
-
 		l4Off, proto, ok := ipv6L4Offset(pkt)
 		if !ok || (isTCP && proto != 6) || (!isTCP && proto != 17) {
 			return [][]byte{pkt}, false
@@ -93,7 +92,6 @@ func segment(pkt []byte, gsoSize int, isTCP bool) (segs [][]byte, split bool) {
 		copy(seg[hdrLen:], chunk)
 
 		if v6 {
-
 			binary.BigEndian.PutUint16(seg[4:6], uint16((ipHdrLen-40)+l4Hdr+len(chunk)))
 		} else {
 			binary.BigEndian.PutUint16(seg[2:4], uint16(len(seg)))
@@ -133,7 +131,6 @@ func finalizeCsum(pkt []byte) {
 	var ipHdrLen int
 	var proto byte
 	if v6 {
-
 		var ok bool
 		ipHdrLen, proto, ok = ipv6L4Offset(pkt)
 		if !ok {
@@ -180,7 +177,6 @@ func ipv6L4Offset(pkt []byte) (l4Off int, proto byte, ok bool) {
 			next = pkt[off]
 			off += 8
 		default:
-
 			if off > len(pkt) {
 				return 0, 0, false
 			}
