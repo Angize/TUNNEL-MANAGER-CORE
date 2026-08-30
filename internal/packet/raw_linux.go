@@ -73,6 +73,7 @@ type Raw struct {
 	tsEcr   atomic.Uint32
 
 	peerAnswered atomic.Bool
+	unanswered   atomic.Bool
 
 	fecEnc  *fecEncoder
 	fecDec  *fecDecoder
@@ -648,6 +649,8 @@ func (r *Raw) replyPort(sport uint16) uint16 {
 }
 
 func (r *Raw) usePort(p uint16) {
+	r.unanswered.Store(true)
+	r.ci.Store(nil)
 	r.cliPort.Store(uint32(p))
 	r.newTCPFlow()
 }
@@ -729,7 +732,7 @@ func (r *Raw) tunToNet(q *txQueue) error {
 		if peer == nil {
 			continue
 		}
-		if r.sealer() == nil {
+		if r.sealer() == nil || r.unanswered.Load() {
 			continue
 		}
 		body, err := r.body(typeData, buf[:n])
@@ -958,6 +961,7 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 		r.fecDec.reset()
 
 		r.ci.Store(nil)
+		r.unanswered.Store(false)
 		r.markRx(addr.IP)
 		r.provenFrom(addr.IP)
 		r.st.newSession()
