@@ -136,10 +136,8 @@ func sendViaConn(r *Raw, pkt []byte, to *net.IPAddr) {
 		if _, _, err := r.conn.WriteMsgIP(pkt, r.srcOOB(src), to); err == nil {
 			return
 		} else {
-
 			r.sendErr.note("raw/pinned-source", err)
 			if rawChecksumBindsSource(r.profile) {
-
 				return
 			}
 		}

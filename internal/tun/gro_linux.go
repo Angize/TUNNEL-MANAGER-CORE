@@ -75,12 +75,10 @@ func sameHeaders(a, b []byte, sa, sb tcpSeg) bool {
 		return false
 	}
 	if sa.v6 {
-
 		if !bytes.Equal(a[0:4], b[0:4]) || !bytes.Equal(a[6:sa.ipHdr], b[6:sb.ipHdr]) {
 			return false
 		}
 	} else {
-
 		if !bytes.Equal(a[0:2], b[0:2]) || !bytes.Equal(a[6:10], b[6:10]) ||
 			!bytes.Equal(a[12:sa.ipHdr], b[12:sb.ipHdr]) {
 			return false

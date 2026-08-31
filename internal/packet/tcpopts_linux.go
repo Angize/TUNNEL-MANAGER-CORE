@@ -51,7 +51,6 @@ func tcpDecoyShape(c net.Conn) (opts []byte, window uint16) {
 		if w, ok := tcpInfoU32(info, tiOffRcvWnd); ok {
 			window = scaleWindow(w, wscale)
 		} else if w, ok := tcpInfoU32(info, tiOffRcvSsthresh); ok {
-
 			window = scaleWindow(w, wscale)
 		}
 		if info[tiOffOptions]&tcpiOptTimestamps == 0 {

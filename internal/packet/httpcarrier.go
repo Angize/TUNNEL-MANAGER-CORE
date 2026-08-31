@@ -86,7 +86,6 @@ func (c *httpcConn) Write(p []byte) (int, error) {
 	closed := c.closed
 	c.mu.Unlock()
 	if closed {
-
 		return 0, net.ErrClosed
 	}
 	if dl := c.wdl.Load(); dl != 0 && time.Now().UnixNano() > dl {
@@ -234,7 +233,6 @@ func SetHTTPUpstream(workers, batchKB, ratePerSec int) {
 		upIdleConns = upWorkers * 2
 	}
 	if batchKB > 0 {
-
 		maxUpBatch = tclamp(batchKB, 8, 512) << 10
 		upChanCap = maxUpBatch/1400 + 2
 	}
@@ -459,7 +457,6 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 	var rt http.RoundTripper
 	var closeIdle func()
 	if b.wsTLS && b.httpcTLS == nil {
-
 		var alpn []string
 		if h2 {
 			alpn = []string{"h2"}
@@ -482,7 +479,6 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 			return uc, nil
 		}
 		if h2 {
-
 			h2t := &http2.Transport{
 				DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.Config) (net.Conn, error) {
 					return dialTLS(ctx)
@@ -501,7 +497,6 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 			rt, closeIdle = tr, func() { tr.CloseIdleConnections(); forceClose() }
 		}
 	} else {
-
 		tr := &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				c, err := rawDial(ctx)
@@ -548,7 +543,6 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 		conn, err = b.dialHTTPCPost(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr, budget)
 	}
 	if err != nil {
-
 		closeIdle()
 	}
 	return conn, err
@@ -910,7 +904,6 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
-
 		s := b.httpcLookup(sid)
 		if s == nil {
 			http.Error(w, "Not Found", http.StatusNotFound)
@@ -923,13 +916,11 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		data, rerr := io.ReadAll(io.LimitReader(r.Body, maxPostBody))
 		if rerr != nil {
-
 			log.Printf("core/http: truncated upstream chunk seq=%d (%d bytes read): %v — dropping so the client re-dials", seq, len(data), rerr)
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}
 		if !s.up.deliver(seq, data) {
-
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}

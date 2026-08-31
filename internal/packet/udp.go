@@ -166,7 +166,6 @@ func (b *UDP) SetSourcePool(sp *PeerPool) {
 		if ip := net.ParseIP(host); ip != nil {
 			nc, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip})
 			if err != nil {
-
 				log.Printf("core/udp: initial source bind to %s failed: %v", host, err)
 
 				b.sp.fail("unbindable")
@@ -403,7 +402,6 @@ func (b *UDP) serverReadLoop(c *net.UDPConn) error {
 				return err
 			}
 			for _, d := range ds {
-
 				b.rxMu.Lock()
 				b.rxConn.Store(c)
 				b.receive(d.pkt, d.addr)
@@ -424,7 +422,6 @@ func (b *UDP) serverReadLoop(c *net.UDPConn) error {
 
 func (b *UDP) receive(pkt []byte, addr *net.UDPAddr) {
 	if b.fecDec != nil {
-
 		b.rxAddr.Store(addr)
 		b.fecDec.input(pkt)
 		return
@@ -433,7 +430,6 @@ func (b *UDP) receive(pkt []byte, addr *net.UDPAddr) {
 }
 
 func (b *UDP) learnPeer(addr *net.UDPAddr) {
-
 	if !b.isClient {
 		if c := b.rxConn.Load(); c != nil {
 			b.replyConn.Store(c)
@@ -508,7 +504,6 @@ func (b *UDP) initFec(fec bool, fecData, fecParity int) {
 		func(pkt []byte) {
 			if p := b.peer.Load(); p != nil {
 				if c := b.sendConn(); c != nil {
-
 					if _, err := c.WriteToUDP(pkt, p); err != nil {
 						b.sendErr.note("udp/fec", err)
 					}
@@ -603,7 +598,6 @@ func (b *UDP) tunToNet(dev *tun.Device) error {
 			tx, txFor = newUDPTx(c), c
 		}
 		if tx != nil {
-
 			tx.reset()
 			tx.add(frame, peer)
 			for !tx.full() {
@@ -621,10 +615,8 @@ func (b *UDP) tunToNet(dev *tun.Device) error {
 				tx.flush(&b.sendErr)
 				continue
 			}
-
 		}
 		if _, err := c.WriteToUDP(frame, peer); err != nil {
-
 			b.sendErr.note("udp", err)
 		}
 	}
@@ -683,7 +675,6 @@ func (b *UDP) deliver(pkt []byte, addr *net.UDPAddr) {
 	}
 	pt := iff(pkt[1] == typeData, pkt[2:], nil)
 	if pt != nil {
-
 		pt = append([]byte(nil), pt...)
 	}
 	b.dispatch(pkt[1], pt, addr)
@@ -799,7 +790,6 @@ func (b *UDP) tryHandshake(pkt []byte, addr *net.UDPAddr) {
 
 	b.staged = stageSession(b.staged, s)
 	if msg2 := crypto.RespMsg(b.psk, eInit, sr); msg2 != nil {
-
 		b.hsCache.put(pkt, msg2)
 		b.writeCtrl(msg2, addr)
 	}
@@ -811,7 +801,6 @@ func (b *UDP) writeCtrl(pkt []byte, to *net.UDPAddr) {
 	}
 	if c := b.replySock(); c != nil {
 		if _, err := c.WriteToUDP(fecTag(b.fecEnc, pkt), to); err != nil {
-
 			b.sendErr.note("udp/ctrl", err)
 		}
 	}
@@ -822,7 +811,6 @@ func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {
 	case typePing:
 		b.send(typePong, nil, addr)
 	case typePong:
-
 	case typeData:
 		b.tw.write(payload)
 	}
@@ -843,7 +831,6 @@ func (b *UDP) clientLoop() {
 			b.sendInit()
 		}
 		if !b.cryptoOn || b.sealer() != nil {
-
 			if b.pp != nil && b.peerAnswered.Load() {
 				if pa := b.peer.Load(); pa != nil {
 					b.pp.pinLandedOn(pa.String())
@@ -858,7 +845,6 @@ func (b *UDP) clientLoop() {
 			b.send(typePing, nil, b.peer.Load())
 
 			if b.cryptoOn && b.sealer() == nil {
-
 				continue
 			}
 		}

@@ -131,7 +131,6 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 		}
 		fd, err := open(r.proto)
 		if err != nil {
-
 			if d.mode == "both" {
 				log.Printf("raw: low-TTL decoys disabled (cannot open raw socket: %v) — the bad-checksum decoys still fire", err)
 			} else {
@@ -143,9 +142,7 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 		}
 	}
 	if d.usesBadsum() {
-
 		if inj, err := newL2Inject(); err != nil {
-
 			if d.mode == "both" {
 				log.Printf("raw: bad-checksum decoys disabled (AF_PACKET: %v) — the TTL decoys still fire", err)
 			} else {
@@ -177,7 +174,6 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 	var sa syscall.SockaddrInet4
 	copy(sa.Addr[:], to.IP.To4())
 	for i, sp := range r.desync.specs() {
-
 		dseq := r.decoySeq(i)
 		var dack uint32
 		if r.proto == protoTCP {
@@ -190,7 +186,6 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 			continue
 		}
 		if sp.badSum {
-
 			if r.inj != nil {
 				r.dsSend.note("raw", r.inj.sendTo(to.IP, out))
 			}
@@ -410,7 +405,6 @@ func (r *Raw) wire(body []byte, dst net.IP) []byte { return r.wireTo(body, dst, 
 func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
 	var seq, ack uint32
 	if r.proto == protoTCP {
-
 		n := uint32(len(body))
 		seq = r.tcpISN.Load() + r.tcpBytes.Add(n) - n
 		ack = r.tcpAck.Load()
@@ -487,7 +481,6 @@ func buildIP4Ext(src, dst net.IP, proto, ttl int, badSum bool, payload []byte) [
 	sum := onesComplementSum(h[:20])
 	binary.BigEndian.PutUint16(h[10:12], sum)
 	if badSum {
-
 		binary.BigEndian.PutUint16(h[10:12], ^sum)
 		if onesComplementSum(h[:20]) == 0 {
 			binary.BigEndian.PutUint16(h[10:12], ^sum^0x0001)
@@ -560,7 +553,6 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked b
 	switch profile {
 	case "icmp":
 		if isClient || !marked {
-
 			return nil
 		}
 		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "echo-reply",
@@ -568,7 +560,6 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked b
 	case "udp":
 		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "port-unreachable"}}
 	case "tcp":
-
 		srv, _ := rawPorts(false, port, 0)
 		side := "--dport"
 		if !isClient {
@@ -747,7 +738,6 @@ func (r *Raw) tunToNet(q *txQueue) error {
 		pkt := r.wire(body, peer.IP)
 
 		if r.canBatch(q) {
-
 			var oob []byte
 			if src := r.pinnedSrc(); src != nil {
 				oob = r.srcOOB(src)
@@ -767,13 +757,11 @@ func (r *Raw) tunToNet(q *txQueue) error {
 				n++
 			}
 			if n > 1 {
-
 				if sent := sendBatch(q.batch, ms[:n]); sent != n {
 					r.sendErr.note("raw/batch", errShortBatch)
 				}
 				continue
 			}
-
 		}
 		r.writeOut(pkt, peer)
 	}
@@ -799,7 +787,6 @@ func (r *Raw) recvConnLoop() error {
 			if r.link.filterSrc() {
 				if peer := r.peer.Load(); peer != nil && !addr.IP.Equal(peer.IP) && !r.srcAllowed(addr.IP) {
 					continue
-
 				}
 			}
 			if !r.isClient {
@@ -817,12 +804,10 @@ func (r *Raw) learnReplySrc(oob []byte) {
 	}
 	switch {
 	case d == nil:
-
 		r.noPktinfo.Do(func() {
 			log.Printf("raw: WARNING inbound frames carry no IP_PKTINFO — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one")
 		})
 	case sameIP4(r.replySrc.Load(), d):
-
 	case r.ours.has(d):
 		cp := append(net.IP(nil), d...)
 		r.replySrc.Store(&cp)
@@ -869,11 +854,9 @@ func (r *Raw) handleRaw(raw []byte, addr *net.IPAddr) {
 		return
 	}
 	if pts != 0 {
-
 		r.tsEcr.Store(pts)
 	}
 	if r.fecDec != nil {
-
 		r.rxAddr.Store(addr)
 		r.rxSport.Store(uint32(sport))
 		r.fecDec.input(body)
@@ -923,7 +906,6 @@ func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
 }
 
 func (r *Raw) learnPeer(addr *net.IPAddr) {
-
 	if r.link.filterSrc() && r.pp == nil {
 		r.peer.Store(addr)
 	}
@@ -971,7 +953,6 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 
 	if len(r.staged) > 0 {
 		if resp, ok := r.hsCache.get(body); ok {
-
 			r.writeCtrlTo(resp, r.replyAddr(addr), r.replyPort(hsSport))
 			return
 		}
@@ -998,7 +979,6 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 		r.leak.scopeAsync(addr.IP)
 	}
 	if msg2 := crypto.RespMsg(r.psk, eInit, sr); msg2 != nil {
-
 		r.hsCache.put(body, msg2)
 		r.writeCtrlTo(msg2, r.replyAddr(addr), r.replyPort(hsSport))
 	}
@@ -1018,7 +998,6 @@ func (r *Raw) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 	case typePing:
 		r.send(typePong, nil, r.replyAddr(addr))
 	case typePong:
-
 	case typeData:
 		r.rxw.write(payload)
 	}
@@ -1109,7 +1088,6 @@ func (r *Raw) SetSourcePool(sp *PeerPool) {
 		return
 	}
 	if r.link.pinsSource() {
-
 		log.Printf("core/raw: source pool ignored — spoof_src pins the source IP (remove one of them)")
 		return
 	}
@@ -1120,7 +1098,6 @@ func (r *Raw) SetSourcePool(sp *PeerPool) {
 		if ip := adoptableSource("raw", sp, sp.current(), &r.srcWarned); ip != nil {
 			r.localIP.Store(&net.IPAddr{IP: ip})
 		} else {
-
 			sp.fail("unbindable")
 		}
 	}
@@ -1137,7 +1114,6 @@ func (r *Raw) rotateSourceRaw(proactive bool) {
 	}
 	ip := adoptableSource("raw", r.sp, addr, &r.srcWarned)
 	if ip == nil {
-
 		r.sp.rejectCandidate(prev)
 		return
 	}
@@ -1218,7 +1194,6 @@ func (r *Raw) adoptSourceRaw() {
 	addr := r.sp.current()
 	ip := adoptableSource("raw", r.sp, addr, &r.srcWarned)
 	if ip == nil {
-
 		r.sp.fail("unbindable")
 		return
 	}
@@ -1229,7 +1204,6 @@ func (r *Raw) adoptSourceRaw() {
 	}
 	log.Printf("raw: pinned source to %s", ip)
 	r.sp.pinLandedOn(addr)
-
 }
 
 func (r *Raw) pinPollLoop(rc *rotationController) {
@@ -1256,7 +1230,6 @@ func (r *Raw) clientLoop() {
 			r.sendInit()
 		}
 		if r.sealer() != nil {
-
 			if r.pp != nil && r.peerAnswered.Load() {
 				if pa := r.peer.Load(); pa != nil {
 					r.pp.pinLandedOn(pa.IP.String())
@@ -1266,7 +1239,6 @@ func (r *Raw) clientLoop() {
 			r.send(typePing, nil, r.peer.Load())
 
 			if r.sealer() == nil {
-
 				continue
 			}
 		}

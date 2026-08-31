@@ -235,12 +235,10 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoTCP:
-
 		sp, dp := rawPorts(isClient, port, cport)
 		return buildTCPSeg(src, dst, sp, dp, seq, ack, flags, rawTCPWindow, tcpTSOption(tsval, tsecr), payload)
 
 	case protoESP:
-
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		binary.BigEndian.PutUint32(h[0:4], spi)
 		binary.BigEndian.PutUint32(h[4:8], seq)
@@ -248,7 +246,6 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoL2TPv3:
-
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		sess := spi
 		if sess == 0 {
@@ -260,7 +257,6 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoAH:
-
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		h[0], h[1] = protoIPIP, 4
 		binary.BigEndian.PutUint32(h[4:8], spi)
@@ -274,7 +270,6 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoIPComp:
-
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		h[0] = protoIPIP
 		binary.BigEndian.PutUint16(h[2:4], 2)
@@ -282,7 +277,6 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 		return h
 
 	case protoEtherIP:
-
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		h[0] = 0x30
 		copy(h[2:], payload)
@@ -312,7 +306,6 @@ func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16,
 	case protoBare, protoIPIP:
 		return pkt, 0, 0, true
 	case protoTCP:
-
 		if len(pkt) < 20 {
 			return nil, 0, 0, false
 		}

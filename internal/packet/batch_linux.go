@@ -21,7 +21,6 @@ type recvBatcher struct{ ms []ipv4.Message }
 func newRecvBatcher(n int) *recvBatcher {
 	ms := make([]ipv4.Message, n)
 	for i := range ms {
-
 		ms[i].Buffers = [][]byte{make([]byte, maxDatagram)}
 		ms[i].OOB = make([]byte, pktinfoOOBLen)
 	}

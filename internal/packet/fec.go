@@ -91,7 +91,6 @@ func (c *fecCodec) Reconstruct(shards [][]byte) ([][]byte, error) {
 	sz := 0
 	for i := 0; i < c.n+c.k; i++ {
 		if shards[i] != nil {
-
 			if sz != 0 && len(shards[i]) != sz {
 				return nil, errors.New("fec: mixed shard lengths")
 			}
@@ -162,7 +161,6 @@ func gfInvert(m [][]byte) ([][]byte, error) {
 		a[i][n+i] = 1
 	}
 	for col := 0; col < n; col++ {
-
 		if a[col][col] == 0 {
 			sw := -1
 			for r := col + 1; r < n; r++ {

@@ -113,7 +113,6 @@ func (c *Codec) DecodeName(name string) ([]byte, error) {
 	}
 	prefix := strings.TrimSuffix(nl[:len(nl)-len(c.zone)], ".")
 	if prefix == "" {
-
 		return nil, ErrBareZone
 	}
 	labels := strings.Split(prefix, ".")

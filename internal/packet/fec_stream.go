@@ -274,7 +274,6 @@ func (d *fecDecoder) input(pkt []byte) {
 	}
 	b := d.blocks[blk]
 	if b == nil {
-
 		padBytes := (n - count) * shardLen
 
 		for d.bytes+padBytes+shardLen > d.maxBytes && len(d.blocks) > 0 {
@@ -298,14 +297,12 @@ func (d *fecDecoder) input(pkt []byte) {
 		d.blocks[blk] = b
 		d.evictLocked()
 	} else if b.n != n || b.k != k || b.count != count || b.shardLen != shardLen {
-
 		return
 	}
 	if b.done || b.shards[slot] != nil {
 		return
 	}
 	if d.bytes+shardLen > d.maxBytes {
-
 		if typ == fecTypeData {
 			if b.gaveOut == nil {
 				b.gaveOut = make([]bool, b.count)

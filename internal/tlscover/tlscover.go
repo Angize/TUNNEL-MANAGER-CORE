@@ -221,7 +221,6 @@ func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 		return
 	}
 	go func() {
-
 		queued := true
 		leaveQueue := func() {
 			if queued {
@@ -278,7 +277,6 @@ func (c *idleConn) Write(b []byte) (int, error) {
 }
 
 func readClientHello(c net.Conn) (buf, sid []byte, err error) {
-
 	hdr := make([]byte, 5)
 	n, err := io.ReadFull(c, hdr)
 	buf = hdr[:n]

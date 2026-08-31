@@ -157,7 +157,6 @@ func NewDNSClientTransport(resolverAddrs []string, codec *Codec) (WireTransport,
 			continue
 		}
 		if _, _, err := net.SplitHostPort(ra); err != nil {
-
 			host := strings.TrimSuffix(strings.TrimPrefix(ra, "["), "]")
 			ra = net.JoinHostPort(host, "53")
 		}
@@ -309,7 +308,6 @@ func (c *dnsClient) sendOne(up []byte) bool {
 	}
 	resolver := c.resolvers[int(c.rr.Add(1)-1)%len(c.resolvers)]
 	if _, err := c.conn.WriteToUDP(query, resolver); err != nil {
-
 		c.sendErr.note("dns/"+resolver.String(), err)
 		c.dropInflight(id)
 		return true
@@ -335,7 +333,6 @@ func (c *dnsClient) recvLoop() {
 		}
 		down, derr := parseResponseTXT(buf[:n], id)
 		if derr != nil {
-
 			c.answerErr.noteAs("dns/"+from.String(), "answer rejected", derr)
 
 			down = nil
@@ -560,7 +557,6 @@ func (s *dnsServer) serveLoop() {
 
 		data, derr := s.codec.DecodeName(qname)
 		if errors.Is(derr, ErrBareZone) {
-
 			resp, berr := buildResponse(id, qn, dnsmessage.TypeTXT, nil, s.negativeAuthority(nil))
 			if berr == nil {
 				if _, err := s.conn.WriteToUDP(resp, addr); err != nil {

@@ -68,17 +68,13 @@ func (d *Device) reportGSO() {
 	if d.repAt.IsZero() {
 		d.repAt = now
 		if cur == ([6]uint64{}) {
-
 			return
 		}
-
 	} else {
 		moved := cur != d.repSeen
 		switch {
 		case moved && !d.repSaid:
-
 		case moved, !d.repSaid:
-
 			if now.Sub(d.repAt) < gsoReportEvery {
 				return
 			}
@@ -145,7 +141,6 @@ func openQueue(name string, gso, multi bool) (*Device, error) {
 	if errno := setIff(f, &ifr); errno != 0 {
 		f.Close()
 		if gso {
-
 			return nil, fmt.Errorf("TUNSETIFF (vnet-hdr): %w: %w", ErrGSOUnsupported, errno)
 		}
 		return nil, fmt.Errorf("TUNSETIFF: %w", errno)
@@ -366,7 +361,6 @@ func (d *Device) segsFrom(n int) [][]byte {
 		segs, split = splitGSO(pkt, gsoSize, gsoType)
 	}
 	if !split {
-
 		if flags&vnetNeedsCsum != 0 {
 			finalizeCsum(pkt)
 		}
@@ -416,7 +410,6 @@ func oversizeNote(n uint64) string {
 
 func (d *Device) Close() error {
 	if d.gso && (d.nSuper.Load() > 0 || d.nUnsplit.Load() > 0 || d.nOversize.Load() > 0 || d.nOut.Load() > 0) {
-
 		log.Printf("tun %s: gso final: in %d super-packets -> %d segments, %d unsplit%s; out %d packets in %d writes",
 			d.Name, d.nSuper.Load(), d.nSeg.Load(), d.nUnsplit.Load(), oversizeNote(d.nOversize.Load()),
 			d.nOut.Load(), d.nWrites.Load())

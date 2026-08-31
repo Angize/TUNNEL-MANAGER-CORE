@@ -14,12 +14,13 @@ func TestTheFirstVerdictAboutThePairTheWalkArrivedOnSpendsNothing(t *testing.T) 
 	rot := func(bool) { dst.fail("tun-probe") }
 
 	start, _ := rc.livePair()
-	for i := 0; i < 40 && func() bool { now, _ := rc.livePair(); return now == start }(); i++ {
+	arrived := start
+	for i := 0; i < 40 && arrived == start; i++ {
 		failLivePair(t, rc, rot, noRot)
+		arrived, _ = rc.livePair()
 	}
-	arrived, _ := rc.livePair()
 	if arrived == start {
-		t.Fatalf("setup: the ladder never walked off %s", start)
+		t.Fatalf("setup: the ladder never walked off %s in 40 verdicts", start)
 	}
 
 	r0, d0 := *rolls, *drops

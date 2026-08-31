@@ -78,9 +78,7 @@ func ListenSpoof(listenIP string, dev *tun.Device, obfs bool, psk, cipher, realP
 
 		r.link = &forgedLink{r: r, spoofFd: fd, pktFd: pfd, spoofSrc: dip, decoy: dip,
 			fixedPeer: fixedPeer, antiLeak: addAntiLeak(r.proto, dip, r.tunName())}
-
 	} else {
-
 		r.link = &forgedLink{r: r, spoofFd: -1, pktFd: -1, fixedPeer: fixedPeer}
 		applyConnSockBuf(r.conn)
 	}

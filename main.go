@@ -95,7 +95,6 @@ func main() {
 
 	cipherName := "off"
 	if cfg.Crypto.Enabled {
-
 		s, err := crypto.NewSealer(cfg.Crypto.Cipher, cfg.Crypto.PSK, cfg.Role == "client")
 		if err != nil {
 			log.Fatalf("tnl-core: crypto: %v", err)
@@ -398,7 +397,6 @@ func pinSource(b any, cfg *Config) string {
 			return pinBySrcIPs
 		}
 		if cfg.SpoofSrc != "" {
-
 			return pinBySpoof
 		}
 
@@ -416,7 +414,6 @@ func applySNISplit(b any, transport, mode string, pos, ttl int) bool {
 		SetSNISplit(bool, int, string, int) bool
 	})
 	if ok && s.SetSNISplit(true, pos, mode, ttl) {
-
 		if mode == "disorder" {
 			log.Printf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d ttl=%d)", mode, pos, ttl)
 		} else {
