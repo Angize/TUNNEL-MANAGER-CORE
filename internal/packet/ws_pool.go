@@ -415,14 +415,14 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 		p.mu.Unlock()
 		return
 	}
-	fresh := p.healthMap(kind).burn(key)
+	condemned := p.healthMap(kind).burn(key)
 	p.mu.Unlock()
-	if fresh {
+	if condemned {
 		p.burns.Add(1)
 		p.event("burn", reason, kind+":"+key)
 	}
 	p.publish()
-	if fresh && kind == "ip" {
+	if condemned && kind == "ip" {
 		p.reassessRotation()
 	}
 }

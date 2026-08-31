@@ -49,7 +49,7 @@ func (h healthSet) best(keys []string) string {
 	return best
 }
 
-func (h healthSet) burn(key string) (fresh bool) {
+func (h healthSet) burn(key string) (condemned bool) {
 	r := h.recs[key]
 	if r == nil {
 		h.recs[key] = &healthRec{state: stateSuspect, nextRetest: h.now() + suspectBackoff[0]}
@@ -57,6 +57,7 @@ func (h healthSet) burn(key string) (fresh bool) {
 	}
 	if r.nextRetest <= h.now() {
 		retestBackoff(r, h.now())
+		return true
 	}
 	return false
 }
