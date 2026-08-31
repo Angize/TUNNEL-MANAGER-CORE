@@ -367,10 +367,10 @@ func (p *PeerPool) markSuspect(addr, reason string) {
 		p.mu.Unlock()
 		return
 	}
-	fresh := p.health.burn(addr)
+	condemned := p.health.burn(addr)
 	axis, ev := p.axis, p.ev
 	p.mu.Unlock()
-	if fresh {
+	if condemned {
 		p.burns.Add(1)
 		if ev != nil {
 			ev("burn", reason, axis+":"+addr)
