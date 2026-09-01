@@ -16,7 +16,7 @@ func TestFecDoesNotPadTheWire(t *testing.T) {
 	}
 
 	sink := &fecCapture{}
-	enc, err := newFecEncoder(10, 3, sink.emit)
+	enc, err := newFecEncoder(10, 3, fecTestKey, sink.emit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestFecDoesNotPadTheWire(t *testing.T) {
 		t.Fatalf("%d data shards for %d frames", len(data), len(frames))
 	}
 
-	shardLen := int(binary.BigEndian.Uint16(data[0][9:11]))
+	shardLen := fecHdrPeek(data[0]).shardLen
 	onWire, padded := 0, 0
 	for i, p := range data {
 		want := fecHdrLen + 2 + sizes[i]
@@ -83,7 +83,7 @@ func TestFecDoesNotPadTheWire(t *testing.T) {
 
 func TestFecUniformBlockIsUnchanged(t *testing.T) {
 	sink := &fecCapture{}
-	enc, err := newFecEncoder(4, 2, sink.emit)
+	enc, err := newFecEncoder(4, 2, fecTestKey, sink.emit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestFecUniformBlockIsUnchanged(t *testing.T) {
 	if len(data) != 4 || len(parity) != 2 {
 		t.Fatalf("got %d data + %d parity", len(data), len(parity))
 	}
-	shardLen := int(binary.BigEndian.Uint16(data[0][9:11]))
+	shardLen := fecHdrPeek(data[0]).shardLen
 	for i, p := range data {
 		if len(p) != fecHdrLen+shardLen {
 			t.Errorf("data shard %d is %d bytes, want %d — a uniform block must be exactly what it was",
@@ -115,13 +115,9 @@ func TestFecRefusesAShardThatOverrunsItsBlock(t *testing.T) {
 	delivered := 0
 	dec := fecDecoderFor(t, 4, 2, func([]byte) { delivered++ })
 	mk := func(typ byte, shardLen, bodyLen int) []byte {
-		p := make([]byte, fecHdrLen+bodyLen)
-		p[0] = typ
-		binary.BigEndian.PutUint32(p[1:5], 7)
-		p[5], p[6], p[7], p[8] = 0, 4, 2, 4
-		binary.BigEndian.PutUint16(p[9:11], uint16(shardLen))
-		binary.BigEndian.PutUint16(p[fecHdrLen:], uint16(bodyLen-2))
-		return p
+		body := make([]byte, bodyLen)
+		binary.BigEndian.PutUint16(body, uint16(bodyLen-2))
+		return fecPutHdr(fecTestKey, fecHeader{typ: typ, blk: 7, n: 4, k: 2, count: 4, shardLen: shardLen}, body)
 	}
 	for _, tc := range []struct {
 		name string

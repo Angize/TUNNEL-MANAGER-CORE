@@ -1,12 +1,18 @@
 package packet
 
 import (
-	"encoding/binary"
 	"fmt"
 	"sync"
 	"testing"
 	"time"
 )
+
+var fecTestKey = newFecHdrMask("fec-test-psk")
+
+func fecHdrPeek(p []byte) fecHeader {
+	h, _, _ := fecReadHdr(fecTestKey, p)
+	return h
+}
 
 type fecCapture struct {
 	mu   sync.Mutex
@@ -23,7 +29,7 @@ func (c *fecCapture) take() (data, parity [][]byte) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, p := range c.pkts {
-		switch p[0] {
+		switch fecHdrPeek(p).typ {
 		case fecTypeData:
 			data = append(data, p)
 		case fecTypeParity:
@@ -62,7 +68,7 @@ func flushBlock(t *testing.T, e *fecEncoder, sink *fecCapture, count int) (data,
 func TestPartialFecBlockScalesParity(t *testing.T) {
 	for _, geo := range []struct{ n, k int }{{10, 3}, {10, 2}, {8, 4}, {4, 1}} {
 		sink := &fecCapture{}
-		e, err := newFecEncoder(geo.n, geo.k, sink.emit)
+		e, err := newFecEncoder(geo.n, geo.k, fecTestKey, sink.emit)
 		if err != nil {
 			t.Fatalf("newFecEncoder(%d,%d): %v", geo.n, geo.k, err)
 		}
@@ -95,7 +101,7 @@ func TestPartialFecBlockScalesParity(t *testing.T) {
 
 func TestPartialFecBlockStillRecoversLoss(t *testing.T) {
 	sink := &fecCapture{}
-	e, err := newFecEncoder(10, 3, sink.emit)
+	e, err := newFecEncoder(10, 3, fecTestKey, sink.emit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +114,7 @@ func TestPartialFecBlockStillRecoversLoss(t *testing.T) {
 	}
 
 	for _, p := range append(append([][]byte{}, data...), parity...) {
-		if got := int(p[7]); got != 3 {
+		if got := fecHdrPeek(p).k; got != 3 {
 			t.Fatalf("header k = %d, want the configured 3 — the wire format moved", got)
 		}
 	}
@@ -143,7 +149,7 @@ func TestPartialFecBlockStillRecoversLoss(t *testing.T) {
 
 func TestFullFecBlockWireUnchanged(t *testing.T) {
 	sink := &fecCapture{}
-	e, err := newFecEncoder(10, 3, sink.emit)
+	e, err := newFecEncoder(10, 3, fecTestKey, sink.emit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,17 +165,18 @@ func TestFullFecBlockWireUnchanged(t *testing.T) {
 			if i >= 10 {
 				wantIdx = i - 10
 			}
-			if got := binary.BigEndian.Uint32(p[1:5]); got != blk {
-				t.Fatalf("block id %d, want %d", got, blk)
+			h := fecHdrPeek(p)
+			if h.blk != blk {
+				t.Fatalf("block id %d, want %d", h.blk, blk)
 			}
-			if int(p[5]) != wantIdx {
-				t.Fatalf("shard %d: idx %d, want %d", i, p[5], wantIdx)
+			if h.idx != wantIdx {
+				t.Fatalf("shard %d: idx %d, want %d", i, h.idx, wantIdx)
 			}
-			if int(p[6]) != 10 || int(p[7]) != 3 || int(p[8]) != 10 {
-				t.Fatalf("shard %d: header n,k,count = %d,%d,%d, want 10,3,10", i, p[6], p[7], p[8])
+			if h.n != 10 || h.k != 3 || h.count != 10 {
+				t.Fatalf("shard %d: header n,k,count = %d,%d,%d, want 10,3,10", i, h.n, h.k, h.count)
 			}
-			if got := int(binary.BigEndian.Uint16(p[9:11])); got != len(p)-fecHdrLen {
-				t.Fatalf("shard %d: shardLen %d, body %d", i, got, len(p)-fecHdrLen)
+			if h.shardLen != len(p)-fecHdrLen {
+				t.Fatalf("shard %d: shardLen %d, body %d", i, h.shardLen, len(p)-fecHdrLen)
 			}
 		}
 	}

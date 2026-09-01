@@ -11,7 +11,7 @@ func fecEncodeBlock(t *testing.T, n, k, count int) (wire, payloads [][]byte) {
 	t.Helper()
 	var mu sync.Mutex
 	var got [][]byte
-	e, err := newFecEncoder(n, k, func(p []byte) {
+	e, err := newFecEncoder(n, k, fecTestKey, func(p []byte) {
 		mu.Lock()
 		got = append(got, append([]byte(nil), p...))
 		mu.Unlock()
@@ -47,7 +47,7 @@ func fecEncodeBlock(t *testing.T, n, k, count int) (wire, payloads [][]byte) {
 
 func fecSplit(wire [][]byte) (data, parity [][]byte) {
 	for _, p := range wire {
-		switch p[0] {
+		switch fecHdrPeek(p).typ {
 		case fecTypeData:
 			data = append(data, p)
 		case fecTypeParity:

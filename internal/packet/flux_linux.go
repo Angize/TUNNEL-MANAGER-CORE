@@ -151,7 +151,7 @@ func newFlux(dev *tun.Device, rotate time.Duration, obfs, cryptoOn bool, psk, ci
 
 	f.logEp.Store(sh.epoch)
 
-	f.fecEnc, f.fecDec = newFecPair(fec, fecData, fecParity, "flux",
+	f.fecEnc, f.fecDec = newFecPair(fec, fecData, fecParity, f.psk, "flux",
 		func(pkt []byte) {
 			if p := f.peer.Load(); p != nil {
 				f.carrierOut(pkt, p)

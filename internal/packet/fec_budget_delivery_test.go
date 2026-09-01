@@ -2,14 +2,13 @@ package packet
 
 import (
 	"bytes"
-	"encoding/binary"
 	"testing"
 )
 
 func fecBlockOf(pkts [][]byte, blk uint32) [][]byte {
 	var out [][]byte
 	for _, p := range pkts {
-		if len(p) >= fecHdrLen && binary.BigEndian.Uint32(p[1:5]) == blk {
+		if len(p) >= fecHdrLen && fecHdrPeek(p).blk == blk {
 			out = append(out, p)
 		}
 	}
@@ -18,7 +17,7 @@ func fecBlockOf(pkts [][]byte, blk uint32) [][]byte {
 
 func TestFecDeliversAnArrivedShardOverTheByteBudget(t *testing.T) {
 	var wire [][]byte
-	enc, err := newFecEncoder(5, 2, func(p []byte) { wire = append(wire, append([]byte(nil), p...)) })
+	enc, err := newFecEncoder(5, 2, fecTestKey, func(p []byte) { wire = append(wire, append([]byte(nil), p...)) })
 	if err != nil {
 		t.Fatalf("newFecEncoder: %v", err)
 	}
