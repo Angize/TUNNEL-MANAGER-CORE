@@ -267,6 +267,7 @@ type TCP struct {
 
 	pool   *wsPool
 	rotate time.Duration
+	rotAt  atomic.Int64
 	st     *coreStatus
 	stTag  string
 	lastRx atomic.Int64
@@ -416,6 +417,23 @@ func (b *TCP) livePath() (pathKey, bool) {
 }
 
 func (b *TCP) endRound() { b.rc.success() }
+
+func (b *TCP) rotateIn(iv time.Duration) time.Duration {
+	now := time.Now().UnixNano()
+	at := b.rotAt.Load()
+	if at == 0 {
+		at = now + int64(iv)
+		b.rotAt.Store(at)
+	}
+	if d := time.Duration(at - now); d > 0 {
+		return d
+	}
+	return time.Millisecond
+}
+
+func (b *TCP) rotateFrom(iv time.Duration) {
+	b.rotAt.Store(time.Now().Add(iv).UnixNano())
+}
 
 func (b *TCP) rollSourcePort() bool {
 	if c := b.curConn.Load(); c != nil {
@@ -1260,6 +1278,7 @@ func (b *TCP) dialLoop() {
 
 		var rotp atomic.Pointer[time.Timer]
 		rearm := func(d time.Duration) {
+			b.rotateFrom(d)
 			if t := rotp.Load(); t != nil {
 				t.Reset(d)
 			}
@@ -1270,7 +1289,7 @@ func (b *TCP) dialLoop() {
 		if b.pool != nil && b.rotate > 0 {
 			c := conn
 
-			rot = time.AfterFunc(b.rotate, func() {
+			rot = time.AfterFunc(b.rotateIn(b.rotate), func() {
 				if !timerLive.Load() {
 					return
 				}
@@ -1292,6 +1311,7 @@ func (b *TCP) dialLoop() {
 				if nowSNI.host != prevSNI.host {
 					b.st.rotated("sni", "sni:"+nowSNI.host, true)
 				}
+				b.rotateFrom(b.rotate)
 				rotated.Store(true)
 				c.Close()
 			})
@@ -1306,7 +1326,7 @@ func (b *TCP) dialLoop() {
 				iv = b.sp.rotate
 			}
 
-			rot = time.AfterFunc(iv, func() {
+			rot = time.AfterFunc(b.rotateIn(iv), func() {
 				if !timerLive.Load() {
 					return
 				}
@@ -1331,6 +1351,7 @@ func (b *TCP) dialLoop() {
 					rearm(iv)
 					return
 				}
+				b.rotateFrom(iv)
 				rotated.Store(true)
 				c.Close()
 			})
