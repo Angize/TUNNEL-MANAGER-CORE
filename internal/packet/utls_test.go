@@ -101,7 +101,7 @@ func helloSeenBy(t *testing.T, alpn []string, goFingerprint bool) *tls.ClientHel
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = uEdgeHandshake(cli, "cdn.example.com", nil, alpn, goFingerprint, handshakeTimeout)
+	_, _ = uEdgeHandshake(cli, "cdn.example.com", nil, alpn, goFingerprint, handshakeTimeout, nil)
 	cli.Close()
 	<-done
 	if got == nil {
