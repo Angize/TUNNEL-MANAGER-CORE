@@ -1,7 +1,6 @@
 package packet
 
 import (
-	"encoding/binary"
 	"fmt"
 	"testing"
 	"time"
@@ -13,19 +12,11 @@ func fecDecoderFor(t *testing.T, n, k int, deliver func([]byte)) *fecDecoder {
 	if err != nil {
 		t.Fatalf("newFECCodec(%d,%d): %v", n, k, err)
 	}
-	return newFecDecoder(c, deliver)
+	return newFecDecoder(c, fecTestKey, deliver)
 }
 
 func fecDataShard(blk uint32, n, k int) []byte {
-	pkt := make([]byte, fecHdrLen+2)
-	pkt[0] = fecTypeData
-	binary.BigEndian.PutUint32(pkt[1:5], blk)
-	pkt[5] = 0
-	pkt[6] = byte(n)
-	pkt[7] = byte(k)
-	pkt[8] = 1
-	binary.BigEndian.PutUint16(pkt[9:11], 2)
-	return pkt
+	return fecPutHdr(fecTestKey, fecHeader{typ: fecTypeData, blk: blk, n: n, k: k, count: 1, shardLen: 2}, make([]byte, 2))
 }
 
 // The decoder used to take its geometry off the wire: bytes 6 and 7 of an unauthenticated packet
@@ -43,7 +34,7 @@ func fecDataShard(blk uint32, n, k int) []byte {
 // front makes the codec a fixed, single, configured object and takes the choice away from the wire.
 func TestAFecShardMustBeOurGeometry(t *testing.T) {
 	var wire [][]byte
-	e, err := newFecEncoder(10, 3, func(p []byte) { wire = append(wire, append([]byte(nil), p...)) })
+	e, err := newFecEncoder(10, 3, fecTestKey, func(p []byte) { wire = append(wire, append([]byte(nil), p...)) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +75,7 @@ func TestAFecShardMustBeOurGeometry(t *testing.T) {
 	}
 
 	for _, p := range wire {
-		if p[0] == fecTypeData && p[5] == 3 {
+		if h := fecHdrPeek(p); h.typ == fecTypeData && h.idx == 3 {
 			continue
 		}
 		d.input(p)
@@ -103,13 +94,7 @@ func TestAHostileFecBlockCostsNothing(t *testing.T) {
 	d := fecDecoderFor(t, 10, 3, func([]byte) {})
 	const n, k, count, shardLen = 255, 1, 255, 2
 	mk := func(typ byte, idx int) []byte {
-		p := make([]byte, fecHdrLen+shardLen)
-		p[0] = typ
-		binary.BigEndian.PutUint32(p[1:5], 7)
-		p[5] = byte(idx)
-		p[6], p[7], p[8] = byte(n), byte(k), byte(count)
-		binary.BigEndian.PutUint16(p[9:11], shardLen)
-		return p
+		return fecPutHdr(fecTestKey, fecHeader{typ: typ, blk: 7, idx: idx, n: n, k: k, count: count, shardLen: shardLen}, make([]byte, shardLen))
 	}
 	var pkts [][]byte
 	for i := 0; i < count-1; i++ {
@@ -123,9 +108,10 @@ func TestAHostileFecBlockCostsNothing(t *testing.T) {
 	}
 	el := time.Since(start)
 	t.Logf("255 hostile packets, %d wire bytes, %v", len(pkts)*(fecHdrLen+shardLen), el)
-	if el > 100*time.Microsecond {
-		t.Errorf("a hostile block still cost %v; it was 387us before the geometry check and should now "+
-			"be header parsing only", el)
+	if el > time.Millisecond {
+		t.Errorf("a hostile block still cost %v; it was 387us of GF(256) inversion before the geometry "+
+			"check and should now be one AES block to unmask the header plus eleven bytes of parsing "+
+			"(about 110us for these 255 packets, four times that under -race)", el)
 	}
 }
 
@@ -135,7 +121,7 @@ func TestAHostileFecBlockCostsNothing(t *testing.T) {
 // Reconstruct only ever reads them, and nothing below count is ever a pad, so the sharing is invisible.
 func TestAShortFecBlockSharesOnePadBuffer(t *testing.T) {
 	sink := &fecCapture{}
-	e, err := newFecEncoder(10, 3, sink.emit)
+	e, err := newFecEncoder(10, 3, fecTestKey, sink.emit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +142,7 @@ func TestAShortFecBlockSharesOnePadBuffer(t *testing.T) {
 	}
 
 	d.mu.Lock()
-	b := d.blocks[binary.BigEndian.Uint32(data[0][1:5])]
+	b := d.blocks[fecHdrPeek(data[0]).blk]
 	d.mu.Unlock()
 	if b == nil {
 		t.Fatal("the block is gone")
@@ -174,7 +160,7 @@ func TestAShortFecBlockSharesOnePadBuffer(t *testing.T) {
 	lone := fecDecoderFor(t, 10, 3, func([]byte) {})
 	lone.input(data[0])
 	lone.mu.Lock()
-	only := lone.blocks[binary.BigEndian.Uint32(data[0][1:5])]
+	only := lone.blocks[fecHdrPeek(data[0]).blk]
 	total, shardLen := lone.bytes, only.shardLen
 	lone.mu.Unlock()
 	if want := 2 * shardLen; total != want {

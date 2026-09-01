@@ -333,7 +333,7 @@ func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 }
 
 func (r *Raw) initFec(fec bool, fecData, fecParity int) {
-	r.fecEnc, r.fecDec = newFecPair(fec, fecData, fecParity, "raw",
+	r.fecEnc, r.fecDec = newFecPair(fec, fecData, fecParity, r.psk, "raw",
 		func(pkt []byte) {
 			if p := r.peer.Load(); p != nil {
 				r.writeOut(r.wire(pkt, p.IP), p)

@@ -1,6 +1,9 @@
 package packet
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
 	"encoding/binary"
 	"log"
 	"sync"
@@ -8,23 +11,89 @@ import (
 	"time"
 )
 
-func newFecPair(fec bool, data, parity int, name string, emit, deliver func([]byte)) (*fecEncoder, *fecDecoder) {
+func newFecPair(fec bool, data, parity int, psk, name string, emit, deliver func([]byte)) (*fecEncoder, *fecDecoder) {
 	if !fec {
 		return nil, nil
 	}
-	enc, err := newFecEncoder(data, parity, emit)
+	key := newFecHdrMask(psk)
+	enc, err := newFecEncoder(data, parity, key, emit)
 	if err != nil {
 		log.Printf("%s: FEC disabled (bad geometry %d+%d): %v", name, data, parity, err)
 		return nil, nil
 	}
-	return enc, newFecDecoder(enc.codec, deliver)
+	return enc, newFecDecoder(enc.codec, key, deliver)
+}
+
+type fecHdrMask struct{ blk cipher.Block }
+
+func newFecHdrMask(psk string) fecHdrMask {
+	k := sha256.Sum256([]byte("tnl-core-fec|v1|hdr|" + psk))
+	b, err := aes.NewCipher(k[:16])
+	if err != nil {
+		panic(err)
+	}
+	return fecHdrMask{blk: b}
+}
+
+var fecScratch = sync.Pool{New: func() any { return new([2 * aes.BlockSize]byte) }}
+
+func (m fecHdrMask) apply(hdr, body []byte) {
+	buf := fecScratch.Get().(*[2 * aes.BlockSize]byte)
+	n := copy(buf[:aes.BlockSize], body)
+	for i := n; i < aes.BlockSize; i++ {
+		buf[i] = 0
+	}
+	m.blk.Encrypt(buf[aes.BlockSize:], buf[:aes.BlockSize])
+	for i := range hdr {
+		hdr[i] ^= buf[aes.BlockSize+i]
+	}
+	fecScratch.Put(buf)
+}
+
+type fecHeader struct {
+	typ                        byte
+	blk                        uint32
+	idx, n, k, count, shardLen int
+}
+
+func fecPutHdr(key fecHdrMask, h fecHeader, body []byte) []byte {
+	p := make([]byte, fecHdrLen+len(body))
+	p[0] = h.typ
+	binary.BigEndian.PutUint32(p[1:5], h.blk)
+	p[5] = byte(h.idx)
+	p[6] = byte(h.n)
+	p[7] = byte(h.k)
+	p[8] = byte(h.count)
+	binary.BigEndian.PutUint16(p[9:11], uint16(h.shardLen))
+	copy(p[fecHdrLen:], body)
+	key.apply(p[:fecHdrLen], p[fecHdrLen:])
+	return p
+}
+
+func fecReadHdr(key fecHdrMask, pkt []byte) (fecHeader, []byte, bool) {
+	if len(pkt) < fecHdrLen {
+		return fecHeader{}, nil, false
+	}
+	var h [fecHdrLen]byte
+	copy(h[:], pkt)
+	body := pkt[fecHdrLen:]
+	key.apply(h[:], body)
+	return fecHeader{
+		typ:      h[0],
+		blk:      binary.BigEndian.Uint32(h[1:5]),
+		idx:      int(h[5]),
+		n:        int(h[6]),
+		k:        int(h[7]),
+		count:    int(h[8]),
+		shardLen: int(binary.BigEndian.Uint16(h[9:11])),
+	}, body, true
 }
 
 func fecTag(enc *fecEncoder, frame []byte) []byte {
 	if enc == nil {
 		return frame
 	}
-	return append([]byte{fecTypePass}, frame...)
+	return fecPutHdr(enc.key, fecHeader{typ: fecTypePass}, frame)
 }
 
 const (
@@ -42,6 +111,7 @@ const (
 type fecEncoder struct {
 	codec *fecCodec
 	n, k  int
+	key   fecHdrMask
 	emit  func([]byte)
 
 	mu     sync.Mutex
@@ -51,12 +121,12 @@ type fecEncoder struct {
 	closed bool
 }
 
-func newFecEncoder(n, k int, emit func([]byte)) (*fecEncoder, error) {
+func newFecEncoder(n, k int, key fecHdrMask, emit func([]byte)) (*fecEncoder, error) {
 	c, err := newFECCodec(n, k)
 	if err != nil {
 		return nil, err
 	}
-	return &fecEncoder{codec: c, n: n, k: k, emit: emit}, nil
+	return &fecEncoder{codec: c, n: n, k: k, key: key, emit: emit}, nil
 }
 
 func (e *fecEncoder) Close() {
@@ -120,25 +190,17 @@ func (e *fecEncoder) flushLocked() {
 	if err != nil {
 		return
 	}
-	hdr := func(typ byte, idx int) []byte {
-		h := make([]byte, fecHdrLen)
-		h[0] = typ
-		binary.BigEndian.PutUint32(h[1:5], blk)
-		h[5] = byte(idx)
-		h[6] = byte(e.n)
-		h[7] = byte(e.k)
-		h[8] = byte(count)
-		binary.BigEndian.PutUint16(h[9:11], uint16(shardLen))
-		return h
+	hdr := func(typ byte, idx int) fecHeader {
+		return fecHeader{typ: typ, blk: blk, idx: idx, n: e.n, k: e.k, count: count, shardLen: shardLen}
 	}
 
 	for i := 0; i < count; i++ {
-		e.emit(append(hdr(fecTypeData, i), queued[i]...))
+		e.emit(fecPutHdr(e.key, hdr(fecTypeData, i), queued[i]))
 	}
 
 	kEff := (e.k*count + e.n - 1) / e.n
 	for i := 0; i < kEff; i++ {
-		e.emit(append(hdr(fecTypeParity, i), parity[i]...))
+		e.emit(fecPutHdr(e.key, hdr(fecTypeParity, i), parity[i]))
 	}
 }
 
@@ -160,15 +222,16 @@ type fecDecoder struct {
 	bytes    int
 	maxBytes int
 	n, k     int
+	key      fecHdrMask
 	codec    *fecCodec
 	deliver  func([]byte)
 
 	resetPending atomic.Bool
 }
 
-func newFecDecoder(c *fecCodec, deliver func([]byte)) *fecDecoder {
+func newFecDecoder(c *fecCodec, key fecHdrMask, deliver func([]byte)) *fecDecoder {
 	return &fecDecoder{blocks: map[uint32]*fecBlock{}, maxBytes: fecMaxBytes,
-		n: c.n, k: c.k, codec: c, deliver: deliver}
+		n: c.n, k: c.k, key: key, codec: c, deliver: deliver}
 }
 
 func (d *fecDecoder) reset() {
@@ -184,29 +247,24 @@ func (d *fecDecoder) dropBlocksLocked() {
 }
 
 func (d *fecDecoder) input(pkt []byte) {
-	if len(pkt) < 1 {
+	h, shard, ok := fecReadHdr(d.key, pkt)
+	if !ok {
 		return
 	}
-	switch pkt[0] {
+	switch h.typ {
 	case fecTypePass:
-		if len(pkt) < 2 {
+		if h.blk != 0 || h.idx != 0 || h.n != 0 || h.k != 0 || h.count != 0 || h.shardLen != 0 || len(shard) < 1 {
 			return
 		}
-		d.deliver(pkt[1:])
+		d.deliver(shard)
 		return
 	case fecTypeData, fecTypeParity:
 	default:
 		return
 	}
-	if len(pkt) < fecHdrLen {
-		return
-	}
-	typ := pkt[0]
-	blk := binary.BigEndian.Uint32(pkt[1:5])
-	idx := int(pkt[5])
-	n, k, count := int(pkt[6]), int(pkt[7]), int(pkt[8])
-	shardLen := int(binary.BigEndian.Uint16(pkt[9:11]))
-	shard := pkt[fecHdrLen:]
+	typ, blk, idx := h.typ, h.blk, h.idx
+	n, k, count := h.n, h.k, h.count
+	shardLen := h.shardLen
 	if n != d.n || k != d.k || count < 1 || count > n || shardLen < 2 || shardLen > fecMaxShardLen {
 		return
 	}
@@ -265,6 +323,9 @@ func (d *fecDecoder) input(pkt []byte) {
 		d.blocks[blk] = b
 		d.evictLocked()
 	} else if b.count != count || b.shardLen != shardLen {
+		if typ == fecTypeData {
+			d.deliverShard(shard)
+		}
 		return
 	}
 	if b.done || b.shards[slot] != nil {

@@ -502,7 +502,7 @@ func (b *UDP) replySock() *net.UDPConn {
 }
 
 func (b *UDP) initFec(fec bool, fecData, fecParity int) {
-	b.fecEnc, b.fecDec = newFecPair(fec, fecData, fecParity, "udp",
+	b.fecEnc, b.fecDec = newFecPair(fec, fecData, fecParity, b.psk, "udp",
 		func(pkt []byte) {
 			if p := b.peer.Load(); p != nil {
 				if c := b.sendConn(); c != nil {
