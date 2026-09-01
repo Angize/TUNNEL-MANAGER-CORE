@@ -133,13 +133,16 @@ func TestNodeVerdictsDriveTheLiveDirectPool(t *testing.T) {
 	cli, _, a1, _, _, _ := probePair(t, "onej")
 	p := cli.pp
 
-	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Low: a1})
-	time.Sleep(3 * time.Second)
-	p.mu.Lock()
-	early := p.health.recs[a1] != nil
-	p.mu.Unlock()
-	if early {
-		t.Fatalf("the first verdict condemned %s while the ladder still had a free step", a1)
+	for i := 1; i <= portTries+1; i++ {
+		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Low: a1})
+		time.Sleep(3 * time.Second)
+		p.mu.Lock()
+		early := p.health.recs[a1] != nil
+		p.mu.Unlock()
+		if early {
+			t.Fatalf("verdict %d condemned %s while the ladder still had a free step — udp has %d "+
+				"source-port draws and then the session drop before anything may be blamed", i, a1, portTries)
+		}
 	}
 
 	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Low: a1})

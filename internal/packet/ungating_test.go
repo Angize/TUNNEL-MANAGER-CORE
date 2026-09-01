@@ -51,6 +51,10 @@ func TestAPoolLessTunnelHearsTheJudge(t *testing.T) {
 	for cli.sealer() == nil {
 		time.Sleep(20 * time.Millisecond)
 	}
+	spendThePortRung(t, cli, func() {
+		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail})
+	})
+
 	was := cli.session.Load()
 	start := time.Now()
 	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail})

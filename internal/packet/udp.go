@@ -212,20 +212,53 @@ func (b *UDP) rebindSourceTo(addr string) (string, bool) {
 	if ip == nil {
 		return "", false
 	}
-	b.rebindMu.Lock()
-	defer b.rebindMu.Unlock()
-	nc, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip})
-	if err != nil {
+	if err := b.rebind(&net.UDPAddr{IP: ip}); err != nil {
 		log.Printf("core/udp: source rebind to %s failed: %v", host, err)
 		return "", false
+	}
+	return host, true
+}
+
+func (b *UDP) rebind(la *net.UDPAddr) error {
+	b.rebindMu.Lock()
+	defer b.rebindMu.Unlock()
+	nc, err := net.ListenUDP("udp", la)
+	if err != nil {
+		return err
 	}
 	applyConnSockBuf(nc)
 	old := b.conn.Load()
 
 	b.conn.Store(nc)
 	b.rebindGen.Add(1)
-	_ = old.Close()
-	return host, true
+	if old != nil {
+		_ = old.Close()
+	}
+	return nil
+}
+
+func (b *UDP) rollSourcePort() bool {
+	c := b.conn.Load()
+	if c == nil {
+		return false
+	}
+	la, ok := c.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return false
+	}
+	for i := 0; i < 8; i++ {
+		p := rollRepairPort()
+		if p == 0 {
+			return false
+		}
+		if err := b.rebind(&net.UDPAddr{IP: la.IP, Port: int(p)}); err == nil {
+			log.Printf("core/udp: redrew the source port %d -> %d", la.Port, p)
+			b.st.portRedrawn()
+			wakeLoop(b.wake)
+			return true
+		}
+	}
+	return false
 }
 
 func (b *UDP) adoptPeerUDP() {
@@ -823,11 +856,17 @@ func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {
 	}
 }
 
-func (b *UDP) clientLoop() {
+func (b *UDP) newController() *rotationController {
 	rc := newRotationController(b.pp, b.sp)
 	rc.session.setDrop(b.rehandshake)
+	rc.port.setRoll(b.rollSourcePort)
 	rc.attachStatus(b.st)
 	b.st.setPair(rc.pairStatus)
+	return rc
+}
+
+func (b *UDP) clientLoop() {
+	rc := b.newController()
 	if rc.polls() {
 		go b.pinPollLoop(rc)
 	}
