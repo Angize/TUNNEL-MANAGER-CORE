@@ -57,9 +57,10 @@ func fecSplit(wire [][]byte) (data, parity [][]byte) {
 	return data, parity
 }
 
-func fecCollect(pkts [][]byte) map[string]int {
+func fecCollect(t *testing.T, n, k int, pkts [][]byte) map[string]int {
+	t.Helper()
 	seen := map[string]int{}
-	d := newFecDecoder(func(frame []byte) { seen[string(frame)]++ })
+	d := fecDecoderFor(t, n, k, func(frame []byte) { seen[string(frame)]++ })
 	for _, p := range pkts {
 		d.input(p)
 	}
@@ -82,7 +83,7 @@ func TestFecDeliversTheShardsThatArrived(t *testing.T) {
 	}
 	_ = parity
 
-	seen := fecCollect(arrived)
+	seen := fecCollect(t, 10, 3, arrived)
 	for i, p := range payloads {
 		want := 0
 		if !lost[i] {
@@ -103,7 +104,7 @@ func TestFecDeliversWithoutWaitingForTheBlock(t *testing.T) {
 	data, _ := fecSplit(wire)
 
 	var got []string
-	d := newFecDecoder(func(frame []byte) { got = append(got, string(frame)) })
+	d := fecDecoderFor(t, 10, 3, func(frame []byte) { got = append(got, string(frame)) })
 	d.input(data[0])
 	if len(got) != 1 || got[0] != string(payloads[0]) {
 		t.Fatalf("after the first data shard the decoder delivered %v, want the first frame — "+
@@ -141,7 +142,7 @@ func TestFecEveryErasurePatternDeliversWhatArrived(t *testing.T) {
 					parityPresent++
 				}
 			}
-			seen := fecCollect(pkts)
+			seen := fecCollect(t, tc.n, tc.k, pkts)
 			recoverable := pads+dataPresent+parityPresent >= tc.n
 			for i, p := range payloads {
 				want := 0

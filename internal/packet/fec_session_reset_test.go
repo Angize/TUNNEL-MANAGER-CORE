@@ -141,7 +141,7 @@ func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
 func TestFecDecoderResetFromDeliver(t *testing.T) {
 	var d *fecDecoder
 	delivered := 0
-	d = newFecDecoder(func([]byte) {
+	d = fecDecoderFor(t, 4, 2, func([]byte) {
 		delivered++
 		d.reset()
 	})

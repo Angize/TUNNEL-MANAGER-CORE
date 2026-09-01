@@ -363,6 +363,8 @@ func (b *TCP) noteAttempt(low, high string) {
 	b.st.write()
 }
 
+func (b *TCP) accusationAnswered() { b.attempted.Store(false) }
+
 func (b *TCP) publishPair() {
 	b.rc.liveFn = b.livePairNow
 	b.st.setPair(b.rc.pairStatus)
@@ -1494,7 +1496,9 @@ func (b *TCP) pollPeerCmd() {
 
 func (b *TCP) rotateLowTCP(proactive bool) {
 	if b.pool == nil {
-		b.rotateDestTCP(proactive)
+		if _, moved := b.rotateDestTCP(proactive); moved {
+			b.accusationAnswered()
+		}
 		return
 	}
 	low, _ := b.rc.underJudgement()
@@ -1502,12 +1506,15 @@ func (b *TCP) rotateLowTCP(proactive bool) {
 
 	if now := b.pool.advanceIP(); now != "" {
 		b.st.rotated("edge", "ip:"+now, proactive)
+		b.accusationAnswered()
 	}
 }
 
 func (b *TCP) rotateHighTCP(proactive bool) {
 	if b.pool == nil {
-		b.rotateSourceTCP(proactive)
+		if _, moved := b.rotateSourceTCP(proactive); moved {
+			b.accusationAnswered()
+		}
 		return
 	}
 
@@ -1515,6 +1522,7 @@ func (b *TCP) rotateHighTCP(proactive bool) {
 	b.pool.markSuspect("sni", sni, "tun-probe")
 	if now := b.pool.advanceSNI(); now != "" {
 		b.st.rotated("sni", "sni:"+now, proactive)
+		b.accusationAnswered()
 	}
 }
 

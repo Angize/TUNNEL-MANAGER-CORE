@@ -54,11 +54,11 @@ func obfsSeal(s Sealer, typ byte, payload []byte, padMax int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	inner := make([]byte, obfsInnerHdr+len(payload)+n)
+	buf, _, inner := s.Frame(0, obfsInnerHdr+len(payload)+n)
 	inner[0] = typ
 	binary.BigEndian.PutUint16(inner[1:3], uint16(len(payload)))
 	copy(inner[obfsInnerHdr:], payload)
-	return s.Seal(inner, nil)
+	return s.SealInPlace(buf, inner, nil)
 }
 
 func obfsOpen(s Sealer, sealed []byte) (typ byte, session uint64, seq uint64, payload []byte, err error) {

@@ -46,7 +46,7 @@ func TestFecDeliversAnArrivedShardOverTheByteBudget(t *testing.T) {
 	}
 
 	var got [][]byte
-	d := newFecDecoder(func(p []byte) { got = append(got, append([]byte(nil), p...)) })
+	d := fecDecoderFor(t, 5, 2, func(p []byte) { got = append(got, append([]byte(nil), p...)) })
 
 	d.maxBytes = 900
 

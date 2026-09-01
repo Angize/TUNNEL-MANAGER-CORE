@@ -25,6 +25,8 @@ const (
 
 type Sealer interface {
 	Seal(pt, aad []byte) ([]byte, error)
+	Frame(lead, innerLen int) (buf, head, inner []byte)
+	SealInPlace(buf, inner, aad []byte) ([]byte, error)
 	Open(sealed, aad []byte) (session uint64, seq uint64, pt []byte, err error)
 }
 
@@ -680,19 +682,24 @@ func (b *UDP) deliver(pkt []byte, addr *net.UDPAddr) {
 	b.dispatch(pkt[1], pt, addr)
 }
 
+var typeAAD = [...][]byte{{typeData}, {typePing}, {typePong}}
+
+func aadFor(typ byte) []byte {
+	if int(typ) < len(typeAAD) {
+		return typeAAD[typ]
+	}
+	return []byte{typ}
+}
+
 func sealBody(s Sealer, obfs bool, typ byte, payload []byte, padMax int) ([]byte, error) {
 	if obfs {
 		return obfsSeal(s, typ, payload, padMax)
 	}
 	if s != nil {
-		sealed, err := s.Seal(payload, []byte{typ})
-		if err != nil {
-			return nil, err
-		}
-		out := make([]byte, 2+len(sealed))
-		out[0], out[1] = magic, typ
-		copy(out[2:], sealed)
-		return out, nil
+		buf, head, inner := s.Frame(2, len(payload))
+		head[0], head[1] = magic, typ
+		copy(inner, payload)
+		return s.SealInPlace(buf, inner, aadFor(typ))
 	}
 	out := make([]byte, 2+len(payload))
 	out[0], out[1] = magic, typ
@@ -706,7 +713,7 @@ func openFrame(s Sealer, data []byte, obfs bool) (typ byte, session, seq uint64,
 	}
 	if len(data) >= 2 && data[0] == magic {
 		typ = data[1]
-		session, seq, payload, oerr = s.Open(data[2:], []byte{typ})
+		session, seq, payload, oerr = s.Open(data[2:], aadFor(typ))
 		return
 	}
 	return 0, 0, 0, nil, errBadFrame

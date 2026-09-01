@@ -114,7 +114,7 @@ func TestPartialFecBlockStillRecoversLoss(t *testing.T) {
 	}
 
 	var got [][]byte
-	d := newFecDecoder(func(frame []byte) { got = append(got, append([]byte(nil), frame...)) })
+	d := fecDecoderFor(t, 10, 3, func(frame []byte) { got = append(got, append([]byte(nil), frame...)) })
 
 	for i, p := range data {
 		if i == 1 || i == 3 {

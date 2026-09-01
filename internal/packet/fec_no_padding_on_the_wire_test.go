@@ -57,7 +57,7 @@ func TestFecDoesNotPadTheWire(t *testing.T) {
 	}
 
 	var got [][]byte
-	dec := newFecDecoder(func(b []byte) { got = append(got, append([]byte(nil), b...)) })
+	dec := fecDecoderFor(t, 10, 3, func(b []byte) { got = append(got, append([]byte(nil), b...)) })
 	for i, p := range data {
 		if i == 0 || i == 5 {
 			continue
@@ -113,7 +113,7 @@ func TestFecUniformBlockIsUnchanged(t *testing.T) {
 
 func TestFecRefusesAShardThatOverrunsItsBlock(t *testing.T) {
 	delivered := 0
-	dec := newFecDecoder(func([]byte) { delivered++ })
+	dec := fecDecoderFor(t, 4, 2, func([]byte) { delivered++ })
 	mk := func(typ byte, shardLen, bodyLen int) []byte {
 		p := make([]byte, fecHdrLen+bodyLen)
 		p[0] = typ
