@@ -167,32 +167,31 @@ func (s *Sealer) Seal(plaintext, aad []byte) ([]byte, error) {
 	return out, nil
 }
 
-func (s *Sealer) Frame(innerLen int) (buf, inner []byte) {
-	head := maskSaltLen + s.sendAEAD.NonceSize()
-	buf = make([]byte, head+innerLen, head+innerLen+s.sendAEAD.Overhead())
-	return buf, buf[head:]
+func (s *Sealer) Frame(lead, innerLen int) (buf, head, inner []byte) {
+	off := lead + maskSaltLen + s.sendAEAD.NonceSize()
+	buf = make([]byte, off+innerLen, off+innerLen+s.sendAEAD.Overhead())
+	return buf, buf[:lead], buf[off:]
 }
 
-func (s *Sealer) SealInPlace(buf, aad []byte) ([]byte, error) {
+func (s *Sealer) SealInPlace(buf, inner, aad []byte) ([]byte, error) {
 	ns := s.sendAEAD.NonceSize()
-	head := maskSaltLen + ns
-	if len(buf) < head || cap(buf) < len(buf)+s.sendAEAD.Overhead() {
+	off := len(buf) - len(inner)
+	if off < maskSaltLen+ns || cap(buf) < len(buf)+s.sendAEAD.Overhead() {
 		return nil, errors.New("seal: frame buffer was not built by Frame")
 	}
-	if err := RandRead(buf[:maskSaltLen]); err != nil {
+	salt, nonce := buf[off-maskSaltLen-ns:off-ns], buf[off-ns:off]
+	if err := RandRead(salt); err != nil {
 		return nil, err
 	}
-	nonce := buf[maskSaltLen:head]
 	copy(nonce, s.prefix)
 	binary.BigEndian.PutUint64(nonce[ns-8:], s.ctr.Add(1))
 
-	inner := buf[head:]
 	out := s.sendAEAD.Seal(inner[:0], nonce, inner, aad)
 
-	if err := mask(s.sendMask, buf[:maskSaltLen], nonce); err != nil {
+	if err := mask(s.sendMask, salt, nonce); err != nil {
 		return nil, err
 	}
-	return buf[:head+len(out)], nil
+	return buf[:off+len(out)], nil
 }
 
 func (s *Sealer) Open(wire, aad []byte) (session uint64, seq uint64, pt []byte, err error) {
