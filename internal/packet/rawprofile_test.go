@@ -167,8 +167,8 @@ func TestRawTCPLiveFlowFields(t *testing.T) {
 	if got := binary.BigEndian.Uint32(tcp[8:12]); got != 0x55667788 {
 		t.Errorf("tcp ack = %#x, want the passed non-zero ack (ack=0 with the ACK flag is a forged-segment tell)", got)
 	}
-	if got := binary.BigEndian.Uint16(tcp[14:16]); got != rawTCPWindow {
-		t.Errorf("tcp window = %#x, want realistic %#x", got, rawTCPWindow)
+	if got := binary.BigEndian.Uint16(tcp[14:16]); got < rawTCPWinLo || got > rawTCPWinLo+rawTCPWinSpan+16 {
+		t.Errorf("tcp window = %d, outside the advertised band %d..%d", got, rawTCPWinLo, rawTCPWinLo+rawTCPWinSpan+16)
 	}
 	if tcp[13] != 0x18 {
 		t.Errorf("tcp flags = %#x, want PSH|ACK (0x18)", tcp[13])

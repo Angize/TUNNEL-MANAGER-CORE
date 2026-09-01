@@ -23,10 +23,13 @@ const (
 )
 
 const (
-	tcpOptEOL     = 0
-	tcpOptNOPKind = 1
-	tcpOptTSKind  = 8
-	tcpOptTSBytes = 10
+	tcpOptEOL        = 0
+	tcpOptNOPKind    = 1
+	tcpOptMSSKind    = 2
+	tcpOptWSKind     = 3
+	tcpOptSACKOKKind = 4
+	tcpOptTSKind     = 8
+	tcpOptTSBytes    = 10
 )
 
 var rawProfiles = map[string]int{
@@ -63,7 +66,9 @@ const (
 	rawClientPort = 51820
 	rawServerPort = 443
 
-	rawTCPWindow = 0xFAF0
+	rawTCPWinLo    = 300
+	rawTCPWinSpan  = 512
+	rawTCPWinScale = 7
 )
 
 var rawSportPool = [...]uint16{
@@ -171,6 +176,28 @@ func tcpTSOption(tsval, tsecr uint32) []byte {
 	return o
 }
 
+func tcpSynOptions(tsval, tsecr uint32) []byte {
+	o := []byte{
+		tcpOptMSSKind, 4, 0x05, 0xb4,
+		tcpOptSACKOKKind, 2,
+		tcpOptTSKind, tcpOptTSBytes, 0, 0, 0, 0, 0, 0, 0, 0,
+		tcpOptNOPKind,
+		tcpOptWSKind, 3, rawTCPWinScale,
+	}
+	binary.BigEndian.PutUint32(o[8:12], tsval)
+	binary.BigEndian.PutUint32(o[12:16], tsecr)
+	return o
+}
+
+func tcpWindowFor(seq, tsval uint32) uint16 {
+	t := uint64(seq)>>11 + uint64(tsval)>>7
+	step := t % (2 * rawTCPWinSpan)
+	if step >= rawTCPWinSpan {
+		step = 2*rawTCPWinSpan - 1 - step
+	}
+	return uint16(rawTCPWinLo + step + splitmix64(t)>>60)
+}
+
 func peerTSVal(tcp []byte) uint32 {
 	off := int(tcp[12]>>4) * 4
 	if off <= 20 || off > len(tcp) {
@@ -236,7 +263,11 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 
 	case protoTCP:
 		sp, dp := rawPorts(isClient, port, cport)
-		return buildTCPSeg(src, dst, sp, dp, seq, ack, flags, rawTCPWindow, tcpTSOption(tsval, tsecr), payload)
+		opts := tcpTSOption(tsval, tsecr)
+		if flags&tcpSyn != 0 {
+			opts = tcpSynOptions(tsval, tsecr)
+		}
+		return buildTCPSeg(src, dst, sp, dp, seq, ack, flags, tcpWindowFor(seq, tsval), opts, payload)
 
 	case protoESP:
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
@@ -290,6 +321,22 @@ func splitmix64(x uint64) uint64 {
 	x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9
 	x = (x ^ (x >> 27)) * 0x94D049BB133111EB
 	return x ^ (x >> 31)
+}
+
+func tcpOf(pkt []byte, proto int) []byte {
+	if proto != protoTCP || len(pkt) < 20 || pkt[0]>>4 != 4 {
+		return nil
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	total := int(binary.BigEndian.Uint16(pkt[2:4]))
+	if ihl < 20 || total < ihl || total > len(pkt) || int(pkt[9]) != proto {
+		return nil
+	}
+	tcp := pkt[ihl:total]
+	if len(tcp) < 20 {
+		return nil
+	}
+	return tcp
 }
 
 func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16, tsval uint32, ok bool) {
