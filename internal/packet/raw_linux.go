@@ -649,11 +649,20 @@ func (r *Raw) usePort(p uint16) {
 func (r *Raw) freshTuple() {
 	p := r.cport()
 	if r.sportRandom {
-		if n := rawRollSport(); n != 0 {
-			p = n
+		for i := 0; i < 8; i++ {
+			n := rawRollSport()
+			if n != 0 && n != p {
+				p = n
+				break
+			}
 		}
 	}
 	r.usePort(p)
+	wakeLoop(r.wake)
+}
+
+func (r *Raw) mustKnock() bool {
+	return handshakeOutstanding(r.sealer(), &r.ci) || r.unanswered.Load()
 }
 
 func (r *Raw) rollSourcePort() bool {
@@ -880,6 +889,7 @@ func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
 	if s := r.sealer(); s != nil {
 		if typ, session, seq, payload, oerr := r.openWith(s, body); oerr == nil && r.rp.ok(session, seq) {
 			settleHandshake(&r.ci)
+			r.unanswered.Store(false)
 			r.markRx(addr.IP)
 			r.provenFrom(addr.IP)
 			r.learnPeer(addr)
@@ -1225,7 +1235,7 @@ func (r *Raw) clientLoop() {
 
 	for {
 		rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
-		asking := handshakeOutstanding(r.sealer(), &r.ci)
+		asking := r.mustKnock()
 		if asking {
 			r.sendInit()
 		}
