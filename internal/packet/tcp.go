@@ -934,7 +934,7 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 	for attempt := 0; attempt < 2; attempt++ {
 		var uc net.Conn
 
-		uc, err = uEdgeHandshake(b.fragWrap(conn, host, ech), host, ech, []string{"http/1.1"}, false, budget)
+		uc, err = uEdgeHandshake(b.fragWrap(conn, host, ech), host, ech, []string{"http/1.1"}, false, budget, nil)
 		if err == nil {
 			if healed && live {
 				b.noteECHSelfHeal(host, ech)
@@ -960,8 +960,15 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 	return nil, err
 }
 
-func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFingerprint bool, budget time.Duration) (net.Conn, error) {
+func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFingerprint bool, budget time.Duration, verify *tls.Config) (net.Conn, error) {
 	cfg := &utls.Config{ServerName: host}
+	if verify != nil {
+		cfg.InsecureSkipVerify = verify.InsecureSkipVerify
+		cfg.RootCAs = verify.RootCAs
+		if verify.ServerName != "" {
+			cfg.ServerName = verify.ServerName
+		}
+	}
 	var echPub []string
 
 	echRejected := false

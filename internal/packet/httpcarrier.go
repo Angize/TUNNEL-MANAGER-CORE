@@ -461,7 +461,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 
 	var rt http.RoundTripper
 	var closeIdle func()
-	if b.wsTLS && b.httpcTLS == nil {
+	if b.wsTLS {
 		var alpn []string
 		if h2 {
 			alpn = []string{"h2"}
@@ -474,7 +474,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 				return nil, err
 			}
 
-			uc, err := uEdgeHandshake(b.fragWrap(c, host, ech), host, ech, alpn, h2, budget)
+			uc, err := uEdgeHandshake(b.fragWrap(c, host, ech), host, ech, alpn, h2, budget, b.httpcTLS)
 			if err != nil {
 				c.Close()
 				return nil, err
@@ -508,9 +508,6 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 				if err != nil {
 					return nil, err
 				}
-				if b.wsTLS {
-					c = b.fragWrap(c, host, ech)
-				}
 				return track(c), nil
 			},
 			ForceAttemptHTTP2:   h2,
@@ -518,10 +515,6 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 			MaxIdleConns:        upIdleConns * 2,
 			MaxIdleConnsPerHost: upIdleConns,
 			IdleConnTimeout:     90 * time.Second,
-			TLSHandshakeTimeout: budget,
-		}
-		if b.wsTLS {
-			tr.TLSClientConfig = b.httpcTLS
 		}
 		rt, closeIdle = tr, func() { tr.CloseIdleConnections(); forceClose() }
 	}
