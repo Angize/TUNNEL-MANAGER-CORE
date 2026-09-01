@@ -756,6 +756,13 @@ func (c *rotationController) spendFreeRungs() bool {
 	return !c.session.try()
 }
 
+func (c *rotationController) reviveIfDue() {
+	if c.revive.try(time.Now()) {
+		c.refill()
+		c.st.event("down", "ladder-revive", "")
+	}
+}
+
 func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurned bool) {
 	if !c.spendFreeRungs() {
 		return false
@@ -768,10 +775,7 @@ func (c *rotationController) fail(rotDst, rotSrc func(proactive bool)) (dstBurne
 		return burned
 	}
 
-	if c.revive.try(time.Now()) {
-		c.refill()
-		c.st.event("down", "ladder-revive", "")
-	}
+	c.reviveIfDue()
 	return burned
 }
 
@@ -870,7 +874,9 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 		}
 
 		if cmd.Low == "" && cmd.High == "" {
-			c.spendFreeRungs()
+			if c.spendFreeRungs() {
+				c.reviveIfDue()
+			}
 			return false
 		}
 		lowKind, highKind := c.pair.kinds()
