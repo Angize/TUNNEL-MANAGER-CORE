@@ -57,7 +57,7 @@ func FuzzFecInput(f *testing.F) {
 	f.Add([]byte{0x01, 0xff})
 	f.Add([]byte{0x02, 0, 0, 0, 1, 0, 4, 2, 4, 0, 2, 0xaa, 0xbb})
 	f.Fuzz(func(t *testing.T, data []byte) {
-		d := newFecDecoder(func([]byte) {})
+		d := fecDecoderFor(t, 4, 2, func([]byte) {})
 		d.input(data)
 	})
 }
