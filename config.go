@@ -439,9 +439,12 @@ func (c *Config) validate() error {
 				return errors.New("http_streams must be between 1 and 16 (0 = default)")
 			}
 		}
+		if c.HTTPUpRate != 0 && (c.Role != "client" || c.CDNCarrier != "http") {
+			return errors.New("http_up_rate paces the client's POSTs and applies to an http-carrier CLIENT only")
+		}
 		if c.HTTPUpWorkers != 0 || c.HTTPUpBatchKB != 0 || c.HTTPUpRate != 0 {
-			if c.Role != "client" || c.CDNCarrier != "http" {
-				return errors.New("http_up_workers/http_up_batch_kb/http_up_rate apply to an http-carrier CLIENT only")
+			if c.CDNCarrier != "http" {
+				return errors.New("http_up_workers/http_up_batch_kb/http_up_rate apply to the http carrier only")
 			}
 			if c.HTTPUpWorkers < 0 || c.HTTPUpWorkers > 16 {
 				return errors.New("http_up_workers must be between 1 and 16 (0 = default)")

@@ -213,6 +213,11 @@ type seqChunk struct {
 	data []byte
 }
 
+const (
+	upMaxWorkers = 16
+	upMaxBatch   = 512 << 10
+)
+
 var (
 	maxUpBatch = 128 << 10
 
@@ -229,11 +234,11 @@ const upWorkCap = 1
 
 func SetHTTPUpstream(workers, batchKB, ratePerSec int) {
 	if workers > 0 {
-		upWorkers = tclamp(workers, 1, 16)
+		upWorkers = tclamp(workers, 1, upMaxWorkers)
 		upIdleConns = upWorkers * 2
 	}
 	if batchKB > 0 {
-		maxUpBatch = tclamp(batchKB, 8, 512) << 10
+		maxUpBatch = tclamp(batchKB, 8, upMaxBatch>>10) << 10
 		upChanCap = maxUpBatch/1400 + 2
 	}
 	if ratePerSec > 0 {
