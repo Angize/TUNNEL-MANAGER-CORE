@@ -31,6 +31,9 @@ type antiLeaker struct {
 	wait  time.Duration
 
 	pending []*lingering
+
+	known  []net.IP
+	static map[string]func()
 }
 
 type lingering struct {
@@ -42,6 +45,54 @@ type lingering struct {
 func (a *antiLeaker) init(closeCh <-chan struct{}, install func(peer net.IP) (func(), bool)) {
 	a.closeCh = closeCh
 	a.install = install
+}
+
+func (a *antiLeaker) scopeAll(ips []net.IP) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.known = a.known[:0]
+	for _, ip := range ips {
+		if v4 := ip.To4(); v4 != nil {
+			a.known = append(a.known, append(net.IP(nil), v4...))
+		}
+	}
+	a.applyKnownLocked()
+}
+
+func (a *antiLeaker) applyKnownLocked() {
+	select {
+	case <-a.closeCh:
+		return
+	default:
+	}
+	if a.install == nil || len(a.known) == 0 {
+		return
+	}
+	if a.static == nil {
+		a.static = map[string]func(){}
+	}
+	for _, v4 := range a.known {
+		if _, done := a.static[string(v4)]; done {
+			continue
+		}
+		fn, ok := a.takeLingeringLocked(v4)
+		if fn == nil && !ok {
+			fn, ok = a.install(v4)
+		}
+		if !ok {
+			if fn != nil {
+				fn()
+			}
+			a.armRetryLocked(v4)
+			continue
+		}
+		a.static[string(v4)] = fn
+	}
+}
+
+func (a *antiLeaker) coveredLocked(v4 net.IP) bool {
+	_, ok := a.static[string(v4)]
+	return ok
 }
 
 func (a *antiLeaker) scope(peer net.IP) {
@@ -86,6 +137,9 @@ func (a *antiLeaker) apply() {
 	}
 	v4 := *want
 	if a.curIP != nil && a.curIP.Equal(v4) {
+		return
+	}
+	if a.coveredLocked(v4) {
 		return
 	}
 
@@ -171,6 +225,7 @@ func (a *antiLeaker) armRetryLocked(peer net.IP) {
 	a.retry = time.AfterFunc(a.wait, func() {
 		a.mu.Lock()
 		a.retry = nil
+		a.applyKnownLocked()
 		a.mu.Unlock()
 		a.apply()
 	})
@@ -186,6 +241,11 @@ func (a *antiLeaker) teardown() {
 	for len(a.pending) > 0 {
 		a.dropLingeringLocked(0)
 	}
+	for k, fn := range a.static {
+		fn()
+		delete(a.static, k)
+	}
+	a.known = nil
 	if p := a.cur.Load(); p != nil && *p != nil {
 		(*p)()
 	}

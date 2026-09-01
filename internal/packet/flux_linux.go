@@ -772,6 +772,7 @@ func (f *Flux) SetPeerSources(ips []string) {
 	if m := buildSrcAllow(ips); len(m) > 0 {
 		f.srcAllow = m
 	}
+	f.leak.scopeAll(parseIP4s(ips))
 }
 
 func (f *Flux) srcAllowed(ip net.IP) bool {
