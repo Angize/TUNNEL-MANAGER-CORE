@@ -610,7 +610,7 @@ func (c *Config) validate() error {
 		}
 
 		if ed > packet.MaxFecData {
-			return fmt.Errorf("fec_data must be at most %d: above that a parity-recovered frame lands outside the receiver's replay window and is discarded, so FEC would cost its full bandwidth and repair nothing", packet.MaxFecData)
+			return fmt.Errorf("fec_data must be at most %d: the sender holds a whole block before any of it leaves, so a bigger block only adds latency and memory -- what a block can repair is decided by fec_parity, not by its size", packet.MaxFecData)
 		}
 	}
 	if c.FakeDesync {

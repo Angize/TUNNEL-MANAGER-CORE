@@ -29,12 +29,16 @@ func TestReplayGuardBasics(t *testing.T) {
 
 func TestReplayGuardTooOld(t *testing.T) {
 	var g replayGuard
-	g.ok(1, 100)
-	if g.ok(1, 100-replayWindow) {
-		t.Fatal("a frame older than the window must be rejected")
+	const top = replayWindow * 2
+	g.ok(1, top)
+	if g.ok(1, top-replayWindow) {
+		t.Fatal("a frame exactly a window behind the newest must be rejected")
 	}
-	if !g.ok(1, 99) {
+	if !g.ok(1, top-replayWindow+1) {
 		t.Fatal("a frame just inside the window must be accepted")
+	}
+	if !g.ok(1, top-1) {
+		t.Fatal("a frame one behind the newest must be accepted")
 	}
 }
 
