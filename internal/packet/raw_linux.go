@@ -68,6 +68,8 @@ type Raw struct {
 	tcpAck   atomic.Uint32
 	peerSeen atomic.Bool
 	synAcked atomic.Bool
+	cliSyn   atomic.Uint32
+	cliSynOK atomic.Bool
 	tcpBytes atomic.Uint32
 
 	tsBase  atomic.Uint32
@@ -294,8 +296,13 @@ func (r *Raw) tcpFlow(raw []byte, addr *net.IPAddr) bool {
 		if r.isClient {
 			return true
 		}
+		if !r.cliSynOK.Load() || r.cliSyn.Load() != seq {
+			r.cliSyn.Store(seq)
+			r.cliSynOK.Store(true)
+			r.newTCPFlow()
+			r.notePeerSeq(seq+1, true)
+		}
 		r.learnClientPort(binary.BigEndian.Uint16(tcp[0:2]))
-		r.notePeerSeq(seq+1, true)
 		r.sendTCPFlags(tcpSynAck, addr, r.cport())
 		return true
 	case flags&tcpSyn != 0:
