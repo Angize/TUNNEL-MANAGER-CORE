@@ -25,6 +25,8 @@ const (
 
 type Sealer interface {
 	Seal(pt, aad []byte) ([]byte, error)
+	Frame(innerLen int) (buf, inner []byte)
+	SealInPlace(buf, aad []byte) ([]byte, error)
 	Open(sealed, aad []byte) (session uint64, seq uint64, pt []byte, err error)
 }
 
