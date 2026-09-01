@@ -32,6 +32,10 @@ func TestAClearedSessionDoesNotWaitOutTheKeepalive(t *testing.T) {
 		settle()
 		gone := p.current()
 
+		spendThePortRung(t, cli, func() {
+			liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Low: gone})
+		})
+
 		was := cli.session.Load()
 		start := time.Now()
 		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Low: gone})

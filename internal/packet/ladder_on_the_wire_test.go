@@ -54,14 +54,14 @@ func TestAPacketArrivingIsNotTheJudgeSayingItCarries(t *testing.T) {
 
 	was := activeOf(src)
 	burned, srcMoved := false, false
-	for i := 0; i < 5 && !(burned && srcMoved); i++ {
+	for i := 0; i < 5*(portTries+2) && !(burned && srcMoved); i++ {
 		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail, Low: activeOf(dst)})
-		time.Sleep(3 * time.Second)
+		time.Sleep(2 * time.Second)
 		burned = burned || len(burnedIn(dst)) > 0
 		srcMoved = srcMoved || activeOf(src) != was
 	}
 	if !burned {
-		t.Errorf("five verdicts and no destination was ever condemned. The carrier is receiving the "+
+		t.Errorf("every free rung was spent and no destination was ever condemned. The carrier is receiving the "+
 			"whole time, and a packet arriving refilled the free rungs on every keepalive beat, so the "+
 			"ladder spent a step it had not earned and never reached the walk. Only the judge saying "+
 			"the tunnel CARRIES may refill them; still burned: %v", burnedIn(dst))

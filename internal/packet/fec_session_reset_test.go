@@ -125,8 +125,11 @@ func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
 	go srv2.Run()
 	t.Cleanup(func() { srv2.Close() })
 
+	spendThePortRung(t, cli, func() {
+		liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail})
+	})
 	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail})
-	waitUntil(t, "the client to re-handshake with the restarted server", 10*time.Second,
+	waitUntil(t, "the client to re-handshake with the restarted server", 25*time.Second,
 		func() bool { return srv2.sealer() != nil && srv2.peer.Load() != nil })
 
 	pkt := bytes.Repeat([]byte{0x5C}, fecSeedLen)
