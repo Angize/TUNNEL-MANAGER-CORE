@@ -5,7 +5,13 @@ import (
 	"net"
 )
 
-const tcpPshAck = 0x18
+const (
+	tcpPshAck = 0x18
+	tcpFin    = 0x01
+	tcpSyn    = 0x02
+	tcpAckBit = 0x10
+	tcpSynAck = 0x12
+)
 
 func buildTCPSeg(src, dst net.IP, sport, dport uint16, seq, ack uint32, flags byte, window uint16, opts, payload []byte) []byte {
 	if len(opts)%4 != 0 || len(opts) > 40 {

@@ -66,6 +66,8 @@ type Raw struct {
 
 	tcpISN   atomic.Uint32
 	tcpAck   atomic.Uint32
+	peerSeen atomic.Bool
+	synAcked atomic.Bool
 	tcpBytes atomic.Uint32
 
 	tsBase  atomic.Uint32
@@ -157,7 +159,7 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 
 func (r *Raw) decoySeq(i int) uint32 {
 	if r.proto == protoTCP {
-		return r.tcpISN.Load() + r.tcpBytes.Load() + fakeSeqGap + uint32(i)
+		return r.tcpSeqBase() + r.tcpBytes.Load() + fakeSeqGap + uint32(i)
 	}
 	return r.seq.Load() + fakeSeqGap + uint32(i)
 }
@@ -234,9 +236,81 @@ func (r *Raw) newTCPFlow() {
 	}
 	r.tcpISN.Store(binary.BigEndian.Uint32(b[0:4]))
 	r.tcpAck.Store(binary.BigEndian.Uint32(b[4:8]))
+	r.peerSeen.Store(false)
+	r.synAcked.Store(false)
 	r.tsBase.Store(binary.BigEndian.Uint32(b[8:12]))
 	r.tsStart.Store(time.Now().UnixNano())
 	r.tcpBytes.Store(0)
+}
+
+func (r *Raw) tcpSeqBase() uint32 { return r.tcpISN.Load() + 1 }
+
+func (r *Raw) notePeerSeq(next uint32, first bool) {
+	for {
+		cur := r.tcpAck.Load()
+		if !first && r.peerSeen.Load() && int32(next-cur) <= 0 {
+			return
+		}
+		if r.tcpAck.CompareAndSwap(cur, next) {
+			r.peerSeen.Store(true)
+			return
+		}
+	}
+}
+
+func (r *Raw) sendTCPFlags(flags byte, to *net.IPAddr, cport uint16) {
+	if to == nil || r.proto != protoTCP {
+		return
+	}
+	seq := r.tcpISN.Load()
+	if flags&tcpSyn == 0 {
+		seq = r.tcpSeqBase() + r.tcpBytes.Load()
+	}
+	seg := rawEncap(r.profile, nil, r.srcIP(), to.IP, r.isClient, r.icmpID, r.port, cport,
+		seq, r.tcpAck.Load(), r.spi, r.tsNow(), r.tsEcr.Load(), flags)
+	r.writeOut(seg, to)
+}
+
+func (r *Raw) knockTCP(to *net.IPAddr) {
+	if r.proto != protoTCP || !r.isClient || r.synAcked.Load() {
+		return
+	}
+	r.sendTCPFlags(tcpSyn, to, r.cport())
+}
+
+func (r *Raw) tcpFlow(raw []byte, addr *net.IPAddr) bool {
+	if r.proto != protoTCP {
+		return false
+	}
+	tcp := tcpOf(raw, r.proto)
+	if tcp == nil {
+		return false
+	}
+	flags := tcp[13]
+	seq := binary.BigEndian.Uint32(tcp[4:8])
+	off := int(tcp[12]>>4) * 4
+	switch {
+	case flags&tcpSyn != 0 && flags&tcpAckBit == 0:
+		if r.isClient {
+			return true
+		}
+		r.learnClientPort(binary.BigEndian.Uint16(tcp[0:2]))
+		r.notePeerSeq(seq+1, true)
+		r.sendTCPFlags(tcpSynAck, addr, r.cport())
+		return true
+	case flags&tcpSyn != 0:
+		if !r.isClient {
+			return true
+		}
+		r.notePeerSeq(seq+1, true)
+		r.synAcked.Store(true)
+		r.sendTCPFlags(tcpAckBit, addr, r.cport())
+		return true
+	}
+	if n := len(tcp) - off; n > 0 && off >= 20 && off <= len(tcp) {
+		r.notePeerSeq(seq+uint32(n), false)
+	}
+	return false
 }
 
 func (r *Raw) tsNow() uint32 {
@@ -406,7 +480,7 @@ func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
 	var seq, ack uint32
 	if r.proto == protoTCP {
 		n := uint32(len(body))
-		seq = r.tcpISN.Load() + r.tcpBytes.Add(n) - n
+		seq = r.tcpSeqBase() + r.tcpBytes.Add(n) - n
 		ack = r.tcpAck.Load()
 	} else {
 		seq = r.seq.Add(1)
@@ -858,6 +932,9 @@ func afpacketLoop(fd int, closeCh <-chan struct{}, handle func(pkt []byte, ihl i
 }
 
 func (r *Raw) handleRaw(raw []byte, addr *net.IPAddr) {
+	if r.tcpFlow(raw, addr) {
+		return
+	}
 	body, sport, pts, ok := rawDecap(r.profile, r.proto, raw)
 	if !ok {
 		return
@@ -1270,6 +1347,7 @@ func (r *Raw) sendInit() {
 	if peer == nil {
 		return
 	}
+	r.knockTCP(peer)
 
 	ci := r.ci.Load()
 	if ci == nil {
