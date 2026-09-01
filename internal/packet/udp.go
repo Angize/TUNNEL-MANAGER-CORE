@@ -524,6 +524,16 @@ func buildSrcAllow(ips []string) map[string]struct{} {
 	return m
 }
 
+func parseIP4s(ips []string) []net.IP {
+	out := make([]net.IP, 0, len(ips))
+	for _, s := range ips {
+		if ip := parseIP4(hostOnly(s)); ip != nil {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
 func (b *UDP) replySock() *net.UDPConn {
 	if b.isClient {
 		return b.conn.Load()

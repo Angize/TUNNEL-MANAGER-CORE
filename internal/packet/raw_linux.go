@@ -1152,6 +1152,7 @@ func (r *Raw) SetPeerSources(ips []string) {
 	if m := buildSrcAllow(ips); len(m) > 0 {
 		r.srcAllow = m
 	}
+	r.leak.scopeAll(parseIP4s(ips))
 }
 
 func (r *Raw) srcAllowed(ip net.IP) bool {
