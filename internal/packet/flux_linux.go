@@ -42,6 +42,10 @@ type Flux struct {
 	peer    atomic.Pointer[net.IPAddr]
 
 	replySrc atomic.Pointer[net.IP]
+	sport    atomic.Uint32
+	sportOld atomic.Uint32
+	cliPort  atomic.Uint32
+	hold     atomic.Pointer[net.UDPConn]
 	srcAllow map[string]struct{}
 	session  atomic.Pointer[sealerBox]
 	curShape atomic.Pointer[fluxShape]
@@ -148,6 +152,7 @@ func newFlux(dev *tun.Device, rotate time.Duration, obfs, cryptoOn bool, psk, ci
 	f.leak.init(f.closeCh, func(peer net.IP) (func(), bool) { return addFluxDrop(peer, carrier, f.tunName()) })
 	sh := deriveFluxShape(psk, f.epochNow(), shape)
 	f.curShape.Store(&sh)
+	f.takeSport(sh.sport)
 
 	f.logEp.Store(sh.epoch)
 
@@ -238,6 +243,9 @@ func (f *Flux) Close() error {
 	if f.pktFd >= 0 {
 		syscall.Close(f.pktFd)
 	}
+	if h := f.hold.Swap(nil); h != nil {
+		h.Close()
+	}
 	if f.inj != nil {
 		f.inj.close()
 	}
@@ -277,9 +285,86 @@ func (f *Flux) body(typ byte, payload []byte) ([]byte, error) {
 
 func (f *Flux) carrierSeg(body []byte, sh *fluxShape, src, dst net.IP) []byte {
 	if f.carrier == "stun" {
-		return buildUDPSeg(src, dst, sh.sport, sh.dportSTUN, buildSTUN(body))
+		body = buildSTUN(body, sh, f.isClient)
 	}
-	return buildUDPSeg(src, dst, sh.sport, sh.dport, body)
+	sp, dp := uint16(f.sport.Load()), sh.dportFor(f.carrier)
+	if !f.isClient {
+		sp, dp = sh.dportFor(f.carrier), f.replyPort(sh)
+	}
+	return buildUDPSeg(src, dst, sp, dp, body)
+}
+
+func (f *Flux) replyPort(sh *fluxShape) uint16 {
+	if p := uint16(f.cliPort.Load()); p != 0 {
+		return p
+	}
+	return sh.sport
+}
+
+func (f *Flux) ourPort(p uint16) bool {
+	return p == uint16(f.sport.Load()) || p == uint16(f.sportOld.Load())
+}
+
+func (f *Flux) claimSport(p uint16) bool {
+	if p == 0 {
+		return false
+	}
+	if !f.isClient {
+		f.sportOld.Store(f.sport.Swap(uint32(p)))
+		return true
+	}
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{Port: int(p)})
+	if err != nil {
+		return false
+	}
+	f.sportOld.Store(f.sport.Swap(uint32(p)))
+	if old := f.hold.Swap(c); old != nil {
+		old.Close()
+	}
+	go drainHold(c)
+	return true
+}
+
+func drainHold(c *net.UDPConn) {
+	buf := make([]byte, 2048)
+	for {
+		if _, _, err := c.ReadFromUDP(buf); err != nil {
+			return
+		}
+	}
+}
+
+func (f *Flux) takeSport(p uint16) bool {
+	if f.claimSport(p) {
+		return true
+	}
+	for i := 0; i < 8; i++ {
+		if f.claimSport(rollRepairPort()) {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *Flux) applyEpochSport(sh *fluxShape) {
+	f.takeSport(sh.sport)
+}
+
+func (f *Flux) rollSourcePort() bool {
+	prev := uint16(f.sport.Load())
+	for i := 0; i < 8; i++ {
+		p := rollRepairPort()
+		if p == prev {
+			continue
+		}
+		if f.claimSport(p) {
+			log.Printf("flux: redrew the source port %d -> %d", prev, p)
+			f.st.portRedrawn()
+			wakeLoop(f.wake)
+			return true
+		}
+	}
+	return false
 }
 
 func (f *Flux) carrierOut(body []byte, to *net.IPAddr) {
@@ -306,33 +391,72 @@ func (f *Flux) carrierOut(body []byte, to *net.IPAddr) {
 
 const stunMagic = 0x2112A442
 
-const stunAttrType = 0x8022
+const (
+	stunSendIndication = 0x0016
+	stunDataIndication = 0x0017
 
-func buildSTUN(payload []byte) []byte {
+	stunAttrPeer = 0x0012
+	stunAttrData = 0x0013
+
+	stunPeerAttrLen = 4 + 8
+	stunOverhead    = 20 + stunPeerAttrLen + 4
+)
+
+func stunPeerAttr(dst []byte, sh *fluxShape) {
+	binary.BigEndian.PutUint16(dst[0:2], stunAttrPeer)
+	binary.BigEndian.PutUint16(dst[2:4], 8)
+	dst[4] = 0
+	dst[5] = 0x01
+	binary.BigEndian.PutUint16(dst[6:8], sh.relayPort^uint16(stunMagic>>16))
+	binary.BigEndian.PutUint32(dst[8:12], binary.BigEndian.Uint32(sh.relayIP[:])^stunMagic)
+}
+
+func buildSTUN(payload []byte, sh *fluxShape, isClient bool) []byte {
 	valLen := len(payload)
 	padded := (valLen + 3) &^ 3
-	msgLen := 4 + padded
+	msgLen := stunPeerAttrLen + 4 + padded
 	h := make([]byte, 20+msgLen)
-	binary.BigEndian.PutUint16(h[0:2], 0x0001)
+	typ := uint16(stunDataIndication)
+	if isClient {
+		typ = stunSendIndication
+	}
+	binary.BigEndian.PutUint16(h[0:2], typ)
 	binary.BigEndian.PutUint16(h[2:4], uint16(msgLen))
 	binary.BigEndian.PutUint32(h[4:8], stunMagic)
 	_, _ = rand.Read(h[8:20])
-	binary.BigEndian.PutUint16(h[20:22], stunAttrType)
-	binary.BigEndian.PutUint16(h[22:24], uint16(valLen))
-	copy(h[24:], payload)
+	stunPeerAttr(h[20:], sh)
+	binary.BigEndian.PutUint16(h[32:34], stunAttrData)
+	binary.BigEndian.PutUint16(h[34:36], uint16(valLen))
+	copy(h[36:], payload)
 
 	return h
 }
 
 func parseSTUN(pkt []byte) ([]byte, bool) {
-	if len(pkt) < 24 || binary.BigEndian.Uint32(pkt[4:8]) != stunMagic {
+	if len(pkt) < 20 || binary.BigEndian.Uint32(pkt[4:8]) != stunMagic {
 		return nil, false
 	}
-	valLen := int(binary.BigEndian.Uint16(pkt[22:24]))
-	if 24+valLen > len(pkt) {
+	switch binary.BigEndian.Uint16(pkt[0:2]) {
+	case stunSendIndication, stunDataIndication:
+	default:
 		return nil, false
 	}
-	return pkt[24 : 24+valLen], true
+	body := pkt[20:]
+	if n := int(binary.BigEndian.Uint16(pkt[2:4])); n <= len(body) {
+		body = body[:n]
+	}
+	for len(body) >= 4 {
+		at := binary.BigEndian.Uint16(body[0:2])
+		al := int(binary.BigEndian.Uint16(body[2:4]))
+		if 4+al > len(body) {
+			return nil, false
+		}
+		if at == stunAttrData {
+			return body[4 : 4+al], true
+		}
+		body = body[4+((al+3)&^3):]
+	}
+	return nil, false
 }
 
 func buildUDPSeg(src, dst net.IP, sport, dport uint16, payload []byte) []byte {
@@ -405,7 +529,12 @@ func (f *Flux) netToTun() error {
 		if int(pkt[9]) != protoUDP || len(pkt) < ihl+8 {
 			return
 		}
-		if !graceD[binary.BigEndian.Uint16(pkt[ihl+2:ihl+4])] {
+		dport := binary.BigEndian.Uint16(pkt[ihl+2 : ihl+4])
+		if f.isClient {
+			if !f.ourPort(dport) {
+				return
+			}
+		} else if !graceD[dport] {
 			return
 		}
 		body := pkt[ihl+8:]
@@ -423,6 +552,7 @@ func (f *Flux) netToTun() error {
 		if !f.isClient {
 			d := append(net.IP(nil), pkt[16:20]...)
 			f.replySrc.Store(&d)
+			f.cliPort.Store(uint32(binary.BigEndian.Uint16(pkt[ihl : ihl+2])))
 		}
 		if f.fecDec != nil {
 			f.rxSrc.Store(src)
@@ -591,7 +721,7 @@ func (f *Flux) livePath() (pathKey, bool) {
 		k.Dst = p.IP.String()
 	}
 	if sh := f.curShape.Load(); sh != nil {
-		k.Sport, k.Dport = sh.sport, sh.dportFor(f.carrier)
+		k.Sport, k.Dport = uint16(f.sport.Load()), sh.dportFor(f.carrier)
 	}
 	return k, f.sealer() != nil
 }
@@ -766,6 +896,7 @@ func (f *Flux) pinPollLoop(rc *rotationController) {
 func (f *Flux) clientLoop() {
 	rc := newRotationController(f.pp, f.sp)
 	rc.session.setDrop(f.rehandshake)
+	rc.port.setRoll(f.rollSourcePort)
 	rc.attachStatus(f.st)
 	f.st.setPair(rc.pairStatus)
 	if rc.polls() {
@@ -851,6 +982,7 @@ func (f *Flux) rotateWatcher() {
 			sh := deriveFluxShape(f.psk, f.epochNow(), f.shapeProf)
 			f.curShape.Store(&sh)
 			if prev := f.logEp.Swap(sh.epoch); prev != sh.epoch && prev != 0 {
+				f.applyEpochSport(&sh)
 				if f.carrier == "stun" {
 					log.Printf("flux: rotated to epoch %d (stun carrier :%d)", sh.epoch, sh.dportSTUN)
 				} else {

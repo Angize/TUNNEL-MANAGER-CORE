@@ -24,12 +24,46 @@ func TestFluxShapeDeterministic(t *testing.T) {
 	}
 }
 
-func TestFluxShapeProfileOnlyChangesPadding(t *testing.T) {
-	r := deriveFluxShape("hunter2", 42, "random")
-	v := deriveFluxShape("hunter2", 42, "video")
-	if r.dport != v.dport || r.dportSTUN != v.dportSTUN || r.sport != v.sport {
-		t.Fatal("shape profile changed the carrier params (must only change padding)")
+// flux_shape offers the operator "quic", "video" and "webrtc" and used to change exactly one thing:
+// how much padding a PING frame carries, and only when obfs is on. The destination port -- the one
+// thing on the wire that says what the traffic claims to be -- was drawn from the whole pool
+// regardless, so a tunnel set to "webrtc" spent a third of its epochs on 443 and one set to "quic"
+// spent them on 3478. The knob named a protocol and picked none.
+//
+// The shape now chooses the port it claims. Packet SIZES still belong to the payload: without cover
+// traffic no setting can make a tunnel look like video, and this knob does not pretend to.
+func TestTheFluxShapeChoosesThePortItClaims(t *testing.T) {
+	want := map[string][]uint16{
+		"quic":   {443},
+		"video":  {443, 8801},
+		"webrtc": {3478, 19302, 5349},
 	}
+	for shape, ports := range want {
+		seen := map[uint16]bool{}
+		for ep := int64(0); ep < 400; ep++ {
+			sh := deriveFluxShape("hunter2", ep, shape)
+			if !dportInPool(sh.dport, ports) {
+				t.Fatalf("shape %q drew udp dport %d, which is not one of %v", shape, sh.dport, ports)
+			}
+			if !dportInPool(sh.dportSTUN, fluxStunDports) {
+				t.Fatalf("shape %q drew stun dport %d outside the STUN pool", shape, sh.dportSTUN)
+			}
+			seen[sh.dport] = true
+		}
+		if len(seen) != len(ports) {
+			t.Errorf("shape %q used %d of its %d ports over 400 epochs", shape, len(seen), len(ports))
+		}
+	}
+
+	wide := map[uint16]bool{}
+	for ep := int64(0); ep < 400; ep++ {
+		wide[deriveFluxShape("hunter2", ep, "random").dport] = true
+	}
+	if len(wide) != len(fluxDportPool) {
+		t.Errorf("\"random\" used %d of the %d ports in the pool", len(wide), len(fluxDportPool))
+	}
+
+	v := deriveFluxShape("hunter2", 42, "video")
 	if v.ctrlPad < 64 || v.ctrlPad > 223 {
 		t.Fatalf("video ctrlPad %d out of its profile band", v.ctrlPad)
 	}
