@@ -55,6 +55,8 @@ type Config struct {
 
 	RawSportRandom bool `json:"raw_sport_random"`
 
+	RawSportRotate int `json:"raw_sport_rotate"`
+
 	SpoofSrc string `json:"spoof_src_ip"`
 	RealPeer string `json:"real_peer_ip"`
 
@@ -346,6 +348,21 @@ func (c *Config) validate() error {
 					" -- set one or the other, not both")
 			}
 		}
+		if c.RawSportRotate != 0 {
+			if c.RawProfile != "udp" {
+				return errors.New("raw_sport_rotate cycles the forged UDP source port and is the \"udp\" profile only" +
+					" (raw_profile \"" + c.RawProfile + "\" would break its own flow state or forges no ports)")
+			}
+			if c.RawSportRotate < 1 || c.RawSportRotate > 64 {
+				return errors.New("raw_sport_rotate must be in 1..64 (0 = off; a new forged source port every N packets, N under the middlebox per-tuple budget)")
+			}
+			if c.RawSport != 0 || c.RawSportRandom {
+				return errors.New("raw_sport_rotate continuously re-picks the forged source port, so it cannot combine with raw_sport (fixed) or raw_sport_random (rolls once)")
+			}
+			if c.Fec {
+				return errors.New("raw_sport_rotate is not supported with fec yet (the FEC send path does not cycle the source port per packet)")
+			}
+		}
 		if !c.Crypto.Enabled {
 			return errors.New("raw transport requires crypto enabled (the AEAD both encrypts and authenticates each raw packet)")
 		}
@@ -370,6 +387,9 @@ func (c *Config) validate() error {
 		}
 		if c.RawSport != 0 {
 			return errors.New("raw_sport sets a forged L4 source port, and the spoof carrier writes no L4 header at all")
+		}
+		if c.RawSportRotate != 0 {
+			return errors.New("raw_sport_rotate cycles a forged L4 source port, and the spoof carrier writes no L4 header at all")
 		}
 		if c.SpoofSrc != "" && net.ParseIP(c.SpoofSrc).To4() == nil {
 			return errors.New("spoof_src_ip must be an IPv4 address")
