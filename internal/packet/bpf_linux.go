@@ -21,6 +21,21 @@ func bpfIPProto(proto int) []unix.SockFilter {
 	}
 }
 
+func bpfIPProtoSrc(proto int, src net.IP) []unix.SockFilter {
+	v4 := src.To4()
+	if v4 == nil {
+		return bpfIPProto(proto)
+	}
+	return []unix.SockFilter{
+		{Code: unix.BPF_LD | unix.BPF_B | unix.BPF_ABS, K: 9},
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: uint32(proto), Jt: 0, Jf: 3},
+		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 12},
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: binary.BigEndian.Uint32(v4), Jt: 0, Jf: 1},
+		{Code: unix.BPF_RET | unix.BPF_K, K: bpfAcceptAll},
+		{Code: unix.BPF_RET | unix.BPF_K, K: 0},
+	}
+}
+
 func bpfIPProtoDst(proto int, dst net.IP) []unix.SockFilter {
 	v4 := dst.To4()
 	if v4 == nil {

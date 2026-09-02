@@ -172,13 +172,17 @@ func newFlux(dev *tun.Device, rotate time.Duration, obfs, cryptoOn bool, psk, ci
 
 func (f *Flux) epochNow() int64 { return fluxEpochAt(f.rotate, time.Now()) + f.epochOffset }
 
-func openFluxSockets() (send, pkt int, err error) {
+func openFluxSockets(peer net.IP) (send, pkt int, err error) {
 	send, err = openHdrincl(protoBare)
 	if err != nil {
 		return -1, -1, err
 	}
 
-	pkt, err = openAfpacket(bpfIPProto(protoUDP), "flux: receive")
+	filt := bpfIPProto(protoUDP)
+	if peer != nil {
+		filt = bpfIPProtoSrc(protoUDP, peer)
+	}
+	pkt, err = openAfpacket(filt, "flux: receive")
 	if err != nil {
 		syscall.Close(send)
 		return -1, -1, err
@@ -191,7 +195,7 @@ func DialFlux(peerIP string, dev *tun.Device, rotate time.Duration, obfs, crypto
 	if ip == nil {
 		return nil, errBadFrame
 	}
-	send, pkt, err := openFluxSockets()
+	send, pkt, err := openFluxSockets(ip)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +210,7 @@ func DialFlux(peerIP string, dev *tun.Device, rotate time.Duration, obfs, crypto
 }
 
 func ListenFlux(listenIP string, dev *tun.Device, rotate time.Duration, obfs, cryptoOn bool, psk, cipher, carrier, shape string, epochOffset int64, fec bool, fecData, fecParity int) (*Flux, error) {
-	send, pkt, err := openFluxSockets()
+	send, pkt, err := openFluxSockets(nil)
 	if err != nil {
 		return nil, err
 	}
