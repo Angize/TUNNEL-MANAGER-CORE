@@ -47,14 +47,6 @@ func TestOperatorPinIsSilentOnEveryCarrier(t *testing.T) {
 			r.link = &directLink{r: r}
 			r.adoptSourceRaw()
 		}},
-		{"flux/dest", func(st *coreStatus) {
-			f := &Flux{carrier: "udp", st: st, pp: dstPool()}
-			f.adoptPeerFlux()
-		}},
-		{"flux/source", func(st *coreStatus) {
-			f := &Flux{carrier: "udp", st: st, sp: srcPool()}
-			f.adoptSourceFlux()
-		}},
 		{"udp/dest", func(st *coreStatus) {
 			b := &UDP{st: st, pp: NewPeerPool([]string{"10.0.0.1:20000", "10.0.0.2:20000"}, 0)}
 			b.adoptPeerUDP()
@@ -72,7 +64,7 @@ func TestOperatorPinIsSilentOnEveryCarrier(t *testing.T) {
 				t.Fatalf("%s: a manual pin must write NO event, got %d: %+v", c.name, len(d.Events), d.Events)
 			}
 
-			if wantActiveChange := c.name == "raw/dest" || c.name == "flux/dest" || c.name == "udp/dest"; wantActiveChange {
+			if wantActiveChange := c.name == "raw/dest" || c.name == "udp/dest"; wantActiveChange {
 				if d.Active == "before" {
 					t.Fatalf("%s: a destination pin must update the active descriptor, still %q", c.name, d.Active)
 				}

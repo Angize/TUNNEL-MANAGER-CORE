@@ -120,14 +120,6 @@ type Config struct {
 
 	StatusPath string `json:"status_path"`
 
-	FluxCarrier string `json:"flux_carrier"`
-
-	FluxShape string `json:"flux_shape"`
-
-	FluxEpochOffset int64 `json:"flux_epoch_offset"`
-
-	FluxRotateSecs int `json:"flux_rotate_secs"`
-
 	Fec bool `json:"fec"`
 
 	FecData   int `json:"fec_data"`
@@ -199,17 +191,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Transport == "raw" && c.RawProfile == "" {
 		c.RawProfile = "bare"
-	}
-	if c.Transport == "flux" {
-		if c.FluxRotateSecs == 0 {
-			c.FluxRotateSecs = 600
-		}
-		if c.FluxCarrier == "" {
-			c.FluxCarrier = "udp"
-		}
-		if c.FluxShape == "" {
-			c.FluxShape = "random"
-		}
 	}
 	if c.Fec {
 		if c.FecData == 0 {
@@ -410,23 +391,6 @@ func (c *Config) validate() error {
 				return errors.New("spoof server requires real_peer_ip (the client's real IP to reply to)")
 			}
 		}
-	case "flux":
-		if !c.Crypto.Enabled {
-			return errors.New("flux transport requires crypto enabled (the shape is derived from the PSK and the AEAD authenticates every frame)")
-		}
-		if c.FluxRotateSecs < 0 {
-			return errors.New("flux_rotate_secs must be >= 0 (0 defaults to 600)")
-		}
-		switch c.FluxCarrier {
-		case "", "udp", "stun":
-		default:
-			return errors.New("flux_carrier must be \"udp\" or \"stun\"")
-		}
-		switch c.FluxShape {
-		case "", "random", "quic", "video", "webrtc":
-		default:
-			return errors.New("flux_shape must be \"random\", \"quic\", \"video\", or \"webrtc\"")
-		}
 	case "dns":
 		if !c.Crypto.Enabled {
 			return errors.New("dns transport requires crypto enabled (the session handshake and every datagram are AEAD-authenticated)")
@@ -534,7 +498,7 @@ func (c *Config) validate() error {
 			}
 		}
 	default:
-		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", \"flux\", \"spoof\", \"ws\", or \"dns\"")
+		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", \"spoof\", \"ws\", or \"dns\"")
 	}
 
 	if len(c.PeerIPs) > 0 {
@@ -542,12 +506,12 @@ func (c *Config) validate() error {
 			return errors.New("peer_ips is a client rotation pool (a server listens, it does not dial)")
 		}
 		switch c.Transport {
-		case "", "udp", "tcp", "raw", "flux":
+		case "", "udp", "tcp", "raw":
 		default:
-			return errors.New("peer_ips is only for the direct transports (udp, tcp, raw, flux) — ws has its own edge pool")
+			return errors.New("peer_ips is only for the direct transports (udp, tcp, raw) — ws has its own edge pool")
 		}
 
-		needPort := c.Transport != "raw" && c.Transport != "flux"
+		needPort := c.Transport != "raw"
 		for _, e := range c.PeerIPs {
 			if err := validatePoolEndpoint("peer_ips", e, needPort); err != nil {
 				return err
@@ -560,9 +524,9 @@ func (c *Config) validate() error {
 			return errors.New("src_ips is a client source rotation pool (a server does not dial)")
 		}
 		switch c.Transport {
-		case "", "udp", "tcp", "raw", "flux":
+		case "", "udp", "tcp", "raw":
 		default:
-			return errors.New("src_ips is only for the direct transports (udp, tcp, raw, flux) — ws has its own edge pool")
+			return errors.New("src_ips is only for the direct transports (udp, tcp, raw) — ws has its own edge pool")
 		}
 		for _, e := range c.SrcIPs {
 			if err := validatePoolEndpoint("src_ips", e, false); err != nil {
@@ -575,9 +539,9 @@ func (c *Config) validate() error {
 			return errors.New("peer_src_ips is a server-side view of the client's source pool")
 		}
 		switch c.Transport {
-		case "raw", "flux":
+		case "raw":
 		default:
-			return errors.New("peer_src_ips is only for the raw/flux transports (udp/tcp re-learn the source on their own)")
+			return errors.New("peer_src_ips is only for the raw transport (udp/tcp re-learn the source on their own)")
 		}
 		for _, e := range c.PeerSrcIPs {
 			if err := validatePoolEndpoint("peer_src_ips", e, false); err != nil {
@@ -613,9 +577,9 @@ func (c *Config) validate() error {
 	}
 	if c.Fec {
 		switch c.Transport {
-		case "", "udp", "raw", "flux", "spoof":
+		case "", "udp", "raw", "spoof":
 		default:
-			return fmt.Errorf("fec is not supported on the %s carrier — only on the datagram carriers (udp, raw, flux, spoof)", c.Transport)
+			return fmt.Errorf("fec is not supported on the %s carrier — only on the datagram carriers (udp, raw, spoof)", c.Transport)
 		}
 		if c.FecData < 0 || c.FecParity < 0 {
 			return errors.New("fec_data / fec_parity must be >= 0 (0 defaults to 10 / 3)")
@@ -638,9 +602,9 @@ func (c *Config) validate() error {
 	}
 	if c.FakeDesync {
 		switch c.Transport {
-		case "raw", "flux", "spoof", "tcp", "ws":
+		case "raw", "spoof", "tcp", "ws":
 		default:
-			return errors.New("fake_desync is supported on the raw, flux, spoof, tcp and ws carriers (not plain udp)")
+			return errors.New("fake_desync is supported on the raw, spoof, tcp and ws carriers (not plain udp)")
 		}
 
 		if c.cdnIsHTTP() {

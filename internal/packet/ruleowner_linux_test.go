@@ -44,7 +44,6 @@ func TestTheRemovalMatchesTheInstallOnTheRealPath(t *testing.T) {
 		{"raw tcp", func() func() { rm, _ := addRawDrop(testDst, "tcp", "core42", 0, true, false); return rm }},
 		{"raw icmp", func() func() { rm, _ := addRawDrop(testDst, "icmp", "core42", 0, false, true); return rm }},
 		{"spoof decoy", func() func() { return addAntiLeak(253, testDst, "core42") }},
-		{"flux udp", func() func() { rm, _ := addFluxDrop(testDst, "udp", "core42"); return rm }},
 	} {
 		argv = nil
 		rm := tc.run()

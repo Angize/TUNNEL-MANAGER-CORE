@@ -56,7 +56,7 @@ func ip4(proto int, src, dst string) []byte {
 func TestTheSocketFiltersKeepExactlyWhatTheReceiveLoopsWant(t *testing.T) {
 	const decoy, other = "198.51.100.9", "198.51.100.10"
 
-	t.Run("flux keeps udp and nothing else", func(t *testing.T) {
+	t.Run("a protocol-only filter keeps that protocol and nothing else", func(t *testing.T) {
 		prog := bpfIPProto(protoUDP)
 		for _, tc := range []struct {
 			name string
@@ -105,7 +105,7 @@ func TestTheSocketFiltersKeepExactlyWhatTheReceiveLoopsWant(t *testing.T) {
 	}
 
 	for name, prog := range map[string][]unix.SockFilter{
-		"flux":  bpfIPProto(protoUDP),
+		"proto": bpfIPProto(protoUDP),
 		"decoy": bpfIPProtoDst(253, net.ParseIP(decoy)),
 		"drop":  bpfDropAll(),
 	} {
@@ -126,7 +126,10 @@ func attachTo(t *testing.T, prog []unix.SockFilter) error {
 		&unix.SockFprog{Len: uint16(len(prog)), Filter: &prog[0]})
 }
 
-func TestTheFluxFilterDropsEverythingButUDPInTheKernel(t *testing.T) {
+// runBPF above only models the filters. This one attaches a real program to a real AF_PACKET socket
+// and checks what the kernel actually queues: the protocol-only filter is the one we can generate
+// traffic for from userspace, and it stands in for the machinery every socket filter here rides on.
+func TestTheProtocolFilterDropsEverythingButUDPInTheKernel(t *testing.T) {
 	fd, err := openAfpacket(bpfIPProto(protoUDP), "test")
 	if err != nil {
 		t.Skipf("AF_PACKET needs CAP_NET_RAW; not measuring the kernel here: %v", err)

@@ -47,11 +47,6 @@ func TestTheServerCoversEveryClientSourceUpFront(t *testing.T) {
 			r.leak.init(r.closeCh, rec.install)
 			return r
 		}},
-		{"flux", func(rec *leakRecorder) interface{ SetPeerSources([]string) } {
-			f := &Flux{carrier: "udp", closeCh: make(chan struct{})}
-			f.leak.init(f.closeCh, rec.install)
-			return f
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec := &leakRecorder{}

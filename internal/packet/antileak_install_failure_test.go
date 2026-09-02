@@ -119,9 +119,6 @@ func TestAntiLeakSurvivesAFailedInstall(t *testing.T) {
 		if rm, ok := addRawDrop(testDst, "udp", "core42", 0, true, false); rm != nil || ok {
 			t.Errorf("raw/udp: addRawDrop returned removal=%v ok=%v, want nil/false", rm != nil, ok)
 		}
-		if rm, ok := addFluxDrop(testDst, "udp", "core42"); rm != nil || ok {
-			t.Errorf("flux/udp: addFluxDrop returned removal=%v ok=%v, want nil/false", rm != nil, ok)
-		}
 	})
 
 	t.Run("Close stops the pending retry", func(t *testing.T) {

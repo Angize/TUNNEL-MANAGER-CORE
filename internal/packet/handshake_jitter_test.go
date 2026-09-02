@@ -26,7 +26,7 @@ func TestHandshakeRetransmitIsJittered(t *testing.T) {
 }
 
 func TestNoCarrierRetransmitsOnAFixedClock(t *testing.T) {
-	for _, f := range []string{"udp.go", "raw_linux.go", "flux_linux.go"} {
+	for _, f := range []string{"udp.go", "raw_linux.go"} {
 		src, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)

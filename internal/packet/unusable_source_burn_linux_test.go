@@ -48,20 +48,6 @@ func TestUnbindableSourceLeavesRotation(t *testing.T) {
 				t.Fatalf("the raw jump stamped %s, which this host cannot send from", gone)
 			}
 		}},
-		{"flux seed", func(t *testing.T, sp *PeerPool) {
-			f := &Flux{isClient: true}
-			f.SetSourcePool(sp)
-			if ip := f.localIP.Load(); ip != nil && ip.IP.String() == gone {
-				t.Fatalf("the flux seed stamped %s, which this host cannot send from", gone)
-			}
-		}},
-		{"flux jump", func(t *testing.T, sp *PeerPool) {
-			f := &Flux{isClient: true, sp: sp}
-			f.adoptSourceFlux()
-			if ip := f.localIP.Load(); ip != nil && ip.IP.String() == gone {
-				t.Fatalf("the flux jump stamped %s, which this host cannot send from", gone)
-			}
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sp := newPool(t)

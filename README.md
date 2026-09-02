@@ -16,7 +16,7 @@
 | `git` | — | دریافتِ کد |
 | Linux | kernel با TUN | اجرا |
 
-راه‌های ضدِسانسورِ خام (`raw`/`flux`/جعلِ IP/بعضی حالت‌های `fake_desync`) به
+راه‌های ضدِسانسورِ خام (`raw`/جعلِ IP/بعضی حالت‌های `fake_desync`) به
 `CAP_NET_RAW` نیاز دارند و فقط روی Linux کار می‌کنند.
 
 ## راه‌اندازی از صفر
@@ -55,7 +55,6 @@ sudo ./tnl-core --config core-<id>.json
 | `udp` | پیش‌فرض، سبک، سازگار با NAT |
 | `tcp` | استریمی، پایدار پشتِ فایروال؛ تنها ترنسپورتی که `cover` (پوششِ TLS) می‌پذیرد |
 | `raw` | بستهٔ خامِ IP — پروفایل `bip` (253 نیتیو) / `ipip` / `gre` / `icmp` / `udp` / `tcp` / `esp` (50)؛ پشتیبانِ جعلِ IP |
-| `flux` | چندریختیِ چرخشی — حاملِ `udp`/`stun`؛ شکل (پورت/padding) هر epoch از `HKDF(PSK, ساعت)` عوض می‌شود، **بدونِ هیچ سیگنالِ روی سیم** |
 | `ws` | پشتِ CDN (دامنه‌فرونتینگ)، با حاملِ `ws` / `http` / `grpc` — با ECH، poolِ چرخشیِ edge و warm-standby |
 | `dns` | تونلِ DNS — نشستِ AEAD/KCP داخلِ کوئری‌های DNS؛ راهِ آخر زیرِ وایت‌لیستِ کاملِ پروتکل+مقصد |
 
@@ -66,14 +65,14 @@ sudo ./tnl-core --config core-<id>.json
 | `crypto` | AEAD (`aes-256-gcm` پیش‌فرض، `aes-128-gcm`, `chacha20-poly1305`, `xchacha20-poly1305`؛ `auto`→aes-256-gcm) با **دست‌دادِ زودگذرِ X25519 برای هر نشست** (forward secrecy) + احرازِ PSK + ضدِبازپخش (anti-replay) |
 | `obfs` | حذفِ بایتِ ثابت + padding + jitter + ماسکِ طولِ TCP (ضدِ DPI)؛ به `crypto` نیاز دارد |
 | `cover` | پوششِ TLS به‌سبکِ REALITY (اثرِانگشتِ Chrome، فقط `tcp`) — پروبِ ناشناس را شفاف به `cover_sni:443`ِ واقعی پراکسی می‌کند |
-| `fec` | تصحیحِ خطای Reed-Solomon روی خطِ پرتلفات (`udp`/`raw`/`flux`) |
+| `fec` | تصحیحِ خطای Reed-Solomon روی خطِ پرتلفات (`udp`/`raw`) |
 | `spoof_src_ip` / `spoof_dst_ip` | جعلِ IPِ مبدأ / مقصدِ طعمه (روی پروفایلِ `raw` `bip`) |
 | ECH | رمزکردنِ SNIِ واقعی داخلِ ClientHello (`ws` + `wss`)؛ نود کلید را از رکوردِ HTTPSِ دامنه روی DoH می‌گیرد |
 | poolِ edge | چرخشِ ترکیبِ (IPِ edge × SNI) با auto-burn و warm-standby (make-before-break) برای `ws` |
 | `cdn_carrier` | شکلِ حامل پشتِ CDN: `ws` (upgrade) / `http` (GET-پایین + POST-بالا) / `grpc` (استریمِ دوطرفه) — `http`/`grpc` از CDNهایی که WebSocket را می‌بندند رد می‌شوند |
 | SNI-split | تکه‌کردنِ ClientHelloِ wss (`split`/`disorder`/`fake`) برای شکستِ DPIِ مبتنی بر SNI |
-| `fake_desync` | بسته‌های طعمه پیش از هر دست‌داد برای بی‌سنکرون‌کردنِ DPIِ حالت‌مند (`raw`/`flux`/`tcp`/`ws`) |
-| poolِ چرخشی | چرخشِ IPِ مقصد و مبدأ برای ترنسپورت‌های مستقیم (`udp`/`tcp`/`raw`/`flux`) با burnِ IPِ بلاک‌شده |
+| `fake_desync` | بسته‌های طعمه پیش از هر دست‌داد برای بی‌سنکرون‌کردنِ DPIِ حالت‌مند (`raw`/`tcp`/`ws`) |
+| poolِ چرخشی | چرخشِ IPِ مقصد و مبدأ برای ترنسپورت‌های مستقیم (`udp`/`tcp`/`raw`) با burnِ IPِ بلاک‌شده |
 | `tuning` | تنظیمِ عملیاتیِ تایمینگِ سلامت/تشخیصِ مرگ/چرخش توسطِ اپراتور |
 | `gso` | سگمنت‌آفلودِ TUN برای گذردهیِ بالاتر (بهینه‌سازیِ محلی، فرمتِ سیم بی‌تغییر) |
 

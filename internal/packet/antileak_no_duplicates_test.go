@@ -5,7 +5,6 @@ package packet
 import (
 	"bytes"
 	"log"
-	"net"
 	"os"
 	"strings"
 	"testing"
@@ -38,35 +37,6 @@ func TestAnAntiLeakRuleIsNeverInstalledTwice(t *testing.T) {
 		rm2()
 		if fake.total() != 0 {
 			t.Errorf("the rule outlived its teardown: %v", fake.snapshot())
-		}
-	})
-
-	t.Run("a rotation back onto a stale rule, through the antiLeaker", func(t *testing.T) {
-		const first, second = "203.0.113.10", "203.0.113.20"
-		for _, carrier := range []string{"udp", "stun"} {
-			fake := &fakeIptables{}
-			undo := fake.install()
-
-			closeCh := make(chan struct{})
-			var leak antiLeaker
-			leak.init(closeCh, func(peer net.IP) (func(), bool) { return addFluxDrop(peer, carrier, "core42") })
-
-			leak.scope(net.ParseIP(first).To4())
-			if fake.total() == 0 {
-				t.Fatalf("flux/%s installed nothing", carrier)
-			}
-			fake.setFailDel(true)
-			leak.scope(net.ParseIP(second).To4())
-			fake.setFailDel(false)
-			leak.scope(net.ParseIP(first).To4())
-
-			if d := fake.dups(); d != 0 {
-				t.Errorf("flux/%s: %d duplicate rule(s) on the host after one failed removal: %v",
-					carrier, d, fake.snapshot())
-			}
-			close(closeCh)
-			leak.teardown()
-			undo()
 		}
 	})
 

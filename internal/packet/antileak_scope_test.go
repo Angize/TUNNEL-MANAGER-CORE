@@ -54,23 +54,6 @@ func TestAntiLeakScopeIsNotDraggedBackByAStragglerFrame(t *testing.T) {
 		}
 	})
 
-	t.Run("flux: same", func(t *testing.T) {
-		rec := &scopeRecorder{}
-		f := &Flux{isClient: true}
-		f.leak.install = rec.installer()
-		f.SetPeerPool(NewPeerPool([]string{old, live}, 0))
-		f.peer.Store(&net.IPAddr{IP: net.ParseIP(live).To4()})
-		f.leak.scope(net.ParseIP(live).To4())
-		if got := rec.last(); got != live {
-			t.Fatalf("pre-scope landed on %q, want %s", got, live)
-		}
-		f.learnPeer(&net.IPAddr{IP: net.ParseIP(old).To4()})
-		f.leak.apply()
-		if got := rec.last(); got != live {
-			t.Errorf("a straggler from %s dragged the flux anti-leak rules off %s", old, live)
-		}
-	})
-
 	t.Run("raw: a server still follows the client it just learned", func(t *testing.T) {
 		rec := &scopeRecorder{}
 		r := &Raw{isClient: false}

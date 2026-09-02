@@ -60,24 +60,10 @@ func udpRung(t *testing.T) rungRig {
 		carries: func() bool { return b.sealer() != nil }}
 }
 
-func fluxRung(t *testing.T) rungRig {
-	t.Helper()
-	f := &Flux{isClient: true, cryptoOn: true, psk: rungPSK, cipher: crypto.CipherChaCha,
-		ping: pingEvery, carrier: "udp", sendFd: -1, pktFd: -1,
-		closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
-	f.peer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
-	f.session.Store(&sealerBox{s: rungSealer(t, true)})
-	f.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
-	t.Cleanup(func() { close(f.closeCh) })
-	return rungRig{st: f.st, drop: f.rehandshake, wake: f.wake,
-		asked:   func() bool { return f.ci.Load() != nil },
-		carries: func() bool { return f.sealer() != nil }}
-}
-
 var sessionRungCarriers = []struct {
 	name string
 	rig  func(*testing.T) rungRig
-}{{"raw", rawRung}, {"udp", udpRung}, {"flux", fluxRung}}
+}{{"raw", rawRung}, {"udp", udpRung}}
 
 // A verdict that reaches the session rung must leave a handshake OUTSTANDING -- and leave the session
 // alone while it is.

@@ -292,7 +292,7 @@ func TestListenIPsRejectedWhereItIsIgnored(t *testing.T) {
 			Listen: "0.0.0.0:9000", TunAddr: "10.200.0.1/24", Crypto: psk,
 		}
 	}
-	for _, tr := range []string{"raw", "flux", "ws", "dns", "spoof"} {
+	for _, tr := range []string{"raw", "ws", "dns", "spoof"} {
 		c := srv(tr)
 		switch tr {
 		case "dns":
@@ -384,52 +384,6 @@ func TestWSRotateSecsNonNegative(t *testing.T) {
 		if err := c.validate(); err != nil {
 			t.Errorf("ws_rotate_secs %d rejected: %v", v, err)
 		}
-	}
-}
-
-func TestFluxCarrierSetIsUDPOnly(t *testing.T) {
-	base := func(carrier string) *Config {
-		return &Config{
-			Role: "client", Mode: "packet", Profile: "core", Transport: "flux", FluxCarrier: carrier,
-			Peer: "203.0.113.9:9000", TunAddr: "10.200.0.2/24",
-			Crypto: CryptoCfg{Enabled: true, PSK: "a-sufficiently-long-preshared-key"},
-		}
-	}
-	for _, ok := range []string{"", "udp", "stun"} {
-		if err := base(ok).validate(); err != nil {
-			t.Fatalf("flux_carrier %q must be accepted: %v", ok, err)
-		}
-	}
-	for _, bad := range []string{"raw", "RAW", "icmp", "bare", "tcp"} {
-		if err := base(bad).validate(); err == nil {
-			t.Fatalf("flux_carrier %q was accepted", bad)
-		}
-	}
-	c := base("")
-	c.applyDefaults()
-	if c.FluxCarrier != "udp" {
-		t.Fatalf("an unset flux_carrier must resolve to udp, got %q", c.FluxCarrier)
-	}
-}
-
-func TestFluxRotateHonoursTunedDefault(t *testing.T) {
-	base := func() *Config {
-		return &Config{
-			Role: "client", Mode: "packet", Profile: "core", Transport: "flux",
-			Peer: "203.0.113.9:9000", TunAddr: "10.200.0.2/24",
-			Crypto: CryptoCfg{Enabled: true, PSK: "a-sufficiently-long-preshared-key"},
-		}
-	}
-	c := base()
-	c.applyDefaults()
-	if c.FluxRotateSecs != 600 {
-		t.Errorf("unset flux rotate should default to 600, got %d", c.FluxRotateSecs)
-	}
-	c = base()
-	c.FluxRotateSecs = 42
-	c.applyDefaults()
-	if c.FluxRotateSecs != 42 {
-		t.Errorf("an explicit flux rotate must be preserved, got %d", c.FluxRotateSecs)
 	}
 }
 
@@ -593,12 +547,9 @@ func TestDNSTransportValidation(t *testing.T) {
 }
 
 func TestTheCarriersWithNoClearModeRefuseCryptoOff(t *testing.T) {
-	flux := validRaw()
-	flux.Transport = "flux"
 	for name, c := range map[string]*Config{
 		"raw":   validRaw(),
 		"spoof": validSpoof(),
-		"flux":  flux,
 		"dns":   validDNSClient(),
 	} {
 		if err := c.validate(); err != nil {

@@ -42,17 +42,6 @@ func FuzzReadWSFrame(f *testing.F) {
 	})
 }
 
-func FuzzParseSTUN(f *testing.F) {
-	f.Add(make([]byte, 24))
-	seed := make([]byte, 40)
-	seed[4], seed[5], seed[6], seed[7] = 0x21, 0x12, 0xa4, 0x42
-	seed[22], seed[23] = 0x00, 0x10
-	f.Add(seed)
-	f.Fuzz(func(t *testing.T, data []byte) {
-		_, _ = parseSTUN(data)
-	})
-}
-
 func FuzzFecInput(f *testing.F) {
 	f.Add([]byte{0x01, 0xff})
 	f.Add([]byte{0x02, 0, 0, 0, 1, 0, 4, 2, 4, 0, 2, 0xaa, 0xbb})
