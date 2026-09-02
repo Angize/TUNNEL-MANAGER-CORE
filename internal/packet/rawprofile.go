@@ -2,6 +2,7 @@ package packet
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"io"
 	"net"
@@ -109,8 +110,35 @@ const (
 	rotSportSpan = 40000
 )
 
-func nextRotSport(idx uint32) uint16 {
-	return uint16(rotSportLo + int(idx%rotSportSpan))
+type rotPerm struct {
+	mul uint64
+	add uint64
+}
+
+func rotPermFrom(psk string, isClient bool) rotPerm {
+	role := "server"
+	if isClient {
+		role = "client"
+	}
+	h := sha256.Sum256([]byte("tnl-core|v1|rot-sport|" + role + "|" + psk))
+	add := uint64(binary.BigEndian.Uint32(h[28:32]))
+	for i := 0; i+4 <= 28; i += 4 {
+		m := uint64(binary.BigEndian.Uint32(h[i:i+4])) | 1
+		if m%5 == 0 {
+			m += 2
+		}
+		if step := m % rotSportSpan; step >= 1000 && step <= rotSportSpan-1000 {
+			return rotPerm{mul: m, add: add}
+		}
+	}
+	return rotPerm{mul: 20001, add: add}
+}
+
+func (p rotPerm) at(idx uint32) uint16 {
+	if p.mul == 0 {
+		return uint16(rotSportLo + int(uint64(idx)%rotSportSpan))
+	}
+	return uint16(rotSportLo + int((p.mul*uint64(idx)+p.add)%rotSportSpan))
 }
 
 func randUint32() uint32 {

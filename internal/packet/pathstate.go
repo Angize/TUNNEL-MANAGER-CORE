@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+type rotStatus struct {
+	Sport uint16 `json:"sport"`
+	Every int    `json:"every"`
+	Lo    uint16 `json:"lo"`
+	Hi    uint16 `json:"hi"`
+	Drawn uint64 `json:"drawn"`
+}
+
 type pathKey struct {
 	Src   string `json:"src"`
 	Sport uint16 `json:"sport"`
