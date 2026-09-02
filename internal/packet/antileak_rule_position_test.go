@@ -25,10 +25,10 @@ func TestEveryAntiLeakRuleGoesInAtTheTopOfItsChain(t *testing.T) {
 		chain string
 		run   func()
 	}{
-		{"raw/udp", "OUTPUT", func() { _, _ = addRawDrop(testDst, "udp", "core42", 0, true, false) }},
-		{"raw/tcp", "OUTPUT", func() { _, _ = addRawDrop(testDst, "tcp", "core42", 0, true, false) }},
-		{"raw/tcp server", "OUTPUT", func() { _, _ = addRawDrop(testDst, "tcp", "core42", 0, false, false) }},
-		{"raw/icmp", "OUTPUT", func() { _, _ = addRawDrop(testDst, "icmp", "core42", 0, false, true) }},
+		{"raw/udp", "OUTPUT", func() { _, _ = addRawDrop(testDst, "udp", "core42", 0, true, false, false) }},
+		{"raw/tcp", "OUTPUT", func() { _, _ = addRawDrop(testDst, "tcp", "core42", 0, true, false, false) }},
+		{"raw/tcp server", "OUTPUT", func() { _, _ = addRawDrop(testDst, "tcp", "core42", 0, false, false, false) }},
+		{"raw/icmp", "OUTPUT", func() { _, _ = addRawDrop(testDst, "icmp", "core42", 0, false, true, false) }},
 		{"spoof decoy", "PREROUTING", func() { addAntiLeak(253, testDst, "core42") }},
 		{"flux/udp", "PREROUTING", func() { _, _ = addFluxDrop(testDst, "udp", "core42") }},
 		{"flux/stun", "PREROUTING", func() { _, _ = addFluxDrop(testDst, "stun", "core42") }},

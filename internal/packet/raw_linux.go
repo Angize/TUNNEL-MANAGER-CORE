@@ -88,8 +88,8 @@ type Raw struct {
 	sportRandom bool
 
 	sportEvery int
-	rotPort    atomic.Uint32
-	rotIdx     atomic.Uint32
+	rotIdx     uint32
+	rotPerm    rotPerm
 	txCount    atomic.Uint64
 
 	leak     antiLeaker
@@ -122,6 +122,7 @@ func (r *Raw) SetStatusPath(path string) {
 		peer = p.String()
 	}
 	r.st = newCoreStatus(path, "raw:"+r.profile+" · "+peer)
+	r.st.trackRot(r.rotSnapshot, r.closeCh)
 }
 
 func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
@@ -188,7 +189,8 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 		if r.proto == protoTCP {
 			dack = r.tcpAck.Load()
 		}
-		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, r.srvPort(), r.cport(),
+		fsrv, fcli := r.rotPorts(r.cport(), r.drawSport())
+		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, fsrv, fcli,
 			dseq, dack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
 		if out == nil {
@@ -499,7 +501,8 @@ func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
 	} else {
 		seq = r.seq.Add(1)
 	}
-	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, r.srvPort(), cport,
+	srv, cli := r.rotPorts(cport, r.drawSport())
+	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, srv, cli,
 		seq, ack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 }
 
@@ -659,11 +662,55 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked b
 	return nil
 }
 
-func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked bool) (func(), bool) {
+func rawNotrackRules(peer net.IP) [][]string {
+	d := peer.String()
+	return [][]string{
+		{"-t", "raw", "-I", "OUTPUT", "-p", "udp", "-d", d},
+		{"-t", "raw", "-I", "PREROUTING", "-p", "udp", "-s", d},
+	}
+}
+
+func addRawNotrack(peer net.IP, tun string) func() {
+	var added [][]string
+	var owners [][]string
+	for _, m := range rawNotrackRules(peer) {
+		args := append(append([]string(nil), m...), "-j", "CT", "--notrack")
+		own, ok := runRule(args, ownerMatch(tun), "raw: conntrack bypass")
+		if !ok {
+			continue
+		}
+		added = append(added, m)
+		owners = append(owners, own)
+	}
+	if len(added) == 0 {
+		log.Printf("raw: WARNING the conntrack bypass could not be installed for %s — a rotating source port mints a new flow every N packets, so this host's conntrack table will sit at its limit", peer)
+		return nil
+	}
+	log.Printf("raw: conntrack bypass scoped to %s (%d raw-table rule(s), owner %s)", peer, len(added), ownerLabel(owners[0], tun))
+	return func() {
+		for i, m := range added {
+			del := append([]string(nil), m...)
+			for j, a := range del {
+				if a == "-I" {
+					del[j] = "-D"
+					break
+				}
+			}
+			del = append(del, "-j", "CT", "--notrack")
+			delRule(append(del, owners[i]...), "raw: conntrack bypass")
+		}
+	}
+}
+
+func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked, notrack bool) (func(), bool) {
 	type installed struct {
 		match, owner []string
 	}
 	var added []installed
+	var undoCT func()
+	if notrack {
+		undoCT = addRawNotrack(peer, tun)
+	}
 	want := rawDropMatches(peer, profile, port, isClient, marked)
 	for _, m := range want {
 		args := append([]string{"-I", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
@@ -674,6 +721,9 @@ func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked 
 		added = append(added, installed{m, own})
 	}
 	if len(added) == 0 {
+		if undoCT != nil {
+			return undoCT, len(want) == 0
+		}
 		return nil, len(want) == 0
 	}
 	log.Printf("raw: anti-leak scoped to %s (%d OUTPUT rule(s), profile %s, owner %s)", peer, len(added), profile, ownerLabel(added[0].owner, tun))
@@ -681,6 +731,9 @@ func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked 
 		for _, in := range added {
 			del := append([]string{"-D", "OUTPUT"}, append(append([]string{}, in.match...), "-j", "DROP")...)
 			delRule(append(del, in.owner...), "raw: anti-leak")
+		}
+		if undoCT != nil {
+			undoCT()
 		}
 	}, len(added) == len(want)
 }
@@ -699,41 +752,41 @@ func setSendMark(conn *net.IPConn) error {
 	return serr
 }
 
-func (r *Raw) rotSport() uint16 {
-	if !r.rotActive() {
-		return 0
-	}
-	return uint16(r.rotPort.Load())
-}
+func (r *Raw) cport() uint16 { return uint16(r.cliPort.Load()) }
 
-func (r *Raw) cport() uint16 {
-	if r.isClient {
-		if p := r.rotSport(); p != 0 {
-			return p
-		}
-	}
-	return uint16(r.cliPort.Load())
-}
-
-func (r *Raw) srvPort() uint16 {
-	if !r.isClient {
-		if p := r.rotSport(); p != 0 {
-			return p
-		}
-	}
-	return r.port
-}
+func (r *Raw) srvPort() uint16 { return r.port }
 
 func (r *Raw) rotActive() bool { return r.sportEvery > 0 && r.proto == protoUDP }
 
-func (r *Raw) rollTxSport() {
+func (r *Raw) drawSport() uint16 {
 	if !r.rotActive() {
-		return
+		return 0
 	}
-	if r.txCount.Add(1)%uint64(r.sportEvery) != 0 {
-		return
+	n := r.txCount.Add(1) - 1
+	return r.rotPerm.at(r.rotIdx + uint32(n/uint64(r.sportEvery)))
+}
+
+func (r *Raw) rotSnapshot() rotStatus {
+	if !r.rotActive() {
+		return rotStatus{}
 	}
-	r.rotPort.Store(uint32(nextRotSport(r.rotIdx.Add(1))))
+	drawn := r.txCount.Load()
+	cur := r.rotPerm.at(r.rotIdx + uint32(drawn/uint64(r.sportEvery)))
+	if drawn > 0 {
+		cur = r.rotPerm.at(r.rotIdx + uint32((drawn-1)/uint64(r.sportEvery)))
+	}
+	return rotStatus{Sport: cur, Every: r.sportEvery, Lo: rotSportLo,
+		Hi: rotSportLo + rotSportSpan - 1, Drawn: (drawn + uint64(r.sportEvery) - 1) / uint64(r.sportEvery)}
+}
+
+func (r *Raw) rotPorts(cport, rot uint16) (uint16, uint16) {
+	if rot == 0 {
+		return r.port, cport
+	}
+	if r.isClient {
+		return r.port, rot
+	}
+	return rot, cport
 }
 
 func (r *Raw) setSportRotate(every int) {
@@ -741,8 +794,10 @@ func (r *Raw) setSportRotate(every int) {
 		return
 	}
 	r.sportEvery = every
-	r.rotIdx.Store(randUint32())
-	r.rotPort.Store(uint32(nextRotSport(r.rotIdx.Load())))
+	r.rotIdx = randUint32()
+	r.rotPerm = rotPermFrom(r.psk, r.isClient)
+	log.Printf("raw: source-port rotation every %d packets over %d ports (%d-%d); a port comes back after %d packets, so above ~%d packets/s it returns inside the ~45s a middlebox needs to forget it",
+		every, rotSportSpan, rotSportLo, rotSportLo+rotSportSpan-1, rotSportSpan*every, rotSportSpan*every/45)
 }
 
 func (r *Raw) setSportMode(on bool, fix int) {
@@ -827,7 +882,7 @@ func (r *Raw) wireAntiLeak() {
 		}
 	}
 	r.leak.init(r.closeCh, func(peer net.IP) (func(), bool) {
-		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked)
+		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked, r.rotActive())
 	})
 	if p := r.peer.Load(); p != nil {
 		r.leak.scope(p.IP)
@@ -876,7 +931,6 @@ func (r *Raw) tunToNet(q *txQueue) error {
 			r.fecEnc.addData(body)
 			continue
 		}
-		r.rollTxSport()
 		pkt := r.wire(body, peer.IP)
 
 		if r.canBatch(q) {
@@ -895,7 +949,6 @@ func (r *Raw) tunToNet(q *txQueue) error {
 				if err != nil {
 					continue
 				}
-				r.rollTxSport()
 				ms[n].Buffers[0], ms[n].Addr, ms[n].OOB = r.wire(b, peer.IP), peer, oob
 				n++
 			}

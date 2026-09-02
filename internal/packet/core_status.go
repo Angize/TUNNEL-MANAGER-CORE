@@ -20,6 +20,7 @@ type coreStatus struct {
 
 	health []func() []healthStatus
 	pair   func() (low, high, lowKind, highKind string)
+	rot    func() rotStatus
 
 	tracker pathTracker
 }
@@ -42,6 +43,39 @@ func (s *coreStatus) setPair(live func() (low, high, lowKind, highKind string)) 
 	s.pair = live
 	s.mu.Unlock()
 	s.write()
+}
+
+func (s *coreStatus) setRot(live func() rotStatus) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.rot = live
+	s.mu.Unlock()
+	s.write()
+}
+
+func (s *coreStatus) trackRot(live func() rotStatus, closeCh <-chan struct{}) {
+	if s == nil || live().Every == 0 {
+		return
+	}
+	s.setRot(live)
+	go func() {
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		last := live().Sport
+		for {
+			select {
+			case <-closeCh:
+				return
+			case <-tick.C:
+				if p := live().Sport; p != last {
+					last = p
+					s.write()
+				}
+			}
+		}
+	}()
 }
 
 func (s *coreStatus) trackPath(live func() (pathKey, bool), closeCh <-chan struct{}) {
@@ -220,6 +254,7 @@ func (s *coreStatus) write() {
 	active := s.active
 	sources := append([]func() []healthStatus(nil), s.health...)
 	livePair := s.pair
+	liveRot := s.rot
 	s.mu.Unlock()
 
 	health := []healthStatus{}
@@ -230,6 +265,10 @@ func (s *coreStatus) write() {
 	if livePair != nil {
 		pair.Low, pair.High, pair.LowKind, pair.HighKind = livePair()
 	}
+	var rot rotStatus
+	if liveRot != nil {
+		rot = liveRot()
+	}
 
 	epoch, path, ready := s.tracker.snapshot()
 	payload := struct {
@@ -238,10 +277,11 @@ func (s *coreStatus) write() {
 		Ready  bool           `json:"ready"`
 		Path   pathKey        `json:"path"`
 		Pair   pairStatus     `json:"pair"`
+		Rot    rotStatus      `json:"rot"`
 		Health []healthStatus `json:"health"`
 		Events []coreEvent    `json:"events"`
 		TS     int64          `json:"ts"`
-	}{Active: active, Epoch: epoch, Ready: ready, Path: path, Pair: pair, Health: health,
+	}{Active: active, Epoch: epoch, Ready: ready, Path: path, Pair: pair, Rot: rot, Health: health,
 		Events: evs, TS: time.Now().Unix()}
 	buf, err := json.Marshal(payload)
 	if err != nil {
