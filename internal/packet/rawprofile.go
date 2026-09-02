@@ -104,6 +104,23 @@ func rawPorts(isClient bool, srv, cli uint16) (sport, dport uint16) {
 	return srv, cli
 }
 
+const (
+	rotSportLo   = 20000
+	rotSportSpan = 40000
+)
+
+func nextRotSport(idx uint32) uint16 {
+	return uint16(rotSportLo + int(idx%rotSportSpan))
+}
+
+func randUint32() uint32 {
+	var b [4]byte
+	if _, err := io.ReadFull(rand.Reader, b[:]); err != nil {
+		return 0
+	}
+	return binary.BigEndian.Uint32(b[:])
+}
+
 func rawRollSport() uint16 {
 	n := len(rawSportPool)
 	limit := 65536 - (65536 % n)

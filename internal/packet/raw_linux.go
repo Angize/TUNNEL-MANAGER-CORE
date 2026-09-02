@@ -87,6 +87,11 @@ type Raw struct {
 	cliPort     atomic.Uint32
 	sportRandom bool
 
+	sportEvery int
+	rotPort    atomic.Uint32
+	rotIdx     atomic.Uint32
+	txCount    atomic.Uint64
+
 	leak     antiLeaker
 	sendMu   sync.RWMutex
 	sendDown bool
@@ -183,7 +188,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 		if r.proto == protoTCP {
 			dack = r.tcpAck.Load()
 		}
-		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, r.port, r.cport(),
+		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, r.srvPort(), r.cport(),
 			dseq, dack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
 		if out == nil {
@@ -268,7 +273,7 @@ func (r *Raw) sendTCPFlags(flags byte, to *net.IPAddr, cport uint16) {
 	if flags&tcpSyn == 0 {
 		seq = r.tcpSeqBase() + r.tcpBytes.Load()
 	}
-	seg := rawEncap(r.profile, nil, r.srcIP(), to.IP, r.isClient, r.icmpID, r.port, cport,
+	seg := rawEncap(r.profile, nil, r.srcIP(), to.IP, r.isClient, r.icmpID, r.srvPort(), cport,
 		seq, r.tcpAck.Load(), r.spi, r.tsNow(), r.tsEcr.Load(), flags)
 	r.writeOut(seg, to)
 }
@@ -375,7 +380,7 @@ func listenRawBase(listenIP string, dev *tun.Device, obfs bool, psk, cipher, pro
 	return r, nil
 }
 
-func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, extraQ ...*tun.Device) (*Raw, error) {
+func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, sportRotate int, extraQ ...*tun.Device) (*Raw, error) {
 	r, err := dialRawBase(peerIP, dev, obfs, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
@@ -383,6 +388,7 @@ func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile str
 	r.link = &directLink{r: r}
 
 	r.setSportMode(sportRandom, rawSport)
+	r.setSportRotate(sportRotate)
 	r.initFec(fec, fecData, fecParity)
 	r.wireAntiLeak()
 	r.rxw = newTunWriters(append([]*tun.Device{dev}, extraQ...))
@@ -394,13 +400,14 @@ func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile str
 	return r, nil
 }
 
-func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, extraQ ...*tun.Device) (*Raw, error) {
+func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, sportRotate int, extraQ ...*tun.Device) (*Raw, error) {
 	r, err := listenRawBase(listenIP, dev, obfs, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
 	}
 	r.link = &directLink{r: r}
 	r.setSportMode(sportRandom, rawSport)
+	r.setSportRotate(sportRotate)
 	applyConnSockBuf(r.conn)
 	r.initFec(fec, fecData, fecParity)
 	r.wireAntiLeak()
@@ -492,7 +499,7 @@ func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
 	} else {
 		seq = r.seq.Add(1)
 	}
-	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, r.port, cport,
+	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, r.srvPort(), cport,
 		seq, ack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 }
 
@@ -692,7 +699,51 @@ func setSendMark(conn *net.IPConn) error {
 	return serr
 }
 
-func (r *Raw) cport() uint16 { return uint16(r.cliPort.Load()) }
+func (r *Raw) rotSport() uint16 {
+	if !r.rotActive() {
+		return 0
+	}
+	return uint16(r.rotPort.Load())
+}
+
+func (r *Raw) cport() uint16 {
+	if r.isClient {
+		if p := r.rotSport(); p != 0 {
+			return p
+		}
+	}
+	return uint16(r.cliPort.Load())
+}
+
+func (r *Raw) srvPort() uint16 {
+	if !r.isClient {
+		if p := r.rotSport(); p != 0 {
+			return p
+		}
+	}
+	return r.port
+}
+
+func (r *Raw) rotActive() bool { return r.sportEvery > 0 && r.proto == protoUDP }
+
+func (r *Raw) rollTxSport() {
+	if !r.rotActive() {
+		return
+	}
+	if r.txCount.Add(1)%uint64(r.sportEvery) != 0 {
+		return
+	}
+	r.rotPort.Store(uint32(nextRotSport(r.rotIdx.Add(1))))
+}
+
+func (r *Raw) setSportRotate(every int) {
+	if every <= 0 || r.proto != protoUDP {
+		return
+	}
+	r.sportEvery = every
+	r.rotIdx.Store(randUint32())
+	r.rotPort.Store(uint32(nextRotSport(r.rotIdx.Load())))
+}
 
 func (r *Raw) setSportMode(on bool, fix int) {
 	r.sportRandom = on && RawProfileHasPorts(r.profile)
@@ -825,6 +876,7 @@ func (r *Raw) tunToNet(q *txQueue) error {
 			r.fecEnc.addData(body)
 			continue
 		}
+		r.rollTxSport()
 		pkt := r.wire(body, peer.IP)
 
 		if r.canBatch(q) {
@@ -843,6 +895,7 @@ func (r *Raw) tunToNet(q *txQueue) error {
 				if err != nil {
 					continue
 				}
+				r.rollTxSport()
 				ms[n].Buffers[0], ms[n].Addr, ms[n].OOB = r.wire(b, peer.IP), peer, oob
 				n++
 			}
@@ -1102,7 +1155,7 @@ func (r *Raw) livePath() (pathKey, bool) {
 	if p := r.peer.Load(); p != nil {
 		k.Dst = p.IP.String()
 	}
-	if RawProfileHasPorts(r.profile) {
+	if RawProfileHasPorts(r.profile) && !r.rotActive() {
 		k.Sport, k.Dport = rawPorts(r.isClient, r.port, r.cport())
 	}
 	return k, r.sealer() != nil
