@@ -16,7 +16,7 @@ func TestAnAntiLeakRuleIsNeverInstalledTwice(t *testing.T) {
 		fake := &fakeIptables{}
 		defer fake.install()()
 
-		rm, _ := addRawDrop(leakPeer, "udp", "core42", 0, true, false, false)
+		rm, _ := addRawDrop(leakPeer, "udp", "core42", 0, true, false)
 		if rm == nil || fake.total() != 1 {
 			t.Fatalf("the first install put %d rule(s) on the host: %v", fake.total(), fake.snapshot())
 		}
@@ -27,7 +27,7 @@ func TestAnAntiLeakRuleIsNeverInstalledTwice(t *testing.T) {
 		}
 		fake.setFailDel(false)
 
-		rm2, _ := addRawDrop(leakPeer, "udp", "core42", 0, true, false, false)
+		rm2, _ := addRawDrop(leakPeer, "udp", "core42", 0, true, false)
 		if n, d := fake.total(), fake.dups(); n != 1 || d != 0 {
 			t.Errorf("re-scoping onto a destination whose rule was never removed left %d rule(s), %d of them copies: %v",
 				n, d, fake.snapshot())
@@ -74,14 +74,14 @@ func TestAnAntiLeakRuleIsNeverInstalledTwice(t *testing.T) {
 		fake := &fakeIptables{noComment: true}
 		defer fake.install()()
 
-		rm, _ := addRawDrop(leakPeer, "udp", "core42", 0, true, false, false)
+		rm, _ := addRawDrop(leakPeer, "udp", "core42", 0, true, false)
 		if rm == nil || fake.total() != 1 {
 			t.Fatalf("the untagged fallback put %d rule(s) on the host: %v", fake.total(), fake.snapshot())
 		}
 		fake.setFailDel(true)
 		rm()
 		fake.setFailDel(false)
-		_, _ = addRawDrop(leakPeer, "udp", "core42", 0, true, false, false)
+		_, _ = addRawDrop(leakPeer, "udp", "core42", 0, true, false)
 		if n, d := fake.total(), fake.dups(); n != 1 || d != 0 {
 			t.Errorf("%d rule(s), %d of them copies: %v", n, d, fake.snapshot())
 		}
@@ -94,7 +94,7 @@ func TestAnAntiLeakRuleIsNeverInstalledTwice(t *testing.T) {
 		log.SetOutput(&logged)
 		defer log.SetOutput(os.Stderr)
 
-		rm, _ := addRawDrop(leakPeer, "tcp", "core42", 0, true, false, false)
+		rm, _ := addRawDrop(leakPeer, "tcp", "core42", 0, true, false)
 		if rm == nil {
 			t.Fatal("nothing installed")
 		}

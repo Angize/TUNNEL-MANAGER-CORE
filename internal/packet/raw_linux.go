@@ -662,55 +662,11 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked b
 	return nil
 }
 
-func rawNotrackRules(peer net.IP) [][]string {
-	d := peer.String()
-	return [][]string{
-		{"-t", "raw", "-I", "OUTPUT", "-p", "udp", "-d", d},
-		{"-t", "raw", "-I", "PREROUTING", "-p", "udp", "-s", d},
-	}
-}
-
-func addRawNotrack(peer net.IP, tun string) func() {
-	var added [][]string
-	var owners [][]string
-	for _, m := range rawNotrackRules(peer) {
-		args := append(append([]string(nil), m...), "-j", "CT", "--notrack")
-		own, ok := runRule(args, ownerMatch(tun), "raw: conntrack bypass")
-		if !ok {
-			continue
-		}
-		added = append(added, m)
-		owners = append(owners, own)
-	}
-	if len(added) == 0 {
-		log.Printf("raw: WARNING the conntrack bypass could not be installed for %s — a rotating source port mints a new flow every N packets, so this host's conntrack table will sit at its limit", peer)
-		return nil
-	}
-	log.Printf("raw: conntrack bypass scoped to %s (%d raw-table rule(s), owner %s)", peer, len(added), ownerLabel(owners[0], tun))
-	return func() {
-		for i, m := range added {
-			del := append([]string(nil), m...)
-			for j, a := range del {
-				if a == "-I" {
-					del[j] = "-D"
-					break
-				}
-			}
-			del = append(del, "-j", "CT", "--notrack")
-			delRule(append(del, owners[i]...), "raw: conntrack bypass")
-		}
-	}
-}
-
-func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked, notrack bool) (func(), bool) {
+func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked bool) (func(), bool) {
 	type installed struct {
 		match, owner []string
 	}
 	var added []installed
-	var undoCT func()
-	if notrack {
-		undoCT = addRawNotrack(peer, tun)
-	}
 	want := rawDropMatches(peer, profile, port, isClient, marked)
 	for _, m := range want {
 		args := append([]string{"-I", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
@@ -721,9 +677,6 @@ func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked,
 		added = append(added, installed{m, own})
 	}
 	if len(added) == 0 {
-		if undoCT != nil {
-			return undoCT, len(want) == 0
-		}
 		return nil, len(want) == 0
 	}
 	log.Printf("raw: anti-leak scoped to %s (%d OUTPUT rule(s), profile %s, owner %s)", peer, len(added), profile, ownerLabel(added[0].owner, tun))
@@ -731,9 +684,6 @@ func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked,
 		for _, in := range added {
 			del := append([]string{"-D", "OUTPUT"}, append(append([]string{}, in.match...), "-j", "DROP")...)
 			delRule(append(del, in.owner...), "raw: anti-leak")
-		}
-		if undoCT != nil {
-			undoCT()
 		}
 	}, len(added) == len(want)
 }
@@ -882,7 +832,7 @@ func (r *Raw) wireAntiLeak() {
 		}
 	}
 	r.leak.init(r.closeCh, func(peer net.IP) (func(), bool) {
-		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked, r.rotActive())
+		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked)
 	})
 	if p := r.peer.Load(); p != nil {
 		r.leak.scope(p.IP)
