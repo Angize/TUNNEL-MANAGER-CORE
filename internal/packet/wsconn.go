@@ -201,7 +201,16 @@ func wsClientHandshake(conn net.Conn, host, path string, deadline time.Time) (*b
 	return r, nil
 }
 
-const wsNotFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+func wsDateHeader() string {
+	return "Date: " + time.Now().UTC().Format(http.TimeFormat) + "\r\n"
+}
+
+const wsServerName = "Server: nginx\r\n"
+
+func wsNotFound() string {
+	return "HTTP/1.1 404 Not Found\r\n" + wsDateHeader() + wsServerName +
+		"Content-Type: text/html\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+}
 
 func headerListContains(v, tok string) bool {
 	for _, p := range strings.Split(v, ",") {
@@ -239,11 +248,12 @@ func wsServerHandshake(conn net.Conn, wantPath string, deadline time.Time) (*buf
 		return nil, err
 	}
 	if !wsUpgradeForUs(req, wantPath) {
-		_, _ = conn.Write([]byte(wsNotFound))
+		_, _ = conn.Write([]byte(wsNotFound()))
 		return nil, errNotWS
 	}
 	accept := wsAccept(req.Header.Get("Sec-WebSocket-Key"))
 	resp := "HTTP/1.1 101 Switching Protocols\r\n" +
+		wsDateHeader() + wsServerName +
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +
 		"Sec-WebSocket-Accept: " + accept + "\r\n\r\n"
