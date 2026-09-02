@@ -51,8 +51,8 @@ func TestSportRotateAdvancesEveryNPacketsOnTheClientWire(t *testing.T) {
 	var order []uint16
 	for i := 0; i < every*40; i++ {
 		p := wireSport(r, r.cport())
-		if p < rotSportLo || p >= rotSportLo+rotSportSpan {
-			t.Fatalf("packet %d: sport %d outside [%d,%d)", i, p, rotSportLo, rotSportLo+rotSportSpan)
+		if p < sportBandLo || p >= sportBandLo+sportBandSpan {
+			t.Fatalf("packet %d: sport %d outside [%d,%d)", i, p, sportBandLo, sportBandLo+sportBandSpan)
 		}
 		if per[p] == 0 {
 			order = append(order, p)
@@ -83,7 +83,7 @@ func TestSportRotateRotatesTheServerSourceNotItsReplyTarget(t *testing.T) {
 		pkt := r.wireTo([]byte("payload-payload"), testDst, r.cport())
 		sp := binary.BigEndian.Uint16(pkt[0:2])
 		dp := binary.BigEndian.Uint16(pkt[2:4])
-		if sp < rotSportLo || sp >= rotSportLo+rotSportSpan {
+		if sp < sportBandLo || sp >= sportBandLo+sportBandSpan {
 			t.Fatalf("packet %d: server source %d outside the rotation band", i, sp)
 		}
 		if dp != 41000 {
@@ -189,7 +189,9 @@ func rotSportNext(r *Raw) uint16 {
 func TestEveryPortCarriesExactlyNPacketsUnderConcurrentQueues(t *testing.T) {
 	for _, every := range []int{3, 5, 6} {
 		for _, workers := range []int{1, 2, 4, 8} {
-			const perWorker = 4000
+			// Kept under sportBandSpan*every so one pass covers the whole run: past that the walk
+			// legitimately comes back around, and reuse-after-a-full-pass is what the test below is for.
+			const perWorker = 3000
 			r := rotClient(every)
 
 			out := make([]map[uint16]int, workers)
@@ -271,17 +273,17 @@ func TestDecoysDrawTheirOwnPortRatherThanRidingTheCurrentOne(t *testing.T) {
 // differs per tunnel and between the two ends of the same tunnel.
 func TestTheBandWalkIsKeyedAndStillVisitsEveryPortOnce(t *testing.T) {
 	perm := rotPermFrom("a-sufficiently-long-preshared-key", true)
-	seen := make(map[uint16]bool, rotSportSpan)
+	seen := make(map[uint16]bool, sportBandSpan)
 	var steps = map[int]int{}
 	prev := perm.at(0)
-	for i := uint32(0); i < rotSportSpan; i++ {
+	for i := uint32(0); i < sportBandSpan; i++ {
 		p := perm.at(i)
-		if p < rotSportLo || p >= rotSportLo+rotSportSpan {
-			t.Fatalf("index %d drew %d, outside [%d,%d)", i, p, rotSportLo, rotSportLo+rotSportSpan)
+		if p < sportBandLo || p >= sportBandLo+sportBandSpan {
+			t.Fatalf("index %d drew %d, outside [%d,%d)", i, p, sportBandLo, sportBandLo+sportBandSpan)
 		}
 		if seen[p] {
 			t.Fatalf("port %d repeated after %d of %d draws; a port must stay off the wire for a whole pass",
-				p, i, rotSportSpan)
+				p, i, sportBandSpan)
 		}
 		seen[p] = true
 		if i > 0 {
@@ -289,11 +291,16 @@ func TestTheBandWalkIsKeyedAndStillVisitsEveryPortOnce(t *testing.T) {
 		}
 		prev = p
 	}
-	if len(seen) != rotSportSpan {
-		t.Fatalf("a full pass covered %d ports, want %d", len(seen), rotSportSpan)
+	if len(seen) != sportBandSpan {
+		t.Fatalf("a full pass covered %d ports, want %d", len(seen), sportBandSpan)
 	}
-	if len(steps) < 2 {
-		t.Fatalf("the walk has a single universal step %v — that is the ramp this replaced", steps)
+	// A constant stride IS the fingerprint: an observer who sees two consecutive source ports predicts
+	// every one after them. The affine walk this replaced had exactly two step values -- the stride, and
+	// the stride minus the span at the one index where it wrapped -- so it passed a "more than one step"
+	// check while staying trivially predictable. A keyed permutation has no stride to find.
+	if len(steps) < sportBandSpan/4 {
+		t.Fatalf("the walk took only %d distinct steps over %d draws — consecutive ports are predictable from the stride",
+			len(steps), sportBandSpan)
 	}
 
 	// the two ends of one tunnel must not walk the same sequence
@@ -318,5 +325,49 @@ func TestTheBandWalkIsKeyedAndStillVisitsEveryPortOnce(t *testing.T) {
 	}
 	if same > 4096/1000 {
 		t.Errorf("two different PSKs drew the same port at %d of 4096 indexes", same)
+	}
+}
+
+// The band is walked by cycle-walking a Feistel permutation over a power-of-two domain. The domain has
+// to cover the band: if the band ever outgrew it, at() would spin for ever on the indexes past the end,
+// and it would do it inside the per-packet send path.
+func TestTheWalkDomainCoversTheWholeBand(t *testing.T) {
+	if rotDomain < sportBandSpan {
+		t.Fatalf("the permutation domain is %d but the band is %d ports wide", rotDomain, sportBandSpan)
+	}
+	if sportBandLo+sportBandSpan-1 > 65535 {
+		t.Fatalf("the band ends at %d, past the last UDP port", sportBandLo+sportBandSpan-1)
+	}
+	if sportBandLo < 1024 {
+		t.Fatalf("the band starts at %d, inside the privileged ports", sportBandLo)
+	}
+}
+
+// The band is 10000 ports wide, so a busy tunnel spends all of it and comes back. The distance between
+// one use of a port and the next is the whole feature: a port that returns before the middlebox has
+// forgotten it (~45 s) is a tuple over its packet budget, which is the thing rotation exists to avoid.
+// The walk must therefore come back EXACTLY one pass later, never sooner -- which is what a permutation
+// buys over drawing at random, where the birthday bound puts the first repeat ~125 draws in.
+func TestAPortComesBackOnlyAfterTheWholeBandHasBeenSpent(t *testing.T) {
+	const every = 5
+	r := rotClient(every)
+	first := map[uint16]int{}
+	for i := 0; i < sportBandSpan*every+every*4; i++ {
+		p := wireSport(r, r.cport())
+		draw := i / every
+		if j, seen := first[p]; seen {
+			if j == draw {
+				continue
+			}
+			if gap := draw - j; gap != sportBandSpan {
+				t.Fatalf("port %d came back %d draws later, want exactly %d (%d packets)",
+					p, gap, sportBandSpan, sportBandSpan*every)
+			}
+			continue
+		}
+		first[p] = draw
+	}
+	if len(first) != sportBandSpan {
+		t.Fatalf("a full pass used %d ports, want %d", len(first), sportBandSpan)
 	}
 }
