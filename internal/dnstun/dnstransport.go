@@ -43,8 +43,9 @@ func buildQuery(id uint16, name string) ([]byte, error) {
 		return nil, err
 	}
 	msg := dnsmessage.Message{
-		Header:    dnsmessage.Header{ID: id, RecursionDesired: true},
-		Questions: []dnsmessage.Question{{Name: n, Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET}},
+		Header:      dnsmessage.Header{ID: id, RecursionDesired: true},
+		Questions:   []dnsmessage.Question{{Name: n, Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET}},
+		Additionals: []dnsmessage.Resource{ednsOPT()},
 	}
 	return msg.Pack()
 }
@@ -106,12 +107,21 @@ func parseQuery(buf []byte) (id uint16, name string, qtype dnsmessage.Type, ok b
 	return parseMsgQuestion(buf, false)
 }
 
+const ednsUDPSize = 1232
+
+func ednsOPT() dnsmessage.Resource {
+	var h dnsmessage.ResourceHeader
+	_ = h.SetEDNS0(ednsUDPSize, dnsmessage.RCodeSuccess, false)
+	return dnsmessage.Resource{Header: h, Body: &dnsmessage.OPTResource{}}
+}
+
 func buildResponse(id uint16, qname dnsmessage.Name, qtype dnsmessage.Type, answers, authority []dnsmessage.Resource) ([]byte, error) {
 	msg := dnsmessage.Message{
 		Header:      dnsmessage.Header{ID: id, Response: true, Authoritative: true},
 		Questions:   []dnsmessage.Question{{Name: qname, Type: qtype, Class: dnsmessage.ClassINET}},
 		Answers:     answers,
 		Authorities: authority,
+		Additionals: []dnsmessage.Resource{ednsOPT()},
 	}
 	return msg.Pack()
 }
