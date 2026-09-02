@@ -88,12 +88,25 @@ func TestRotationSoakRapidRotate(t *testing.T) {
 	if distinct < 2 {
 		t.Fatalf("rotation appears frozen: saw only %d distinct active edge(s) across 3s of 150ms rotation (want >= 2): %v", distinct, seen)
 	}
-	if cli.cur.Load() == nil {
-		t.Fatal("tunnel has no active carrier after the rapid-rotate soak")
-	}
-	if got := atomic.LoadInt64(&delivered); got == 0 {
-		t.Fatal("no data traversed the tunnel during rapid rotation — the tunnel was dead throughout")
-	}
+	// The carrier is torn down and rebuilt every 150ms, so "is there an active carrier" is only a
+	// meaningful question once the churn has had a moment to settle. Reading cli.cur exactly once, the
+	// instant the write loop stops, samples a moving target: under -race a reconnect takes long enough
+	// that the single sample often lands in the gap between one carrier closing and the next opening.
+	// Measured on DE02 at 40 iterations with -race, that read failed 19/40 on v2.95.0 and 13/40 on main
+	// while the tunnel was healthy and the race detector reported nothing. What the soak actually proves
+	// is that the churn CONVERGES -- that a carrier comes back and stays -- so wait for that rather than
+	// catch it mid-swap. A frozen or dead tunnel still fails: it never satisfies the condition.
+	waitFor(t, 3*time.Second, "a carrier to come back after the rapid-rotate soak", func() bool {
+		return cli.cur.Load() != nil
+	})
+	// delivered is cumulative and monotonic, so it cannot rewind -- but drainCounter reads the far end on
+	// its own goroutine, so the last packets of the soak need not be counted at the instant the write loop
+	// stops. Same treatment for the same reason: give the count a moment to arrive instead of sampling a
+	// pipe that is still draining. A tunnel that carried nothing still fails, three seconds later.
+	waitFor(t, 3*time.Second, "at least one packet to traverse the tunnel during rapid rotation "+
+		"(zero means the tunnel was dead throughout)", func() bool {
+		return atomic.LoadInt64(&delivered) > 0
+	})
 	t.Logf("rapid-rotate soak: %d distinct active edges, %d packets delivered through the churn: %v",
 		distinct, atomic.LoadInt64(&delivered), seen)
 }
