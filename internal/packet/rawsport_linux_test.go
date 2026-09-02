@@ -12,57 +12,55 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
-// The pool itself: what the draw is allowed to return, and what must never be in it.
-func TestTheSourcePortPoolIsWellFormed(t *testing.T) {
-	in := map[uint16]bool{}
-	for i, p := range rawSportPool {
-		if p == 0 {
-			t.Fatalf("entry %d is 0, which rawPorts reads as \"use the default\"", i)
-		}
-		if in[p] {
-			t.Errorf("port %d appears twice — a duplicate skews the draw toward it", p)
-		}
-		in[p] = true
-		if i > 0 && rawSportPool[i-1] >= p {
-			t.Errorf("entry %d (%d) is not after %d — an unsorted pool makes review by eye impossible",
-				i, p, rawSportPool[i-1])
-		}
+// The band itself: what the draw is allowed to return, and what must never come out of it. The 200-port
+// table of well-known service ports this replaced put a SERVER port on a CLIENT packet, which is the
+// one thing about the forgery that looked wrong to anyone reading a capture. A band is only an
+// improvement if it also keeps clear of the ports measured dead on the path, so that is asserted here
+// rather than left to whoever next edits the two constants.
+func TestTheSourcePortBandIsWellFormed(t *testing.T) {
+	lo, hi := int(sportBandLo), int(sportBandLo)+int(sportBandSpan)-1
+	if lo < 1024 {
+		t.Errorf("the band starts at %d, inside the privileged ports", lo)
 	}
-	if len(rawSportPool) < 100 {
-		t.Errorf("only %d ports: too few to vary between draws", len(rawSportPool))
+	if hi > 65535 {
+		t.Errorf("the band ends at %d, past the last UDP port", hi)
 	}
-	// The ports a filter reaches for first, and the four that were MEASURED dead IR->DE (3 rounds
-	// each, 2026-08-28) while 400 sampled ephemeral ports were all alive. A draw that lands on one of
-	// these is a rung spent on nothing.
-	for _, bad := range []uint16{500, 1194, 1701, 1723, 4500, 51820, 9050, 9051, 9150,
+	if sportBandSpan < 1000 {
+		t.Errorf("only %d ports: too few to vary between draws", sportBandSpan)
+	}
+	// The ports a filter reaches for first, and the four MEASURED dead IR->DE (3 rounds each,
+	// 2026-08-28) while 400 sampled ephemeral ports were all alive. A draw that lands on one of these
+	// is a rung spent on nothing.
+	for _, bad := range []int{500, 1194, 1701, 1723, 4500, 51820, 9050, 9051, 9150,
 		23, 25, 465, 3389} {
-		if in[bad] {
-			t.Errorf("%d must not be drawn: it is a VPN/Tor port or one measured dead on the path", bad)
+		if bad >= lo && bad <= hi {
+			t.Errorf("%d is inside the band: it is a VPN/Tor port or one measured dead on the path", bad)
 		}
+	}
+	// Blocking was measured 4x worse above 47000 (2026-08-17, IR02->DE02). Half a band up there is
+	// half the draws spent on a rung that cannot work.
+	if hi > 46999 {
+		t.Errorf("the band reaches %d, into the range measured 4x worse for blocking", hi)
 	}
 }
 
-func TestTheDrawComesFromThePoolAndSpreads(t *testing.T) {
+func TestTheDrawStaysInTheBandAndSpreads(t *testing.T) {
 	const draws = 4000
-	in := map[uint16]bool{}
-	for _, p := range rawSportPool {
-		in[p] = true
-	}
+	lo, hi := uint32(sportBandLo), uint32(sportBandLo+sportBandSpan-1)
 	seen := map[uint16]bool{}
 	for i := 0; i < draws; i++ {
-		p := rawRollSport()
-		if p == 0 {
-			t.Fatalf("draw %d failed", i)
+		p := uint32(rawRollSport())
+		if p < lo || p > hi {
+			t.Fatalf("draw %d returned %d, outside [%d,%d] — the anti-leak rule and the measured "+
+				"block rates are both about the band", i, p, lo, hi)
 		}
-		if !in[p] {
-			t.Fatalf("draw %d returned %d, which is not in the pool — the anti-leak rule and the "+
-				"measured block rates are both about the pool", i, p)
-		}
-		seen[p] = true
+		seen[uint16(p)] = true
 	}
-	if len(seen) < len(rawSportPool)*9/10 {
-		t.Errorf("%d of %d pool ports seen in %d draws — the draw is not spreading over the pool",
-			len(seen), len(rawSportPool), draws)
+	// 4000 draws over 10000 ports collide by the birthday bound; anything near 4000 distinct says the
+	// draw is spreading, anything small says it is stuck on a few values.
+	if len(seen) < draws*3/4 {
+		t.Errorf("%d distinct ports in %d draws — the draw is not spreading over the band",
+			len(seen), draws)
 	}
 }
 
@@ -194,9 +192,10 @@ func TestTheAntiLeakRuleCoversEveryPortTheDrawCanReturn(t *testing.T) {
 					"kernel is then free to RST the peer", isClient, rule)
 			}
 		}
-		for _, p := range rawSportPool {
-			if strings.Contains(rule, " "+strconv.Itoa(int(p))+" ") && int(p) != rawServerPort {
-				t.Errorf("isClient=%v: rule %q names pool port %d, so it does not cover the others",
+		for i := 0; i < 64; i++ {
+			p := int(rawRollSport())
+			if strings.Contains(rule, " "+strconv.Itoa(p)+" ") && p != rawServerPort {
+				t.Errorf("isClient=%v: rule %q names band port %d, so it does not cover the others",
 					isClient, rule, p)
 			}
 		}

@@ -248,9 +248,6 @@ func (b *UDP) rollSourcePort() bool {
 	}
 	for i := 0; i < 8; i++ {
 		p := rollRepairPort()
-		if p == 0 {
-			return false
-		}
 		if err := b.rebind(&net.UDPAddr{IP: la.IP, Port: int(p)}); err == nil {
 			log.Printf("core/udp: redrew the source port %d -> %d", la.Port, p)
 			b.st.portRedrawn()

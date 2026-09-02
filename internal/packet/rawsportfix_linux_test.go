@@ -105,12 +105,9 @@ func TestAFixedSourcePortIsDroppedWhereItCannotHold(t *testing.T) {
 	if !r.sportRandom {
 		t.Error("setSportMode(true, …) did not enable rolling")
 	}
-	inPool := false
-	for _, p := range rawSportPool {
-		inPool = inPool || p == r.cport()
-	}
-	if !inPool {
-		t.Errorf("rolled port %d is not in the pool the draw is allowed to return", r.cport())
+	if p := uint32(r.cport()); p < sportBandLo || p >= sportBandLo+sportBandSpan {
+		t.Errorf("rolled port %d is outside [%d,%d) — the band the draw is allowed to return",
+			p, sportBandLo, sportBandLo+sportBandSpan)
 	}
 
 	for _, isClient := range []bool{true, false} {

@@ -725,8 +725,8 @@ func (r *Raw) rotSnapshot() rotStatus {
 	if drawn > 0 {
 		cur = r.rotPerm.at(r.rotIdx + uint32((drawn-1)/uint64(r.sportEvery)))
 	}
-	return rotStatus{Sport: cur, Every: r.sportEvery, Lo: rotSportLo,
-		Hi: rotSportLo + rotSportSpan - 1, Drawn: (drawn + uint64(r.sportEvery) - 1) / uint64(r.sportEvery)}
+	return rotStatus{Sport: cur, Every: r.sportEvery, Lo: sportBandLo,
+		Hi: sportBandLo + sportBandSpan - 1, Drawn: (drawn + uint64(r.sportEvery) - 1) / uint64(r.sportEvery)}
 }
 
 func (r *Raw) rotPorts(cport, rot uint16) (uint16, uint16) {
@@ -744,10 +744,10 @@ func (r *Raw) setSportRotate(every int) {
 		return
 	}
 	r.sportEvery = every
-	r.rotIdx = randUint32()
+	r.rotIdx = randBelow(sportBandSpan)
 	r.rotPerm = rotPermFrom(r.psk, r.isClient)
 	log.Printf("raw: source-port rotation every %d packets over %d ports (%d-%d); a port comes back after %d packets, so above ~%d packets/s it returns inside the ~45s a middlebox needs to forget it",
-		every, rotSportSpan, rotSportLo, rotSportLo+rotSportSpan-1, rotSportSpan*every, rotSportSpan*every/45)
+		every, sportBandSpan, sportBandLo, sportBandLo+sportBandSpan-1, sportBandSpan*every, sportBandSpan*every/45)
 }
 
 func (r *Raw) setSportMode(on bool, fix int) {
@@ -756,9 +756,7 @@ func (r *Raw) setSportMode(on bool, fix int) {
 		r.cliPort.Store(uint32(fix))
 	}
 	if r.sportRandom && r.isClient {
-		if p := rawRollSport(); p != 0 {
-			r.cliPort.Store(uint32(p))
-		}
+		r.cliPort.Store(uint32(rawRollSport()))
 	}
 }
 
@@ -787,8 +785,7 @@ func (r *Raw) freshTuple() {
 	p := r.cport()
 	if r.sportRandom {
 		for i := 0; i < 8; i++ {
-			n := rawRollSport()
-			if n != 0 && n != p {
+			if n := rawRollSport(); n != p {
 				p = n
 				break
 			}
@@ -803,11 +800,7 @@ func (r *Raw) mustKnock() bool {
 }
 
 func (r *Raw) rollSourcePort() bool {
-	p := rawRollSport()
-	if p == 0 {
-		return false
-	}
-	r.usePort(p)
+	r.usePort(rawRollSport())
 	r.sendInit()
 
 	r.st.portRedrawn()
