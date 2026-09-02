@@ -42,10 +42,14 @@ func (d desyncCfg) specs() []fakeSpec {
 	if !d.on {
 		return nil
 	}
+	lowTTL := d.ttl
+	if lowTTL > injectMaxTTL {
+		lowTTL = injectMaxTTL
+	}
 	out := make([]fakeSpec, 0, d.count)
 	for i := 0; i < d.count; i++ {
 		bad := d.mode == "badsum" || (d.mode == "both" && i%2 == 1)
-		ttl := d.ttl
+		ttl := lowTTL
 		if bad {
 			ttl = 64
 		}
