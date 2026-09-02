@@ -36,19 +36,6 @@ func TestASourcePinLandsWhenTheSourceIsAdopted(t *testing.T) {
 		}
 	})
 
-	t.Run("flux", func(t *testing.T) {
-		sp := NewPeerPool([]string{usableLoopbackIP, other}, 0)
-		f := &Flux{isClient: true}
-		f.SetSourcePool(sp)
-		if !sp.selectEntry(other) || !sp.isPinned() {
-			t.Fatal("the pin did not take")
-		}
-		f.adoptSourceFlux()
-		if sp.isPinned() {
-			t.Error("a flux source pin is still in progress after the source was adopted")
-		}
-	})
-
 	t.Run("a destination success does not release a source pin", func(t *testing.T) {
 		sp := NewPeerPool([]string{usableLoopbackIP, other}, 0)
 		dp := NewPeerPool([]string{"203.0.113.10", "203.0.113.11"}, 0)

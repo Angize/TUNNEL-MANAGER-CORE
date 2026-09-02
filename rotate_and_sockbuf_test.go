@@ -39,23 +39,6 @@ func TestRotationMayNotFireBeforeTheJudgeCanSpeak(t *testing.T) {
 	}
 }
 
-func TestFluxEpochIsNotAnEndpointRotation(t *testing.T) {
-	c := validRaw()
-	c.Transport = "flux"
-	c.FluxRotateSecs = 5
-	if err := c.validate(); err != nil {
-		t.Fatalf("a flux epoch under the rotation floor must be allowed -- it rotates the SHAPE off the "+
-			"clock and drops nothing: %v", err)
-	}
-
-	c = validRaw()
-	c.Transport = "flux"
-	c.PeerRotateSecs = 5
-	if err := c.validate(); err == nil {
-		t.Error("peer_rotate_secs=5 must still be refused; only the shape epoch is exempt")
-	}
-}
-
 func TestSockBufIsFlooredNotJustCapped(t *testing.T) {
 	const floor = 64 << 10
 

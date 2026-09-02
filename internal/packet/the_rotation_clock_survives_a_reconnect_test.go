@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// For udp/raw/flux the scheduled rotation is an absolute deadline on the controller: newRotationController
+// For udp/raw the scheduled rotation is an absolute deadline on the controller: newRotationController
 // sets rotateAt = now + interval and proactive() re-arms it from the wall clock every time it fires, so
 // the interval means what the operator set no matter what the connection is doing.
 //

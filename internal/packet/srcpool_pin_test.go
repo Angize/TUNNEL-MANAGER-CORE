@@ -20,14 +20,6 @@ func TestOneEntrySourcePoolPinsTheSource(t *testing.T) {
 		}
 	})
 
-	t.Run("flux stamps the crafted header from it", func(t *testing.T) {
-		f := &Flux{isClient: true}
-		f.SetSourcePool(NewPeerPool([]string{pin}, 0))
-		if got := f.srcIP(); got == nil || got.String() != pin {
-			t.Fatalf("flux source = %v, want %s", got, pin)
-		}
-	})
-
 	t.Run("udp binds its socket to it", func(t *testing.T) {
 		b := &UDP{isClient: true}
 		b.SetSourcePool(NewPeerPool([]string{pin}, 0))

@@ -148,7 +148,7 @@ func TestWithNoCarrierTheRungIsSpentAndNothingIsTornDown(t *testing.T) {
 	}
 	// The burn and the move it caused, and nothing from the draws before them: a redrawn source port is
 	// a retry of the same endpoint and says nothing until it works, but a walk really did change where
-	// the traffic goes, and that is the operator's to see -- the same line udp, raw and flux publish.
+	// the traffic goes, and that is the operator's to see -- the same line udp and raw publish.
 	if got := codes(coreStatusEvents(t, path)); len(got) != 2 ||
 		got[0] != "tun-probe" || got[1] != "peer-rotate" {
 		t.Fatalf("events = %v, want the burn then the rotation it caused", got)

@@ -6,7 +6,7 @@ import "testing"
 
 // A low-TTL desync decoy only works if it dies in the network before it reaches the peer: the DPI in the
 // middle sees it, the peer never does. specsTCP() has always capped the TTL at the 8-hop budget; specs(),
-// which every non-TCP carrier (raw, flux, spoof) uses, did not -- so an operator who set fake_ttl=200 on a
+// which every non-TCP carrier (raw and spoof) uses, did not -- so an operator who set fake_ttl=200 on a
 // raw tunnel shipped a "decoy" that sailed all the way to the peer and desynced nobody. Both paths now cap.
 func TestTheTTLDecoyIsCappedOnEveryCarrier(t *testing.T) {
 	for _, mode := range []string{"ttl", "both"} {
