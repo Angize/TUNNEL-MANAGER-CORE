@@ -4,6 +4,7 @@ package packet
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -116,33 +117,96 @@ func TestASingleQueueCarrierStillReachesItsDevice(t *testing.T) {
 	}
 }
 
-func TestTheReadersOwnQueueWaitsRatherThanDropping(t *testing.T) {
-	r, wr, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
+func flowPktN(t *testing.T, src, dst string, proto byte, sport, dport uint16, size int) []byte {
+	t.Helper()
+	p := flowPkt(t, src, dst, proto, sport, dport)
+	if size <= len(p) {
+		return p
 	}
-	t.Cleanup(func() { r.Close(); wr.Close() })
-	w := newTunWriters([]*tun.Device{tun.FromFile(wr, "q0")})
-	defer w.close()
+	return append(p, make([]byte, size-len(p))...)
+}
 
-	const n = rxQueueDepth * 3
-	go func() {
-		for i := 0; i < n; i++ {
-			w.write(flowPkt(t, "10.0.0.1", "10.0.0.2", 6, 1234, 443))
+func portForQueue(t *testing.T, queue, queues int) uint16 {
+	t.Helper()
+	for p := 1024; p < 65535; p++ {
+		if int(flowHash(flowPkt(t, "10.0.0.1", "10.0.0.2", 6, uint16(p), 443))%uint32(queues)) == queue {
+			return uint16(p)
 		}
-	}()
+	}
+	t.Fatalf("no source port lands on queue %d of %d", queue, queues)
+	return 0
+}
 
-	got, buf := 0, make([]byte, 65536)
-	deadline := time.Now().Add(10 * time.Second)
-	for got < n*24 {
-		if time.Now().After(deadline) {
-			t.Fatalf("%d of %d bytes arrived: the reader's own queue dropped what it was handed", got, n*24)
+// Queue 0 waited for room; every other queue threw the packet on the floor, silently and uncounted.
+// Measured on the test pair at workers=4, that lost 1.04% of an 8-stream TCP load and 12.9% of a
+// UDP one -- and the packet was already through the AEAD, so the CPU that opened it was spent and
+// then thrown away. Waiting everywhere is both correct and faster (940 vs 884 Mbit on UDP, same on
+// TCP, same RTT): the drop moves back to the kernel's socket buffer, where the frame has not been
+// paid for yet. A queue that only sometimes keeps what it is handed is the bug, so every queue is
+// driven here, not just the reader's own -- the old test drove queue 0 alone and stayed green while
+// three quarters of the traffic was being dropped beside it.
+func TestEveryQueueWaitsRatherThanDropping(t *testing.T) {
+	for _, queues := range []int{1, 4} {
+		for k := 0; k < queues; k++ {
+			t.Run(fmt.Sprintf("%dqueues_queue%d", queues, k), func(t *testing.T) {
+				var files []*os.File
+				var readers []*os.File
+				var devs []*tun.Device
+				for i := 0; i < queues; i++ {
+					r, wr, err := os.Pipe()
+					if err != nil {
+						t.Fatal(err)
+					}
+					files = append(files, r, wr)
+					readers = append(readers, r)
+					devs = append(devs, tun.FromFile(wr, "q"))
+				}
+				t.Cleanup(func() {
+					for _, f := range files {
+						f.Close()
+					}
+				})
+				w := newTunWriters(devs)
+				defer w.close()
+
+				const packets, size = 1500, 1400
+				pkt := flowPktN(t, "10.0.0.1", "10.0.0.2", 6, portForQueue(t, k, queues), 443, size)
+				done := make(chan struct{})
+				go func() {
+					for i := 0; i < packets; i++ {
+						w.write(pkt)
+					}
+					close(done)
+				}()
+
+				time.Sleep(300 * time.Millisecond)
+				select {
+				case <-done:
+					t.Fatalf("%d packets were accepted with nothing draining queue %d: the queue never "+
+						"filled, so this test would stay green over a queue that drops", packets, k)
+				default:
+				}
+
+				got, buf := 0, make([]byte, 1<<16)
+				deadline := time.Now().Add(30 * time.Second)
+				for got < packets*size {
+					if time.Now().After(deadline) {
+						t.Fatalf("queue %d of %d kept %d of %d bytes: the rest was dropped on the floor",
+							k, queues, got, packets*size)
+					}
+					n, err := readers[k].Read(buf)
+					if err != nil {
+						t.Fatalf("read: %v", err)
+					}
+					got += n
+				}
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("every byte arrived but the writer never returned")
+				}
+			})
 		}
-		k, err := r.Read(buf)
-		if err != nil {
-			t.Fatalf("read: %v", err)
-		}
-		got += k
 	}
 }
 

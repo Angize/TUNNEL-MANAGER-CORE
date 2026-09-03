@@ -62,16 +62,9 @@ func (w *tunWriters) write(pkt []byte) {
 	if n := len(w.ch); n > 1 {
 		i = int(flowHash(pkt) % uint32(n))
 	}
-	if i == 0 {
-		select {
-		case w.ch[0] <- pkt:
-		case <-w.done:
-		}
-		return
-	}
 	select {
 	case w.ch[i] <- pkt:
-	default:
+	case <-w.done:
 	}
 }
 
