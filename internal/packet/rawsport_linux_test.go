@@ -26,16 +26,16 @@ func TestTheSourcePortBandIsWellFormed(t *testing.T) {
 		t.Errorf("the band ends at %d, past the last UDP port", hi)
 	}
 
-	// The width of the band IS the throughput ceiling, and that is the only reason to care how wide it
-	// is. A port may not come back before the middlebox has forgotten the flow, so the fastest the
-	// carrier may go is span*every/rotForgetSecs packets a second. Measured on the burned path
-	// 2026-09-03, same tunnel and same minute: a 10000-port band gave 9.7 Mbit up, a 50000-port band
-	// gave 209. Narrowing the band is therefore not a free "looks tidier" change; it is a throughput
-	// cut, and this asserts the floor so the next narrowing has to argue with a number.
-	pps := int(sportBandSpan) * 4 / rotForgetSecs
-	if mbit := pps * 1400 * 8 / 1000000; mbit < 100 {
-		t.Errorf("the band allows only %d packets/s at every=4 (%d Mbit at 1400B) before a port comes "+
-			"back inside the ~%ds forget window", pps, mbit, rotForgetSecs)
+	// The width of the band is the throughput ceiling of a rotating tunnel: a port may not come back
+	// before the middlebox has forgotten the flow. HOW LONG that takes belongs to whatever box is on
+	// the path, and it is not ours to state -- an earlier guess at it (45 seconds) travelled from a
+	// note into a log line, wore the look of a fact there, and was quoted back as one. So this asserts
+	// what was actually MEASURED rather than anything derived from a window: on the burned path
+	// 2026-09-03, same throwaway tunnel and same minute, a 10000-port band carried 9.7 Mbit up and a
+	// 50000-port band carried 209.
+	if sportBandSpan < 40000 {
+		t.Errorf("the band is %d ports wide -- 10000 measured 9.7 Mbit up on the burned path where "+
+			"50000 measured 209, so a narrowing needs a number, not a preference", sportBandSpan)
 	}
 
 	// The ports a filter reaches for first, and the four MEASURED dead IR->DE (3 rounds each,

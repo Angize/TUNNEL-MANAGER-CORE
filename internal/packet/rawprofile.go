@@ -89,8 +89,6 @@ const (
 	sportBandLo   = 10000
 	sportBandSpan = 50000
 
-	rotForgetSecs = 17
-
 	rotHalfBits = 8
 	rotHalfMask = 1<<rotHalfBits - 1
 	rotDomain   = 1 << (2 * rotHalfBits)
