@@ -8,46 +8,47 @@ import (
 	"testing"
 )
 
-// Measured on the netns lab on DE02, one real udp tunnel per row, 20 s of iperf3 TCP over 8 streams
-// then 20 s of UDP at 300 Mbit, counting frames that DECRYPTED and were then thrown away by the replay
-// guard:
-//
-//	workers=1   912 Mbit   212167 retransmits         0 replay-rejected
-//	workers=2   993 Mbit   236103 retransmits         0 replay-rejected
-//	workers=4  1063 Mbit   363852 retransmits    216000 replay-rejected of 2075629 accepted  (9.4%)
-//
 // One AEAD counter serves the whole tunnel (crypto.Sealer.ctr), and each of the `workers` tunToNet
 // goroutines seals frame by frame into its own batch and only then flushes it with one sendmmsg. A
-// queue's batch therefore carries sequence numbers spread over as much as workers*maxBatch of the
-// shared counter, and the batches reach the wire in whatever order the goroutines finish sealing.
-// Anything further behind the newest frame than the window is discarded as a replay -- silently: the
-// drop falls through to tryHandshake, so no counter moved and nothing was logged. The panel offers the
-// knob as سبک/متوسط/سنگین, which is an invitation to raise it.
+// queue's batch therefore carries sequence numbers spread over a stretch of the shared counter, and
+// the batches reach the wire in whatever order the goroutines finish sealing. Anything further behind
+// the newest frame than the window is discarded as a replay -- after the AEAD has already opened it,
+// so the CPU that decrypted it was spent and then thrown away.
 //
 // The window has to be at least as wide as the reordering the SENDER itself produces. maxWorkers is
 // read out of config.go rather than mirrored here, so raising the worker cap without widening the
 // window fails this test instead of shipping.
 //
-// maxWorkers*maxBatch = 256 is the fair-scheduling bound and it is NOT enough. Instrumenting the guard
-// on the same lab run and bucketing every out-of-order frame by how far behind the newest it landed:
+// maxWorkers*maxBatch is the fair-scheduling bound and it is nowhere near enough. Measured on the
+// test pair (IR02 -> DE02, 30 s of 8-stream TCP per row) with the receiver running a 1<<20 window so
+// that NOTHING was rejected and every out-of-order frame could be bucketed by how far behind the
+// newest it landed:
 //
-//	64..127   70435      512..1023   5893
-//	128..255  59084     1024..2047    107
-//	256..511  43346     worst seen   1148
+//	raw:tcp workers=1   worst   59    nothing past 64
+//	raw:tcp workers=2   worst   47    nothing past 64
+//	raw:tcp workers=4   worst 4600    12584 frames past 2048
+//	raw:tcp workers=8   worst 4062    16944 frames past 2048
+//	raw:udp workers=2   worst 4838    12132 frames past 2048
+//	raw:udp workers=8   worst 6814    14588 frames past 2048
 //
-// So a 512-wide window still threw away 6000 frames (0.32% of everything received) and only 2048
-// covers the tail with margin. That tail is scheduling jitter on a 2-core box under saturation; it has
-// no proof behind it, only this measurement, which is why replayDrops logs when the window is ever
-// too small again instead of dropping in silence the way this bug did.
+// One queue barely reorders at all; two or more and the tail runs to thousands. The old window of
+// 2048 therefore threw away roughly 0.4% of everything it had just decrypted, at the worker counts
+// the panel actually offers -- silently, because the drop falls through to tryHandshake.
+//
+// 32768 is 4.8x the worst of those runs and costs a 4 KB bitmap. Widening cannot weaken the guard:
+// the bitmap covers exactly the window, so every duplicate inside it is still caught, and the window
+// only bounds how far back the guard remembers. The tail is scheduling jitter and has no proof behind
+// it, only this measurement, which is why replayDrops still logs whenever the window turns out to be
+// too small again.
 func TestTheReplayWindowCoversWhatTheSenderReorders(t *testing.T) {
-	const worstMeasured = 1148
+	const worstMeasured = 6814
 	queues := maxWorkersFromConfig(t)
 	if replayWindow < queues*maxBatch {
 		t.Fatalf("replayWindow %d is under the sender's own worst case: maxWorkers %d * maxBatch %d = %d",
 			replayWindow, queues, maxBatch, queues*maxBatch)
 	}
 	if replayWindow <= worstMeasured {
-		t.Fatalf("replayWindow %d is at or under the %d measured on the netns lab at workers=%d",
+		t.Fatalf("replayWindow %d is at or under the %d measured on the test pair at workers=%d",
 			replayWindow, worstMeasured, queues)
 	}
 
