@@ -746,8 +746,9 @@ func (r *Raw) setSportRotate(every int) {
 	r.sportEvery = every
 	r.rotIdx = randBelow(sportBandSpan)
 	r.rotPerm = rotPermFrom(r.psk, r.isClient)
-	log.Printf("raw: source-port rotation every %d packets over %d ports (%d-%d); a port comes back after %d packets, so above ~%d packets/s it returns inside the ~45s a middlebox needs to forget it",
-		every, sportBandSpan, sportBandLo, sportBandLo+sportBandSpan-1, sportBandSpan*every, sportBandSpan*every/45)
+	log.Printf("raw: source-port rotation every %d packets over %d ports (%d-%d); a port comes back after %d packets, so above ~%d packets/s it returns inside the ~%ds a middlebox needs to forget it",
+		every, sportBandSpan, sportBandLo, sportBandLo+sportBandSpan-1, sportBandSpan*every,
+		sportBandSpan*every/rotForgetSecs, rotForgetSecs)
 }
 
 func (r *Raw) setSportMode(on bool, fix int) {

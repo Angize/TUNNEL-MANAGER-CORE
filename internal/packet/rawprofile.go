@@ -86,10 +86,12 @@ func rawPorts(isClient bool, srv, cli uint16) (sport, dport uint16) {
 }
 
 const (
-	sportBandLo   = 20000
-	sportBandSpan = 10000
+	sportBandLo   = 10000
+	sportBandSpan = 50000
 
-	rotHalfBits = 7
+	rotForgetSecs = 17
+
+	rotHalfBits = 8
 	rotHalfMask = 1<<rotHalfBits - 1
 	rotDomain   = 1 << (2 * rotHalfBits)
 )
