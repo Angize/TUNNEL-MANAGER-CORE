@@ -4,7 +4,6 @@ package packet
 
 import (
 	"errors"
-	"time"
 
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
@@ -24,11 +23,11 @@ func ListenRaw(string, *tun.Device, bool, string, string, string, bool, int, int
 	return nil, errRawUnsupported
 }
 
-func DialSpoof(string, *tun.Device, time.Duration, bool, string, string, string, string, bool, int, int, int) (*Raw, error) {
+func DialSpoof(string, *tun.Device, bool, string, string, string, string, bool, int, int, int) (*Raw, error) {
 	return nil, errRawUnsupported
 }
 
-func ListenSpoof(string, *tun.Device, time.Duration, bool, string, string, string, string, bool, int, int, int) (*Raw, error) {
+func ListenSpoof(string, *tun.Device, bool, string, string, string, string, bool, int, int, int) (*Raw, error) {
 	return nil, errRawUnsupported
 }
 

@@ -1,0 +1,49 @@
+name: ci
+
+# The core builds and ships for linux only, and every one of its 82 carrier files says so with a
+# //go:build linux tag. Six files exist to keep the other GOOS compiling anyway. Nothing ever built
+# them, so they rotted: DialRaw and ListenRaw in the stub had drifted a whole parameter out of step
+# with the real ones, ListenSpoof and DialSpoof still carried a time.Duration nobody passes any more,
+# and the tun device was missing WriteBatch entirely. None of it was visible, because the release
+# workflow builds GOOS=linux and stops.
+#
+# This job is deliberately small. It does NOT run the tests -- those want the real network and live on
+# DE02 -- it only asks whether the tree still compiles for the platforms it claims to support, which is
+# the exact thing that went unasked.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: gofmt leaves nothing to say
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "$out"; exit 1; fi
+
+      - name: it builds and vets on linux
+        run: |
+          go build ./...
+          go vet ./...
+
+      - name: and it still compiles for every GOOS the tree claims
+        run: |
+          fail=0
+          for os in darwin windows freebsd; do
+            for arch in amd64 arm64; do
+              if ! GOOS=$os GOARCH=$arch go build -gcflags=-e ./... ; then
+                echo "::error::$os/$arch does not build"
+                fail=1
+              fi
+            done
+          done
+          exit $fail
