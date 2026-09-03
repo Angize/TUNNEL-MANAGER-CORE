@@ -11,6 +11,8 @@ const (
 	tunFCSUM = 0x01
 	tunFTSO4 = 0x02
 	tunFTSO6 = 0x04
+	tunFUSO4 = 0x20
+	tunFUSO6 = 0x40
 
 	vnetHdrLen = 10
 
