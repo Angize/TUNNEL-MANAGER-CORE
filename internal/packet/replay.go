@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-const replayWindow = 2048
+const replayWindow = 32768
 
 const replayWords = replayWindow / 64
 
@@ -87,7 +87,11 @@ func (r *replayDropLog) note(offset uint64) {
 	}
 	now := time.Now().UnixNano()
 	prev := r.last.Load()
-	if prev != 0 && now-prev < int64(replayDropEvery) {
+	if prev == 0 {
+		r.last.CompareAndSwap(0, now)
+		return
+	}
+	if now-prev < int64(replayDropEvery) {
 		return
 	}
 	if !r.last.CompareAndSwap(prev, now) {
