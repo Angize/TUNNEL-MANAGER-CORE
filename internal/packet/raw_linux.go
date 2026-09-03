@@ -90,6 +90,7 @@ type Raw struct {
 	sportEvery int
 	rotIdx     uint32
 	rotPerm    rotPerm
+	dports     []uint16
 	txCount    atomic.Uint64
 
 	leak     antiLeaker
@@ -189,7 +190,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 		if r.proto == protoTCP {
 			dack = r.tcpAck.Load()
 		}
-		fsrv, fcli := r.rotPorts(r.cport(), r.drawSport())
+		fsrv, fcli := r.wirePorts(r.cport())
 		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, fsrv, fcli,
 			dseq, dack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
@@ -382,7 +383,7 @@ func listenRawBase(listenIP string, dev *tun.Device, obfs bool, psk, cipher, pro
 	return r, nil
 }
 
-func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, sportRotate int, extraQ ...*tun.Device) (*Raw, error) {
+func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, rot SportRotation, extraQ ...*tun.Device) (*Raw, error) {
 	r, err := dialRawBase(peerIP, dev, obfs, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
@@ -390,7 +391,7 @@ func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile str
 	r.link = &directLink{r: r}
 
 	r.setSportMode(sportRandom, rawSport)
-	r.setSportRotate(sportRotate)
+	r.setSportRotate(rot)
 	r.initFec(fec, fecData, fecParity)
 	r.wireAntiLeak()
 	r.rxw = newTunWriters(append([]*tun.Device{dev}, extraQ...))
@@ -402,14 +403,14 @@ func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile str
 	return r, nil
 }
 
-func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, sportRotate int, extraQ ...*tun.Device) (*Raw, error) {
+func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, rot SportRotation, extraQ ...*tun.Device) (*Raw, error) {
 	r, err := listenRawBase(listenIP, dev, obfs, psk, cipher, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
 	}
 	r.link = &directLink{r: r}
 	r.setSportMode(sportRandom, rawSport)
-	r.setSportRotate(sportRotate)
+	r.setSportRotate(rot)
 	applyConnSockBuf(r.conn)
 	r.initFec(fec, fecData, fecParity)
 	r.wireAntiLeak()
@@ -501,7 +502,7 @@ func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
 	} else {
 		seq = r.seq.Add(1)
 	}
-	srv, cli := r.rotPorts(cport, r.drawSport())
+	srv, cli := r.wirePorts(cport)
 	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, srv, cli,
 		seq, ack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 }
@@ -708,12 +709,11 @@ func (r *Raw) srvPort() uint16 { return r.port }
 
 func (r *Raw) rotActive() bool { return r.sportEvery > 0 && r.proto == protoUDP }
 
-func (r *Raw) drawSport() uint16 {
-	if !r.rotActive() {
-		return 0
+func (r *Raw) dportAt(w uint64) uint16 {
+	if len(r.dports) < 2 {
+		return r.port
 	}
-	n := r.txCount.Add(1) - 1
-	return r.rotPerm.at(r.rotIdx + uint32(n/uint64(r.sportEvery)))
+	return r.dports[(w/sportBandSpan)%uint64(len(r.dports))]
 }
 
 func (r *Raw) rotSnapshot() rotStatus {
@@ -721,31 +721,44 @@ func (r *Raw) rotSnapshot() rotStatus {
 		return rotStatus{}
 	}
 	drawn := r.txCount.Load()
-	cur := r.rotPerm.at(r.rotIdx + uint32(drawn/uint64(r.sportEvery)))
-	if drawn > 0 {
-		cur = r.rotPerm.at(r.rotIdx + uint32((drawn-1)/uint64(r.sportEvery)))
+	n := drawn
+	if n > 0 {
+		n--
 	}
-	return rotStatus{Sport: cur, Every: r.sportEvery, Lo: sportBandLo,
-		Hi: sportBandLo + sportBandSpan - 1, Drawn: (drawn + uint64(r.sportEvery) - 1) / uint64(r.sportEvery)}
+	w := uint64(r.rotIdx) + n/uint64(r.sportEvery)
+	st := rotStatus{Sport: r.rotPerm.at(w), Dports: len(r.dports), Every: r.sportEvery,
+		Lo: sportBandLo, Hi: sportBandLo + sportBandSpan - 1,
+		Drawn: (drawn + uint64(r.sportEvery) - 1) / uint64(r.sportEvery)}
+	if r.isClient {
+		st.Dport = r.dportAt(w)
+	} else {
+		st.Dport = r.cport()
+	}
+	return st
 }
 
-func (r *Raw) rotPorts(cport, rot uint16) (uint16, uint16) {
-	if rot == 0 {
+func (r *Raw) wirePorts(cport uint16) (uint16, uint16) {
+	if !r.rotActive() {
 		return r.port, cport
 	}
-	if r.isClient {
-		return r.port, rot
+	w := uint64(r.rotIdx) + (r.txCount.Add(1)-1)/uint64(r.sportEvery)
+	sp := r.rotPerm.at(w)
+	if !r.isClient {
+		return sp, cport
 	}
-	return rot, cport
+	return r.dportAt(w), sp
 }
 
-func (r *Raw) setSportRotate(every int) {
-	if every <= 0 || r.proto != protoUDP {
+func (r *Raw) setSportRotate(rot SportRotation) {
+	if rot.Every <= 0 || r.proto != protoUDP {
 		return
 	}
-	r.sportEvery = every
+	r.sportEvery = rot.Every
 	r.rotIdx = randBelow(sportBandSpan)
 	r.rotPerm = rotPermFrom(r.psk, r.isClient)
+	if r.isClient {
+		r.dports = dportSet(r.port, rot.Dports, r.psk)
+	}
 }
 
 func (r *Raw) setSportMode(on bool, fix int) {

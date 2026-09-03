@@ -89,6 +89,8 @@ const (
 	sportBandLo   = 10000
 	sportBandSpan = 50000
 
+	MaxDports = 8
+
 	rotHalfBits = 8
 	rotHalfMask = 1<<rotHalfBits - 1
 	rotDomain   = 1 << (2 * rotHalfBits)
@@ -119,8 +121,8 @@ func rotRound(v, k uint32) uint32 {
 	return x & rotHalfMask
 }
 
-func (p rotPerm) at(idx uint32) uint16 {
-	v := idx % sportBandSpan
+func (p rotPerm) at(idx uint64) uint16 {
+	v := uint32(idx % sportBandSpan)
 	for {
 		l, r := v>>rotHalfBits, v&rotHalfMask
 		for _, k := range p.rk {
@@ -131,6 +133,38 @@ func (p rotPerm) at(idx uint32) uint16 {
 			return uint16(sportBandLo + v)
 		}
 	}
+}
+
+type SportRotation struct {
+	Every  int
+	Dports int
+}
+
+var dportPool = [...]uint16{443, 3478, 3479, 5349, 8443, 8801, 19302, 19305}
+
+func dportSet(base uint16, n int, psk string) []uint16 {
+	if n > MaxDports {
+		n = MaxDports
+	}
+	out := []uint16{base}
+	if n < 2 {
+		return out
+	}
+	h := sha256.Sum256([]byte("tnl-core|v1|rot-dport|" + psk))
+	order := dportPool
+	for i := len(order) - 1; i > 0; i-- {
+		j := int(h[i]) % (i + 1)
+		order[i], order[j] = order[j], order[i]
+	}
+	for _, d := range order {
+		if len(out) == n {
+			break
+		}
+		if d != base {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func randUint32() uint32 {

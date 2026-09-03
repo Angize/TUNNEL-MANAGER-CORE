@@ -81,3 +81,59 @@ func TestRawSportRotateRejectedOnSpoof(t *testing.T) {
 		t.Error("raw_sport_rotate accepted on the spoof carrier, which writes no L4 header")
 	}
 }
+
+// raw_dports is the second axis of the same feature: it spreads the forged DESTINATION port so one
+// source port is worth several flow-table buckets. On its own it means nothing -- with the source port
+// pinned, every packet still shares one bucket per destination and the walk never moves -- so it is
+// only accepted alongside raw_sport_rotate.
+func TestRawDportsOnlyMeansSomethingWhileTheSourceIsCycling(t *testing.T) {
+	c := validRaw()
+	c.RawProfile = "udp"
+	c.RawSportRotate = 4
+	c.RawDports = 4
+	if err := c.validate(); err != nil {
+		t.Fatalf("raw_dports alongside raw_sport_rotate rejected: %v", err)
+	}
+
+	c = validRaw()
+	c.RawProfile = "udp"
+	c.RawDports = 4
+	if err := c.validate(); err == nil {
+		t.Error("raw_dports accepted with no raw_sport_rotate, want rejected")
+	}
+}
+
+func TestRawDportsRange(t *testing.T) {
+	for _, n := range []int{1, 2, 8} {
+		c := validRaw()
+		c.RawProfile = "udp"
+		c.RawSportRotate = 4
+		c.RawDports = n
+		if err := c.validate(); err != nil {
+			t.Errorf("raw_dports=%d rejected: %v", n, err)
+		}
+	}
+	for _, n := range []int{-1, 9, 100} {
+		c := validRaw()
+		c.RawProfile = "udp"
+		c.RawSportRotate = 4
+		c.RawDports = n
+		if err := c.validate(); err == nil {
+			t.Errorf("raw_dports=%d accepted, want rejected", n)
+		}
+	}
+}
+
+// The profile rule is inherited rather than restated: raw_dports rides on raw_sport_rotate, which is
+// udp-only, so a non-udp profile must be refused through that gate and not silently allowed here.
+func TestRawDportsIsRefusedOffTheUDPProfile(t *testing.T) {
+	for _, p := range []string{"bare", "tcp", "esp", "ah", "l2tpv3", "icmp"} {
+		c := validRaw()
+		c.RawProfile = p
+		c.RawSportRotate = 4
+		c.RawDports = 4
+		if err := c.validate(); err == nil {
+			t.Errorf("raw_dports accepted on raw_profile %q, want rejected", p)
+		}
+	}
+}

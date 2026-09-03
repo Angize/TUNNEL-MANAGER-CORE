@@ -57,6 +57,8 @@ type Config struct {
 
 	RawSportRotate int `json:"raw_sport_rotate"`
 
+	RawDports int `json:"raw_dports"`
+
 	SpoofSrc string `json:"spoof_src_ip"`
 	RealPeer string `json:"real_peer_ip"`
 
@@ -342,6 +344,14 @@ func (c *Config) validate() error {
 			}
 			if c.Fec {
 				return errors.New("raw_sport_rotate is not supported with fec yet (the FEC send path does not cycle the source port per packet)")
+			}
+		}
+		if c.RawDports != 0 {
+			if c.RawSportRotate == 0 {
+				return errors.New("raw_dports spreads the forged DESTINATION port so each source port is worth that many flow-table buckets, which only means something while raw_sport_rotate is cycling the source; set raw_sport_rotate too")
+			}
+			if c.RawDports < 1 || c.RawDports > packet.MaxDports {
+				return fmt.Errorf("raw_dports must be in 1..%d (1 = the single configured raw_port; N = that port plus N-1 more drawn from the service-port pool)", packet.MaxDports)
 			}
 		}
 		if !c.Crypto.Enabled {
