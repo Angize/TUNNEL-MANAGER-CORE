@@ -9,11 +9,15 @@ import (
 	"testing"
 )
 
-func rotClient(every int) *Raw {
+func rotClient(every int, dports ...int) *Raw {
 	r := &Raw{profile: "udp", isClient: true, port: rawServerPort}
 	r.proto = protoUDP
 	r.localIP.Store(&net.IPAddr{IP: testSrc})
-	r.setSportRotate(every)
+	n := 0
+	if len(dports) > 0 {
+		n = dports[0]
+	}
+	r.setSportRotate(SportRotation{Every: every, Dports: n})
 	return r
 }
 
@@ -21,7 +25,7 @@ func rotServer(every int, learned uint16) *Raw {
 	r := &Raw{profile: "udp", isClient: false, port: rawServerPort}
 	r.proto = protoUDP
 	r.localIP.Store(&net.IPAddr{IP: testSrc})
-	r.setSportRotate(every)
+	r.setSportRotate(SportRotation{Every: every})
 	r.cliPort.Store(uint32(learned))
 	return r
 }
@@ -106,7 +110,7 @@ func TestSportRotateIsUDPOnlyAndOffByDefault(t *testing.T) {
 	for _, profile := range RawProfileNames() {
 		r := &Raw{profile: profile, isClient: true, port: rawServerPort}
 		r.proto = rawProfiles[profile]
-		r.setSportRotate(5)
+		r.setSportRotate(SportRotation{Every: 5})
 		if want := profile == "udp"; r.rotActive() != want {
 			t.Errorf("raw/%s: rotActive()=%v, want %v", profile, r.rotActive(), want)
 		}
@@ -179,7 +183,7 @@ func TestEveryEmittedPacketAdvancesTheRotationNotOnlyTunData(t *testing.T) {
 
 // rotSportNext reports the port the NEXT packet would draw, without spending a draw.
 func rotSportNext(r *Raw) uint16 {
-	return r.rotPerm.at(r.rotIdx + uint32(r.txCount.Load()/uint64(r.sportEvery)))
+	return r.rotPerm.at(uint64(r.rotIdx) + r.txCount.Load()/uint64(r.sportEvery))
 }
 
 // The tunnel runs one tunToNet goroutine per tx queue (workers 1..4). The count and the port used to be
@@ -253,7 +257,7 @@ func TestDecoysDrawTheirOwnPortRatherThanRidingTheCurrentOne(t *testing.T) {
 	// what sendFakes builds for each decoy, without the raw socket it would send them on
 	seen := map[uint16]int{}
 	for i := 0; i < 8; i++ {
-		srv, cli := r.rotPorts(r.cport(), r.drawSport())
+		srv, cli := r.wirePorts(r.cport())
 		pkt := rawEncap(r.profile, fakePayload(), testSrc, testDst, r.isClient, r.icmpID, srv, cli,
 			0, 0, r.spi, 0, 0, tcpPshAck)
 		seen[binary.BigEndian.Uint16(pkt[0:2])]++
@@ -276,7 +280,7 @@ func TestTheBandWalkIsKeyedAndStillVisitsEveryPortOnce(t *testing.T) {
 	seen := make(map[uint16]bool, sportBandSpan)
 	var steps = map[int]int{}
 	prev := perm.at(0)
-	for i := uint32(0); i < sportBandSpan; i++ {
+	for i := uint64(0); i < sportBandSpan; i++ {
 		p := perm.at(i)
 		if p < sportBandLo || p >= sportBandLo+sportBandSpan {
 			t.Fatalf("index %d drew %d, outside [%d,%d)", i, p, sportBandLo, sportBandLo+sportBandSpan)
@@ -306,7 +310,7 @@ func TestTheBandWalkIsKeyedAndStillVisitsEveryPortOnce(t *testing.T) {
 	// the two ends of one tunnel must not walk the same sequence
 	srv := rotPermFrom("a-sufficiently-long-preshared-key", false)
 	same := 0
-	for i := uint32(0); i < 4096; i++ {
+	for i := uint64(0); i < 4096; i++ {
 		if perm.at(i) == srv.at(i) {
 			same++
 		}
@@ -318,7 +322,7 @@ func TestTheBandWalkIsKeyedAndStillVisitsEveryPortOnce(t *testing.T) {
 	// and two tunnels must not walk the same sequence either
 	other := rotPermFrom("a-different-preshared-key-entirely", true)
 	same = 0
-	for i := uint32(0); i < 4096; i++ {
+	for i := uint64(0); i < 4096; i++ {
 		if perm.at(i) == other.at(i) {
 			same++
 		}

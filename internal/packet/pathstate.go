@@ -8,11 +8,13 @@ import (
 )
 
 type rotStatus struct {
-	Sport uint16 `json:"sport"`
-	Every int    `json:"every"`
-	Lo    uint16 `json:"lo"`
-	Hi    uint16 `json:"hi"`
-	Drawn uint64 `json:"drawn"`
+	Sport  uint16 `json:"sport"`
+	Dport  uint16 `json:"dport"`
+	Dports int    `json:"dports"`
+	Every  int    `json:"every"`
+	Lo     uint16 `json:"lo"`
+	Hi     uint16 `json:"hi"`
+	Drawn  uint64 `json:"drawn"`
 }
 
 type pathKey struct {
