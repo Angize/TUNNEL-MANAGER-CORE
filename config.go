@@ -29,7 +29,7 @@ func (c *Config) cdnIsHTTP() bool { return c.CDNCarrier == "http" || c.CDNCarrie
 
 func queueingCarrier(t string) bool { return t == "raw" || t == "udp" }
 
-const maxWorkers = 4
+const maxWorkers = 8
 
 func (c *Config) cdnMode() string {
 	if c.CDNCarrier == "grpc" {
