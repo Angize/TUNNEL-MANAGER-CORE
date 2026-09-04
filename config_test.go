@@ -49,19 +49,6 @@ func validRaw() *Config {
 	}
 }
 
-func validSpoof() *Config {
-	return &Config{
-		Role:      "client",
-		Mode:      "packet",
-		Profile:   "core",
-		Transport: "spoof",
-		Peer:      "203.0.113.9",
-		TunAddr:   "10.200.0.2/24",
-		SpoofSrc:  "192.0.2.7",
-		Crypto:    CryptoCfg{Enabled: true, PSK: "a-sufficiently-long-preshared-key"},
-	}
-}
-
 func TestRawTransportValidAndDefaults(t *testing.T) {
 	c := validRaw()
 	if err := c.validate(); err != nil {
@@ -128,83 +115,6 @@ func TestRawTransportRejectsCover(t *testing.T) {
 	c.CoverSNI = "example.com"
 	if err := c.validate(); err == nil {
 		t.Error("cover was accepted on the raw transport (it is TCP-only)")
-	}
-}
-
-func TestSpoofValidation(t *testing.T) {
-
-	if err := validSpoof().validate(); err != nil {
-		t.Errorf("valid spoof client rejected: %v", err)
-	}
-	c := validSpoof()
-	c.SpoofSrc = "not-an-ip"
-	if err := c.validate(); err == nil {
-		t.Error("bogus spoof_src_ip accepted")
-	}
-
-	c = validSpoof()
-	c.SpoofSrc = ""
-	c.SpoofDst = "185.51.200.10"
-	if err := c.validate(); err != nil {
-		t.Errorf("valid spoof_dst client rejected: %v", err)
-	}
-	c = validSpoof()
-	c.SpoofSrc = ""
-	c.SpoofDst = "nope"
-	if err := c.validate(); err == nil {
-		t.Error("bogus spoof_dst_ip accepted")
-	}
-
-	c = validSpoof()
-	c.SpoofSrc = ""
-	c.SpoofDst = ""
-	if err := c.validate(); err == nil {
-		t.Error("spoof client with neither spoof_src nor spoof_dst accepted")
-	}
-
-	c = validSpoof()
-	c.Crypto = CryptoCfg{Enabled: false}
-	if err := c.validate(); err == nil {
-		t.Error("spoof transport without crypto accepted")
-	}
-
-	c = validSpoof()
-	c.RawProto = 300
-	if err := c.validate(); err == nil {
-		t.Error("spoof raw_proto=300 accepted")
-	}
-	c = validSpoof()
-	c.RawProto = 58
-	if err := c.validate(); err != nil {
-		t.Errorf("spoof raw_proto=58 rejected: %v", err)
-	}
-
-	c = validSpoof()
-	c.PeerIPs = []string{"203.0.113.9", "203.0.113.10"}
-	if err := c.validate(); err == nil {
-		t.Error("spoof accepted a peer_ips rotation pool")
-	}
-	c = validSpoof()
-	c.SrcIPs = []string{"192.0.2.7", "192.0.2.8"}
-	if err := c.validate(); err == nil {
-		t.Error("spoof accepted a src_ips rotation pool")
-	}
-
-	c = validSpoof()
-	c.Role = "server"
-	c.Listen = "0.0.0.0:9000"
-	c.Peer = ""
-	c.SpoofSrc = ""
-	if err := c.validate(); err == nil {
-		t.Error("spoof server without real_peer_ip accepted")
-	}
-	c.RealPeer = "198.51.100.9"
-	if err := c.validate(); err != nil {
-		t.Errorf("spoof server with real_peer_ip rejected: %v", err)
-	}
-	c.SpoofDst = "185.51.200.10"
-	if err := c.validate(); err != nil {
-		t.Errorf("decoy spoof server with real_peer_ip rejected: %v", err)
 	}
 }
 
@@ -292,13 +202,11 @@ func TestListenIPsRejectedWhereItIsIgnored(t *testing.T) {
 			Listen: "0.0.0.0:9000", TunAddr: "10.200.0.1/24", Crypto: psk,
 		}
 	}
-	for _, tr := range []string{"raw", "ws", "dns", "spoof"} {
+	for _, tr := range []string{"raw", "ws", "dns"} {
 		c := srv(tr)
 		switch tr {
 		case "dns":
 			c.DNSZone = "t.example.com"
-		case "spoof":
-			c.RealPeer = "203.0.113.9"
 		}
 		if err := c.validate(); err != nil {
 			t.Fatalf("%s: base server config is not valid, so this case proves nothing: %v", tr, err)
@@ -548,9 +456,8 @@ func TestDNSTransportValidation(t *testing.T) {
 
 func TestTheCarriersWithNoClearModeRefuseCryptoOff(t *testing.T) {
 	for name, c := range map[string]*Config{
-		"raw":   validRaw(),
-		"spoof": validSpoof(),
-		"dns":   validDNSClient(),
+		"raw": validRaw(),
+		"dns": validDNSClient(),
 	} {
 		if err := c.validate(); err != nil {
 			t.Fatalf("%s: the baseline config is already invalid (%v) — the case below would prove nothing", name, err)

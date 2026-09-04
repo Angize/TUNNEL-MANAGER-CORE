@@ -26,11 +26,9 @@ func TestOnlyAPlainSendPathBatches(t *testing.T) {
 
 		{"a pinned source still batches — sendmmsg carries its control message",
 			func(r *Raw) { r.replySrc.Store(&net.IP{10, 0, 0, 1}) }, true},
-		{"a forged link sends on its own socket",
-			func(r *Raw) { r.link = &fakeFDLink{fd: 7} }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &Raw{batch: pc, link: &fakeFDLink{fd: -1}}
+			r := &Raw{batch: pc}
 			tc.set(r)
 			q := &txQueue{batch: r.batch}
 			if got := r.canBatch(q); got != tc.want {
@@ -101,13 +99,6 @@ func TestMaxBatchClearsOneSuperPacket(t *testing.T) {
 		t.Fatalf("maxBatch %d is under one super-packet's segment count", maxBatch)
 	}
 }
-
-type fakeFDLink struct {
-	ipLink
-	fd int
-}
-
-func (f *fakeFDLink) fakeFD() int { return f.fd }
 
 func TestEachBatchSlotCarriesItsOwnPacket(t *testing.T) {
 	src := string(mustRead(t, "raw_linux.go"))

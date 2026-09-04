@@ -61,11 +61,6 @@ type Config struct {
 
 	RawDports int `json:"raw_dports"`
 
-	SpoofSrc string `json:"spoof_src_ip"`
-	RealPeer string `json:"real_peer_ip"`
-
-	SpoofDst string `json:"spoof_dst_ip"`
-
 	DNSZone      string   `json:"dns_zone"`
 	DNSResolvers []string `json:"dns_resolvers"`
 
@@ -359,50 +354,6 @@ func (c *Config) validate() error {
 		if !c.Crypto.Enabled {
 			return errors.New("raw transport requires crypto enabled (the AEAD both encrypts and authenticates each raw packet)")
 		}
-	case "spoof":
-		if !c.Crypto.Enabled {
-			return errors.New("spoof transport requires crypto enabled (the AEAD authenticates every forged-header frame)")
-		}
-		if c.RawProto != 0 {
-			if c.RawProto < 1 || c.RawProto > 255 {
-				return errors.New("raw_proto must be in 1..255 (0 = the bare default 253)")
-			}
-			if err := rawProtoBorrowed(c.RawProto); err != nil {
-				return err
-			}
-		}
-
-		if c.RawPort != 0 {
-			return errors.New("raw_port sets a forged L4 port, and the spoof carrier writes no L4 header at all")
-		}
-		if c.RawSportRandom {
-			return errors.New("raw_sport_random rolls a forged L4 source port, and the spoof carrier writes no L4 header at all")
-		}
-		if c.RawSport != 0 {
-			return errors.New("raw_sport sets a forged L4 source port, and the spoof carrier writes no L4 header at all")
-		}
-		if c.RawSportRotate != 0 {
-			return errors.New("raw_sport_rotate cycles a forged L4 source port, and the spoof carrier writes no L4 header at all")
-		}
-		if c.SpoofSrc != "" && net.ParseIP(c.SpoofSrc).To4() == nil {
-			return errors.New("spoof_src_ip must be an IPv4 address")
-		}
-		if c.SpoofDst != "" && net.ParseIP(c.SpoofDst).To4() == nil {
-			return errors.New("spoof_dst_ip must be an IPv4 address")
-		}
-		if c.RealPeer != "" && net.ParseIP(c.RealPeer).To4() == nil {
-			return errors.New("real_peer_ip must be an IPv4 address")
-		}
-		switch c.Role {
-		case "client":
-			if c.SpoofSrc == "" && c.SpoofDst == "" {
-				return errors.New("spoof transport requires at least one of spoof_src_ip / spoof_dst_ip on the client")
-			}
-		case "server":
-			if c.RealPeer == "" {
-				return errors.New("spoof server requires real_peer_ip (the client's real IP to reply to)")
-			}
-		}
 	case "dns":
 		if !c.Crypto.Enabled {
 			return errors.New("dns transport requires crypto enabled (the session handshake and every datagram are AEAD-authenticated)")
@@ -510,7 +461,7 @@ func (c *Config) validate() error {
 			}
 		}
 	default:
-		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", \"spoof\", \"ws\", or \"dns\"")
+		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", \"ws\", or \"dns\"")
 	}
 
 	if len(c.PeerIPs) > 0 {
@@ -589,9 +540,9 @@ func (c *Config) validate() error {
 	}
 	if c.Fec {
 		switch c.Transport {
-		case "", "udp", "raw", "spoof":
+		case "", "udp", "raw":
 		default:
-			return fmt.Errorf("fec is not supported on the %s carrier — only on the datagram carriers (udp, raw, spoof)", c.Transport)
+			return fmt.Errorf("fec is not supported on the %s carrier — only on the datagram carriers (udp, raw)", c.Transport)
 		}
 		if c.FecData < 0 || c.FecParity < 0 {
 			return errors.New("fec_data / fec_parity must be >= 0 (0 defaults to 10 / 3)")
@@ -614,9 +565,9 @@ func (c *Config) validate() error {
 	}
 	if c.FakeDesync {
 		switch c.Transport {
-		case "raw", "spoof", "tcp", "ws":
+		case "raw", "tcp", "ws":
 		default:
-			return errors.New("fake_desync is supported on the raw, spoof, tcp and ws carriers (not plain udp)")
+			return errors.New("fake_desync is supported on the raw, tcp and ws carriers (not plain udp)")
 		}
 
 		if c.cdnIsHTTP() {

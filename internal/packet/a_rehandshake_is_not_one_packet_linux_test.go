@@ -133,15 +133,8 @@ func (c *countingLink) reset() {
 	c.mu.Unlock()
 }
 
-func (c *countingLink) recvLoop() error                     { return nil }
-func (c *countingLink) replyTo(src *net.IPAddr) *net.IPAddr { return src }
-func (c *countingLink) filterSrc() bool                     { return true }
-func (c *countingLink) pinsSource() bool                    { return false }
-func (c *countingLink) fakeFD() int                         { return -1 }
-func (c *countingLink) close()                              {}
-func (c *countingLink) header(realSrc net.IP, to *net.IPAddr) (net.IP, net.IP) {
-	return realSrc, to.IP
-}
+func (c *countingLink) recvLoop() error { return nil }
+func (c *countingLink) close()          {}
 
 func loopRaw(t *testing.T, sportRandom bool) (*Raw, *countingLink) {
 	t.Helper()

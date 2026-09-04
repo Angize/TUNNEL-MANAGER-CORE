@@ -15,8 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"golang.org/x/net/ipv4"
 
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
@@ -135,7 +133,7 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 		return
 	}
 
-	if d.usesLowTTL() && r.link.fakeFD() < 0 {
+	if d.usesLowTTL() {
 		open := r.openFakeFd
 		if open == nil {
 			open = openHdrincl
@@ -177,11 +175,8 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 	if !r.desync.on || to == nil {
 		return
 	}
-	fd := r.link.fakeFD()
-	if fd < 0 {
-		fd = r.fakeFd
-	}
-	src, dst := r.link.header(r.srcIP(), to)
+	fd := r.fakeFd
+	src, dst := r.srcIP(), to.IP
 	var sa syscall.SockaddrInet4
 	copy(sa.Addr[:], to.IP.To4())
 	for i, sp := range r.desync.specs() {
@@ -527,7 +522,7 @@ func (r *Raw) pinnedSrc() net.IP {
 }
 
 func (r *Raw) replyAddr(addr *net.IPAddr) *net.IPAddr {
-	return r.link.replyTo(addr)
+	return addr
 }
 
 const ipFlagDF = 1 << 14
@@ -582,32 +577,7 @@ func buildIP4Ext(src, dst net.IP, proto, ttl int, badSum bool, payload []byte) [
 	return h
 }
 
-const packetOutgoing = 4
-
 const ethPIP = 0x0800
-
-func htons(v uint16) uint16 { return v<<8 | v>>8 }
-
-func ProbeSpoof() SpoofProbe {
-	p := SpoofProbe{}
-	if fd, err := openHdrincl(253); err == nil {
-		p.CapNetRaw = true
-		syscall.Close(fd)
-	} else {
-		p.Reason = "raw sockets not permitted (needs CAP_NET_RAW / root): " + err.Error()
-	}
-	if fd, err := openAfpacket(bpfDropAll(), "spoof probe"); err == nil {
-		p.AFPacket = true
-		syscall.Close(fd)
-	} else if p.Reason == "" {
-		p.Reason = "AF_PACKET not permitted (needs CAP_NET_RAW / root): " + err.Error()
-	}
-	p.OK = p.CapNetRaw && p.AFPacket
-	if p.OK {
-		p.Reason = ""
-	}
-	return p
-}
 
 func openHdrincl(proto int) (int, error) {
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, proto)
@@ -619,22 +589,6 @@ func openHdrincl(proto int) (int, error) {
 		return -1, err
 	}
 	applyFdSndBuf(fd, wantSockBuf())
-	return fd, nil
-}
-
-func openAfpacket(prog []unix.SockFilter, what string) (int, error) {
-	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_DGRAM, int(htons(ethPIP)))
-	if err != nil {
-		return -1, err
-	}
-
-	tv := syscall.Timeval{Sec: 1}
-	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
-		syscall.Close(fd)
-		return -1, err
-	}
-	attachFilter(fd, prog, what)
-	applyFdRcvBuf(fd, wantSockBuf())
 	return fd, nil
 }
 
@@ -843,20 +797,6 @@ func (r *Raw) wireAntiLeak() {
 	}
 }
 
-func addAntiLeak(proto int, decoy net.IP, tun string) func() {
-	args := []string{"-t", "raw", "-I", "PREROUTING", "-p", strconv.Itoa(proto), "-d", decoy.String(), "-j", "DROP"}
-	own, ok := runRule(args, ownerMatch(tun), "raw: decoy anti-leak")
-	if !ok {
-		return nil
-	}
-	log.Printf("raw: anti-leak rule installed (iptables raw PREROUTING -p %d -d %s DROP)", proto, decoy)
-	return func() {
-		del := append([]string(nil), args...)
-		del[2] = "-D"
-		delRule(append(del, own...), "raw: decoy anti-leak")
-	}
-}
-
 func (r *Raw) tunToNet(q *txQueue) error {
 	buf := make([]byte, maxDatagram)
 
@@ -918,7 +858,7 @@ func (r *Raw) tunToNet(q *txQueue) error {
 }
 
 func (r *Raw) canBatch(q *txQueue) bool {
-	return q.batch != nil && r.fecEnc == nil && r.link.fakeFD() < 0
+	return q.batch != nil && r.fecEnc == nil
 }
 
 func (r *Raw) recvConnLoop() error {
@@ -934,10 +874,8 @@ func (r *Raw) recvConnLoop() error {
 			if addr == nil {
 				continue
 			}
-			if r.link.filterSrc() {
-				if peer := r.peer.Load(); peer != nil && !addr.IP.Equal(peer.IP) && !r.srcAllowed(addr.IP) {
-					continue
-				}
+			if peer := r.peer.Load(); peer != nil && !addr.IP.Equal(peer.IP) && !r.srcAllowed(addr.IP) {
+				continue
 			}
 			if !r.isClient {
 				r.learnReplySrc(m.OOB[:m.NN])
@@ -965,36 +903,6 @@ func (r *Raw) learnReplySrc(oob []byte) {
 		r.notOurDst.Do(func() {
 			log.Printf("raw: a frame was addressed to %s, which is not an address this host holds — not answering from it", d)
 		})
-	}
-}
-
-func afpacketLoop(fd int, closeCh <-chan struct{}, handle func(pkt []byte, ihl int)) error {
-	buf := make([]byte, maxDatagram+64)
-	for {
-		n, from, err := syscall.Recvfrom(fd, buf, 0)
-		if err != nil {
-			select {
-			case <-closeCh:
-				return nil
-			default:
-			}
-			if err == syscall.EINTR || err == syscall.EAGAIN {
-				continue
-			}
-			return err
-		}
-		if ll, ok := from.(*syscall.SockaddrLinklayer); ok && ll.Pkttype == packetOutgoing {
-			continue
-		}
-		pkt := buf[:n]
-		if len(pkt) < 20 || pkt[0]>>4 != 4 {
-			continue
-		}
-		ihl := int(pkt[0]&0x0f) * 4
-		if ihl < 20 || len(pkt) < ihl {
-			continue
-		}
-		handle(pkt, ihl)
 	}
 }
 
@@ -1060,7 +968,7 @@ func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
 }
 
 func (r *Raw) learnPeer(addr *net.IPAddr) {
-	if r.link.filterSrc() && r.pp == nil {
+	if r.pp == nil {
 		r.peer.Store(addr)
 	}
 	r.learnLocalIP(addr.IP)
@@ -1242,10 +1150,6 @@ func (r *Raw) SetSourcePool(sp *PeerPool) {
 	if !r.isClient {
 		return
 	}
-	if r.link.pinsSource() {
-		log.Printf("core/raw: source pool ignored — spoof_src pins the source IP (remove one of them)")
-		return
-	}
 	r.sp = sp
 
 	if sp != nil {
@@ -1259,7 +1163,7 @@ func (r *Raw) SetSourcePool(sp *PeerPool) {
 }
 
 func (r *Raw) rotateSourceRaw(proactive bool) {
-	if r.sp == nil || r.link.pinsSource() {
+	if r.sp == nil {
 		return
 	}
 	prev := r.sp.current()
@@ -1343,7 +1247,7 @@ func (r *Raw) adoptPeerRaw() {
 }
 
 func (r *Raw) adoptSourceRaw() {
-	if r.sp == nil || r.link.pinsSource() {
+	if r.sp == nil {
 		return
 	}
 	addr := r.sp.current()

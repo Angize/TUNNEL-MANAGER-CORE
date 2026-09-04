@@ -50,15 +50,3 @@ func TestRawSportAndRawSportRandomAreExclusive(t *testing.T) {
 		t.Errorf("raw_sport_random alone must validate, got %v", err)
 	}
 }
-
-func TestSpoofRefusesRawSport(t *testing.T) {
-	c := validSpoof()
-	c.RawSport = 4500
-	if err := c.validate(); err == nil {
-		t.Error("spoof writes no L4 header — raw_sport must be refused, not accepted and ignored")
-	}
-	c.RawSport = 0
-	if err := c.validate(); err != nil {
-		t.Errorf("spoof with no raw_sport must still validate, got %v", err)
-	}
-}

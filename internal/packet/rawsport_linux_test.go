@@ -308,12 +308,5 @@ type capturingLink struct {
 func (c *capturingLink) send(pkt []byte, _ *net.IPAddr) {
 	c.sent = append(c.sent, append([]byte(nil), pkt...))
 }
-func (c *capturingLink) recvLoop() error                     { return nil }
-func (c *capturingLink) replyTo(src *net.IPAddr) *net.IPAddr { return src }
-func (c *capturingLink) filterSrc() bool                     { return true }
-func (c *capturingLink) pinsSource() bool                    { return false }
-func (c *capturingLink) fakeFD() int                         { return -1 }
-func (c *capturingLink) header(realSrc net.IP, to *net.IPAddr) (net.IP, net.IP) {
-	return realSrc, to.IP
-}
-func (c *capturingLink) close() {}
+func (c *capturingLink) recvLoop() error { return nil }
+func (c *capturingLink) close()          {}

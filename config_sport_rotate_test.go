@@ -74,14 +74,6 @@ func TestRawSportRotateRejectedWithFec(t *testing.T) {
 	}
 }
 
-func TestRawSportRotateRejectedOnSpoof(t *testing.T) {
-	c := validSpoof()
-	c.RawSportRotate = 5
-	if err := c.validate(); err == nil {
-		t.Error("raw_sport_rotate accepted on the spoof carrier, which writes no L4 header")
-	}
-}
-
 // raw_dports is the second axis of the same feature: it spreads the forged DESTINATION port so one
 // source port is worth several flow-table buckets. On its own it means nothing -- with the source port
 // pinned, every packet still shares one bucket per destination and the walk never moves -- so it is

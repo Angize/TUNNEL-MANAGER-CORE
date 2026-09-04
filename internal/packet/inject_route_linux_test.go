@@ -94,46 +94,25 @@ func TestRawBadsumDecoyFollowsDestination(t *testing.T) {
 
 func TestRawBadsumDecoyFramesForTheRoutedPeer(t *testing.T) {
 	peer := &net.IPAddr{IP: net.IPv4(203, 0, 113, 5)}
-	decoy := net.IPv4(198, 51, 100, 200)
-	forgedSrc := net.IPv4(192, 0, 2, 44)
+	f := &fakeResolver{}
+	r := &Raw{isClient: true, proto: protoBare, profile: "bare", fakeFd: -1}
+	r.link = &directLink{r: r}
+	r.localIP.Store(&net.IPAddr{IP: net.IPv4(192, 0, 2, 1)})
+	r.desync = newDesyncCfg(true, 4, 2, "badsum")
+	r.inj = testInjector(f)
+	r.peer.Store(peer)
 
-	for _, tc := range []struct {
-		name string
-		link func(r *Raw) ipLink
-	}{
-		{"direct", func(r *Raw) ipLink { return &directLink{r: r} }},
-		{"forge src", func(r *Raw) ipLink {
-			return &forgedLink{r: r, spoofFd: -1, pktFd: -1, spoofSrc: forgedSrc}
-		}},
-		{"forge dst", func(r *Raw) ipLink {
-			return &forgedLink{r: r, spoofFd: -1, pktFd: -1, spoofDst: decoy}
-		}},
-		{"forge both", func(r *Raw) ipLink {
-			return &forgedLink{r: r, spoofFd: -1, pktFd: -1, spoofSrc: forgedSrc, spoofDst: decoy}
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := &fakeResolver{}
-			r := &Raw{isClient: true, proto: protoBare, profile: "bare", fakeFd: -1}
-			r.link = tc.link(r)
-			r.localIP.Store(&net.IPAddr{IP: net.IPv4(192, 0, 2, 1)})
-			r.desync = newDesyncCfg(true, 4, 2, "badsum")
-			r.inj = testInjector(f)
-			r.peer.Store(peer)
+	r.sendFakes(peer)
 
-			r.sendFakes(peer)
-
-			asked := f.asked()
-			if len(asked) == 0 {
-				t.Fatal("no badsum decoy was framed at all — the injector was never asked for a route")
-			}
-			for _, a := range asked {
-				if a != peer.IP.String() {
-					t.Fatalf("a badsum decoy was L2-framed for %s; it must follow the address the tunnel "+
-						"routes to (%s), which is what forgedLink.send and the low-TTL decoy both use — "+
-						"framing it for the forged header dst sends it out a next hop of its own", a, peer.IP)
-				}
-			}
-		})
+	asked := f.asked()
+	if len(asked) == 0 {
+		t.Fatal("no badsum decoy was framed at all — the injector was never asked for a route")
+	}
+	for _, a := range asked {
+		if a != peer.IP.String() {
+			t.Fatalf("a badsum decoy was L2-framed for %s; it must follow the address the tunnel "+
+				"routes to (%s), which is what the real send and the low-TTL decoy both use — "+
+				"framing it for anything else sends it out a next hop of its own", a, peer.IP)
+		}
 	}
 }

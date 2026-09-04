@@ -29,7 +29,6 @@ func TestEveryAntiLeakRuleGoesInAtTheTopOfItsChain(t *testing.T) {
 		{"raw/tcp", "OUTPUT", func() { _, _ = addRawDrop(testDst, "tcp", "core42", 0, true, false) }},
 		{"raw/tcp server", "OUTPUT", func() { _, _ = addRawDrop(testDst, "tcp", "core42", 0, false, false) }},
 		{"raw/icmp", "OUTPUT", func() { _, _ = addRawDrop(testDst, "icmp", "core42", 0, false, true) }},
-		{"spoof decoy", "PREROUTING", func() { addAntiLeak(253, testDst, "core42") }},
 	} {
 		argv = nil
 		tc.run()
