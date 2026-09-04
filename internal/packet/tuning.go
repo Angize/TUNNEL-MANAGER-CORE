@@ -22,10 +22,10 @@ type TuningInput struct {
 }
 
 func ApplyTuning(t TuningInput) {
-	if bs := tsteps(t.SuspectBackoff); len(bs) > 0 {
+	if bs := tsteps(t.SuspectBackoff, backoffStepMin, backoffStepMax); len(bs) > 0 {
 		suspectBackoff = bs
 	}
-	if rv := tsteps(t.LadderRevive); len(rv) > 0 {
+	if rv := tsteps(t.LadderRevive, reviveStepMin, reviveStepMax); len(rv) > 0 {
 		ladderRevive = rv
 	}
 	if t.DeadRetestSecs > 0 {
@@ -36,10 +36,18 @@ func ApplyTuning(t TuningInput) {
 	}
 }
 
-func tsteps(in []int64) []int64 {
+const (
+	reviveStepMin int64 = 10
+	reviveStepMax int64 = 3600
+
+	backoffStepMin int64 = 1
+	backoffStepMax int64 = 86400
+)
+
+func tsteps(in []int64, lo, hi int64) []int64 {
 	out := make([]int64, 0, len(in))
 	for _, v := range in {
-		if v >= 1 && v <= 86400 {
+		if v >= lo && v <= hi {
 			out = append(out, v)
 		}
 	}

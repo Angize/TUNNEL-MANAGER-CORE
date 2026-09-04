@@ -71,7 +71,7 @@ func TestTheReviveClockGivesTheUdpPortRungBack(t *testing.T) {
 func reviveRound(t *testing.T, withSrcPool bool) {
 	oldRevive := ladderRevive
 	t.Cleanup(func() { ladderRevive = oldRevive })
-	ApplyTuning(TuningInput{LadderRevive: []int64{1}})
+	ladderRevive = []int64{1}
 	withPortTries(t, 1)
 
 	b, _ := rigUDP(t, nil)
