@@ -31,6 +31,8 @@ func queueingCarrier(t string) bool { return t == "raw" || t == "udp" }
 
 const maxWorkers = 8
 
+const maxSportEvery = 60
+
 func (c *Config) cdnMode() string {
 	if c.CDNCarrier == "grpc" {
 		return "grpc"
@@ -336,8 +338,8 @@ func (c *Config) validate() error {
 				return errors.New("raw_sport_rotate cycles the forged UDP source port and is the \"udp\" profile only" +
 					" (raw_profile \"" + c.RawProfile + "\" would break its own flow state or forges no ports)")
 			}
-			if c.RawSportRotate < 1 || c.RawSportRotate > 64 {
-				return errors.New("raw_sport_rotate must be in 1..64 (0 = off; a new forged source port every N packets, N under the middlebox per-tuple budget)")
+			if c.RawSportRotate < 1 || c.RawSportRotate > maxSportEvery {
+				return fmt.Errorf("raw_sport_rotate must be in 1..%d (0 = off; a new forged source port every N packets, N under the middlebox per-tuple budget)", maxSportEvery)
 			}
 			if c.RawSport != 0 || c.RawSportRandom {
 				return errors.New("raw_sport_rotate continuously re-picks the forged source port, so it cannot combine with raw_sport (fixed) or raw_sport_random (rolls once)")
