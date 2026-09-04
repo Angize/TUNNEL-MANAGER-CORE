@@ -139,7 +139,7 @@ func TestTheDrawBudgetIsClamped(t *testing.T) {
 	t.Cleanup(func() { portTries = was })
 	for _, tc := range []struct {
 		in, want int
-	}{{0, was}, {-3, was}, {1, 1}, {50, 50}, {999, 50}} {
+	}{{0, was}, {-3, was}, {1, 1}, {maxPortTries, maxPortTries}, {maxPortTries + 1, maxPortTries}, {999, maxPortTries}} {
 		portTries = was
 		SetPortTries(tc.in)
 		if portTries != tc.want {

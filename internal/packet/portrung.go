@@ -6,6 +6,8 @@ import (
 
 var portTries = 2
 
+const maxPortTries = 60
+
 const (
 	repairPortLo = 32768
 	repairPortHi = 46999
@@ -17,8 +19,8 @@ func SetPortTries(n int) {
 	if n <= 0 {
 		return
 	}
-	if n > 50 {
-		n = 50
+	if n > maxPortTries {
+		n = maxPortTries
 	}
 	portTries = n
 }
