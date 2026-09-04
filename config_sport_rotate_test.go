@@ -24,7 +24,7 @@ func TestRawSportRotateAcceptedOnUDPOnly(t *testing.T) {
 }
 
 func TestRawSportRotateRange(t *testing.T) {
-	for _, n := range []int{1, 6, 64} {
+	for _, n := range []int{1, 6, maxSportEvery} {
 		c := validRaw()
 		c.RawProfile = "udp"
 		c.RawSportRotate = n
@@ -32,7 +32,7 @@ func TestRawSportRotateRange(t *testing.T) {
 			t.Errorf("raw_sport_rotate=%d rejected: %v", n, err)
 		}
 	}
-	for _, n := range []int{-1, 65, 1000} {
+	for _, n := range []int{-1, maxSportEvery + 1, 1000} {
 		c := validRaw()
 		c.RawProfile = "udp"
 		c.RawSportRotate = n
