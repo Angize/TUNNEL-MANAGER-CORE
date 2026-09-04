@@ -12,6 +12,8 @@ const (
 
 	groMaxSegs = 64
 
+	udpHdrLen = 8
+
 	tcpFIN = 0x01
 	tcpPSH = 0x08
 	tcpACK = 0x10
@@ -27,35 +29,48 @@ type tcpSeg struct {
 	flags   byte
 }
 
-func parseTCPSeg(pkt []byte) (s tcpSeg) {
+func ipShape(pkt []byte, proto byte) (ipHdr int, v6, ok bool) {
 	if len(pkt) < 20 {
 		return
 	}
 	switch pkt[0] >> 4 {
 	case 4:
-		if pkt[9] != 6 {
+		if pkt[9] != proto || pkt[6]&0x3f != 0 || pkt[7] != 0 {
 			return
 		}
-
-		if pkt[6]&0x3f != 0 || pkt[7] != 0 {
-			return
-		}
-		s.ipHdr = int(pkt[0]&0x0f) * 4
-		if s.ipHdr < 20 || int(binary.BigEndian.Uint16(pkt[2:4])) != len(pkt) {
+		ipHdr = int(pkt[0]&0x0f) * 4
+		if ipHdr < 20 || int(binary.BigEndian.Uint16(pkt[2:4])) != len(pkt) {
 			return
 		}
 	case 6:
-		off, proto, ok := ipv6L4Offset(pkt)
-		if !ok || proto != 6 {
+		off, p, o := ipv6L4Offset(pkt)
+		if !o || p != proto {
 			return
 		}
-		s.v6, s.ipHdr = true, off
+		v6, ipHdr = true, off
 		if 40+int(binary.BigEndian.Uint16(pkt[4:6])) != len(pkt) {
 			return
 		}
 	default:
 		return
 	}
+	return ipHdr, v6, true
+}
+
+func sameIPHeaders(a, b []byte, ipHdr int, v6 bool) bool {
+	if v6 {
+		return bytes.Equal(a[0:4], b[0:4]) && bytes.Equal(a[6:ipHdr], b[6:ipHdr])
+	}
+	return bytes.Equal(a[0:2], b[0:2]) && bytes.Equal(a[6:10], b[6:10]) &&
+		bytes.Equal(a[12:ipHdr], b[12:ipHdr])
+}
+
+func parseTCPSeg(pkt []byte) (s tcpSeg) {
+	ipHdr, v6, ok := ipShape(pkt, 6)
+	if !ok {
+		return
+	}
+	s.ipHdr, s.v6 = ipHdr, v6
 	if len(pkt) < s.ipHdr+20 {
 		return
 	}
@@ -74,15 +89,8 @@ func sameHeaders(a, b []byte, sa, sb tcpSeg) bool {
 	if sa.v6 != sb.v6 || sa.ipHdr != sb.ipHdr || sa.l4Hdr != sb.l4Hdr {
 		return false
 	}
-	if sa.v6 {
-		if !bytes.Equal(a[0:4], b[0:4]) || !bytes.Equal(a[6:sa.ipHdr], b[6:sb.ipHdr]) {
-			return false
-		}
-	} else {
-		if !bytes.Equal(a[0:2], b[0:2]) || !bytes.Equal(a[6:10], b[6:10]) ||
-			!bytes.Equal(a[12:sa.ipHdr], b[12:sb.ipHdr]) {
-			return false
-		}
+	if !sameIPHeaders(a, b, sa.ipHdr, sa.v6) {
+		return false
 	}
 	x, y := a[sa.ipHdr:], b[sb.ipHdr:]
 
@@ -90,6 +98,67 @@ func sameHeaders(a, b []byte, sa, sb tcpSeg) bool {
 		bytes.Equal(x[8:13], y[8:13]) &&
 		bytes.Equal(x[14:16], y[14:16]) &&
 		bytes.Equal(x[18:sa.l4Hdr], y[18:sb.l4Hdr])
+}
+
+type udpSeg struct {
+	ok      bool
+	v6      bool
+	ipHdr   int
+	payload int
+}
+
+func parseUDPSeg(pkt []byte) (s udpSeg) {
+	ipHdr, v6, ok := ipShape(pkt, 17)
+	if !ok {
+		return
+	}
+	s.ipHdr, s.v6 = ipHdr, v6
+	if len(pkt) < s.ipHdr+udpHdrLen {
+		return
+	}
+	s.payload = len(pkt) - s.ipHdr - udpHdrLen
+	if int(binary.BigEndian.Uint16(pkt[s.ipHdr+4:s.ipHdr+6])) != udpHdrLen+s.payload {
+		return
+	}
+	s.ok = s.payload > 0
+	return
+}
+
+func sameUDPHeaders(a, b []byte, sa, sb udpSeg) bool {
+	if sa.v6 != sb.v6 || sa.ipHdr != sb.ipHdr {
+		return false
+	}
+	return sameIPHeaders(a, b, sa.ipHdr, sa.v6) &&
+		bytes.Equal(a[sa.ipHdr:sa.ipHdr+4], b[sb.ipHdr:sb.ipHdr+4])
+}
+
+func udpRun(pkts [][]byte) (n, segSize int) {
+	if len(pkts) < 2 {
+		return 0, 0
+	}
+	lead := parseUDPSeg(pkts[0])
+	if !lead.ok {
+		return 0, 0
+	}
+	segSize = lead.payload
+	total := len(pkts[0])
+	n = 1
+	for i := 1; i < len(pkts) && n < groMaxSegs; i++ {
+		s := parseUDPSeg(pkts[i])
+		if !s.ok || s.payload > segSize || total+s.payload > groMaxBytes ||
+			!sameUDPHeaders(pkts[0], pkts[i], lead, s) {
+			break
+		}
+		total += s.payload
+		n++
+		if s.payload < segSize {
+			break
+		}
+	}
+	if n < 2 {
+		return 0, 0
+	}
+	return n, segSize
 }
 
 func groRun(pkts [][]byte) (n, segSize int) {
@@ -123,42 +192,57 @@ func groRun(pkts [][]byte) (n, segSize int) {
 	return n, segSize
 }
 
-func (d *Device) writeSuper(pkts [][]byte, segSize int) error {
+func (d *Device) writeSuper(pkts [][]byte, segSize int, proto byte) error {
 	lead := pkts[0]
-	s := parseTCPSeg(lead)
-	hdrLen := s.ipHdr + s.l4Hdr
+	ipHdr, l4Hdr, v6 := superShape(lead, proto)
+	hdrLen := ipHdr + l4Hdr
 
-	body := s.payload
-	for _, p := range pkts[1:] {
+	body := 0
+	for _, p := range pkts {
 		body += len(p) - hdrLen
 	}
-	l4Len := s.l4Hdr + body
+	l4Len := l4Hdr + body
 
-	if s.v6 {
-		binary.BigEndian.PutUint16(lead[4:6], uint16(s.ipHdr-40+l4Len))
+	if v6 {
+		binary.BigEndian.PutUint16(lead[4:6], uint16(ipHdr-40+l4Len))
 	} else {
-		binary.BigEndian.PutUint16(lead[2:4], uint16(s.ipHdr+l4Len))
+		binary.BigEndian.PutUint16(lead[2:4], uint16(ipHdr+l4Len))
 		lead[10], lead[11] = 0, 0
-		binary.BigEndian.PutUint16(lead[10:12], ipChecksum(lead[:s.ipHdr]))
+		binary.BigEndian.PutUint16(lead[10:12], ipChecksum(lead[:ipHdr]))
 	}
-
-	lead[s.ipHdr+13] |= parseTCPSeg(pkts[len(pkts)-1]).flags & tcpPSH
-
-	binary.BigEndian.PutUint16(lead[s.ipHdr+16:s.ipHdr+18], pseudoSum(lead, s.ipHdr, s.v6, 6, l4Len))
 
 	var vnet [vnetHdrLen]byte
-	vnet[0] = vnetNeedsCsum
-	vnet[1] = gsoTCPv4
-	if s.v6 {
-		vnet[1] = gsoTCPv6
+	csumOff := 16
+	if proto == 17 {
+		csumOff = 6
+		vnet[1] = gsoUDPL4
+		binary.BigEndian.PutUint16(lead[ipHdr+4:ipHdr+6], uint16(l4Len))
+	} else {
+		lead[ipHdr+13] |= parseTCPSeg(pkts[len(pkts)-1]).flags & tcpPSH
+		vnet[1] = gsoTCPv4
+		if v6 {
+			vnet[1] = gsoTCPv6
+		}
 	}
+	binary.BigEndian.PutUint16(lead[ipHdr+csumOff:ipHdr+csumOff+2], pseudoSum(lead, ipHdr, v6, proto, l4Len))
+
+	vnet[0] = vnetNeedsCsum
 	binary.LittleEndian.PutUint16(vnet[2:4], uint16(hdrLen))
 	binary.LittleEndian.PutUint16(vnet[4:6], uint16(segSize))
-	binary.LittleEndian.PutUint16(vnet[6:8], uint16(s.ipHdr))
-	binary.LittleEndian.PutUint16(vnet[8:10], 16)
+	binary.LittleEndian.PutUint16(vnet[6:8], uint16(ipHdr))
+	binary.LittleEndian.PutUint16(vnet[8:10], uint16(csumOff))
 
 	_, err := d.wrvGSO(vnet[:], lead, pkts[1:], hdrLen)
 	return err
+}
+
+func superShape(pkt []byte, proto byte) (ipHdr, l4Hdr int, v6 bool) {
+	if proto == 17 {
+		s := parseUDPSeg(pkt)
+		return s.ipHdr, udpHdrLen, s.v6
+	}
+	s := parseTCPSeg(pkt)
+	return s.ipHdr, s.l4Hdr, s.v6
 }
 
 func (d *Device) WriteBatch(pkts [][]byte) error {
@@ -176,14 +260,20 @@ func (d *Device) WriteBatch(pkts [][]byte) error {
 		return ferr
 	}
 	for i := 0; i < len(pkts); {
+		proto := byte(6)
 		n, segSize := groRun(pkts[i:])
+		if n < 2 && d.uso {
+			if n, segSize = udpRun(pkts[i:]); n >= 2 {
+				proto = 17
+			}
+		}
 		if n < 2 {
 			_, err := d.Write(pkts[i])
 			note(err)
 			i++
 			continue
 		}
-		if err := d.writeSuper(pkts[i:i+n], segSize); err != nil {
+		if err := d.writeSuper(pkts[i:i+n], segSize, proto); err != nil {
 			note(err)
 		} else {
 			d.nOut.Add(uint64(n))

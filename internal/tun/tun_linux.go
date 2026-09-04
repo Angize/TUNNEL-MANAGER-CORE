@@ -44,6 +44,7 @@ type Device struct {
 	Name string
 
 	gso  bool
+	uso  bool
 	rbuf []byte
 	q    [][]byte
 
@@ -147,15 +148,17 @@ func openQueue(name string, gso, multi bool) (*Device, error) {
 	}
 	real := strings.TrimRight(string(ifr[:16]), "\x00")
 
+	uso := false
 	if gso {
-		off := uintptr(tunFCSUM | tunFTSO4 | tunFTSO6)
-		if errno := setOffload(f, off); errno != 0 {
+		if setOffload(f, uintptr(tunFCSUM|tunFTSO4|tunFTSO6|tunFUSO4|tunFUSO6)) == 0 {
+			uso = true
+		} else if errno := setOffload(f, uintptr(tunFCSUM|tunFTSO4|tunFTSO6)); errno != 0 {
 			f.Close()
 			return nil, fmt.Errorf("TUNSETOFFLOAD (gso): %w: %w", ErrGSOUnsupported, errno)
 		}
 	}
 
-	d := &Device{f: f, fd: int(f.Fd()), Name: real, gso: gso}
+	d := &Device{f: f, fd: int(f.Fd()), Name: real, gso: gso, uso: uso}
 	if gso {
 		d.rbuf = make([]byte, vnetHdrLen+65535)
 	}
