@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -50,16 +49,10 @@ func tuningFrom(t *TuningCfg) packet.TuningInput {
 func main() {
 	cfgPath := flag.String("config", "", "path to core JSON config")
 	showVer := flag.Bool("version", false, "print version and exit")
-	probeSpoof := flag.Bool("probe-spoof", false, "print IP-spoofing capability (JSON) and exit")
 	flag.Parse()
 
 	if *showVer {
 		os.Stdout.WriteString(version + "\n")
-		return
-	}
-	if *probeSpoof {
-		b, _ := json.Marshal(packet.ProbeSpoof())
-		os.Stdout.Write(append(b, '\n'))
 		return
 	}
 	if *cfgPath == "" {
@@ -159,20 +152,6 @@ func main() {
 			b, err = packet.DialRaw(cfg.Peer, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports}, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/raw:%s%s%s) %s", cfg.RawProfile, obfsTag, fecTag, cfg.Peer)
-			}
-		}
-	case "spoof":
-		spoofTag := spoofLogTag(cfg)
-		switch cfg.Role {
-		case "server":
-			b, err = packet.ListenSpoof(cfg.Listen, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RealPeer, cfg.SpoofDst, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto)
-			if err == nil {
-				log.Printf("tnl-core: listening (core/spoof:%s%s%s) on %s", spoofTag, obfsTag, fecTag, cfg.Listen)
-			}
-		case "client":
-			b, err = packet.DialSpoof(cfg.Peer, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.SpoofSrc, cfg.SpoofDst, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto)
-			if err == nil {
-				log.Printf("tnl-core: dialing (core/spoof:%s%s%s) %s", spoofTag, obfsTag, fecTag, cfg.Peer)
 			}
 		}
 	case "ws":
@@ -366,7 +345,6 @@ const (
 	pinByBind      = "bind"
 	pinByPool      = "pool"
 	pinBySrcIPs    = "src_ips"
-	pinBySpoof     = "spoof_src"
 	pinUnsupported = "unsupported"
 )
 
@@ -382,10 +360,6 @@ func pinSource(b any, cfg *Config) string {
 		if len(cfg.SrcIPs) > 0 {
 			return pinBySrcIPs
 		}
-		if cfg.SpoofSrc != "" {
-			return pinBySpoof
-		}
-
 		s.SetSourcePool(packet.NewPeerPool([]string{cfg.BindIP}, 0))
 		return pinByPool
 	}
@@ -409,17 +383,4 @@ func applySNISplit(b any, transport, mode string, pos, ttl int) bool {
 	}
 	log.Printf("core: WARNING carrier %s ignores sni_split — it sends no TLS ClientHello of its own, so nothing is fragmented", transport)
 	return false
-}
-
-func spoofLogTag(cfg *Config) string {
-	switch {
-	case cfg.SpoofSrc != "" && cfg.SpoofDst != "":
-		return "src+dst"
-	case cfg.SpoofDst != "":
-		return "dst"
-	case cfg.SpoofSrc != "":
-		return "src"
-	default:
-		return "src"
-	}
 }

@@ -33,15 +33,3 @@ func TestRawPortOnlyOnAProfileThatForgesPorts(t *testing.T) {
 		}
 	}
 }
-
-func TestSpoofRefusesRawPort(t *testing.T) {
-	c := validSpoof()
-	c.RawPort = 51820
-	if err := c.validate(); err == nil {
-		t.Error("spoof writes no L4 header — raw_port must be refused, not accepted and ignored")
-	}
-	c.RawPort = 0
-	if err := c.validate(); err != nil {
-		t.Errorf("spoof with no raw_port must still validate, got %v", err)
-	}
-}

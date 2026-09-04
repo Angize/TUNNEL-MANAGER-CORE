@@ -51,17 +51,6 @@ func TestBindIPReachesEveryCarrierThatCanHonourIt(t *testing.T) {
 		}
 	})
 
-	t.Run("a forged source supersedes it", func(t *testing.T) {
-		c := &pinsByPool{}
-		cfg := &Config{Role: "client", BindIP: ip, Transport: "spoof", SpoofSrc: "192.0.2.7"}
-		if got := pinSource(c, cfg); got != pinBySpoof {
-			t.Fatalf("pinSource = %q, want %q", got, pinBySpoof)
-		}
-		if c.got != nil {
-			t.Error("a pool was installed under spoof_src; the carrier refuses it and blames a pool the operator never configured")
-		}
-	})
-
 	t.Run("a carrier that can pin nothing says so", func(t *testing.T) {
 		if got := pinSource(&pinsNothing{}, &Config{Role: "client", BindIP: ip, Transport: "dns"}); got != pinUnsupported {
 			t.Fatalf("pinSource = %q, want %q — silence here is what made this a no-op nobody could see", got, pinUnsupported)

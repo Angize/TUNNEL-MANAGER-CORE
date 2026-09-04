@@ -57,16 +57,4 @@ func TestBareRefusesAProtocolNumberAnotherProfileOwns(t *testing.T) {
 	if err := c.validate(); err == nil {
 		t.Error("a non-bare profile must still refuse raw_proto outright — its number is tied to its header")
 	}
-
-	sp := validSpoof()
-	sp.RawProto = protoOf(t, "tcp")
-	if err := sp.validate(); err == nil {
-		t.Error("spoof is bare-like and headerless — it must refuse a borrowed protocol number too")
-	}
-	sp.RawProto = 200
-	if _, taken := packet.RawProfileOwning(200); !taken {
-		if err := sp.validate(); err != nil {
-			t.Errorf("spoof must still accept a free protocol number, got %v", err)
-		}
-	}
 }

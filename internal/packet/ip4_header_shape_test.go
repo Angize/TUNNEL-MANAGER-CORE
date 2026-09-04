@@ -18,7 +18,7 @@ func TestCraftedHeadersLookLikeTheFlowTheyJoin(t *testing.T) {
 			name string
 			pkt  []byte
 		}{
-			{"buildIP4 (spoof REAL data)", buildIP4(src, dst, protoBare, body)},
+			{"buildIP4 (REAL data)", buildIP4(src, dst, protoBare, body)},
 			{"low-TTL decoy", buildIP4Ext(src, dst, protoBare, 4, false, body)},
 			{"bad-checksum decoy", buildIP4Ext(src, dst, protoBare, 64, true, body)},
 		} {
@@ -29,7 +29,7 @@ func TestCraftedHeadersLookLikeTheFlowTheyJoin(t *testing.T) {
 			if flags&ipFlagDF == 0 {
 				t.Fatalf("%s: DF is not set. Measured on the wire: the raw carrier's own data and an "+
 					"ordinary Linux UDP socket both send DF=1, so a DF=0 packet is one bit that tells a "+
-					"decoy apart from the flow it is imitating — and on the spoof link it is every "+
+					"decoy apart from the flow it is imitating — and on the raw link it is every "+
 					"packet of the tunnel", tc.name)
 			}
 			if frag := flags & 0x1fff; frag != 0 {

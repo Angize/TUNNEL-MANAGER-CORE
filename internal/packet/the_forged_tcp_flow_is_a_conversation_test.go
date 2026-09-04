@@ -13,15 +13,8 @@ type capturedLink struct{ sent [][]byte }
 func (l *capturedLink) send(pkt []byte, to *net.IPAddr) {
 	l.sent = append(l.sent, append([]byte(nil), pkt...))
 }
-func (l *capturedLink) recvLoop() error                     { return nil }
-func (l *capturedLink) replyTo(src *net.IPAddr) *net.IPAddr { return src }
-func (l *capturedLink) filterSrc() bool                     { return true }
-func (l *capturedLink) pinsSource() bool                    { return false }
-func (l *capturedLink) fakeFD() int                         { return -1 }
-func (l *capturedLink) close()                              {}
-func (l *capturedLink) header(realSrc net.IP, to *net.IPAddr) (net.IP, net.IP) {
-	return realSrc, to.IP
-}
+func (l *capturedLink) recvLoop() error { return nil }
+func (l *capturedLink) close()          {}
 
 func rawTCPEnd(t *testing.T, isClient bool) (*Raw, *capturedLink) {
 	t.Helper()

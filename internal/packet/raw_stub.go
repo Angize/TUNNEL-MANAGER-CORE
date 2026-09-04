@@ -22,15 +22,3 @@ func DialRaw(string, *tun.Device, bool, string, string, string, bool, int, int, 
 func ListenRaw(string, *tun.Device, bool, string, string, string, bool, int, int, int, int, int, bool, SportRotation, ...*tun.Device) (*Raw, error) {
 	return nil, errRawUnsupported
 }
-
-func DialSpoof(string, *tun.Device, bool, string, string, string, string, bool, int, int, int) (*Raw, error) {
-	return nil, errRawUnsupported
-}
-
-func ListenSpoof(string, *tun.Device, bool, string, string, string, string, bool, int, int, int) (*Raw, error) {
-	return nil, errRawUnsupported
-}
-
-func ProbeSpoof() SpoofProbe {
-	return SpoofProbe{Reason: "raw transport requires Linux (raw IPv4 sockets)"}
-}
