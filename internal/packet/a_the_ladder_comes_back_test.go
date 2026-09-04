@@ -148,15 +148,15 @@ func TestTheReviveWaitIsTheOperatorsNumber(t *testing.T) {
 	restore := ladderRevive
 	t.Cleanup(func() { ladderRevive = restore })
 
-	ApplyTuning(TuningInput{LadderRevive: []int64{7}})
-	if len(ladderRevive) != 1 || ladderRevive[0] != 7 {
+	ApplyTuning(TuningInput{LadderRevive: []int64{12}})
+	if len(ladderRevive) != 1 || ladderRevive[0] != 12 {
 		t.Fatalf("ApplyTuning did not take the wait: %v", ladderRevive)
 	}
 	src := NewPeerPool([]string{"94.182.131.47"}, 0)
 	rc, rolls, drops := ladderOn(t, nil, src)
 	toDeadEnd(t, rc, rolls, drops, func(bool) { src.nextEndpoint(false) })
-	if w := armedFor(rc); w != 7*time.Second {
-		t.Errorf("the ladder waits %v, want the operator's 7s", w)
+	if w := armedFor(rc); w != 12*time.Second {
+		t.Errorf("the ladder waits %v, want the operator's 12s", w)
 	}
 }
 
@@ -166,7 +166,7 @@ func TestAnUnusableReviveWaitKeepsTheDefault(t *testing.T) {
 	restore := ladderRevive
 	t.Cleanup(func() { ladderRevive = restore })
 
-	for _, in := range [][]int64{nil, {}, {0}, {-3}, {86401}} {
+	for _, in := range [][]int64{nil, {}, {0}, {-3}, {reviveStepMin - 1}, {reviveStepMax + 1}, {86401}} {
 		ladderRevive = []int64{45, 180, 600}
 		ApplyTuning(TuningInput{LadderRevive: in})
 		if len(ladderRevive) != 3 || ladderRevive[0] != 45 {
@@ -221,5 +221,36 @@ func TestTheReviveWorksOnEveryLadderShape(t *testing.T) {
 					spent, 2*budget)
 			}
 		})
+	}
+}
+
+// The revive wait has its OWN range, and it is not the suspect ladder's. Both lists used to run through
+// one 1..86400 filter, so the form could offer -- and the core would take -- a 3-second revive that
+// refills the ladder before the node has judged the last rung, or a 12-hour one that reads as "never".
+// The suspect backoff is a different clock (a burned endpoint waits out a censor, not a probe) and must
+// NOT be narrowed with it: a two-hour step still has to land.
+func TestTheReviveWaitAndTheSuspectBackoffHaveDifferentRanges(t *testing.T) {
+	rv, sb := ladderRevive, suspectBackoff
+	t.Cleanup(func() { ladderRevive, suspectBackoff = rv, sb })
+
+	for _, tc := range []struct {
+		in   int64
+		want bool
+	}{{reviveStepMin, true}, {reviveStepMax, true}, {45, true},
+		{reviveStepMin - 1, false}, {1, false}, {reviveStepMax + 1, false}, {7200, false}} {
+		ladderRevive = []int64{45, 180, 600}
+		ApplyTuning(TuningInput{LadderRevive: []int64{tc.in}})
+		took := len(ladderRevive) == 1 && ladderRevive[0] == tc.in
+		if took != tc.want {
+			t.Errorf("revive wait %ds: taken=%v want %v (range is %d..%d)",
+				tc.in, took, tc.want, reviveStepMin, reviveStepMax)
+		}
+	}
+
+	suspectBackoff = []int64{600, 1800, 3600}
+	ApplyTuning(TuningInput{SuspectBackoff: []int64{7200}})
+	if len(suspectBackoff) != 1 || suspectBackoff[0] != 7200 {
+		t.Errorf("a 7200s suspect step was dropped (%v) -- the revive range was applied to the wrong list",
+			suspectBackoff)
 	}
 }
