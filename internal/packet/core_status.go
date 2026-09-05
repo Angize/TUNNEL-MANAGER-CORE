@@ -56,7 +56,7 @@ func (s *coreStatus) setRot(live func() rotStatus) {
 }
 
 func (s *coreStatus) trackRot(live func() rotStatus, closeCh <-chan struct{}) {
-	if s == nil || live().Every == 0 {
+	if s == nil || live() == (rotStatus{}) {
 		return
 	}
 	s.setRot(live)
