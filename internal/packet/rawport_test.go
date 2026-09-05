@@ -32,7 +32,7 @@ func TestRawPortReachesBothTheWireAndTheAntiLeakRule(t *testing.T) {
 	}
 
 	for _, isClient := range []bool{true, false} {
-		got := rawDropMatches(testDst, "tcp", custom, isClient, false, false)
+		got := rawDropMatches(rawLeak{peer: testDst, profile: "tcp", port: custom, isClient: isClient})
 		if len(got) != 1 {
 			t.Fatalf("tcp isClient=%v: want exactly one anti-leak rule, got %v", isClient, got)
 		}

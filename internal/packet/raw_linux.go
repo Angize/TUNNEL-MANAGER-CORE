@@ -272,7 +272,8 @@ func (r *Raw) sendTCPFlags(flags byte, to *net.IPAddr, cport uint16) {
 	if flags&tcpSyn == 0 {
 		seq = r.tcpSeqBase() + r.tcpBytes.Load()
 	}
-	seg := rawEncap(r.profile, nil, r.srcIP(), to.IP, r.isClient, r.icmpID, r.srvPort(), cport,
+	srv, cli := r.wirePorts(cport)
+	seg := rawEncap(r.profile, nil, r.srcIP(), to.IP, r.isClient, r.icmpID, srv, cli,
 		seq, r.tcpAck.Load(), r.spi, r.tsNow(), r.tsEcr.Load(), flags)
 	r.writeOut(seg, to)
 }
@@ -595,11 +596,49 @@ func openHdrincl(proto int) (int, error) {
 
 const rawSendMark = 0x746e6c01
 
-func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked, portsMove bool) [][]string {
-	d := peer.String()
-	switch profile {
+type rawLeak struct {
+	peer      net.IP
+	profile   string
+	port      uint16
+	dports    []uint16
+	isClient  bool
+	marked    bool
+	portsMove bool
+}
+
+func inSportBand(p uint16) bool {
+	return int(p) >= sportBandLo && int(p) < sportBandLo+sportBandSpan
+}
+
+func (l rawLeak) heardFrom() []string {
+	srv, _ := rawPorts(false, l.port, 0)
+	if !l.portsMove {
+		return []string{strconv.Itoa(int(srv))}
+	}
+	out := []string{strconv.Itoa(sportBandLo) + ":" + strconv.Itoa(sportBandLo+sportBandSpan-1)}
+	if !inSportBand(srv) {
+		out = append(out, strconv.Itoa(int(srv)))
+	}
+	return out
+}
+
+func (l rawLeak) answeredOn() []string {
+	if len(l.dports) < 2 {
+		srv, _ := rawPorts(false, l.port, 0)
+		return []string{strconv.Itoa(int(srv))}
+	}
+	out := make([]string, 0, len(l.dports))
+	for _, p := range l.dports {
+		out = append(out, strconv.Itoa(int(p)))
+	}
+	return out
+}
+
+func rawDropMatches(l rawLeak) [][]string {
+	d := l.peer.String()
+	switch l.profile {
 	case "icmp":
-		if isClient || !marked {
+		if l.isClient || !l.marked {
 			return nil
 		}
 		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "echo-reply",
@@ -607,20 +646,13 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked, 
 	case "udp":
 		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "port-unreachable"}}
 	case "tcp":
-		srv, _ := rawPorts(false, port, 0)
-		if !isClient {
-			return [][]string{{"-d", d, "-p", "tcp", "--sport", strconv.Itoa(int(srv)),
-				"--tcp-flags", "RST", "RST"}}
+		side, specs := "--dport", l.heardFrom()
+		if !l.isClient {
+			side, specs = "--sport", l.answeredOn()
 		}
-		rst := func(spec string) []string {
-			return []string{"-d", d, "-p", "tcp", "--dport", spec, "--tcp-flags", "RST", "RST"}
-		}
-		if !portsMove {
-			return [][]string{rst(strconv.Itoa(int(srv)))}
-		}
-		out := [][]string{rst(strconv.Itoa(sportBandLo) + ":" + strconv.Itoa(sportBandLo+sportBandSpan-1))}
-		if int(srv) < sportBandLo || int(srv) >= sportBandLo+sportBandSpan {
-			out = append(out, rst(strconv.Itoa(int(srv))))
+		out := make([][]string, 0, len(specs))
+		for _, spec := range specs {
+			out = append(out, []string{"-d", d, "-p", "tcp", side, spec, "--tcp-flags", "RST", "RST"})
 		}
 		return out
 	}
@@ -628,12 +660,12 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked, 
 	return nil
 }
 
-func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked, portsMove bool) (func(), bool) {
+func addRawDrop(l rawLeak, tun string) (func(), bool) {
 	type installed struct {
 		match, owner []string
 	}
 	var added []installed
-	want := rawDropMatches(peer, profile, port, isClient, marked, portsMove)
+	want := rawDropMatches(l)
 	for _, m := range want {
 		args := append([]string{"-I", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
 		own, ok := runRule(args, ownerMatch(tun), "raw: anti-leak")
@@ -645,7 +677,7 @@ func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked,
 	if len(added) == 0 {
 		return nil, len(want) == 0
 	}
-	log.Printf("raw: anti-leak scoped to %s (%d OUTPUT rule(s), profile %s, owner %s)", peer, len(added), profile, ownerLabel(added[0].owner, tun))
+	log.Printf("raw: anti-leak scoped to %s (%d OUTPUT rule(s), profile %s, owner %s)", l.peer, len(added), l.profile, ownerLabel(added[0].owner, tun))
 	return func() {
 		for _, in := range added {
 			del := append([]string{"-D", "OUTPUT"}, append(append([]string{}, in.match...), "-j", "DROP")...)
@@ -670,9 +702,7 @@ func setSendMark(conn *net.IPConn) error {
 
 func (r *Raw) cport() uint16 { return uint16(r.cliPort.Load()) }
 
-func (r *Raw) srvPort() uint16 { return r.port }
-
-func (r *Raw) rotActive() bool { return r.sportEvery > 0 && r.proto == protoUDP }
+func (r *Raw) rotActive() bool { return r.sportEvery > 0 }
 
 func (r *Raw) portsMove() bool { return r.rotActive() || r.sportRandom }
 
@@ -746,14 +776,12 @@ func (r *Raw) armWalk() {
 }
 
 func (r *Raw) setSportRotate(rot SportRotation) {
-	if rot.Every <= 0 || r.proto != protoUDP {
+	if rot.Every <= 0 || !RawProfileHasPorts(r.profile) {
 		return
 	}
 	r.sportEvery = rot.Every
 	r.armWalk()
-	if r.isClient {
-		r.dports = dportSet(r.port, rot.Dports, r.psk)
-	}
+	r.dports = dportSet(r.port, rot.Dports, r.psk)
 }
 
 func (r *Raw) setSportMode(on bool, fix int) {
@@ -831,7 +859,8 @@ func (r *Raw) wireAntiLeak() {
 		}
 	}
 	r.leak.init(r.closeCh, func(peer net.IP) (func(), bool) {
-		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked, r.portsMove())
+		return addRawDrop(rawLeak{peer: peer, profile: r.profile, port: r.port, dports: r.dports,
+			isClient: r.isClient, marked: marked, portsMove: r.portsMove()}, r.tunName())
 	})
 	if p := r.dst(); p != nil {
 		r.leak.scope(p.IP)

@@ -163,7 +163,7 @@ func TestDecapReadsTheSourcePortTheEncapWrote(t *testing.T) {
 // is what makes it hold across a redraw instead of going stale on it.
 func TestTheAntiLeakRuleCoversEveryPortTheDrawCanReturn(t *testing.T) {
 	for _, isClient := range []bool{true, false} {
-		got := rawDropMatches(testDst, "tcp", 0, isClient, false, false)
+		got := rawDropMatches(rawLeak{peer: testDst, profile: "tcp", isClient: isClient})
 		if len(got) != 1 {
 			t.Fatalf("isClient=%v: %d rules, want exactly 1", isClient, len(got))
 		}
@@ -193,7 +193,7 @@ func TestTheAntiLeakRuleCoversEveryPortTheDrawCanReturn(t *testing.T) {
 	}
 
 	for _, isClient := range []bool{true, false} {
-		got := rawDropMatches(testDst, "udp", 0, isClient, false, false)
+		got := rawDropMatches(rawLeak{peer: testDst, profile: "udp", isClient: isClient})
 		if len(got) != 1 || strings.Contains(strings.Join(got[0], " "), "port ") {
 			t.Errorf("udp isClient=%v: %v", isClient, got)
 		}
