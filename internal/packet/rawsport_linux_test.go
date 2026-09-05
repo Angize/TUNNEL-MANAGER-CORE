@@ -54,26 +54,6 @@ func TestTheSourcePortBandIsWellFormed(t *testing.T) {
 	}
 }
 
-func TestTheDrawStaysInTheBandAndSpreads(t *testing.T) {
-	const draws = 4000
-	lo, hi := uint32(sportBandLo), uint32(sportBandLo+sportBandSpan-1)
-	seen := map[uint16]bool{}
-	for i := 0; i < draws; i++ {
-		p := uint32(rawRollSport())
-		if p < lo || p > hi {
-			t.Fatalf("draw %d returned %d, outside [%d,%d] — the anti-leak rule and the measured "+
-				"block rates are both about the band", i, p, lo, hi)
-		}
-		seen[uint16(p)] = true
-	}
-	// 4000 draws over 10000 ports collide by the birthday bound; anything near 4000 distinct says the
-	// draw is spreading, anything small says it is stuck on a few values.
-	if len(seen) < draws*3/4 {
-		t.Errorf("%d distinct ports in %d draws — the draw is not spreading over the band",
-			len(seen), draws)
-	}
-}
-
 func TestSportModeOnlyArmsWhereThereArePorts(t *testing.T) {
 	for _, profile := range RawProfileNames() {
 		r := &Raw{profile: profile, isClient: true}
@@ -202,8 +182,9 @@ func TestTheAntiLeakRuleCoversEveryPortTheDrawCanReturn(t *testing.T) {
 					"kernel is then free to RST the peer", isClient, rule)
 			}
 		}
+		perm := rotPermFrom("a-psk-for-the-anti-leak-rule", isClient)
 		for i := 0; i < 64; i++ {
-			p := int(rawRollSport())
+			p := int(perm.at(uint64(i)))
 			if strings.Contains(rule, " "+strconv.Itoa(p)+" ") && p != rawServerPort {
 				t.Errorf("isClient=%v: rule %q names band port %d, so it does not cover the others",
 					isClient, rule, p)

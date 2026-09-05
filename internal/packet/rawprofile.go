@@ -190,8 +190,6 @@ func randBelow(n uint32) uint32 {
 
 func randPort(lo, span uint32) uint16 { return uint16(lo + randBelow(span)) }
 
-func rawRollSport() uint16 { return randPort(sportBandLo, sportBandSpan) }
-
 func RawProfileHasPorts(profile string) bool {
 	switch rawProfiles[profile] {
 	case protoUDP, protoTCP:

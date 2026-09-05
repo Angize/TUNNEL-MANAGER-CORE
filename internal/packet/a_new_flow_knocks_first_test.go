@@ -17,7 +17,7 @@ func TestADrawnPortCarriesNothingUntilItIsAnswered(t *testing.T) {
 	r := &Raw{isClient: true, profile: "tcp", sportRandom: true}
 	r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 99, 0, 2)})
 
-	r.usePort(8443)
+	r.usePort()
 	if !r.unanswered.Load() {
 		t.Errorf("the draw made a brand new four-tuple and left it carrying -- the queued tun " +
 			"traffic then opens it with a burst of thousands instead of a handshake")

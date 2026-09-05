@@ -90,6 +90,7 @@ type Raw struct {
 	rotPerm    rotPerm
 	dports     []uint16
 	txCount    atomic.Uint64
+	portEpoch  atomic.Uint64
 
 	leak     antiLeaker
 	sendMu   sync.RWMutex
@@ -663,6 +664,30 @@ func (r *Raw) srvPort() uint16 { return r.port }
 
 func (r *Raw) rotActive() bool { return r.sportEvery > 0 && r.proto == protoUDP }
 
+func (r *Raw) portsMove() bool { return r.rotActive() || r.sportRandom }
+
+func (r *Raw) portStepAt(sent uint64) uint64 {
+	if r.rotActive() {
+		return uint64(r.rotIdx) + sent/uint64(r.sportEvery)
+	}
+	return uint64(r.rotIdx) + r.portEpoch.Load()
+}
+
+func (r *Raw) portStep() uint64 {
+	if !r.rotActive() {
+		return r.portStepAt(0)
+	}
+	return r.portStepAt(r.txCount.Add(1) - 1)
+}
+
+func (r *Raw) portStepNow() uint64 {
+	sent := r.txCount.Load()
+	if sent > 0 {
+		sent--
+	}
+	return r.portStepAt(sent)
+}
+
 func (r *Raw) dportAt(w uint64) uint16 {
 	if len(r.dports) < 2 {
 		return r.port
@@ -670,37 +695,44 @@ func (r *Raw) dportAt(w uint64) uint16 {
 	return r.dports[(w/sportBandSpan)%uint64(len(r.dports))]
 }
 
-func (r *Raw) rotSnapshot() rotStatus {
-	if !r.rotActive() {
-		return rotStatus{}
+func (r *Raw) portsAt(w uint64, cport uint16) (uint16, uint16) {
+	if !r.isClient {
+		return r.rotPerm.at(w), cport
 	}
-	drawn := r.txCount.Load()
-	n := drawn
-	if n > 0 {
-		n--
+	if r.rotActive() {
+		cport = r.rotPerm.at(w)
 	}
-	w := uint64(r.rotIdx) + n/uint64(r.sportEvery)
-	st := rotStatus{Sport: r.rotPerm.at(w), Dports: len(r.dports), Every: r.sportEvery,
-		Lo: sportBandLo, Hi: sportBandLo + sportBandSpan - 1,
-		Drawn: (drawn + uint64(r.sportEvery) - 1) / uint64(r.sportEvery)}
-	if r.isClient {
-		st.Dport = r.dportAt(w)
-	} else {
-		st.Dport = r.cport()
-	}
-	return st
+	return r.dportAt(w), cport
 }
 
 func (r *Raw) wirePorts(cport uint16) (uint16, uint16) {
-	if !r.rotActive() {
+	if !r.portsMove() {
 		return r.port, cport
 	}
-	w := uint64(r.rotIdx) + (r.txCount.Add(1)-1)/uint64(r.sportEvery)
-	sp := r.rotPerm.at(w)
-	if !r.isClient {
-		return sp, cport
+	return r.portsAt(r.portStep(), cport)
+}
+
+func (r *Raw) wirePortsNow() (uint16, uint16) {
+	if !r.portsMove() {
+		return r.port, r.cport()
 	}
-	return r.dportAt(w), sp
+	return r.portsAt(r.portStepNow(), r.cport())
+}
+
+func (r *Raw) rotSnapshot() rotStatus {
+	if !r.portsMove() {
+		return rotStatus{}
+	}
+	w := r.portStepNow()
+	srv, cli := r.portsAt(w, r.cport())
+	sport, dport := rawPorts(r.isClient, srv, cli)
+	return rotStatus{Sport: sport, Dport: dport, Dports: len(r.dports), Every: r.sportEvery,
+		Lo: sportBandLo, Hi: sportBandLo + sportBandSpan - 1, Drawn: w - uint64(r.rotIdx) + 1}
+}
+
+func (r *Raw) armWalk() {
+	r.rotIdx = randBelow(sportBandSpan)
+	r.rotPerm = rotPermFrom(r.psk, r.isClient)
 }
 
 func (r *Raw) setSportRotate(rot SportRotation) {
@@ -708,8 +740,7 @@ func (r *Raw) setSportRotate(rot SportRotation) {
 		return
 	}
 	r.sportEvery = rot.Every
-	r.rotIdx = randBelow(sportBandSpan)
-	r.rotPerm = rotPermFrom(r.psk, r.isClient)
+	r.armWalk()
 	if r.isClient {
 		r.dports = dportSet(r.port, rot.Dports, r.psk)
 	}
@@ -720,8 +751,12 @@ func (r *Raw) setSportMode(on bool, fix int) {
 	if RawProfileHasPorts(r.profile) && fix > 0 && fix <= 65535 && !r.sportRandom {
 		r.cliPort.Store(uint32(fix))
 	}
-	if r.sportRandom && r.isClient {
-		r.cliPort.Store(uint32(rawRollSport()))
+	if !r.sportRandom {
+		return
+	}
+	r.armWalk()
+	if r.isClient {
+		r.cliPort.Store(uint32(r.rotPerm.at(r.portStepNow())))
 	}
 }
 
@@ -729,7 +764,9 @@ func (r *Raw) learnClientPort(sport uint16) {
 	if r.isClient || sport == 0 || !RawProfileHasPorts(r.profile) {
 		return
 	}
-	r.cliPort.Store(uint32(sport))
+	if prev := uint16(r.cliPort.Swap(uint32(sport))); prev != 0 && prev != sport && r.sportRandom {
+		r.portEpoch.Add(1)
+	}
 }
 
 func (r *Raw) replyPort(sport uint16) uint16 {
@@ -739,24 +776,18 @@ func (r *Raw) replyPort(sport uint16) uint16 {
 	return sport
 }
 
-func (r *Raw) usePort(p uint16) {
+func (r *Raw) usePort() {
 	r.unanswered.Store(true)
 	r.ci.Store(nil)
-	r.cliPort.Store(uint32(p))
+	if r.sportRandom {
+		r.portEpoch.Add(1)
+		r.cliPort.Store(uint32(r.rotPerm.at(r.portStepNow())))
+	}
 	r.newTCPFlow()
 }
 
 func (r *Raw) freshTuple() {
-	p := r.cport()
-	if r.sportRandom {
-		for i := 0; i < 8; i++ {
-			if n := rawRollSport(); n != p {
-				p = n
-				break
-			}
-		}
-	}
-	r.usePort(p)
+	r.usePort()
 	wakeLoop(r.wake)
 }
 
@@ -765,7 +796,7 @@ func (r *Raw) mustKnock() bool {
 }
 
 func (r *Raw) rollSourcePort() bool {
-	r.usePort(rawRollSport())
+	r.usePort()
 	r.sendInit()
 
 	r.st.portRedrawn()
@@ -1071,7 +1102,8 @@ func (r *Raw) livePath() (pathKey, bool) {
 		k.Dst = p.IP.String()
 	}
 	if RawProfileHasPorts(r.profile) && !r.rotActive() {
-		k.Sport, k.Dport = rawPorts(r.isClient, r.port, r.cport())
+		srv, cli := r.wirePortsNow()
+		k.Sport, k.Dport = rawPorts(r.isClient, srv, cli)
 	}
 	return k, r.sealer() != nil
 }
