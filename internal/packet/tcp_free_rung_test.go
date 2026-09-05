@@ -146,12 +146,14 @@ func TestWithNoCarrierTheRungIsSpentAndNothingIsTornDown(t *testing.T) {
 			"always fails leaves the dial loop between carriers for ever, and a direct pool has no other "+
 			"way off it -- so the rungs must still run out", burned)
 	}
-	// The burn and the move it caused, and nothing from the draws before them: a redrawn source port is
-	// a retry of the same endpoint and says nothing until it works, but a walk really did change where
-	// the traffic goes, and that is the operator's to see -- the same line udp and raw publish.
-	if got := codes(coreStatusEvents(t, path)); len(got) != 2 ||
-		got[0] != "tun-probe" || got[1] != "peer-rotate" {
-		t.Fatalf("events = %v, want the burn then the rotation it caused", got)
+	// The burn, the rotation it stopped, and the move it caused -- and nothing from the draws before
+	// them: a redrawn source port is a retry of the same endpoint and says nothing until it works, but
+	// a walk really did change where the traffic goes, and that is the operator's to see. Burning one
+	// of two destinations leaves a single usable one, which is the degraded line in the middle; the
+	// same line the edge pool has always published, now published by the direct pool too.
+	if got := codes(coreStatusEvents(t, path)); len(got) != 3 ||
+		got[0] != "tun-probe" || got[1] != "degraded" || got[2] != "peer-rotate" {
+		t.Fatalf("events = %v, want the burn, the stopped rotation, then the move it caused", got)
 	}
 }
 

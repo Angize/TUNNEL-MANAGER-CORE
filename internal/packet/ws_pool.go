@@ -53,16 +53,16 @@ type healthRec struct {
 }
 
 type wsPool struct {
-	mu          sync.Mutex
-	ips         []string
-	snis        []wsSNIEntry
-	ipHealth    healthSet
-	sniHealth   healthSet
-	i, j        int
-	burns       atomic.Uint64
-	rotDegraded bool
-	chosen      string
-	now         func() int64
+	mu        sync.Mutex
+	ips       []string
+	snis      []wsSNIEntry
+	ipHealth  healthSet
+	sniHealth healthSet
+	i, j      int
+	burns     atomic.Uint64
+	watch     rotWatch
+	chosen    string
+	now       func() int64
 
 	ev    func(kind, code, detail string)
 	flush func()
@@ -270,26 +270,40 @@ func (p *wsPool) advance() bool {
 	return ip != beforeIP || sni.host != beforeSNI.host
 }
 
+func (p *wsPool) sniHostsLocked() []string {
+	out := make([]string, len(p.snis))
+	for i, s := range p.snis {
+		out[i] = s.host
+	}
+	return out
+}
+
 func (p *wsPool) advanceIP() (now string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.chosen = ""
 	if len(p.ips) < 2 {
 		return ""
 	}
-	p.i = (p.i + 1) % len(p.ips)
-	return p.ips[p.i]
+	idx := p.ipHealth.nextFrom(p.i, p.ips)
+	if idx == p.i {
+		return ""
+	}
+	p.i, p.chosen = idx, ""
+	return p.ips[idx]
 }
 
 func (p *wsPool) advanceSNI() (now string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.chosen = ""
 	if len(p.snis) < 2 {
 		return ""
 	}
-	p.j = (p.j + 1) % len(p.snis)
-	return p.snis[p.j].host
+	idx := p.sniHealth.nextFrom(p.j, p.sniHostsLocked())
+	if idx == p.j {
+		return ""
+	}
+	p.j, p.chosen = idx, ""
+	return p.snis[idx].host
 }
 
 func (p *wsPool) restoreIPs() {
@@ -365,25 +379,18 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 
 func (p *wsPool) reassessRotation() {
 	p.mu.Lock()
-	if len(p.ips) < 2 {
-		p.mu.Unlock()
-		return
-	}
-
-	reachable := p.ipHealth.countEligible(p.ips)
-	degraded := reachable < 2
-	if degraded == p.rotDegraded {
-		p.mu.Unlock()
-		return
-	}
-	p.rotDegraded = degraded
+	eligible, total := p.ipHealth.countEligible(p.ips), len(p.ips)
+	degraded, report := p.watch.turned(eligible, total)
 	p.mu.Unlock()
-	detail := strconv.Itoa(reachable) + "/" + strconv.Itoa(len(p.ips))
+	if !report {
+		return
+	}
+	detail := "ip:" + strconv.Itoa(eligible) + "/" + strconv.Itoa(total)
 	if degraded {
 		p.event("pool", "degraded", detail)
-	} else {
-		p.event("pool", "restored", detail)
+		return
 	}
+	p.event("pool", "restored", detail)
 }
 
 func (p *wsPool) retestNow(kind, key string) bool {
@@ -392,6 +399,9 @@ func (p *wsPool) retestNow(kind, key string) bool {
 	p.mu.Unlock()
 	if ok {
 		p.publish()
+		if kind == "ip" {
+			p.reassessRotation()
+		}
 	}
 	return ok
 }
