@@ -15,13 +15,17 @@ func fecHdrPeek(p []byte) fecHeader {
 }
 
 type fecCapture struct {
-	mu   sync.Mutex
-	pkts [][]byte
+	mu     sync.Mutex
+	pkts   [][]byte
+	blocks int
 }
 
-func (c *fecCapture) emit(p []byte) {
+func (c *fecCapture) emit(block [][]byte) {
 	c.mu.Lock()
-	c.pkts = append(c.pkts, append([]byte(nil), p...))
+	c.blocks++
+	for _, p := range block {
+		c.pkts = append(c.pkts, append([]byte(nil), p...))
+	}
 	c.mu.Unlock()
 }
 

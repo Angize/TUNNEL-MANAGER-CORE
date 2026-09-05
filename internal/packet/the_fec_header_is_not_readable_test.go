@@ -11,7 +11,11 @@ func fecWireOf(t *testing.T, psk string, blocks, count, size int) [][]byte {
 	t.Helper()
 	var wire [][]byte
 	enc, _ := newFecPair(true, 10, 3, psk, "hdr-test",
-		func(p []byte) { wire = append(wire, append([]byte(nil), p...)) }, func([]byte) {})
+		func(block [][]byte) {
+			for _, p := range block {
+				wire = append(wire, append([]byte(nil), p...))
+			}
+		}, func([]byte) {})
 	if enc == nil {
 		t.Fatal("no encoder")
 	}
@@ -95,7 +99,7 @@ func TestAForgedFecShardCannotBlackholeABlock(t *testing.T) {
 	wire := fecWireOf(t, psk, 1, 10, 250)
 
 	var got [][]byte
-	_, dec := newFecPair(true, 10, 3, psk, "victim", func([]byte) {},
+	_, dec := newFecPair(true, 10, 3, psk, "victim", func([][]byte) {},
 		func(f []byte) { got = append(got, append([]byte(nil), f...)) })
 
 	clear := make([]byte, fecHdrLen+2)
@@ -145,7 +149,7 @@ func TestAShardThatDisagreesWithItsBlockIsStillDelivered(t *testing.T) {
 	fresh := fecWireOf(t, psk, 1, 10, 900)
 
 	var got [][]byte
-	_, dec := newFecPair(true, 10, 3, psk, "victim", func([]byte) {},
+	_, dec := newFecPair(true, 10, 3, psk, "victim", func([][]byte) {},
 		func(f []byte) { got = append(got, append([]byte(nil), f...)) })
 
 	key := newFecHdrMask(psk)
@@ -183,7 +187,7 @@ func fecHdrOfKey(key fecHdrMask, p []byte) fecHeader {
 func TestAPassFrameCarriesAnAllZeroHeader(t *testing.T) {
 	const psk = "a-psk-for-pass"
 	var got [][]byte
-	enc, dec := newFecPair(true, 10, 3, psk, "pass", func([]byte) {},
+	enc, dec := newFecPair(true, 10, 3, psk, "pass", func([][]byte) {},
 		func(f []byte) { got = append(got, append([]byte(nil), f...)) })
 	defer enc.Close()
 

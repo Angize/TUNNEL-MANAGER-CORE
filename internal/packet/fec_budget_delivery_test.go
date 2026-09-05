@@ -17,7 +17,11 @@ func fecBlockOf(pkts [][]byte, blk uint32) [][]byte {
 
 func TestFecDeliversAnArrivedShardOverTheByteBudget(t *testing.T) {
 	var wire [][]byte
-	enc, err := newFecEncoder(5, 2, fecTestKey, func(p []byte) { wire = append(wire, append([]byte(nil), p...)) })
+	enc, err := newFecEncoder(5, 2, fecTestKey, func(block [][]byte) {
+		for _, p := range block {
+			wire = append(wire, append([]byte(nil), p...))
+		}
+	})
 	if err != nil {
 		t.Fatalf("newFecEncoder: %v", err)
 	}

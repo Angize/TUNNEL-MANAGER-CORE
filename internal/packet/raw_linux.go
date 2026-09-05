@@ -421,13 +421,41 @@ func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 }
 
 func (r *Raw) initFec(fec bool, fecData, fecParity int) {
-	r.fecEnc, r.fecDec = newFecPair(fec, fecData, fecParity, r.psk, "raw",
-		func(pkt []byte) {
-			if p := r.dst(); p != nil {
-				r.writeOut(r.wire(pkt, p.IP), p)
-			}
-		},
+	r.fecEnc, r.fecDec = newFecPair(fec, fecData, fecParity, r.psk, "raw", r.sendFecBlock,
 		func(frame []byte) { r.deliver(frame, r.rxAddr.Load(), uint16(r.rxSport.Load())) })
+}
+
+func (r *Raw) sendFecBlock(shards [][]byte) {
+	p := r.dst()
+	if p == nil {
+		return
+	}
+	wired := make([][]byte, len(shards))
+	for i, b := range shards {
+		wired[i] = r.wire(b, p.IP)
+	}
+	if r.batch != nil && len(wired) > 1 {
+		var oob []byte
+		if src := r.boundSrc(); src != nil {
+			oob = r.srcOOB(src)
+		}
+		ms := make([]ipv4.Message, len(wired))
+		for i := range wired {
+			ms[i].Buffers = [][]byte{wired[i]}
+			ms[i].Addr, ms[i].OOB = p, oob
+		}
+		sent := sendBatch(r.batch, ms)
+		if sent == len(ms) {
+			return
+		}
+		if sent > 0 {
+			r.sendErr.note("raw/fec-batch", errShortBatch)
+			wired = wired[sent:]
+		}
+	}
+	for _, w := range wired {
+		r.writeOut(w, p)
+	}
 }
 
 func (r *Raw) Run() error {

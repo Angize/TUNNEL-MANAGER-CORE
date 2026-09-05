@@ -5,6 +5,7 @@ import "errors"
 var (
 	gfExp [512]byte
 	gfLog [256]byte
+	gfMul [256][256]byte
 )
 
 func init() {
@@ -19,6 +20,13 @@ func init() {
 	}
 	for i := 255; i < 512; i++ {
 		gfExp[i] = gfExp[i-255]
+	}
+	for a := 1; a < 256; a++ {
+		la := int(gfLog[a])
+		row := &gfMul[a]
+		for b := 1; b < 256; b++ {
+			row[b] = gfExp[la+int(gfLog[b])]
+		}
 	}
 }
 
@@ -147,8 +155,12 @@ func (c *fecCodec) Reconstruct(shards [][]byte) ([][]byte, error) {
 }
 
 func gfMulAddRow(dst, src []byte, coef byte) {
-	for i := range dst {
-		dst[i] ^= gmul(coef, src[i])
+	if coef == 0 {
+		return
+	}
+	row := &gfMul[coef]
+	for i, v := range src[:len(dst)] {
+		dst[i] ^= row[v]
 	}
 }
 

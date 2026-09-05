@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-func newFecPair(fec bool, data, parity int, psk, name string, emit, deliver func([]byte)) (*fecEncoder, *fecDecoder) {
+func newFecPair(fec bool, data, parity int, psk, name string, emit func([][]byte), deliver func([]byte)) (*fecEncoder, *fecDecoder) {
 	if !fec {
 		return nil, nil
 	}
@@ -112,7 +112,7 @@ type fecEncoder struct {
 	codec *fecCodec
 	n, k  int
 	key   fecHdrMask
-	emit  func([]byte)
+	emit  func([][]byte)
 
 	mu     sync.Mutex
 	block  uint32
@@ -121,7 +121,7 @@ type fecEncoder struct {
 	closed bool
 }
 
-func newFecEncoder(n, k int, key fecHdrMask, emit func([]byte)) (*fecEncoder, error) {
+func newFecEncoder(n, k int, key fecHdrMask, emit func([][]byte)) (*fecEncoder, error) {
 	c, err := newFECCodec(n, k)
 	if err != nil {
 		return nil, err
@@ -194,14 +194,15 @@ func (e *fecEncoder) flushLocked() {
 		return fecHeader{typ: typ, blk: blk, idx: idx, n: e.n, k: e.k, count: count, shardLen: shardLen}
 	}
 
-	for i := 0; i < count; i++ {
-		e.emit(fecPutHdr(e.key, hdr(fecTypeData, i), queued[i]))
-	}
-
 	kEff := (e.k*count + e.n - 1) / e.n
-	for i := 0; i < kEff; i++ {
-		e.emit(fecPutHdr(e.key, hdr(fecTypeParity, i), parity[i]))
+	out := make([][]byte, 0, count+kEff)
+	for i := 0; i < count; i++ {
+		out = append(out, fecPutHdr(e.key, hdr(fecTypeData, i), queued[i]))
 	}
+	for i := 0; i < kEff; i++ {
+		out = append(out, fecPutHdr(e.key, hdr(fecTypeParity, i), parity[i]))
+	}
+	e.emit(out)
 }
 
 type fecBlock struct {

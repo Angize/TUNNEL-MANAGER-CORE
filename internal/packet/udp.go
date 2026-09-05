@@ -75,9 +75,11 @@ type UDP struct {
 
 	peerAnswered atomic.Bool
 
-	fecEnc *fecEncoder
-	fecDec *fecDecoder
-	rxAddr atomic.Pointer[net.UDPAddr]
+	fecEnc  *fecEncoder
+	fecDec  *fecDecoder
+	fecTx   *udpTx
+	fecTxOn *net.UDPConn
+	rxAddr  atomic.Pointer[net.UDPAddr]
 
 	closeCh   chan struct{}
 	closeOnce sync.Once
@@ -542,17 +544,42 @@ func (b *UDP) replySock() *net.UDPConn {
 }
 
 func (b *UDP) initFec(fec bool, fecData, fecParity int) {
-	b.fecEnc, b.fecDec = newFecPair(fec, fecData, fecParity, b.psk, "udp",
-		func(pkt []byte) {
-			if p := b.dst(); p != nil {
-				if c := b.sendConn(); c != nil {
-					if _, err := c.WriteToUDP(pkt, p); err != nil {
-						b.sendErr.note("udp/fec", err)
-					}
-				}
-			}
-		},
+	b.fecEnc, b.fecDec = newFecPair(fec, fecData, fecParity, b.psk, "udp", b.sendFecBlock,
 		func(frame []byte) { b.deliver(frame, b.rxAddr.Load()) })
+}
+
+func (b *UDP) sendFecBlock(shards [][]byte) {
+	p := b.dst()
+	if p == nil {
+		return
+	}
+	c := b.sendConn()
+	if c == nil {
+		return
+	}
+	if len(shards) > 1 {
+		if b.fecTx == nil || b.fecTxOn != c {
+			b.fecTx, b.fecTxOn = newUDPTx(c), c
+		}
+		if b.fecTx != nil {
+			b.fecTx.reset()
+			for _, s := range shards {
+				if b.fecTx.full() {
+					b.fecTx.flush(&b.sendErr)
+					b.fecTx.reset()
+				}
+				b.fecTx.add(s, p)
+			}
+			b.fecTx.flush(&b.sendErr)
+			b.fecTx.reset()
+			return
+		}
+	}
+	for _, s := range shards {
+		if _, err := c.WriteToUDP(s, p); err != nil {
+			b.sendErr.note("udp/fec", err)
+		}
+	}
 }
 
 func (b *UDP) Run() error {
