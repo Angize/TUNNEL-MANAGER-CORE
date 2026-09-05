@@ -34,7 +34,11 @@ func fecDataShard(blk uint32, n, k int) []byte {
 // front makes the codec a fixed, single, configured object and takes the choice away from the wire.
 func TestAFecShardMustBeOurGeometry(t *testing.T) {
 	var wire [][]byte
-	e, err := newFecEncoder(10, 3, fecTestKey, func(p []byte) { wire = append(wire, append([]byte(nil), p...)) })
+	e, err := newFecEncoder(10, 3, fecTestKey, func(block [][]byte) {
+		for _, p := range block {
+			wire = append(wire, append([]byte(nil), p...))
+		}
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

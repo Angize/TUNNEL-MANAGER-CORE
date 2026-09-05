@@ -11,9 +11,11 @@ func fecEncodeBlock(t *testing.T, n, k, count int) (wire, payloads [][]byte) {
 	t.Helper()
 	var mu sync.Mutex
 	var got [][]byte
-	e, err := newFecEncoder(n, k, fecTestKey, func(p []byte) {
+	e, err := newFecEncoder(n, k, fecTestKey, func(block [][]byte) {
 		mu.Lock()
-		got = append(got, append([]byte(nil), p...))
+		for _, p := range block {
+			got = append(got, append([]byte(nil), p...))
+		}
 		mu.Unlock()
 	})
 	if err != nil {
