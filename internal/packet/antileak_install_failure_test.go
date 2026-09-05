@@ -102,7 +102,7 @@ func TestAntiLeakSurvivesAFailedInstall(t *testing.T) {
 		}
 		defer func() { iptablesRun = restore }()
 		for _, p := range []string{"bare", "ipip", "gre", "esp"} {
-			rm, ok := addRawDrop(testDst, p, "core42", 0, true, true)
+			rm, ok := addRawDrop(testDst, p, "core42", 0, true, true, false)
 			if rm != nil || !ok {
 				t.Errorf("raw/%s: addRawDrop returned removal=%v ok=%v, want nil/true", p, rm != nil, ok)
 			}
@@ -116,7 +116,7 @@ func TestAntiLeakSurvivesAFailedInstall(t *testing.T) {
 		}
 		defer func() { iptablesRun = restore }()
 
-		if rm, ok := addRawDrop(testDst, "udp", "core42", 0, true, false); rm != nil || ok {
+		if rm, ok := addRawDrop(testDst, "udp", "core42", 0, true, false, false); rm != nil || ok {
 			t.Errorf("raw/udp: addRawDrop returned removal=%v ok=%v, want nil/false", rm != nil, ok)
 		}
 	})

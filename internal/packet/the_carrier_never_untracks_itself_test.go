@@ -36,7 +36,7 @@ func TestTheCarrierNeverUntracksItsOwnTraffic(t *testing.T) {
 
 	for _, profile := range RawProfileNames() {
 		for _, isClient := range []bool{true, false} {
-			_, _ = addRawDrop(testDst, profile, "core42", 443, isClient, true)
+			_, _ = addRawDrop(testDst, profile, "core42", 443, isClient, true, false)
 		}
 	}
 

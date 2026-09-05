@@ -2,6 +2,7 @@ package packet
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -27,6 +28,23 @@ var icmpTypeByName = map[string]int{
 	"echo-request":            8,
 }
 
+// iptables takes lo:hi as well as a single port, and the client's RST rule has to be a range now:
+// the server answers from anywhere in the source-port band, so naming one port suppresses one of
+// fifty thousand possible RSTs.
+func portSpecHas(t *testing.T, spec string, port int) bool {
+	t.Helper()
+	lo, hi, isRange := strings.Cut(spec, ":")
+	if !isRange {
+		return spec == strconv.Itoa(port)
+	}
+	l, errL := strconv.Atoi(lo)
+	h, errH := strconv.Atoi(hi)
+	if errL != nil || errH != nil || l > h {
+		t.Fatalf("rule port spec %q is not a port or a lo:hi range", spec)
+	}
+	return port >= l && port <= h
+}
+
 func ruleMatches(t *testing.T, m []string, p nfPacket) bool {
 	t.Helper()
 	hit := true
@@ -50,10 +68,10 @@ func ruleMatches(t *testing.T, m []string, p nfPacket) bool {
 			hit = hit && p.icmpType == want
 		case "--sport":
 			i++
-			hit = hit && m[i] == strconv.Itoa(p.sport)
+			hit = hit && portSpecHas(t, m[i], p.sport)
 		case "--dport":
 			i++
-			hit = hit && m[i] == strconv.Itoa(p.dport)
+			hit = hit && portSpecHas(t, m[i], p.dport)
 		case "--tcp-flags":
 			if i+2 >= len(m) || m[i+1] != "RST" || m[i+2] != "RST" {
 				t.Fatalf("rule %v: matcher only understands --tcp-flags RST RST", m)
@@ -108,7 +126,7 @@ func ourFrame(profile string, isClient, marked bool) nfPacket {
 	return p
 }
 
-func kernelAnswers(profile string, isClient bool) []nfPacket {
+func kernelAnswers(profile string, isClient, portsMove bool) []nfPacket {
 	switch profile {
 	case "icmp":
 		return []nfPacket{{what: "the kernel mirroring our ciphertext back (icmp echo reply)", proto: protoICMP, icmpType: 0}}
@@ -117,8 +135,18 @@ func kernelAnswers(profile string, isClient bool) []nfPacket {
 	case "tcp":
 
 		psp, pdp := rawPorts(!isClient, 0, 0)
-		return []nfPacket{{what: "the kernel's RST", proto: protoTCP, icmpType: -1,
+		out := []nfPacket{{what: "the kernel's RST", proto: protoTCP, icmpType: -1,
 			sport: int(pdp), dport: int(psp), rst: true}}
+		if !portsMove || !isClient {
+			return out
+		}
+		// The peer's source port walks the band, so our kernel's RST is addressed anywhere in it.
+		for _, peerPort := range []int{sportBandLo, sportBandLo + sportBandSpan/2, sportBandLo + sportBandSpan - 1} {
+			out = append(out, nfPacket{
+				what:  fmt.Sprintf("the kernel's RST to a peer answering from %d", peerPort),
+				proto: protoTCP, icmpType: -1, sport: int(psp), dport: peerPort, rst: true})
+		}
+		return out
 	}
 	return nil
 }
@@ -130,10 +158,12 @@ func TestRawAntiLeakNeverMatchesOurOwnFrames(t *testing.T) {
 		for _, isClient := range []bool{true, false} {
 			for _, marked := range []bool{true, false} {
 				ours := ourFrame(profile, isClient, marked)
-				for _, m := range rawDropMatches(leakPeer, profile, 0, isClient, marked) {
-					if ruleMatches(t, m, ours) {
-						t.Fatalf("raw/%s (isClient=%v marked=%v): the anti-leak rule %v matches %s — this silently black-holes the tunnel",
-							profile, isClient, marked, m, ours.what)
+				for _, portsMove := range []bool{true, false} {
+					for _, m := range rawDropMatches(leakPeer, profile, 0, isClient, marked, portsMove) {
+						if ruleMatches(t, m, ours) {
+							t.Fatalf("raw/%s (isClient=%v marked=%v portsMove=%v): the anti-leak rule %v matches %s — this silently black-holes the tunnel",
+								profile, isClient, marked, portsMove, m, ours.what)
+						}
 					}
 				}
 			}
@@ -149,16 +179,18 @@ func TestRawAntiLeakSuppressesEveryMeasuredKernelAnswer(t *testing.T) {
 			roles = []bool{false}
 		}
 		for _, isClient := range roles {
-			for _, ans := range kernelAnswers(profile, isClient) {
-				covered := false
-				for _, m := range rawDropMatches(leakPeer, profile, 0, isClient, true) {
-					if ruleMatches(t, m, ans) {
-						covered = true
+			for _, portsMove := range []bool{false, true} {
+				for _, ans := range kernelAnswers(profile, isClient, portsMove) {
+					covered := false
+					for _, m := range rawDropMatches(leakPeer, profile, 0, isClient, true, portsMove) {
+						if ruleMatches(t, m, ans) {
+							covered = true
+						}
 					}
-				}
-				if !covered {
-					t.Fatalf("raw/%s (isClient=%v): nothing suppresses %s — the peer sees it on every carrier packet",
-						profile, isClient, ans.what)
+					if !covered {
+						t.Fatalf("raw/%s (isClient=%v portsMove=%v): nothing suppresses %s — the peer sees it on every carrier packet",
+							profile, isClient, portsMove, ans.what)
+					}
 				}
 			}
 		}
@@ -166,15 +198,15 @@ func TestRawAntiLeakSuppressesEveryMeasuredKernelAnswer(t *testing.T) {
 }
 
 func TestRawIcmpRuleIsSkippedWithoutTheMark(t *testing.T) {
-	if got := rawDropMatches(leakPeer, "icmp", 0, false, false); len(got) != 0 {
+	if got := rawDropMatches(leakPeer, "icmp", 0, false, false, false); len(got) != 0 {
 		t.Fatalf("an icmp server with no SO_MARK still installed %v — that drops its own downstream frames", got)
 	}
-	if got := rawDropMatches(leakPeer, "icmp", 0, false, true); len(got) != 1 {
+	if got := rawDropMatches(leakPeer, "icmp", 0, false, true, false); len(got) != 1 {
 		t.Fatalf("an icmp server WITH the mark should install exactly one rule, got %v", got)
 	}
 
 	for _, marked := range []bool{true, false} {
-		if got := rawDropMatches(leakPeer, "icmp", 0, true, marked); len(got) != 0 {
+		if got := rawDropMatches(leakPeer, "icmp", 0, true, marked, false); len(got) != 0 {
 			t.Fatalf("an icmp CLIENT (marked=%v) installed %v; nothing answers its echo replies", marked, got)
 		}
 	}
@@ -204,7 +236,7 @@ func TestRawPortedProfilesReverseTheFlow(t *testing.T) {
 func TestRawAntiLeakLeavesQuietProfilesAlone(t *testing.T) {
 	for _, profile := range []string{"bare", "ipip", "gre", "esp"} {
 		for _, isClient := range []bool{true, false} {
-			if got := rawDropMatches(leakPeer, profile, 0, isClient, true); len(got) != 0 {
+			if got := rawDropMatches(leakPeer, profile, 0, isClient, true, false); len(got) != 0 {
 				t.Fatalf("raw/%s installed %v; no kernel handler answers that protocol", profile, got)
 			}
 		}

@@ -595,7 +595,7 @@ func openHdrincl(proto int) (int, error) {
 
 const rawSendMark = 0x746e6c01
 
-func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked bool) [][]string {
+func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked, portsMove bool) [][]string {
 	d := peer.String()
 	switch profile {
 	case "icmp":
@@ -608,22 +608,32 @@ func rawDropMatches(peer net.IP, profile string, port uint16, isClient, marked b
 		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "port-unreachable"}}
 	case "tcp":
 		srv, _ := rawPorts(false, port, 0)
-		side := "--dport"
 		if !isClient {
-			side = "--sport"
+			return [][]string{{"-d", d, "-p", "tcp", "--sport", strconv.Itoa(int(srv)),
+				"--tcp-flags", "RST", "RST"}}
 		}
-		return [][]string{{"-d", d, "-p", "tcp", side, strconv.Itoa(int(srv)), "--tcp-flags", "RST", "RST"}}
+		rst := func(spec string) []string {
+			return []string{"-d", d, "-p", "tcp", "--dport", spec, "--tcp-flags", "RST", "RST"}
+		}
+		if !portsMove {
+			return [][]string{rst(strconv.Itoa(int(srv)))}
+		}
+		out := [][]string{rst(strconv.Itoa(sportBandLo) + ":" + strconv.Itoa(sportBandLo+sportBandSpan-1))}
+		if int(srv) < sportBandLo || int(srv) >= sportBandLo+sportBandSpan {
+			out = append(out, rst(strconv.Itoa(int(srv))))
+		}
+		return out
 	}
 
 	return nil
 }
 
-func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked bool) (func(), bool) {
+func addRawDrop(peer net.IP, profile, tun string, port uint16, isClient, marked, portsMove bool) (func(), bool) {
 	type installed struct {
 		match, owner []string
 	}
 	var added []installed
-	want := rawDropMatches(peer, profile, port, isClient, marked)
+	want := rawDropMatches(peer, profile, port, isClient, marked, portsMove)
 	for _, m := range want {
 		args := append([]string{"-I", "OUTPUT"}, append(append([]string{}, m...), "-j", "DROP")...)
 		own, ok := runRule(args, ownerMatch(tun), "raw: anti-leak")
@@ -821,7 +831,7 @@ func (r *Raw) wireAntiLeak() {
 		}
 	}
 	r.leak.init(r.closeCh, func(peer net.IP) (func(), bool) {
-		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked)
+		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked, r.portsMove())
 	})
 	if p := r.dst(); p != nil {
 		r.leak.scope(p.IP)
