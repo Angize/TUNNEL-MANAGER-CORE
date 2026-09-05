@@ -65,13 +65,13 @@ type UDP struct {
 	cipher   string
 	isClient bool
 
-	peer    atomic.Pointer[net.UDPAddr]
-	session atomic.Pointer[sealerBox]
-	rp      replayGuard
-	sendErr sendErrLog
-	staged  []*stagedBox
-	hsCache initCache
-	ci      atomic.Pointer[crypto.Ephemeral]
+	soloPeer atomic.Pointer[net.UDPAddr]
+	session  atomic.Pointer[sealerBox]
+	rp       replayGuard
+	sendErr  sendErrLog
+	staged   []*stagedBox
+	hsCache  initCache
+	ci       atomic.Pointer[crypto.Ephemeral]
 
 	peerAnswered atomic.Bool
 
@@ -132,17 +132,10 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 	if !moved {
 		return
 	}
-	ua, err := net.ResolveUDPAddr("udp", addr)
-	if err != nil || ua == nil {
+	ua := b.landPeerUDP(!proactive)
+	if ua == nil {
 		return
 	}
-	b.peer.Store(ua)
-	if !proactive {
-		b.session.Store(nil)
-		b.ci.Store(nil)
-	}
-
-	b.peerAnswered.Store(false)
 	log.Printf("core/udp: rotated destination to %s", addr)
 
 	b.st.setActive("udp · " + ua.String())
@@ -258,21 +251,38 @@ func (b *UDP) rollSourcePort() bool {
 	return false
 }
 
+func (b *UDP) dst() *net.UDPAddr {
+	if b.pp != nil {
+		if a := b.pp.liveAddr(); a != nil {
+			return a.ua
+		}
+		return nil
+	}
+	return b.soloPeer.Load()
+}
+
+func (b *UDP) landPeerUDP(hard bool) *net.UDPAddr {
+	ua := b.dst()
+	if ua == nil {
+		return nil
+	}
+	if hard {
+		b.session.Store(nil)
+		b.ci.Store(nil)
+	}
+	b.peerAnswered.Store(false)
+	return ua
+}
+
 func (b *UDP) adoptPeerUDP() {
 	if b.pp == nil {
 		return
 	}
-	addr := b.pp.current()
-	ua, err := net.ResolveUDPAddr("udp", addr)
-	if err != nil || ua == nil {
+	ua := b.landPeerUDP(true)
+	if ua == nil {
 		return
 	}
-	b.peer.Store(ua)
-	b.session.Store(nil)
-	b.ci.Store(nil)
-
-	b.peerAnswered.Store(false)
-	log.Printf("core/udp: pinned destination to %s", addr)
+	log.Printf("core/udp: destination moved to %s (operator)", ua)
 
 	b.st.setActive("udp · " + ua.String())
 	wakeLoop(b.wake)
@@ -284,20 +294,14 @@ func (b *UDP) adoptSourceUDP() {
 	}
 	addr := b.sp.current()
 	if host, ok := b.rebindSourceTo(addr); ok {
-		log.Printf("core/udp: pinned source to %s", host)
-
-		b.sp.pinLandedOn(addr)
-
+		log.Printf("core/udp: source moved to %s (operator)", host)
 		return
 	}
-
-	if b.sp.pinCannotLand(addr) {
-		log.Printf("core/udp: manual jump to source %s abandoned — that IP will not bind on this host", addr)
-	}
+	log.Printf("core/udp: source %s will not bind on this host — rotation moves on", addr)
 	b.sp.fail("unbindable")
 }
 
-func runPinPoll(rc *rotationController, closeCh <-chan struct{}, applied func(kind, key string),
+func runCmdPoll(rc *rotationController, closeCh <-chan struct{}, applied func(kind, key string),
 	rotLow, rotHigh func(proactive bool), pathEpoch func() int64) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
@@ -311,7 +315,7 @@ func runPinPoll(rc *rotationController, closeCh <-chan struct{}, applied func(ki
 	}
 }
 
-func (b *UDP) pinAppliedUDP(kind, _ string) {
+func (b *UDP) selectedUDP(kind, _ string) {
 	if kind == "src" {
 		b.adoptSourceUDP()
 		return
@@ -319,8 +323,8 @@ func (b *UDP) pinAppliedUDP(kind, _ string) {
 	b.adoptPeerUDP()
 }
 
-func (b *UDP) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, b.closeCh, b.pinAppliedUDP, b.rotatePeerUDP, b.rotateSourceUDP, b.st.pathEpoch)
+func (b *UDP) cmdPollLoop(rc *rotationController) {
+	runCmdPoll(rc, b.closeCh, b.selectedUDP, b.rotatePeerUDP, b.rotateSourceUDP, b.st.pathEpoch)
 }
 
 func (b *UDP) SetStatusPath(path string) {
@@ -328,7 +332,7 @@ func (b *UDP) SetStatusPath(path string) {
 		return
 	}
 	peer := ""
-	if p := b.peer.Load(); p != nil {
+	if p := b.dst(); p != nil {
 		peer = p.String()
 	}
 	b.st = newCoreStatus(path, "udp · "+peer)
@@ -339,7 +343,7 @@ func (b *UDP) livePath() (pathKey, bool) {
 	if c := b.conn.Load(); c != nil {
 		k.Src, k.Sport = addrParts(c.LocalAddr())
 	}
-	if p := b.peer.Load(); p != nil {
+	if p := b.dst(); p != nil {
 		k.Dst, k.Dport = p.IP.String(), uint16(p.Port)
 	}
 
@@ -350,7 +354,7 @@ func (b *UDP) livePath() (pathKey, bool) {
 }
 
 func (b *UDP) rehandshake() bool {
-	if !b.cryptoOn || b.peer.Load() == nil {
+	if !b.cryptoOn || b.dst() == nil {
 		return false
 	}
 	b.ci.Store(nil)
@@ -362,7 +366,7 @@ func (b *UDP) rehandshake() bool {
 
 func (b *UDP) provenFrom(ip net.IP) {
 	if ip != nil && len(b.poolIPs) > 0 {
-		if p := b.peer.Load(); p != nil && !p.IP.Equal(ip) {
+		if p := b.dst(); p != nil && !p.IP.Equal(ip) {
 			if v4 := ip.To4(); v4 != nil {
 				if _, other := b.poolIPs[string(v4)]; other {
 					return
@@ -387,7 +391,7 @@ func Dial(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher str
 		closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
 	b.initQueues(dev, extra)
 	b.conn.Store(conn)
-	b.peer.Store(ra)
+	b.soloPeer.Store(ra)
 	b.initFec(fec, fecData, fecParity)
 	return b, nil
 }
@@ -467,7 +471,7 @@ func (b *UDP) learnPeer(addr *net.UDPAddr) {
 			b.replyConn.Store(c)
 		}
 	}
-	b.peer.Store(addr)
+	b.soloPeer.Store(addr)
 }
 
 func (b *UDP) sendConn() *net.UDPConn {
@@ -492,7 +496,7 @@ func parseIP4(s string) net.IP {
 	return ip.To4()
 }
 
-func adoptableSource(tag string, sp *PeerPool, addr string, warned *sync.Map) net.IP {
+func adoptableSource(tag, addr string, warned *sync.Map) net.IP {
 	ip := parseIP4(hostOnly(addr))
 	if ip != nil && canBindSource(ip) {
 		return ip
@@ -503,10 +507,6 @@ func adoptableSource(tag string, sp *PeerPool, addr string, warned *sync.Map) ne
 		} else {
 			log.Printf("core/%s: source IP %s is not configured on this host — leaving the kernel to pick the source", tag, ip)
 		}
-	}
-
-	if sp != nil && sp.pinCannotLand(addr) {
-		log.Printf("core/%s: manual jump to source %s abandoned — that IP is not configured on this host", tag, addr)
 	}
 	return nil
 }
@@ -544,7 +544,7 @@ func (b *UDP) replySock() *net.UDPConn {
 func (b *UDP) initFec(fec bool, fecData, fecParity int) {
 	b.fecEnc, b.fecDec = newFecPair(fec, fecData, fecParity, b.psk, "udp",
 		func(pkt []byte) {
-			if p := b.peer.Load(); p != nil {
+			if p := b.dst(); p != nil {
 				if c := b.sendConn(); c != nil {
 					if _, err := c.WriteToUDP(pkt, p); err != nil {
 						b.sendErr.note("udp/fec", err)
@@ -616,7 +616,7 @@ func (b *UDP) tunToNet(dev *tun.Device) error {
 		if err != nil {
 			return err
 		}
-		peer := b.peer.Load()
+		peer := b.dst()
 		if peer == nil {
 			continue
 		}
@@ -783,7 +783,9 @@ func (b *UDP) handleCrypto(pkt []byte, addr *net.UDPAddr) {
 			b.fecDec.reset()
 			b.rp = st.rp
 			b.staged = nil
-			b.learnPeer(addr)
+			if b.pp == nil {
+				b.learnPeer(addr)
+			}
 			b.dispatch(typ, payload, addr)
 			return
 		}
@@ -875,7 +877,7 @@ func (b *UDP) newController() *rotationController {
 func (b *UDP) clientLoop() {
 	rc := b.newController()
 	if rc.polls() {
-		go b.pinPollLoop(rc)
+		go b.cmdPollLoop(rc)
 	}
 	for {
 		rc.proactive(b.rotatePeerUDP, b.rotateSourceUDP, time.Now())
@@ -884,18 +886,12 @@ func (b *UDP) clientLoop() {
 			b.sendInit()
 		}
 		if !b.cryptoOn || b.sealer() != nil {
-			if b.pp != nil && b.peerAnswered.Load() {
-				if pa := b.peer.Load(); pa != nil {
-					b.pp.pinLandedOn(pa.String())
-				}
-			}
-
 			if !b.cryptoOn && b.peerAnswered.Load() {
 				b.st.newSession()
 				b.st.reconnected("udp")
 			}
 
-			b.send(typePing, nil, b.peer.Load())
+			b.send(typePing, nil, b.dst())
 
 			if b.cryptoOn && b.sealer() == nil {
 				continue
@@ -915,7 +911,7 @@ func (b *UDP) clientLoop() {
 }
 
 func (b *UDP) sendInit() {
-	peer := b.peer.Load()
+	peer := b.dst()
 	if peer == nil {
 		return
 	}

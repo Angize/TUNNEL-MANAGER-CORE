@@ -120,7 +120,10 @@ func TestPeerPoolDueEndpointReadmitted(t *testing.T) {
 	}
 }
 
-func TestPeerPoolSelectPin(t *testing.T) {
+// A manual jump is a move, not a hold: the cursor goes where the operator said, the entry's burn is
+// forgiven so the choice is actually tried, and every other mechanism -- the verdict, the rotation --
+// keeps its full authority over what happens next.
+func TestAManualJumpMovesTheCursorAndNothingHoldsItThere(t *testing.T) {
 	clk := int64(1000)
 	p := NewPeerPool([]string{"a", "b", "c"}, 0)
 	p.now = func() int64 { return clk }
@@ -130,43 +133,37 @@ func TestPeerPoolSelectPin(t *testing.T) {
 	if !p.selectEntry("c") {
 		t.Fatal("selectEntry should find c")
 	}
-	if !p.isPinned() {
-		t.Fatal("pool should report pinned right after selectEntry")
-	}
 	if got := p.current(); got != "c" {
-		t.Fatalf("current() must force the pinned c, got %q", got)
+		t.Fatalf("current() must be the operator's pick, got %q", got)
 	}
 
-	if a, moved := p.fail("tun-probe"); a != "c" || moved {
-		t.Fatalf("fail() while pinned must stay on c: got %q moved=%v, want c false", a, moved)
+	a, moved := p.fail("tun-probe")
+	if !moved || a == "c" {
+		t.Fatalf("a verdict against the operator's pick must still walk off it: got %q moved=%v", a, moved)
 	}
 	p.mu.Lock()
 	burnedC := p.health.recs["c"] != nil
 	p.mu.Unlock()
-	if burnedC {
-		t.Fatal("fail() while pinned must not burn the pinned endpoint")
-	}
-	if a, moved := p.rotateOnce(); a != "c" || moved {
-		t.Fatalf("rotateOnce() while pinned must stay on c: got %q moved=%v, want c false", a, moved)
-	}
-	p.pinLandedOn("c")
-	if p.isPinned() {
-		t.Fatal("pinLanded on the pinned endpoint must release the pin")
+	if !burnedC {
+		t.Fatal("the endpoint the probe measured was left unburned because the operator had picked it")
 	}
 
-	p.selectEntry("a")
-	if !p.pinCannotLand("b") {
-		p.mu.Lock()
-		still := p.pinKey
-		p.mu.Unlock()
-		if still != "a" {
-			t.Fatal("a failure on a DIFFERENT endpoint released the pin")
-		}
+	if !p.selectEntry("c") {
+		t.Fatal("selectEntry should find c again")
 	}
-	p.pinCannotLand("a")
-	if p.isPinned() {
-		t.Fatal("the pin survived the first refused attempt on the pinned endpoint — waiting for a " +
-			"second only delays the burn that is coming anyway, and forces traffic onto it meanwhile")
+	p.mu.Lock()
+	stillBurned := p.health.recs["c"] != nil
+	p.mu.Unlock()
+	if stillBurned {
+		t.Fatal("jumping onto a burned entry left the burn in place, so the walk steps straight back " +
+			"off the address the operator asked for")
+	}
+
+	if _, rot := p.rotateOnce(); !rot {
+		t.Fatal("rotation stopped after a manual jump — it must never stop")
+	}
+	if got := p.current(); got != "a" {
+		t.Fatalf("rotation must resume FROM the operator's pick: after c it should reach a, got %q", got)
 	}
 }
 
@@ -199,20 +196,14 @@ func TestTheOneStatusFileCarriesBothAxes(t *testing.T) {
 			"second answer, and the two can disagree", len(byKind["dst"]), len(byKind["src"]))
 	}
 
-	suspect, pinned := map[string]bool{}, ""
+	suspect := map[string]bool{}
 	for _, h := range byKind["dst"] {
 		if h.State == stateSuspect {
 			suspect[h.Key] = true
 		}
-		if h.Pin {
-			pinned = h.Key
-		}
 	}
 	if !suspect["a"] {
 		t.Fatalf("a should be reported suspect in health, got %v", suspect)
-	}
-	if pinned != "c" {
-		t.Fatalf("the operator's pick is not flagged in the rows: pinned=%q, want c", pinned)
 	}
 	if st.Pair.Low != "c" || st.Pair.LowKind != "dst" || st.Pair.HighKind != "src" {
 		t.Fatalf("the machine-readable pair is wrong: %+v — the node keys its verdict on this, and "+
@@ -395,62 +386,22 @@ func TestRotationControllerCouplesSource(t *testing.T) {
 	}
 }
 
-func TestRotationControllerPinReleasesOnTheFirstProvenBlock(t *testing.T) {
-	clk := int64(1000)
-	dst := NewPeerPool([]string{"d0", "d1"}, 0)
-	dst.now = func() int64 { return clk }
-	rc := newRotationController(dst, nil)
-	if !dst.selectEntry("d1") {
-		t.Fatal("selectEntry d1 failed")
-	}
-	moves := 0
-	rotDst := func(bool) { moves++ }
-	rotSrc := func(bool) {}
-
-	rc.fail(rotDst, rotSrc)
-	if dst.isPinned() {
-		t.Fatal("the pin survived the first verdict against it. Holding it for a second only delays the " +
-			"burn that is coming anyway, and forces traffic onto the endpoint meanwhile")
-	}
-	if moves != 1 {
-		t.Fatalf("the releasing round must also walk off the blocked endpoint, got moves=%d", moves)
-	}
-
-	rc.success()
-	if !dst.selectEntry("d1") {
-		t.Fatal("re-pin d1 failed")
-	}
-	if !dst.isPinned() {
-		t.Fatal("a fresh pin after a success must hold until something faults it")
-	}
-	moves = 0
-	rc.fail(rotDst, rotSrc)
-	if dst.isPinned() || moves != 1 {
-		t.Fatalf("the re-pin behaved differently from the first one: pinned=%v moves=%d",
-			dst.isPinned(), moves)
-	}
-}
-
-func TestAPinFlushesTheStatusFileTheMomentItGoes(t *testing.T) {
+// The one thing an operator watches after a jump is the panel, and the panel reads this file. The
+// forgiven burn has to be in it before the next poll, not on the next status sample.
+func TestAJumpFlushesTheStatusFileAtOnce(t *testing.T) {
 	b, pp, _ := peerCarrier(t, []string{"a", "b"}, nil)
+	stateOfB := func() string { return stateOf(b.readStatus(t).Health, "dst", "b") }
+
+	pp.markSuspect("b", "tun-probe")
+	if got := stateOfB(); got != stateSuspect {
+		t.Fatalf("setup: b reads %q in the status file, want %q", got, stateSuspect)
+	}
 	pp.selectEntry("b")
-	readPin := func() string {
-		for _, h := range b.readStatus(t).Health {
-			if h.Pin {
-				return h.Key
-			}
-		}
-		return ""
+	if got := stateOfB(); got != "healthy" {
+		t.Fatalf("the jump forgave b's burn but the status file still reads %q, so the panel keeps "+
+			"drawing a countdown on the address the tunnel just moved to", got)
 	}
-	if readPin() != "b" {
-		t.Fatalf("status should show pinned b, got %q", readPin())
-	}
-	pp.pinCannotLand("zzz")
-	if readPin() != "b" {
-		t.Fatalf("a failure on another endpoint must not touch the pin, got %q", readPin())
-	}
-	pp.pinCannotLand("b")
-	if readPin() != "" {
-		t.Fatalf("the status file must clear the pin the moment it is released, got %q", readPin())
+	if cur := pp.current(); cur != "b" {
+		t.Fatalf("the pool is on %q after a jump to b", cur)
 	}
 }

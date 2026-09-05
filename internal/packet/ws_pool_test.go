@@ -374,7 +374,7 @@ func TestRetestEndsOneWaitAndOnlyThatOne(t *testing.T) {
 	}
 }
 
-func TestSelectEntryPinsAndClears(t *testing.T) {
+func TestSelectEntryMovesAndClears(t *testing.T) {
 	p := newWSPool([]string{"a", "b"}, snis("x"))
 	p.markSuspect("ip", "b", "test")
 	if !p.selectEntry("ip", "b") {
@@ -391,85 +391,35 @@ func TestSelectEntryPinsAndClears(t *testing.T) {
 	}
 }
 
-func TestPinOneShot(t *testing.T) {
-	p, _ := clockPool([]string{"a", "b", "c"}, snis("x", "y"))
-	p.markSuspect("sni", "x", "test")
-	p.markSuspect("ip", "a", "test")
-	if !p.selectEntry("ip", "c") {
-		t.Fatal("selectEntry should find c")
-	}
-	if !p.isPinned() {
-		t.Fatal("pool should report pinned right after selectEntry")
-	}
-
-	for i := 0; i < 6; i++ {
-		if ip, _, ok := p.current(); !ok || ip != "c" {
-			t.Fatalf("pin must force ip=c on dial %d, got %q ok=%v", i, ip, ok)
-		}
-		p.advance()
-		p.advanceIP()
-	}
-	p.markSuspect("ip", "b", "test")
-	if ip, _, _ := p.current(); ip != "c" {
-		t.Fatalf("a burn of a non-pinned edge must not override the pin, got %q", ip)
-	}
-
-	p.pinCannotLand("c")
-	if p.isPinned() {
-		t.Fatal("the pin survived the first refused dial on the pinned edge")
-	}
-	p.current()
-	if p.pinIP != "" {
-		t.Fatalf("expired pin not cleared: pinIP=%q", p.pinIP)
-	}
-}
-
-func TestPinReleasesOnProvenBlock(t *testing.T) {
-	b, p := edgeCarrier(t, []string{"a", "b"}, snis("x"))
-	var now int64 = 1000
-	p.now = func() int64 { return now }
-	if !p.selectEntry("ip", "b") {
-		t.Fatal("selectEntry should find b")
-	}
-	if ip, _, _ := p.current(); ip != "b" {
-		t.Fatalf("pin must force b, got %q", ip)
-	}
-
-	p.markSuspect("ip", "b", "tun-probe")
-	if !p.isPinned() {
-		t.Fatal("one burn released the pin — the operator's pick costs a second opinion to override")
-	}
-	if !p.ipHealth.healthy("b") {
-		t.Fatal("the burn landed on the pinned edge; while the pin is in force the pin's own counter is " +
-			"what ends it")
-	}
-
-	p.releasePin()
-	if p.isPinned() || p.pinIP != "" {
-		t.Fatalf("pin state not cleared: pinIP=%q", p.pinIP)
-	}
-
-	p.markSuspect("ip", "b", "tun-probe")
-	if ip, _, ok := p.current(); !ok || ip != "a" {
-		t.Fatalf("after the pin released, current() must fall back to healthy a, got %q ok=%v", ip, ok)
-	}
-
-	if got := poolEventCount(b, "pin_dropped"); got != 1 {
-		t.Fatalf("want exactly one pool/pin_dropped event, got %d", got)
-	}
-}
-
-func TestPinHeldOnGuiltyPartnerAxis(t *testing.T) {
+// The operator names ONE axis. The other one has to be settled onto something usable in the same
+// breath, or the jump lands on a combination the pool already knows is dead and the first dial fails
+// for a reason that has nothing to do with what they asked for.
+func TestAJumpSettlesTheOtherAxisOnSomethingUsable(t *testing.T) {
 	p, _ := clockPool([]string{"a", "b"}, snis("x", "y"))
+	p.markSuspect("sni", "x", "sni_blocked")
 	if !p.selectEntry("ip", "b") {
 		t.Fatal("selectEntry should find b")
 	}
-	p.markSuspect("sni", "x", "sni_blocked")
-	if !p.isPinned() || p.pinIP != "b" {
-		t.Fatalf("burning the free (SNI) axis must not release an IP pin: pinIP=%q pinned=%v", p.pinIP, p.isPinned())
+	ip, sni, ok := p.current()
+	if !ok || ip != "b" {
+		t.Fatalf("the jump did not land: ip=%q ok=%v", ip, ok)
 	}
-	if ip, sni, _ := p.current(); ip != "b" || sni.host == "x" {
-		t.Fatalf("current() must keep pinned ip=b and heal off the guilty sni x, got ip=%q sni=%q", ip, sni.host)
+	if sni.host == "x" {
+		t.Fatal("the jump landed on the burned domain x — the first dial fails for a reason the " +
+			"operator never chose")
+	}
+
+	p2, _ := clockPool([]string{"a", "b"}, snis("x", "y"))
+	p2.markSuspect("ip", "a", "test")
+	if !p2.selectEntry("sni", "y") {
+		t.Fatal("selectEntry should find y")
+	}
+	ip2, sni2, _ := p2.current()
+	if sni2.host != "y" {
+		t.Fatalf("the domain jump did not land: sni=%q", sni2.host)
+	}
+	if ip2 == "a" {
+		t.Fatal("the domain jump left the cursor on the burned edge a")
 	}
 }
 

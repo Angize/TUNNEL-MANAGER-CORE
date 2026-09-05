@@ -15,7 +15,7 @@ func TestARawBuiltAnyOtherWayCarriesFromTheStart(t *testing.T) {
 
 func TestADrawnPortCarriesNothingUntilItIsAnswered(t *testing.T) {
 	r := &Raw{isClient: true, profile: "tcp", sportRandom: true}
-	r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 99, 0, 2)})
+	r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 99, 0, 2)})
 
 	r.usePort(8443)
 	if !r.unanswered.Load() {
@@ -36,7 +36,7 @@ func TestADrawnPortCarriesNothingUntilItIsAnswered(t *testing.T) {
 
 func TestAServerNeverDrawsAndIsNeverShut(t *testing.T) {
 	r := &Raw{isClient: false, profile: "tcp"}
-	r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 99, 0, 1)})
+	r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 99, 0, 1)})
 
 	r.learnClientPort(9443)
 	if r.unanswered.Load() {

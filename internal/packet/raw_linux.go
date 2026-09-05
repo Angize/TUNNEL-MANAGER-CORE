@@ -44,8 +44,8 @@ type Raw struct {
 
 	link ipLink
 
-	localIP atomic.Pointer[net.IPAddr]
-	peer    atomic.Pointer[net.IPAddr]
+	localIP  atomic.Pointer[net.IPAddr]
+	soloPeer atomic.Pointer[net.IPAddr]
 
 	replySrc  atomic.Pointer[net.IP]
 	ours      ourIPs
@@ -117,7 +117,7 @@ func (r *Raw) SetStatusPath(path string) {
 		return
 	}
 	peer := ""
-	if p := r.peer.Load(); p != nil {
+	if p := r.dst(); p != nil {
 		peer = p.String()
 	}
 	r.st = newCoreStatus(path, "raw:"+r.profile+" · "+peer)
@@ -347,7 +347,7 @@ func dialRawBase(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 	applyConnSockBuf(conn)
 	r := newRaw(conn, dev, obfs, psk, cipher, profile, true)
 	r.proto, r.port = proto, rawPortOr(rawPort)
-	r.peer.Store(&net.IPAddr{IP: ip})
+	r.soloPeer.Store(&net.IPAddr{IP: ip})
 	if lip := routeLocalIP(ip); lip != nil {
 		r.localIP.Store(&net.IPAddr{IP: lip})
 	}
@@ -421,7 +421,7 @@ func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 func (r *Raw) initFec(fec bool, fecData, fecParity int) {
 	r.fecEnc, r.fecDec = newFecPair(fec, fecData, fecParity, r.psk, "raw",
 		func(pkt []byte) {
-			if p := r.peer.Load(); p != nil {
+			if p := r.dst(); p != nil {
 				r.writeOut(r.wire(pkt, p.IP), p)
 			}
 		},
@@ -509,7 +509,7 @@ func (r *Raw) writeOut(pkt []byte, to *net.IPAddr) {
 	r.link.send(pkt, to)
 }
 
-func (r *Raw) pinnedSrc() net.IP {
+func (r *Raw) boundSrc() net.IP {
 	if rs := r.replySrc.Load(); rs != nil {
 		return *rs
 	}
@@ -792,7 +792,7 @@ func (r *Raw) wireAntiLeak() {
 	r.leak.init(r.closeCh, func(peer net.IP) (func(), bool) {
 		return addRawDrop(peer, r.profile, r.tunName(), r.port, r.isClient, marked)
 	})
-	if p := r.peer.Load(); p != nil {
+	if p := r.dst(); p != nil {
 		r.leak.scope(p.IP)
 	}
 }
@@ -809,7 +809,7 @@ func (r *Raw) tunToNet(q *txQueue) error {
 		if err != nil {
 			return err
 		}
-		peer := r.peer.Load()
+		peer := r.dst()
 		if peer == nil {
 			continue
 		}
@@ -829,7 +829,7 @@ func (r *Raw) tunToNet(q *txQueue) error {
 
 		if r.canBatch(q) {
 			var oob []byte
-			if src := r.pinnedSrc(); src != nil {
+			if src := r.boundSrc(); src != nil {
 				oob = r.srcOOB(src)
 			}
 			ms[0].Buffers[0], ms[0].Addr, ms[0].OOB = pkt, peer, oob
@@ -874,7 +874,7 @@ func (r *Raw) recvConnLoop() error {
 			if addr == nil {
 				continue
 			}
-			if peer := r.peer.Load(); peer != nil && !addr.IP.Equal(peer.IP) && !r.srcAllowed(addr.IP) {
+			if peer := r.dst(); peer != nil && !addr.IP.Equal(peer.IP) && !r.srcAllowed(addr.IP) {
 				continue
 			}
 			if !r.isClient {
@@ -969,11 +969,11 @@ func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
 
 func (r *Raw) learnPeer(addr *net.IPAddr) {
 	if r.pp == nil {
-		r.peer.Store(addr)
+		r.soloPeer.Store(addr)
 	}
 	r.learnLocalIP(addr.IP)
 
-	if p := r.peer.Load(); p != nil {
+	if p := r.dst(); p != nil {
 		r.leak.scopeAsync(p.IP)
 	}
 }
@@ -1037,7 +1037,7 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 
 	r.learnClientPort(hsSport)
 
-	if r.peer.Load() == nil {
+	if r.dst() == nil {
 		r.leak.scopeAsync(addr.IP)
 	}
 	if msg2 := crypto.RespMsg(r.psk, eInit, sr); msg2 != nil {
@@ -1067,7 +1067,7 @@ func (r *Raw) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
 
 func (r *Raw) livePath() (pathKey, bool) {
 	k := pathKey{Src: r.srcIP().String()}
-	if p := r.peer.Load(); p != nil {
+	if p := r.dst(); p != nil {
 		k.Dst = p.IP.String()
 	}
 	if RawProfileHasPorts(r.profile) && !r.rotActive() {
@@ -1077,7 +1077,7 @@ func (r *Raw) livePath() (pathKey, bool) {
 }
 
 func (r *Raw) rehandshake() bool {
-	if r.peer.Load() == nil {
+	if r.dst() == nil {
 		return false
 	}
 	r.ci.Store(nil)
@@ -1088,13 +1088,13 @@ func (r *Raw) rehandshake() bool {
 }
 
 func (r *Raw) markRx(from net.IP) {
-	if p := r.peer.Load(); p != nil && from != nil && p.IP.Equal(from) {
+	if p := r.dst(); p != nil && from != nil && p.IP.Equal(from) {
 	}
 }
 
 func (r *Raw) provenFrom(ip net.IP) {
 	if ip != nil && len(r.poolIPs) > 0 {
-		if p := r.peer.Load(); p != nil && !p.IP.Equal(ip) {
+		if p := r.dst(); p != nil && !p.IP.Equal(ip) {
 			if v4 := ip.To4(); v4 != nil {
 				if _, other := r.poolIPs[string(v4)]; other {
 					return
@@ -1154,7 +1154,7 @@ func (r *Raw) SetSourcePool(sp *PeerPool) {
 
 	if sp != nil {
 		joinStatus(r.st, sp, "src")
-		if ip := adoptableSource("raw", sp, sp.current(), &r.srcWarned); ip != nil {
+		if ip := adoptableSource("raw", sp.current(), &r.srcWarned); ip != nil {
 			r.localIP.Store(&net.IPAddr{IP: ip})
 		} else {
 			sp.fail("unbindable")
@@ -1171,7 +1171,7 @@ func (r *Raw) rotateSourceRaw(proactive bool) {
 	if !moved {
 		return
 	}
-	ip := adoptableSource("raw", r.sp, addr, &r.srcWarned)
+	ip := adoptableSource("raw", addr, &r.srcWarned)
 	if ip == nil {
 		r.sp.rejectCandidate(prev)
 		return
@@ -1191,21 +1191,9 @@ func (r *Raw) rotatePeerRaw(proactive bool) {
 	if !moved {
 		return
 	}
-	ip := parseIP4(hostOnly(addr))
-	if ip == nil {
+	if r.landPeerRaw(!proactive) == nil {
 		return
 	}
-	r.peer.Store(&net.IPAddr{IP: ip})
-	r.freshTuple()
-
-	r.leak.scope(ip)
-	r.st.setActive("raw:" + r.profile + " · " + ip.String())
-	if !proactive {
-		r.session.Store(nil)
-		r.ci.Store(nil)
-	}
-
-	r.peerAnswered.Store(false)
 	log.Printf("raw: rotated destination to %s", addr)
 	r.st.rotated("peer", "ip:"+addr, proactive)
 	if proactive {
@@ -1214,7 +1202,33 @@ func (r *Raw) rotatePeerRaw(proactive bool) {
 	wakeLoop(r.wake)
 }
 
-func (r *Raw) pinAppliedRaw(kind, _ string) {
+func (r *Raw) dst() *net.IPAddr {
+	if r.pp != nil {
+		if a := r.pp.liveAddr(); a != nil {
+			return a.ip
+		}
+		return nil
+	}
+	return r.soloPeer.Load()
+}
+
+func (r *Raw) landPeerRaw(hard bool) *net.IPAddr {
+	pa := r.dst()
+	if pa == nil {
+		return nil
+	}
+	r.freshTuple()
+	r.leak.scope(pa.IP)
+	r.st.setActive("raw:" + r.profile + " · " + pa.IP.String())
+	if hard {
+		r.session.Store(nil)
+		r.ci.Store(nil)
+	}
+	r.peerAnswered.Store(false)
+	return pa
+}
+
+func (r *Raw) selectedRaw(kind, _ string) {
 	if kind == "src" {
 		r.adoptSourceRaw()
 		return
@@ -1226,23 +1240,11 @@ func (r *Raw) adoptPeerRaw() {
 	if r.pp == nil {
 		return
 	}
-	ip := parseIP4(hostOnly(r.pp.current()))
-	if ip == nil {
+	pa := r.landPeerRaw(true)
+	if pa == nil {
 		return
 	}
-	prev := r.peer.Load()
-	r.peer.Store(&net.IPAddr{IP: ip})
-	if prev == nil || !prev.IP.Equal(ip) {
-		r.freshTuple()
-	}
-	r.leak.scope(ip)
-	r.st.setActive("raw:" + r.profile + " · " + ip.String())
-	r.session.Store(nil)
-	r.ci.Store(nil)
-
-	r.peerAnswered.Store(false)
-	log.Printf("raw: pinned destination to %s", ip)
-
+	log.Printf("raw: destination moved to %s (operator)", pa.IP)
 	wakeLoop(r.wake)
 }
 
@@ -1250,8 +1252,7 @@ func (r *Raw) adoptSourceRaw() {
 	if r.sp == nil {
 		return
 	}
-	addr := r.sp.current()
-	ip := adoptableSource("raw", r.sp, addr, &r.srcWarned)
+	ip := adoptableSource("raw", r.sp.current(), &r.srcWarned)
 	if ip == nil {
 		r.sp.fail("unbindable")
 		return
@@ -1261,12 +1262,11 @@ func (r *Raw) adoptSourceRaw() {
 	if prevSrc == nil || !prevSrc.IP.Equal(ip) {
 		r.freshTuple()
 	}
-	log.Printf("raw: pinned source to %s", ip)
-	r.sp.pinLandedOn(addr)
+	log.Printf("raw: source moved to %s (operator)", ip)
 }
 
-func (r *Raw) pinPollLoop(rc *rotationController) {
-	runPinPoll(rc, r.closeCh, r.pinAppliedRaw, r.rotatePeerRaw, r.rotateSourceRaw, r.st.pathEpoch)
+func (r *Raw) cmdPollLoop(rc *rotationController) {
+	runCmdPoll(rc, r.closeCh, r.selectedRaw, r.rotatePeerRaw, r.rotateSourceRaw, r.st.pathEpoch)
 }
 
 func (r *Raw) clientLoop() {
@@ -1279,7 +1279,7 @@ func (r *Raw) clientLoop() {
 	rc.attachStatus(r.st)
 	r.st.setPair(rc.pairStatus)
 	if rc.polls() {
-		go r.pinPollLoop(rc)
+		go r.cmdPollLoop(rc)
 	}
 
 	for {
@@ -1289,13 +1289,7 @@ func (r *Raw) clientLoop() {
 			r.sendInit()
 		}
 		if r.sealer() != nil {
-			if r.pp != nil && r.peerAnswered.Load() {
-				if pa := r.peer.Load(); pa != nil {
-					r.pp.pinLandedOn(pa.IP.String())
-				}
-			}
-
-			r.send(typePing, nil, r.peer.Load())
+			r.send(typePing, nil, r.dst())
 
 			if r.sealer() == nil {
 				continue
@@ -1315,7 +1309,7 @@ func (r *Raw) clientLoop() {
 }
 
 func (r *Raw) sendInit() {
-	peer := r.peer.Load()
+	peer := r.dst()
 	if peer == nil {
 		return
 	}

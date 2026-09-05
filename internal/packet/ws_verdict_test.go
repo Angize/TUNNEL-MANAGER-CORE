@@ -125,7 +125,7 @@ func TestWSStaleOKClearsOnlyWhatItMeasured(t *testing.T) {
 func TestWSPinStillWorks(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2"})
 
-	b.operatorPin(t, "ip", "e2")
+	b.operatorJump(t, "ip", "e2")
 
 	if got, _, _ := b.pool.current(); got != "e2" {
 		t.Fatalf("the panel's pin did not land: current edge is %s, want e2", got)

@@ -221,8 +221,8 @@ func validatePoolEndpoint(field, e string, needPort bool) error {
 		if err != nil {
 			return errors.New(field + " entry " + strconv.Quote(e) + " must be \"ip:port\"")
 		}
-		if net.ParseIP(host) == nil {
-			return errors.New(field + " entry " + strconv.Quote(e) + " has a non-IP host (the pool dials IPs directly, no DNS)")
+		if ip := net.ParseIP(host); ip == nil || ip.To4() == nil {
+			return errors.New(field + " entry " + strconv.Quote(e) + " must be \"ipv4:port\" (the pool dials IPs directly, no DNS, and the carriers build IPv4 headers)")
 		}
 		if p, err := strconv.Atoi(port); err != nil || p < 1 || p > 65535 {
 			return errors.New(field + " entry " + strconv.Quote(e) + " has an invalid port")

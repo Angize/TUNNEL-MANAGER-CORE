@@ -30,7 +30,7 @@ func movingRaw(t *testing.T, dsts, srcs []string) *Raw {
 	if !r.sportRandom {
 		t.Fatal("the tcp profile did not arm the source-port axis")
 	}
-	r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
+	r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
 	r.localIP.Store(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if len(dsts) > 0 {
 		r.SetPeerPool(NewPeerPool(dsts, 0))
@@ -59,7 +59,7 @@ func TestEveryPathChangeStartsAFlowOfItsOwn(t *testing.T) {
 		}},
 		{"the operator pins a destination by hand", func(t *testing.T, r *Raw) {
 			if !r.pp.selectEntry("10.30.0.3") {
-				t.Fatal("could not pin the destination")
+				t.Fatal("could not jump to the destination")
 			}
 			r.adoptPeerRaw()
 		}},
@@ -68,7 +68,7 @@ func TestEveryPathChangeStartsAFlowOfItsOwn(t *testing.T) {
 		}},
 		{"the operator pins a source by hand", func(t *testing.T, r *Raw) {
 			if !r.sp.selectEntry("127.0.0.2") {
-				t.Fatal("could not pin the source")
+				t.Fatal("could not jump to the source")
 			}
 			r.adoptSourceRaw()
 		}},
@@ -107,23 +107,32 @@ func TestEveryPathChangeStartsAFlowOfItsOwn(t *testing.T) {
 	}
 }
 
-func TestPinningWhereWeAlreadyAreMovesNothing(t *testing.T) {
+// A jump onto the endpoint the tunnel is already on is not a move, and the pool says so. Nothing
+// downstream runs: no fresh tuple, no epoch bump for the node to throw a straddling verdict away on,
+// and — on the ws carrier, where the same answer drives dropCarrier — no healthy connection killed
+// for a button press that asked for the state it was already in.
+func TestJumpingWhereWeAlreadyAreMovesNothing(t *testing.T) {
 	r := movingRaw(t, []string{"10.30.0.2", "10.30.0.3"}, []string{"127.0.0.1", "127.0.0.2"})
 	was := r.tuple()
 
-	if !r.pp.selectEntry("10.30.0.2") {
-		t.Fatal("could not pin the destination we are already on")
+	if r.pp.selectEntry("10.30.0.2") {
+		t.Error("the pool called a jump onto the destination it is already on a move")
 	}
-	r.adoptPeerRaw()
-	if !r.sp.selectEntry("127.0.0.1") {
-		t.Fatal("could not pin the source we are already on")
+	if r.sp.selectEntry("127.0.0.1") {
+		t.Error("the pool called a jump onto the source it is already on a move")
 	}
-	r.adoptSourceRaw()
-
 	if got := r.tuple(); got != was {
-		t.Errorf("a pin onto the endpoint the tunnel is already on redrew the tuple (%+v -> %+v). "+
+		t.Errorf("a jump onto the endpoint the tunnel is already on redrew the tuple (%+v -> %+v). "+
 			"Nothing moved, so nothing is linkable that was not already — and the epoch bump it costs "+
 			"makes the node throw away the verdict that straddles it", was, got)
+	}
+
+	if !r.pp.selectEntry("10.30.0.3") {
+		t.Fatal("a jump to the OTHER destination was not called a move — the case above is vacuous")
+	}
+	r.adoptPeerRaw()
+	if got := r.tuple(); got == was {
+		t.Error("a real jump did NOT redraw the tuple, so the case above proves nothing")
 	}
 }
 

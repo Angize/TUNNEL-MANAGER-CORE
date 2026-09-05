@@ -141,24 +141,22 @@ func TestASourcePooledTunnelHearsItsVerdict(t *testing.T) {
 	}
 }
 
-func TestAVerdictAndAPinAreSeparateMailboxes(t *testing.T) {
+func TestAVerdictAndASelectAreSeparateMailboxes(t *testing.T) {
 	p, rc := judgedPool(t, "a", "b")
-	pinned := 0
+	applied := 0
 
 	liveVerdict(t, rc.verdict, testPathEpoch, poolCmd{Cmd: cmdFail, Low: "a"})
-	writeFileAtomic(rc.pinbox, []byte(`{"kind":"dst","key":"b"}`), 0o644)
-	rc.poll(func(bool) { p.fail("tun-probe") }, func(bool) {}, func(string, string) { pinned++ }, atPathEpoch)
+	writeFileAtomic(rc.selbox, []byte(`{"kind":"dst","key":"a"}`), 0o644)
+	rc.poll(func(bool) { p.fail("tun-probe") }, func(bool) {}, func(string, string) { applied++ }, atPathEpoch)
 
-	if !burnedIn(p)["a"] {
-		t.Error("the verdict did not burn the endpoint it named — the pin file swallowed it")
+	if applied != 1 {
+		t.Errorf("the jump was applied %d times, want once — the verdict consumed its file", applied)
 	}
-	if pinned != 1 {
-		t.Errorf("the pin was applied %d times, want once — the verdict consumed its file", pinned)
+	if cur := p.current(); cur != "a" {
+		t.Errorf("the pool is on %q — the operator put it back on a and the verdict swallowed that", cur)
 	}
-	p.mu.Lock()
-	pin := p.pinKey
-	p.mu.Unlock()
-	if pin != "b" {
-		t.Errorf("the pool is pinned to %q, want b", pin)
+	if burnedIn(p)["a"] {
+		t.Error("the operator asked for a by name and its burn was left in place, so the walk steps " +
+			"straight off it again")
 	}
 }

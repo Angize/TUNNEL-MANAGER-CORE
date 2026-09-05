@@ -20,7 +20,7 @@ func TestTCPTunProbeBurnNamesTheEndpointItBurned(t *testing.T) {
 	if err := os.WriteFile(st.verdictPath(), []byte(`{"cmd":"fail","low":"`+gone+`"}`), 0o644); err != nil {
 		t.Fatalf("write cmd: %v", err)
 	}
-	go b.peerPinPollLoop()
+	go b.cmdPollLoop()
 
 	var burn coreEvent
 	deadline := time.Now().Add(10 * time.Second)

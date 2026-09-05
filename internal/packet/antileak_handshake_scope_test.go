@@ -48,7 +48,7 @@ func TestTheServerScopesItsAntiLeakRuleForTheHandshake(t *testing.T) {
 		srv.leak.init(srv.closeCh, rec.installer())
 		defer func() { close(srv.closeCh); srv.leak.teardown() }()
 
-		srv.peer.Store(&net.IPAddr{IP: testSrc})
+		srv.soloPeer.Store(&net.IPAddr{IP: testSrc})
 		srv.leak.scope(testSrc)
 		if got := rec.last(); got != testSrc.String() {
 			t.Fatalf("pre-scope landed on %q, want %s — the rest of this case would be vacuous", got, testSrc)

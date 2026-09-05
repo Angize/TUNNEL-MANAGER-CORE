@@ -92,19 +92,3 @@ func TestTrafficCrossingRefillsTheDraws(t *testing.T) {
 		t.Errorf("draws after the refill: %d, want %d", *rolls-1, portTries)
 	}
 }
-
-func TestAPinnedTunnelStillRedrawsAndKeepsItsAllowance(t *testing.T) {
-	rc, rolls, burns := rungHarness(t, true)
-	if !rc.dst.selectEntry("d2") {
-		t.Fatal("could not pin")
-	}
-
-	rc.failCounting(burns)
-	if *rolls != 1 {
-		t.Errorf("a pinned tunnel refused the one step that keeps it on its pick (%d draws)", *rolls)
-	}
-	if !rc.dst.isPinned() {
-		t.Error("the pin was released by a round that only redrew a port — the redraw is free and " +
-			"blames nobody, so it is not a second opinion about the operator's pick")
-	}
-}

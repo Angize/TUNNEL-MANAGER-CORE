@@ -354,6 +354,25 @@ func TestPeerPoolRawAcceptsBareIPRejectsV6(t *testing.T) {
 	}
 }
 
+// The pool builds each entry's net.IPAddr and net.UDPAddr once, at construction, and hands the
+// carrier the ready form. An IPv6 entry has no IPv4 form, so it would seat a cursor the carrier
+// cannot follow: the destination silently stays where it was while the panel reports the move. The
+// carriers write IPv4 headers, so the answer is to refuse it at the config, not to half-support it.
+func TestPeerPoolRejectsV6WithAPortToo(t *testing.T) {
+	for _, e := range []string{"[2001:db8::1]:9000", "2001:db8::1"} {
+		c := validUDP()
+		c.PeerIPs = []string{e, "198.51.100.7:9000"}
+		if err := c.validate(); err == nil {
+			t.Errorf("udp peer_ips accepted the IPv6 entry %q", e)
+		}
+	}
+	c := validUDP()
+	c.SrcIPs = []string{"[2001:db8::1]:0"}
+	if err := c.validate(); err == nil {
+		t.Error("src_ips accepted an IPv6 entry")
+	}
+}
+
 func TestPeerPoolRejectedOnWSAndServer(t *testing.T) {
 
 	c := &Config{

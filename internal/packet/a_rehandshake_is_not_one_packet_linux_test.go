@@ -37,7 +37,7 @@ func rawRung(t *testing.T) rungRig {
 	t.Helper()
 	r := &Raw{isClient: true, profile: "udp", psk: rungPSK, cipher: crypto.CipherChaCha,
 		ping: pingEvery, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
-	r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
+	r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
 	r.session.Store(&sealerBox{s: rungSealer(t, true)})
 	r.link = &capturingLink{r: r}
 	r.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
@@ -51,7 +51,7 @@ func udpRung(t *testing.T) rungRig {
 	t.Helper()
 	b := &UDP{isClient: true, cryptoOn: true, psk: rungPSK, cipher: crypto.CipherChaCha,
 		ping: pingEvery, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
-	b.peer.Store(&net.UDPAddr{IP: net.IPv4(10, 30, 0, 2), Port: 443})
+	b.soloPeer.Store(&net.UDPAddr{IP: net.IPv4(10, 30, 0, 2), Port: 443})
 	b.session.Store(&sealerBox{s: rungSealer(t, true)})
 	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
 	t.Cleanup(func() { close(b.closeCh) })
@@ -142,7 +142,7 @@ func loopRaw(t *testing.T, sportRandom bool) (*Raw, *countingLink) {
 	r := &Raw{isClient: true, profile: "udp", psk: rungPSK, cipher: crypto.CipherChaCha,
 		ping: pingEvery, sportRandom: sportRandom,
 		closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
-	r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
+	r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
 	r.session.Store(&sealerBox{s: rungSealer(t, true)})
 	r.link = link
 	r.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
@@ -189,7 +189,7 @@ func TestTheLoopKeepsAskingAfterARung(t *testing.T) {
 func TestTheLoopStopsAskingOnceTheLiveSessionAnswers(t *testing.T) {
 	r, link := loopRaw(t, true)
 	peer := rungSealer(t, false)
-	addr := r.peer.Load()
+	addr := r.soloPeer.Load()
 
 	go r.clientLoop()
 	time.Sleep(300 * time.Millisecond)

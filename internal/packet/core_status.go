@@ -103,7 +103,7 @@ func (s *coreStatus) pathEpoch() int64 {
 
 func (s *coreStatus) verdictPath() string { return s.sidecar(".verdict") }
 
-func (s *coreStatus) pinPath() string { return s.sidecar(".pin") }
+func (s *coreStatus) selectPath() string { return s.sidecar(".select") }
 
 func (s *coreStatus) echCmdPath() string { return s.sidecar(".echcmd") }
 

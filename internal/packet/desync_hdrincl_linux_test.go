@@ -45,7 +45,7 @@ func TestSetDesyncKeepsTheModesThatNeedNoHdrincl(t *testing.T) {
 
 			r.inj = testInjector(f)
 			peer := &net.IPAddr{IP: net.IPv4(203, 0, 113, 5)}
-			r.peer.Store(peer)
+			r.soloPeer.Store(peer)
 			r.sendFakes(peer)
 			if got := len(f.asked()); got != tc.decoysOut {
 				t.Fatalf("mode=%s: %d decoys reached a socket, want %d — the modes that do not need the IP_HDRINCL socket must be delivered in full",

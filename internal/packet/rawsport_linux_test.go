@@ -227,7 +227,7 @@ func TestTheHandshakeReplyGoesToTheRolledPort(t *testing.T) {
 	srv.setSportMode(true, 0)
 	cap := &capturingLink{r: srv}
 	srv.link = cap
-	srv.peer.Store(&net.IPAddr{IP: testSrc})
+	srv.soloPeer.Store(&net.IPAddr{IP: testSrc})
 	srv.localIP.Store(&net.IPAddr{IP: testDst})
 
 	ci, err := crypto.GenerateEphemeral()
@@ -272,7 +272,7 @@ func TestAHandshakeAnswerGoesToTheSenderNotTheDataPath(t *testing.T) {
 		srv.setSportMode(true, 0)
 		cap := &capturingLink{r: srv}
 		srv.link = cap
-		srv.peer.Store(&net.IPAddr{IP: testSrc})
+		srv.soloPeer.Store(&net.IPAddr{IP: testSrc})
 		srv.localIP.Store(&net.IPAddr{IP: testDst})
 
 		ci, err := crypto.GenerateEphemeral()

@@ -21,7 +21,7 @@ func rigUDP(t *testing.T, dsts []string) (*UDP, *rotationController) {
 	if len(dsts) > 0 {
 		b.SetPeerPool(NewPeerPool(dsts, 0))
 	}
-	b.peer.Store(&net.UDPAddr{IP: net.IPv4(198, 51, 100, 1), Port: 5555})
+	b.soloPeer.Store(&net.UDPAddr{IP: net.IPv4(198, 51, 100, 1), Port: 5555})
 	rc := b.newController()
 	t.Cleanup(func() {
 		if cc := b.conn.Load(); cc != nil {

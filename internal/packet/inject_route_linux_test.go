@@ -77,13 +77,13 @@ func TestRawBadsumDecoyFollowsDestination(t *testing.T) {
 	first := &net.IPAddr{IP: net.IPv4(203, 0, 113, 5)}
 	second := &net.IPAddr{IP: net.IPv4(198, 51, 100, 7)}
 
-	r.peer.Store(first)
+	r.soloPeer.Store(first)
 	r.sendFakes(first)
 	if got := f.asked(); len(got) == 0 || got[0] != first.IP.String() {
 		t.Fatalf("first handshake resolved %v, want %s", got, first.IP)
 	}
 
-	r.peer.Store(second)
+	r.soloPeer.Store(second)
 	r.sendFakes(second)
 	last := f.asked()
 	if last[len(last)-1] != second.IP.String() {
@@ -100,7 +100,7 @@ func TestRawBadsumDecoyFramesForTheRoutedPeer(t *testing.T) {
 	r.localIP.Store(&net.IPAddr{IP: net.IPv4(192, 0, 2, 1)})
 	r.desync = newDesyncCfg(true, 4, 2, "badsum")
 	r.inj = testInjector(f)
-	r.peer.Store(peer)
+	r.soloPeer.Store(peer)
 
 	r.sendFakes(peer)
 

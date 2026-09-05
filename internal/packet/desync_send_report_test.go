@@ -27,7 +27,7 @@ func TestDecoyTransmitFailureIsReported(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 	peer := &net.IPAddr{IP: net.IPv4(203, 0, 113, 5)}
-	r.peer.Store(peer)
+	r.soloPeer.Store(peer)
 	r.sendFakes(peer)
 
 	if got := r.dsSend.bad.Load(); got != want {

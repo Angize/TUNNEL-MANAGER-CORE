@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestOperatorPinIsSilentOnEveryCarrier(t *testing.T) {
+func TestAnOperatorJumpIsSilentOnEveryCarrier(t *testing.T) {
 	type statusDoc struct {
 		Active string `json:"active"`
 		Events []struct {
@@ -35,7 +35,7 @@ func TestOperatorPinIsSilentOnEveryCarrier(t *testing.T) {
 
 	cases := []struct {
 		name string
-		pin  func(st *coreStatus)
+		jump func(st *coreStatus)
 	}{
 		{"raw/dest", func(st *coreStatus) {
 			r := &Raw{profile: "bare", fakeFd: -1, st: st, pp: dstPool()}
@@ -57,16 +57,16 @@ func TestOperatorPinIsSilentOnEveryCarrier(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "core.status")
 			st := newCoreStatus(path, "before")
-			c.pin(st)
+			c.jump(st)
 
 			d := read(t, path)
 			if len(d.Events) != 0 {
-				t.Fatalf("%s: a manual pin must write NO event, got %d: %+v", c.name, len(d.Events), d.Events)
+				t.Fatalf("%s: a manual jump must write NO event, got %d: %+v", c.name, len(d.Events), d.Events)
 			}
 
 			if wantActiveChange := c.name == "raw/dest" || c.name == "udp/dest"; wantActiveChange {
 				if d.Active == "before" {
-					t.Fatalf("%s: a destination pin must update the active descriptor, still %q", c.name, d.Active)
+					t.Fatalf("%s: a destination jump must update the active descriptor, still %q", c.name, d.Active)
 				}
 			}
 		})
