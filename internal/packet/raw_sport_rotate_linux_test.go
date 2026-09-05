@@ -105,13 +105,13 @@ func TestSportRotateRotatesTheServerSourceNotItsReplyTarget(t *testing.T) {
 	}
 }
 
-// Rotation is udp-only and off unless asked.
-func TestSportRotateIsUDPOnlyAndOffByDefault(t *testing.T) {
+// Rotation needs a forged port pair, and is off unless asked.
+func TestSportRotateNeedsPortsAndIsOffByDefault(t *testing.T) {
 	for _, profile := range RawProfileNames() {
 		r := &Raw{profile: profile, isClient: true, port: rawServerPort}
 		r.proto = rawProfiles[profile]
 		r.setSportRotate(SportRotation{Every: 5})
-		if want := profile == "udp"; r.rotActive() != want {
+		if want := RawProfileHasPorts(profile); r.rotActive() != want {
 			t.Errorf("raw/%s: rotActive()=%v, want %v", profile, r.rotActive(), want)
 		}
 	}

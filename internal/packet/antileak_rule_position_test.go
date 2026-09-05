@@ -25,10 +25,10 @@ func TestEveryAntiLeakRuleGoesInAtTheTopOfItsChain(t *testing.T) {
 		chain string
 		run   func()
 	}{
-		{"raw/udp", "OUTPUT", func() { _, _ = addRawDrop(testDst, "udp", "core42", 0, true, false, false) }},
-		{"raw/tcp", "OUTPUT", func() { _, _ = addRawDrop(testDst, "tcp", "core42", 0, true, false, false) }},
-		{"raw/tcp server", "OUTPUT", func() { _, _ = addRawDrop(testDst, "tcp", "core42", 0, false, false, false) }},
-		{"raw/icmp", "OUTPUT", func() { _, _ = addRawDrop(testDst, "icmp", "core42", 0, false, true, false) }},
+		{"raw/udp", "OUTPUT", func() { _, _ = addRawDrop(rawLeak{peer: testDst, profile: "udp", isClient: true}, "core42") }},
+		{"raw/tcp", "OUTPUT", func() { _, _ = addRawDrop(rawLeak{peer: testDst, profile: "tcp", isClient: true}, "core42") }},
+		{"raw/tcp server", "OUTPUT", func() { _, _ = addRawDrop(rawLeak{peer: testDst, profile: "tcp"}, "core42") }},
+		{"raw/icmp", "OUTPUT", func() { _, _ = addRawDrop(rawLeak{peer: testDst, profile: "icmp", marked: true}, "core42") }},
 	} {
 		argv = nil
 		tc.run()

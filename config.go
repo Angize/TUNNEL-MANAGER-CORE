@@ -329,9 +329,9 @@ func (c *Config) validate() error {
 			}
 		}
 		if c.RawSportRotate != 0 {
-			if c.RawProfile != "udp" {
-				return errors.New("raw_sport_rotate cycles the forged UDP source port and is the \"udp\" profile only" +
-					" (raw_profile \"" + c.RawProfile + "\" would break its own flow state or forges no ports)")
+			if !packet.RawProfileHasPorts(c.RawProfile) {
+				return errors.New("raw_sport_rotate cycles the forged source port, so it needs a profile that forges one" +
+					" (raw_profile \"" + c.RawProfile + "\" builds no L4 header; use \"udp\" or \"tcp\")")
 			}
 			if c.RawSportRotate < 1 || c.RawSportRotate > maxSportEvery {
 				return fmt.Errorf("raw_sport_rotate must be in 1..%d (0 = off; a new forged source port every N packets, N under the middlebox per-tuple budget)", maxSportEvery)
