@@ -63,13 +63,13 @@ func (s *coreStatus) trackRot(live func() rotStatus, closeCh <-chan struct{}) {
 	go func() {
 		tick := time.NewTicker(time.Second)
 		defer tick.Stop()
-		last := live().Sport
+		last := live()
 		for {
 			select {
 			case <-closeCh:
 				return
 			case <-tick.C:
-				if p := live().Sport; p != last {
+				if p := live(); p.Sport != last.Sport || p.Dport != last.Dport {
 					last = p
 					s.write()
 				}
