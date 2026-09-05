@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // «رندومِ واکنشی» and «چرخشِ پورتِ مبدأ» are the same machine at two speeds.
@@ -318,4 +319,47 @@ func TestThePathKeySaysWhatTheWireCarries(t *testing.T) {
 				tc.name, rot.Sport, rot.Dport, wantS, wantD)
 		}
 	}
+}
+
+// The status file is rewritten on a change, and the change it watched was the carrier's OWN source
+// port. That misses the server's whole first act: it publishes its port at startup with the client's
+// still unknown, and learning the client's port for the FIRST time is not a failover, so its own port
+// does not move and the file was never rewritten. A live netns run caught it -- the server was
+// answering 10.99.0.1:43879 on the wire while its file still carried the placeholder for "unknown".
+func TestTheFileCatchesTheClientPortTheServerLearned(t *testing.T) {
+	srv := rawEnd(false, true, 0)
+	srv.closeCh = make(chan struct{})
+	defer close(srv.closeCh)
+	srv.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
+	srv.st.trackRot(srv.rotSnapshot, srv.closeCh)
+
+	read := func() rotStatus {
+		t.Helper()
+		b, err := os.ReadFile(srv.st.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got struct {
+			Rot rotStatus `json:"rot"`
+		}
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatal(err)
+		}
+		return got.Rot
+	}
+
+	before := read()
+	srv.learnClientPort(40000)
+	if srv.rotSnapshot().Sport != before.Sport {
+		t.Fatal("setup: the server's own port moved, so this is not the case under test")
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		if read().Dport == 40000 {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Errorf("the server answers port 40000 on the wire and its file still says %d — the tracker "+
+		"watches only its own source port, so it never republished", read().Dport)
 }
