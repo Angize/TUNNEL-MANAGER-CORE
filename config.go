@@ -339,9 +339,6 @@ func (c *Config) validate() error {
 			if c.RawSport != 0 || c.RawSportRandom {
 				return errors.New("raw_sport_rotate continuously re-picks the forged source port, so it cannot combine with raw_sport (fixed) or raw_sport_random (rolls once)")
 			}
-			if c.Fec {
-				return errors.New("raw_sport_rotate is not supported with fec yet (the FEC send path does not cycle the source port per packet)")
-			}
 		}
 		if c.RawDports != 0 {
 			if c.RawSportRotate == 0 {
