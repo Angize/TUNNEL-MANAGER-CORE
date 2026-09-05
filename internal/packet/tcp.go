@@ -418,6 +418,28 @@ func (b *TCP) livePath() (pathKey, bool) {
 
 func (b *TCP) endRound() { b.rc.success() }
 
+func (b *TCP) armRotationClock() {
+	b.rc.setClock(func() {
+		if iv := b.rotateEvery(); iv > 0 {
+			b.rotateFrom(iv)
+		}
+	})
+}
+
+func (b *TCP) rotateEvery() time.Duration {
+	if b.pool != nil {
+		return b.rotate
+	}
+	iv := time.Duration(0)
+	if b.pp != nil {
+		iv = b.pp.rotate
+	}
+	if b.sp != nil && b.sp.rotate > iv {
+		iv = b.sp.rotate
+	}
+	return iv
+}
+
 func (b *TCP) rotateIn(iv time.Duration) time.Duration {
 	now := time.Now().UnixNano()
 	at := b.rotAt.Load()
@@ -668,6 +690,7 @@ func (b *TCP) Run() error {
 		go b.keepaliveLoop()
 		go b.diagLoop()
 		b.rc.port.setRoll(b.rollSourcePort)
+		b.armRotationClock()
 		b.st.trackPath(b.livePath, b.closeCh)
 		if b.rc.polls() {
 			go b.cmdPollLoop()
@@ -1303,15 +1326,8 @@ func (b *TCP) dialLoop() {
 				c.Close()
 			})
 			rotp.Store(rot)
-		} else if (b.pp != nil && b.pp.rotate > 0) || (b.sp != nil && b.sp.rotate > 0) {
+		} else if iv := b.rotateEvery(); iv > 0 {
 			c := conn
-			iv := time.Duration(0)
-			if b.pp != nil {
-				iv = b.pp.rotate
-			}
-			if b.sp != nil && b.sp.rotate > iv {
-				iv = b.sp.rotate
-			}
 
 			rot = time.AfterFunc(b.rotateIn(iv), func() {
 				if !timerLive.Load() {

@@ -56,21 +56,26 @@ func TestASourceRotationSaysWhichKindItWas(t *testing.T) {
 	if _, moved := b.rotateSourceTCP(false); !moved {
 		t.Fatal("failover rotate should move in a 2-entry pool")
 	}
-	// Three now: the pool announces the burn it just made, the carrier announces the rotation it
-	// caused, and the rotation is marked as a failover, so the reconnect reports the recovery.
+	// Four now: the pool announces the burn it just made; burning one of two leaves a single usable
+	// source, so it also announces that the rotation on that axis has stopped; then the carrier
+	// announces the move, marked as a failover so the reconnect reports the recovery.
 	ev = coreStatusEvents(t, path)
-	if len(ev) != 3 {
-		t.Fatalf("failover source rotation: events=%+v, want a burn and a src-rotate", ev)
+	if len(ev) != 4 {
+		t.Fatalf("failover source rotation: events=%+v, want a burn, a degraded and a src-rotate", ev)
 	}
 	if ev[1].Kind != "burn" || ev[1].Detail != "src:10.0.0.6" {
 		t.Fatalf("second event should be the pool naming what IT burned, got %+v", ev[1])
 	}
-	if ev[2].Kind != "down" || ev[2].Code != "src-rotate" {
-		t.Fatalf("third event should be the rotation, got %+v", ev[2])
+	if ev[2].Kind != "pool" || ev[2].Code != "degraded" || ev[2].Detail != "src:1/2" {
+		t.Fatalf("third event should be the pool saying its rotation has stopped, and on WHICH axis, "+
+			"got %+v", ev[2])
+	}
+	if ev[3].Kind != "down" || ev[3].Code != "src-rotate" {
+		t.Fatalf("fourth event should be the rotation, got %+v", ev[3])
 	}
 	b.st.reconnected("d0:443")
 	ev = coreStatusEvents(t, path)
-	if len(ev) != 4 || ev[3].Kind != "up" {
+	if len(ev) != 5 || ev[4].Kind != "up" {
 		t.Fatalf("a forced rotation must arm the report that the tunnel came back: %+v", ev)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,6 +41,7 @@ type PeerPool struct {
 	rotate time.Duration
 
 	live   atomic.Pointer[poolAddr]
+	watch  rotWatch
 	chosen string
 	now    func() int64
 
@@ -193,30 +195,26 @@ func retestBackoff(r *healthRec, now int64) {
 }
 
 func (p *PeerPool) advanceFailLocked() {
-	n := len(p.addrs)
-	for k := 1; k <= n; k++ {
-		idx := (p.cur + k) % n
-		if p.health.healthy(p.addrs[idx]) {
-			p.commitLocked(idx)
-			return
-		}
-	}
-	for k := 1; k <= n; k++ {
-		idx := (p.cur + k) % n
-		if p.health.due(p.addrs[idx]) {
-			p.commitLocked(idx)
-			return
-		}
-	}
-	if best := p.bestIdxLocked(p.cur); best != p.cur && p.betterLocked(best, p.cur) {
-		p.commitLocked(best)
+	if idx := p.health.nextFrom(p.cur, p.addrs); idx != p.cur {
+		p.commitLocked(idx)
 	}
 }
 
-func (p *PeerPool) betterLocked(a, b int) bool {
-	at, an := p.tierLocked(p.addrs[a])
-	bt, bn := p.tierLocked(p.addrs[b])
-	return at < bt || (at == bt && an < bn)
+func (p *PeerPool) reassess() {
+	p.mu.Lock()
+	eligible, total := p.health.countEligible(p.addrs), len(p.addrs)
+	degraded, report := p.watch.turned(eligible, total)
+	axis, ev := p.axis, p.ev
+	p.mu.Unlock()
+	if !report || ev == nil {
+		return
+	}
+	detail := axis + ":" + strconv.Itoa(eligible) + "/" + strconv.Itoa(total)
+	if degraded {
+		ev("pool", "degraded", detail)
+		return
+	}
+	ev("pool", "restored", detail)
 }
 
 func (p *PeerPool) advanceEligibleLocked() bool {
@@ -251,6 +249,7 @@ func (p *PeerPool) fail(reason string) (addr string, moved bool) {
 		ev("burn", reason, axis+":"+burned)
 	}
 	p.publish()
+	p.reassess()
 	return a, moved
 }
 
@@ -335,6 +334,7 @@ func (p *PeerPool) clearBurn(addr string) bool {
 			ev("heal", "tun-probe", axis+":"+addr)
 		}
 		p.publish()
+		p.reassess()
 	}
 	return cleared
 }
@@ -345,6 +345,7 @@ func (p *PeerPool) restoreAll() {
 	p.mu.Unlock()
 	if cleared {
 		p.publish()
+		p.reassess()
 	}
 }
 
@@ -354,6 +355,7 @@ func (p *PeerPool) retestNow(addr string) bool {
 	p.mu.Unlock()
 	if ok {
 		p.publish()
+		p.reassess()
 	}
 	return ok
 }
@@ -373,6 +375,7 @@ func (p *PeerPool) markSuspect(addr, reason string) {
 		}
 	}
 	p.publish()
+	p.reassess()
 }
 
 func (p *PeerPool) selectEntry(key string) bool {
@@ -394,6 +397,7 @@ func (p *PeerPool) selectEntry(key string) bool {
 	p.commitLocked(idx)
 	p.mu.Unlock()
 	p.publish()
+	p.reassess()
 	return moved
 }
 
@@ -532,6 +536,7 @@ type rotationController struct {
 	liveFn   func() (low, high string)
 	dst, src *PeerPool
 	st       *coreStatus
+	clock    func()
 	verdict  string
 	selbox   string
 
@@ -721,12 +726,22 @@ func (c *rotationController) restart() {
 	c.refill()
 }
 
+func (c *rotationController) setClock(f func()) {
+	c.mu.Lock()
+	c.clock = f
+	c.mu.Unlock()
+}
+
 func (c *rotationController) jumped() {
 	c.mu.Lock()
 	if c.rotate > 0 {
 		c.rotateAt = time.Now().Add(c.rotate)
 	}
+	f := c.clock
 	c.mu.Unlock()
+	if f != nil {
+		f()
+	}
 	c.success()
 }
 

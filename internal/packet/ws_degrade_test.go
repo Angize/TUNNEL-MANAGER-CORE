@@ -22,8 +22,8 @@ func TestReassessRotationEvents(t *testing.T) {
 	if got := count("degraded"); got != 1 {
 		t.Fatalf("degraded events = %d, want 1", got)
 	}
-	if !p.rotDegraded {
-		t.Fatal("rotDegraded should be set after losing an edge")
+	if !p.watch.degraded {
+		t.Fatal("the watch should be set after losing an edge")
 	}
 
 	p.markSuspect("ip", "1.1.1.1", "test")
@@ -35,8 +35,8 @@ func TestReassessRotationEvents(t *testing.T) {
 	if got := count("restored"); got != 1 {
 		t.Fatalf("restored events = %d, want 1", got)
 	}
-	if p.rotDegraded {
-		t.Fatal("rotDegraded should be cleared after recovery")
+	if p.watch.degraded {
+		t.Fatal("the watch should be cleared after recovery")
 	}
 
 	b1, p1 := edgeCarrier(t, []string{"9.9.9.9"}, []wsSNIEntry{{host: "a.com"}})
@@ -66,7 +66,7 @@ func TestSelectEntryReassessesRotation(t *testing.T) {
 	if count("restored") != 1 {
 		t.Fatalf("restored = %d, want 1 (selectEntry must reassess rotation)", count("restored"))
 	}
-	if p.rotDegraded {
+	if p.watch.degraded {
 		t.Fatal("rotDegraded must be cleared after the pinned edge's burn was lifted")
 	}
 

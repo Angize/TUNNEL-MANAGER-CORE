@@ -85,6 +85,48 @@ func (h healthSet) retestNow(key string) bool {
 	return true
 }
 
+func (h healthSet) nextFrom(at int, keys []string) int {
+	n := len(keys)
+	if n == 0 {
+		return at
+	}
+	for k := 1; k <= n; k++ {
+		if i := (at + k) % n; h.healthy(keys[i]) {
+			return i
+		}
+	}
+	for k := 1; k <= n; k++ {
+		if i := (at + k) % n; h.due(keys[i]) {
+			return i
+		}
+	}
+	best := at
+	bt, bn := h.tier(keys[at])
+	for i := range keys {
+		if i == at {
+			continue
+		}
+		if t, nx := h.tier(keys[i]); t < bt || (t == bt && nx < bn) {
+			best, bt, bn = i, t, nx
+		}
+	}
+	return best
+}
+
+type rotWatch struct{ degraded bool }
+
+func (w *rotWatch) turned(eligible, total int) (degraded, report bool) {
+	if total < 2 {
+		return w.degraded, false
+	}
+	d := eligible < 2
+	if d == w.degraded {
+		return d, false
+	}
+	w.degraded = d
+	return d, true
+}
+
 func (h healthSet) countEligible(keys []string) int {
 	n := 0
 	for _, k := range keys {
