@@ -69,7 +69,7 @@ func TestAFixedSourcePortReachesTheWireThePathAndTheAntiLeakRule(t *testing.T) {
 	// The anti-leak rule is scoped by the SERVER port in every mode -- fixed, default or drawn -- so a
 	// configured source port changes the wire without needing a second rule shape.
 	for _, isClient := range []bool{true, false} {
-		got := rawDropMatches(testDst, "tcp", rawServerPort, isClient, false)
+		got := rawDropMatches(testDst, "tcp", rawServerPort, isClient, false, false)
 		if len(got) != 1 {
 			t.Fatalf("isClient=%v: %d rules, want exactly 1", isClient, len(got))
 		}
@@ -111,7 +111,7 @@ func TestAFixedSourcePortIsDroppedWhereItCannotHold(t *testing.T) {
 	}
 
 	for _, isClient := range []bool{true, false} {
-		rule := strings.Join(rawDropMatches(testDst, "tcp", rawServerPort, isClient, false)[0], " ")
+		rule := strings.Join(rawDropMatches(testDst, "tcp", rawServerPort, isClient, false, false)[0], " ")
 		if strings.Contains(rule, "4500") {
 			t.Errorf("isClient=%v: rolling mode pinned 4500: %s", isClient, rule)
 		}
@@ -139,7 +139,7 @@ func TestNoFixedSourcePortKeepsTheDefault(t *testing.T) {
 		}
 	}
 	for _, isClient := range []bool{true, false} {
-		rule := strings.Join(rawDropMatches(testDst, "tcp", rawServerPort, isClient, false)[0], " ")
+		rule := strings.Join(rawDropMatches(testDst, "tcp", rawServerPort, isClient, false, false)[0], " ")
 		if strings.Contains(rule, strconv.Itoa(rawClientPort)) {
 			t.Errorf("isClient=%v: the default rule pins the client port %d, which the draw moves: %s",
 				isClient, rawClientPort, rule)
