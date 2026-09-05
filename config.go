@@ -193,10 +193,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Fec {
 		if c.FecData == 0 {
-			c.FecData = 10
+			c.FecData = 16
 		}
 		if c.FecParity == 0 {
-			c.FecParity = 3
+			c.FecParity = 4
 		}
 	}
 	if c.Transport == "ws" && c.WSPath == "" {
