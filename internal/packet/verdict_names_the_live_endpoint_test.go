@@ -69,7 +69,7 @@ func TestAVerdictIsChargedToTheEndpointItNamed(t *testing.T) {
 		t.Fatalf("setup: the carrier did not follow the pool, at %q", lt.live)
 	}
 
-	lt.pinAndRelease(t, "a")
+	lt.jumpTo(t, "a")
 	if lt.live != "a" {
 		t.Fatalf("setup: the pin did not land, carrier at %q", lt.live)
 	}
@@ -91,14 +91,13 @@ func TestAVerdictIsChargedToTheEndpointItNamed(t *testing.T) {
 	}
 }
 
-func (lt *liveTunnel) pinAndRelease(t *testing.T, key string) {
+func (lt *liveTunnel) jumpTo(t *testing.T, key string) {
 	t.Helper()
 	if !lt.p.selectEntry(key) {
-		t.Fatalf("could not pin %s", key)
+		t.Fatalf("could not jump to %s", key)
 	}
 	lt.live = lt.p.current()
 	lt.b.pretendConnected(lt.live, "")
-	lt.p.releasePin()
 }
 
 func TestNoVerdictEverCondemnsAnEndpointTheTunnelWasNotOn(t *testing.T) {
@@ -111,7 +110,7 @@ func TestNoVerdictEverCondemnsAnEndpointTheTunnelWasNotOn(t *testing.T) {
 
 			for _, k := range lt.p.all() {
 				if k != lt.live {
-					lt.pinAndRelease(t, k)
+					lt.jumpTo(t, k)
 					break
 				}
 			}

@@ -4,23 +4,42 @@ import (
 	"bytes"
 	"encoding/json"
 	"log"
+	"net"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
+type poolAddr struct {
+	s  string
+	ip *net.IPAddr
+	ua *net.UDPAddr
+}
+
+func newPoolAddr(s string) poolAddr {
+	a := poolAddr{s: s}
+	ip := parseIP4(hostOnly(s))
+	if ip == nil {
+		return a
+	}
+	a.ip = &net.IPAddr{IP: ip}
+	if ua, err := net.ResolveUDPAddr("udp", s); err == nil {
+		a.ua = ua
+	}
+	return a
+}
+
 type PeerPool struct {
 	burns  atomic.Uint64
 	mu     sync.Mutex
 	addrs  []string
+	forms  []poolAddr
 	health healthSet
 	cur    int
 	rotate time.Duration
 
-	pinKey  string
-	pinTook *healthRec
-
+	live   atomic.Pointer[poolAddr]
 	chosen string
 	now    func() int64
 
@@ -45,37 +64,30 @@ func (p *PeerPool) publish() {
 	}
 }
 
-func (p *PeerPool) emit(code, reason string) {
-	p.mu.Lock()
-	axis, ev := p.axis, p.ev
-	p.mu.Unlock()
-	if ev != nil {
-		ev("pool", code, axis+":"+reason)
-	}
-}
-
-func (p *PeerPool) dropPin(reason string, matched func() bool) bool {
-	p.mu.Lock()
-	hit := matched()
-	if hit {
-		p.restorePinTookLocked()
-		p.pinKey = ""
-	}
-	p.mu.Unlock()
-	if hit {
-		p.publish()
-		p.emit("pin_dropped", reason)
-	}
-	return hit
-}
-
 func NewPeerPool(addrs []string, rotate time.Duration) *PeerPool {
 	cp := make([]string, len(addrs))
 	copy(cp, addrs)
-	p := &PeerPool{addrs: cp, rotate: rotate, now: func() int64 { return time.Now().Unix() }}
+	forms := make([]poolAddr, len(cp))
+	for i, a := range cp {
+		forms[i] = newPoolAddr(a)
+	}
+	p := &PeerPool{addrs: cp, forms: forms, rotate: rotate,
+		now: func() int64 { return time.Now().Unix() }}
 	p.health = newHealthSet(&p.now)
+	if len(forms) > 0 {
+		p.live.Store(&p.forms[0])
+	}
 	return p
 }
+
+func (p *PeerPool) liveAddr() *poolAddr {
+	if p == nil {
+		return nil
+	}
+	return p.live.Load()
+}
+
+func (p *PeerPool) landLocked(idx int) { p.live.Store(&p.forms[idx]) }
 
 func (p *PeerPool) current() string {
 	p.mu.Lock()
@@ -86,24 +98,18 @@ func (p *PeerPool) current() string {
 func (p *PeerPool) commitLocked(idx int) string {
 	p.cur = idx
 	p.chosen = p.addrs[idx]
+	p.landLocked(idx)
 	return p.chosen
 }
 
 func (p *PeerPool) pickLocked(idx int) string {
 	p.cur = idx
 	p.chosen = ""
+	p.landLocked(idx)
 	return p.addrs[idx]
 }
 
 func (p *PeerPool) currentLocked() string {
-	if p.pinKey != "" {
-		for idx, a := range p.addrs {
-			if a == p.pinKey {
-				return p.pickLocked(idx)
-			}
-		}
-		p.pinKey = ""
-	}
 	n := len(p.addrs)
 
 	if p.chosen != "" && p.addrs[p.cur] == p.chosen {
@@ -230,12 +236,6 @@ func (p *PeerPool) advanceEligibleLocked() bool {
 
 func (p *PeerPool) fail(reason string) (addr string, moved bool) {
 	p.mu.Lock()
-
-	if p.pinnedLocked() {
-		a := p.addrs[p.cur]
-		p.mu.Unlock()
-		return a, false
-	}
 	prev := p.cur
 	burned := ""
 	if p.burnLocked(p.addrs[p.cur]) {
@@ -256,7 +256,7 @@ func (p *PeerPool) fail(reason string) (addr string, moved bool) {
 
 func (p *PeerPool) rotateOnce() (addr string, moved bool) {
 	p.mu.Lock()
-	if len(p.addrs) < 2 || p.pinnedLocked() {
+	if len(p.addrs) < 2 {
 		a := p.addrs[p.cur]
 		p.mu.Unlock()
 		return a, false
@@ -363,10 +363,6 @@ func (p *PeerPool) markSuspect(addr, reason string) {
 		return
 	}
 	p.mu.Lock()
-	if p.pinKey == addr {
-		p.mu.Unlock()
-		return
-	}
 	condemned := p.health.burn(addr)
 	axis, ev := p.axis, p.ev
 	p.mu.Unlock()
@@ -393,53 +389,12 @@ func (p *PeerPool) selectEntry(key string) bool {
 		return false
 	}
 
-	if p.pinKey != key {
-		if p.pinKey != "" {
-			p.restorePinTookLocked()
-		}
-		p.pinTook = p.health.rec(key)
-		p.health.clear(key)
-	}
-	p.pinKey = key
-	p.pickLocked(idx)
+	moved := p.cur != idx
+	p.health.clear(key)
+	p.commitLocked(idx)
 	p.mu.Unlock()
 	p.publish()
-	return true
-}
-
-func (p *PeerPool) pinLandedOn(addr string) {
-	p.mu.Lock()
-	changed := p.pinnedLocked() && p.pinKey == addr
-	if changed {
-		p.pinKey, p.pinTook = "", nil
-	}
-	p.mu.Unlock()
-	if changed {
-		p.publish()
-	}
-}
-
-func (p *PeerPool) restorePinTookLocked() {
-	if p.pinTook != nil && p.pinKey != "" {
-		p.health.recs[p.pinKey] = p.pinTook
-	}
-	p.pinTook = nil
-}
-
-func (p *PeerPool) pinCannotLand(key string) bool {
-	return p.dropPin("cannot-land", func() bool { return p.pinnedLocked() && p.pinKey == key })
-}
-
-func (p *PeerPool) releasePin() {
-	p.dropPin("tun-probe", func() bool { return p.pinKey != "" })
-}
-
-func (p *PeerPool) pinnedLocked() bool { return p.pinKey != "" }
-
-func (p *PeerPool) isPinned() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.pinnedLocked()
+	return moved
 }
 
 type poolCmd struct {
@@ -502,11 +457,6 @@ const cmdOK = "ok"
 
 const cmdRetest = "retest"
 
-type pinnable interface {
-	isPinned() bool
-	releasePin()
-}
-
 type lowAxis interface {
 	activeIdx() int
 	eligibleCount() int
@@ -531,20 +481,10 @@ type poolPair interface {
 type walkPolicy struct {
 	mu   sync.Mutex
 	od   odometer
-	pins []pinnable
 	low  lowAxis
 	high highAxis
 
 	lowAxisSet atomic.Bool
-}
-
-func (w *walkPolicy) pinnedLocked() bool {
-	for _, p := range w.pins {
-		if p.isPinned() {
-			return true
-		}
-	}
-	return false
 }
 
 func (w *walkPolicy) hasLow() bool { return w.lowAxisSet.Load() }
@@ -560,11 +500,6 @@ func (w *walkPolicy) walk(rotLow, rotHigh func(proactive bool)) (stepped, lowBur
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.pinnedLocked() {
-		for _, p := range w.pins {
-			p.releasePin()
-		}
-	}
 	switch {
 	case w.low != nil:
 		lap := w.od.failed(w.low.eligibleCount)
@@ -598,7 +533,7 @@ type rotationController struct {
 	dst, src *PeerPool
 	st       *coreStatus
 	verdict  string
-	pinbox   string
+	selbox   string
 
 	measured atomic.Pointer[pairNow]
 
@@ -624,15 +559,13 @@ func (c *rotationController) bind(dst, src *PeerPool) {
 	defer c.mu.Unlock()
 	c.dst, c.src = dst, src
 	c.pair = peerPair{dst: dst, src: src}
-	c.pins, c.high, c.rotate = nil, nil, 0
+	c.high, c.rotate = nil, 0
 	c.setLowLocked(nil)
 	if dst != nil {
-		c.pins = append(c.pins, dst)
 		c.setLowLocked(dst)
 		c.rotate = dst.rotate
 	}
 	if src != nil {
-		c.pins = append(c.pins, src)
 		c.high = src
 		if src.rotate > c.rotate {
 			c.rotate = src.rotate
@@ -647,7 +580,6 @@ func (c *rotationController) bindEdges(p *wsPool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.pair = edgePair{p}
-	c.pins = []pinnable{p}
 	c.high = wsSNIs{p}
 	c.setLowLocked(nil)
 	if p.ipsCount() >= 2 {
@@ -740,11 +672,11 @@ func joinStatus(st *coreStatus, p *PeerPool, axis string) {
 
 func (c *rotationController) attachStatus(st *coreStatus) {
 	c.st = st
-	c.verdict, c.pinbox = st.verdictPath(), st.pinPath()
+	c.verdict, c.selbox = st.verdictPath(), st.selectPath()
 }
 
 func (c *rotationController) polls() bool {
-	return c != nil && (c.active() || c.verdict != "" || c.pinbox != "")
+	return c != nil && (c.active() || c.verdict != "" || c.selbox != "")
 }
 
 func (c *rotationController) spendFreeRungs() bool {
@@ -789,6 +721,15 @@ func (c *rotationController) restart() {
 	c.refill()
 }
 
+func (c *rotationController) jumped() {
+	c.mu.Lock()
+	if c.rotate > 0 {
+		c.rotateAt = time.Now().Add(c.rotate)
+	}
+	c.mu.Unlock()
+	c.success()
+}
+
 func (c *rotationController) success() {
 	c.accused.Store(nil)
 	c.revive.restart()
@@ -799,10 +740,6 @@ func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.rotate <= 0 || c.rotateAt.IsZero() || !now.After(c.rotateAt) {
-		return
-	}
-	if c.pinnedLocked() {
-		c.rotateAt = now.Add(c.rotate)
 		return
 	}
 	c.rotateAt = now.Add(c.rotate)
@@ -825,7 +762,7 @@ func (c *rotationController) poll(rotLow, rotHigh func(proactive bool), applied 
 		moved = c.judge(cmd, rotLow, rotHigh, pathEpoch())
 	}
 
-	cmds := readPoolCmds(c.pinbox)
+	cmds := readPoolCmds(c.selbox)
 	if c.pair == nil {
 		return moved
 	}
@@ -840,7 +777,9 @@ func (c *rotationController) poll(rotLow, rotHigh func(proactive bool), applied 
 			}
 		default:
 			if c.pair.pick(cmd.Kind, cmd.Key) {
-				log.Printf("core: pin %s %s (operator)", cmd.Kind, cmd.Key)
+				log.Printf("core: %s moved to %s (operator), rotation continues from there",
+					cmd.Kind, cmd.Key)
+				c.jumped()
 				if applied != nil {
 					applied(cmd.Kind, cmd.Key)
 				}
@@ -925,7 +864,7 @@ func (p *PeerPool) healthRows() []healthStatus {
 	defer p.mu.Unlock()
 	rows := make([]healthStatus, 0, len(p.addrs))
 	for _, a := range p.addrs {
-		hs := healthStatus{Key: a, Kind: p.axis, State: "healthy", Pin: a == p.pinKey}
+		hs := healthStatus{Key: a, Kind: p.axis, State: "healthy"}
 		if r := p.health.rec(a); r != nil {
 			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
 		}

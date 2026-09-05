@@ -28,90 +28,20 @@ func eventCodes(b *TCP, t *testing.T) []string {
 	return out
 }
 
-// A refused dial reaches the edge and stops there: TLS never starts, so the domain is never sent and
-// nothing is learned about it. Ending the operator's domain pin over it threw away the expensive pick
-// -- the one they chose deliberately -- because a cheap one under it happened to be dead.
-func TestARefusedEdgeLeavesTheDomainPinAlone(t *testing.T) {
-	b, p := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis("front-a", "front-b"))
-	if !b.operatorPin(t, "sni", "front-b") {
-		t.Fatal("setup: the domain pin was not applied")
-	}
-	b.pinFailedOn("ip2:443")
-
-	p.mu.Lock()
-	sni, ip := p.pinSNI, p.pinIP
-	p.mu.Unlock()
-	if sni != "front-b" {
-		t.Errorf("the edge refused and the DOMAIN pin went with it (pinSNI=%q)", sni)
-	}
-	if ip != "" {
-		t.Errorf("no edge was pinned, yet pinIP=%q", ip)
-	}
-}
-
-// ...and it still ends an EDGE pin, which is the one thing a refusal does prove.
-func TestARefusedEdgeEndsTheEdgePin(t *testing.T) {
-	b, p := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis("front-a"))
-	if !b.operatorPin(t, "ip", "ip2:443") {
-		t.Fatal("setup: the edge pin was not applied")
-	}
-	b.pinFailedOn("ip2:443")
-	if p.isPinned() {
-		t.Error("the operator's own edge refused the dial and the pin outlived it")
-	}
-}
-
-// The pin stashes the entry's burn and gives it back when the pin ends. Pinning the SAME entry twice
-// used to overwrite that stash with the record the first pin had already cleared -- nothing -- so a
-// six-hour dead entry came back healthy and the walk handed it live traffic again.
-func TestRePinningTheSameEntryKeepsItsBurn(t *testing.T) {
-	t.Run("direct pool", func(t *testing.T) {
-		_, pp, _ := peerCarrier(t, []string{"1.1.1.1:443", "2.2.2.2:443"}, nil)
-		pp.markSuspect("2.2.2.2:443", "tun-probe")
-		pp.selectEntry("2.2.2.2:443")
-		pp.selectEntry("2.2.2.2:443")
-		pp.releasePin()
-		if got := stateOf(pp.healthRows(), "dst", "2.2.2.2:443"); got != stateSuspect {
-			t.Errorf("after two pins and a release the burn is %q, want %q", got, stateSuspect)
-		}
-	})
-	t.Run("edge pool", func(t *testing.T) {
-		for _, tc := range []struct{ kind, key string }{{"ip", "ip2:443"}, {"sni", "front-b"}} {
-			_, p := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis("front-a", "front-b"))
-			p.markSuspect(tc.kind, tc.key, "tun-probe")
-			p.selectEntry(tc.kind, tc.key)
-			p.selectEntry(tc.kind, tc.key)
-			p.releasePin()
-			if got := stateOf(p.healthRows(), tc.kind, tc.key); got != stateSuspect {
-				t.Errorf("%s: after two pins and a release the burn is %q, want %q", tc.kind, got, stateSuspect)
-			}
-		}
-	})
-}
-
-// Pinning a key the pool does not have must change nothing at all -- not the cursor, not the live
-// pin, and not the health of the entry that pin is holding.
-func TestPinningAKeyThePoolDoesNotHaveChangesNothing(t *testing.T) {
+// Jumping to a key the pool does not have must change nothing at all: not the cursor, not the health
+// of the entry the pool is standing on.
+func TestJumpingToAKeyThePoolDoesNotHaveChangesNothing(t *testing.T) {
 	_, p := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis("front-a", "front-b"))
 	p.markSuspect("sni", "front-b", "tun-probe")
 	p.selectEntry("sni", "front-b")
-	before, _, _ := p.current()
+	before, beforeSNI, _ := p.current()
 
 	if p.selectEntry("sni", "nope.example") {
-		t.Fatal("selectEntry reported it pinned a domain the pool does not have")
+		t.Fatal("selectEntry reported it moved onto a domain the pool does not have")
 	}
-	p.mu.Lock()
-	pinned := p.pinSNI
-	p.mu.Unlock()
-	if pinned != "front-b" {
-		t.Errorf("the live pin became %q", pinned)
-	}
-	if now, _, _ := p.current(); now != before {
-		t.Errorf("the cursor moved from %q to %q", before, now)
-	}
-	p.releasePin()
-	if got := stateOf(p.healthRows(), "sni", "front-b"); got != stateSuspect {
-		t.Errorf("the stashed burn is %q after the release, want %q", got, stateSuspect)
+	now, nowSNI, _ := p.current()
+	if now != before || nowSNI.host != beforeSNI.host {
+		t.Errorf("the cursor moved from %q · %q to %q · %q", before, beforeSNI.host, now, nowSNI.host)
 	}
 }
 
@@ -150,13 +80,13 @@ func TestOneConnectIsOneEpoch(t *testing.T) {
 }
 
 // Two commands in one tick are two commands. The mailbox was a single slot, so the second erased the
-// first while the panel reported both as done -- and a pin and a retest are orders on different
+// first while the panel reported both as done -- and a jump and a retest are orders on different
 // entries, so neither supersedes the other.
 func TestTheOperatorMailboxKeepsEveryCommand(t *testing.T) {
 	b, p := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis("front-a", "front-b"))
 	p.markSuspect("ip", "ip2:443", "tun-probe")
 
-	box := b.st.pinPath()
+	box := b.st.selectPath()
 	f, err := os.OpenFile(box, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		t.Fatal(err)
@@ -168,11 +98,8 @@ func TestTheOperatorMailboxKeepsEveryCommand(t *testing.T) {
 	f.Close()
 
 	b.pollPeerCmd()
-	p.mu.Lock()
-	pinned := p.pinSNI
-	p.mu.Unlock()
-	if pinned != "front-b" {
-		t.Errorf("the second command was dropped: pinSNI=%q", pinned)
+	if _, sni, _ := p.current(); sni.host != "front-b" {
+		t.Errorf("the second command was dropped: the pool is on %q", sni.host)
 	}
 	rec := func() *healthRec {
 		p.mu.Lock()
@@ -228,7 +155,7 @@ func TestEveryWalkSaysWhereItWent(t *testing.T) {
 }
 
 // The single-edge ECH key has two writers on two goroutines: the dial loop reads it on every attempt
-// and the pin-poll loop rewrites it when the panel pushes a fresh one. Run under -race.
+// and the command-poll loop rewrites it when the panel pushes a fresh one. Run under -race.
 func TestTheECHKeyHasOneOwner(t *testing.T) {
 	cliDev, _ := tunPair(t, "echown")
 	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: "aes-256-gcm", psk: "ech-one-owner-psk-abcdefghijkl",
@@ -236,13 +163,13 @@ func TestTheECHKeyHasOneOwner(t *testing.T) {
 		idle: connIdle, ping: pingEvery, isClient: true, closeCh: make(chan struct{})}
 	cli.SetStatusPath(runningStatusPath(t, cli))
 	if !cli.rc.polls() {
-		t.Fatal("setup: the pin-poll goroutine would not run, so there is no second writer")
+		t.Fatal("setup: the command-poll goroutine would not run, so there is no second writer")
 	}
 	t.Cleanup(func() { cli.Close() })
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { // the pin-poll goroutine
+	go func() { // the command-poll goroutine
 		defer wg.Done()
 		for i := 0; i < 300; i++ {
 			key := base64.StdEncoding.EncodeToString([]byte{byte(i), 2, 3, 4, 5, 6, 7, 8})

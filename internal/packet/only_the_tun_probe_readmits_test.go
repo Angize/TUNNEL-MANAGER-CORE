@@ -110,18 +110,3 @@ func TestTheLadderDeepensOnTheRetryItsBackoffAllowed(t *testing.T) {
 			"(%+v) — the carrier would retry it at the shortest interval the ladder has, forever", addr, after)
 	}
 }
-
-func TestAPinIsNotAProactiveRotation(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2", "e3"}, snis("x"))
-	if !p.selectEntry("ip", "e3") {
-		t.Fatal("could not pin e3")
-	}
-	for i := 0; i < 3; i++ {
-		if p.advance() {
-			t.Fatal("the rotation timer moved off a pinned edge — the operator's jump must survive it")
-		}
-		if ip, _, _ := p.current(); ip != "e3" {
-			t.Fatalf("the pin resolved to %q", ip)
-		}
-	}
-}

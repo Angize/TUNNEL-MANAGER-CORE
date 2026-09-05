@@ -247,13 +247,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("tnl-core: transport: %v", err)
 	}
-	switch pinSource(b, cfg) {
-	case pinByBind:
+	switch sourceMode(b, cfg) {
+	case srcByBind:
 		log.Printf("tnl-core: binding outbound source IP to %s", cfg.BindIP)
-	case pinByPool:
-		log.Printf("tnl-core: binding outbound source IP to %s (pinned as a one-entry source pool — %s has no separate bind)", cfg.BindIP, cfg.Transport)
-	case pinUnsupported:
-		log.Printf("core: WARNING carrier %s ignores bind_ip — it can pin neither a source IP nor a source pool, so this tunnel egresses from whatever source the kernel routes it out of", cfg.Transport)
+	case srcByPool:
+		log.Printf("tnl-core: binding outbound source IP to %s (a one-entry source pool — %s has no separate bind)", cfg.BindIP, cfg.Transport)
+	case srcUnsupported:
+		log.Printf("core: WARNING carrier %s ignores bind_ip — it can fix neither a source IP nor a source pool, so this tunnel egresses from whatever source the kernel routes it out of", cfg.Transport)
 	}
 
 	if cfg.StatusPath != "" {
@@ -341,29 +341,29 @@ func coverTag(cover bool) string {
 }
 
 const (
-	pinNone        = ""
-	pinByBind      = "bind"
-	pinByPool      = "pool"
-	pinBySrcIPs    = "src_ips"
-	pinUnsupported = "unsupported"
+	srcNone        = ""
+	srcByBind      = "bind"
+	srcByPool      = "pool"
+	srcBySrcIPs    = "src_ips"
+	srcUnsupported = "unsupported"
 )
 
-func pinSource(b any, cfg *Config) string {
+func sourceMode(b any, cfg *Config) string {
 	if cfg.Role != "client" || cfg.BindIP == "" {
-		return pinNone
+		return srcNone
 	}
 	switch s := b.(type) {
 	case interface{ SetSourceIP(string) }:
 		s.SetSourceIP(cfg.BindIP)
-		return pinByBind
+		return srcByBind
 	case interface{ SetSourcePool(*packet.PeerPool) }:
 		if len(cfg.SrcIPs) > 0 {
-			return pinBySrcIPs
+			return srcBySrcIPs
 		}
 		s.SetSourcePool(packet.NewPeerPool([]string{cfg.BindIP}, 0))
-		return pinByPool
+		return srcByPool
 	}
-	return pinUnsupported
+	return srcUnsupported
 }
 
 func applySNISplit(b any, transport, mode string, pos, ttl int) bool {

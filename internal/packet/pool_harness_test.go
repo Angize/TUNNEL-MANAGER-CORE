@@ -118,7 +118,7 @@ func (b *TCP) deliver(t *testing.T, c poolCmd, path string) bool {
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.pinApplied, b.st.pathEpoch)
+	return b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.selectedTCP, b.st.pathEpoch)
 }
 
 func (b *TCP) tunFail(t *testing.T, low, high string) bool {
@@ -131,14 +131,14 @@ func (b *TCP) tunOK(t *testing.T, low, high string) bool {
 	return b.deliver(t, poolCmd{Cmd: cmdOK, Low: low, High: high, Epoch: b.st.pathEpoch()}, b.st.verdictPath())
 }
 
-func (b *TCP) operatorPin(t *testing.T, kind, key string) bool {
+func (b *TCP) operatorJump(t *testing.T, kind, key string) bool {
 	t.Helper()
-	return b.deliver(t, poolCmd{Kind: kind, Key: key}, b.st.pinPath())
+	return b.deliver(t, poolCmd{Kind: kind, Key: key}, b.st.selectPath())
 }
 
 func (b *TCP) operatorRetest(t *testing.T, kind, key string) bool {
 	t.Helper()
-	return b.deliver(t, poolCmd{Cmd: cmdRetest, Kind: kind, Key: key}, b.st.pinPath())
+	return b.deliver(t, poolCmd{Cmd: cmdRetest, Kind: kind, Key: key}, b.st.selectPath())
 }
 
 // The status file, parsed the way the node parses it.

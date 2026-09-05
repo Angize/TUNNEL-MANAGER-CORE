@@ -107,25 +107,3 @@ func TestAStaleComboVerdictBurnsTheAxisTheWalkVaries(t *testing.T) {
 		})
 	}
 }
-
-func TestABurnNeverLandsOnThePinnedEntry(t *testing.T) {
-	for _, tc := range []struct{ kind, key string }{{"ip", "e1"}, {"sni", "s1"}} {
-		p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"))
-		if !p.selectEntry(tc.kind, tc.key) {
-			t.Fatalf("%s: selectEntry(%s) did not find it", tc.kind, tc.key)
-		}
-		p.markSuspect(tc.kind, tc.key, "dial")
-		if !p.healthMap(tc.kind).healthy(tc.key) {
-			t.Fatalf("%s: a dial failure burned the PINNED %s. selectEntry stashed its record in "+
-				"pinTook, so releasing the pin would restore the old record and erase this burn -- and "+
-				"meanwhile the operator's own choice reads as burned on the panel", tc.kind, tc.key)
-		}
-
-		p.releasePin()
-		p.markSuspect(tc.kind, tc.key, "dial")
-		if p.healthMap(tc.kind).healthy(tc.key) {
-			t.Fatalf("%s: once the pin is gone the very next dial failure must burn %s -- the pin defers "+
-				"the evidence, it does not throw it away", tc.kind, tc.key)
-		}
-	}
-}

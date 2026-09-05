@@ -99,22 +99,3 @@ func TestTrafficCrossingRefillsBothRungs(t *testing.T) {
 		t.Errorf("after the refill: rolls=%d drops=%d, want %d and 2", *rolls, *drops, 2*portTries)
 	}
 }
-
-func TestAPinnedTunnelStillHandshakesAndKeepsItsAllowance(t *testing.T) {
-	rc, _, drops, burns := rungLadder(t)
-	rot := func(bool) { *burns++ }
-	if !rc.dst.selectEntry("d2") {
-		t.Fatal("could not pin")
-	}
-
-	for i := 1; i <= portTries+1; i++ {
-		rc.fail(rot, rot)
-	}
-	if *drops != 1 {
-		t.Errorf("a pinned tunnel refused to handshake again (drops=%d)", *drops)
-	}
-	if !rc.dst.isPinned() {
-		t.Error("the pin was released by rounds that only redrew and re-handshaked — both are free and " +
-			"blame nobody, so neither is a second opinion about the operator's pick")
-	}
-}

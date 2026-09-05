@@ -64,7 +64,7 @@ func TestUDPFecDecoderResetAfterClientRestart(t *testing.T) {
 	waitUntil(t, "the first tunnel to come up", 5*time.Second, func() bool { return cli1.sealer() != nil })
 
 	seedBlocks(t, cli1Ctrl, srvCtrl, 3)
-	first := srv.peer.Load()
+	first := srv.soloPeer.Load()
 	if first == nil {
 		t.Fatal("the server never learned the first client")
 	}
@@ -78,7 +78,7 @@ func TestUDPFecDecoderResetAfterClientRestart(t *testing.T) {
 	t.Cleanup(func() { cli2.Close() })
 
 	waitUntil(t, "the server to install the restarted client's session", 8*time.Second, func() bool {
-		p := srv.peer.Load()
+		p := srv.soloPeer.Load()
 		return p != nil && p.String() != first.String()
 	})
 
@@ -113,7 +113,7 @@ func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
 	t.Cleanup(func() { cli.Close() })
 
 	waitUntil(t, "the first tunnel to come up", 5*time.Second,
-		func() bool { return srv1.sealer() != nil && srv1.peer.Load() != nil })
+		func() bool { return srv1.sealer() != nil && srv1.soloPeer.Load() != nil })
 
 	seedBlocks(t, srv1Ctrl, cliCtrl, 3)
 	srv1.Close()
@@ -130,7 +130,7 @@ func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
 	})
 	liveVerdict(t, cli.st.verdictPath(), settledEpoch(t, cli.st), poolCmd{Cmd: cmdFail})
 	waitUntil(t, "the client to re-handshake with the restarted server", 25*time.Second,
-		func() bool { return srv2.sealer() != nil && srv2.peer.Load() != nil })
+		func() bool { return srv2.sealer() != nil && srv2.soloPeer.Load() != nil })
 
 	pkt := bytes.Repeat([]byte{0x5C}, fecSeedLen)
 	if _, err := srv2Ctrl.Write(pkt); err != nil {

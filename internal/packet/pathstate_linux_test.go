@@ -14,7 +14,7 @@ func TestRawLivePathIsTheBytesOnTheWire(t *testing.T) {
 		for _, cport := range []uint32{0, 41207} {
 			r := &Raw{profile: profile, isClient: true, port: 8443}
 			r.cliPort.Store(cport)
-			r.peer.Store(&net.IPAddr{IP: dst})
+			r.soloPeer.Store(&net.IPAddr{IP: dst})
 			r.localIP.Store(&net.IPAddr{IP: src})
 
 			k, _ := r.livePath()
@@ -39,7 +39,7 @@ func TestPortlessRawProfileHasNoPortsInItsPath(t *testing.T) {
 	for _, profile := range []string{"icmp", "bare"} {
 		r := &Raw{profile: profile, isClient: true, port: 8443}
 		r.cliPort.Store(41207)
-		r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 0, 0, 2)})
+		r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 0, 0, 2)})
 		r.localIP.Store(&net.IPAddr{IP: net.IPv4(10, 0, 0, 1)})
 		if k, _ := r.livePath(); k.Sport != 0 || k.Dport != 0 {
 			t.Errorf("raw/%s: path carries ports %d->%d, but the profile puts none on the wire",

@@ -38,7 +38,7 @@ func TestLoopWholeEdgeOutage(t *testing.T) {
 		t.Fatalf("a carrying combination stayed condemned: ip=%v sni=%v", stillIP, stillSNI)
 	}
 
-	b.operatorPin(t, "ip", "e2")
+	b.operatorJump(t, "ip", "e2")
 	if got, _, _ := p.current(); got != "e2" {
 		t.Fatalf("the operator's pin did not land after a run of verdicts: current=%s", got)
 	}

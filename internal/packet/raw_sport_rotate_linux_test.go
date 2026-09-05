@@ -135,7 +135,7 @@ func TestSportRotateIsUDPOnlyAndOffByDefault(t *testing.T) {
 // churns the epoch, and the node's verdict is discarded as stale every time.
 func TestSportRotateStaysOutOfThePathKey(t *testing.T) {
 	r := rotClient(4)
-	r.peer.Store(&net.IPAddr{IP: testDst})
+	r.soloPeer.Store(&net.IPAddr{IP: testDst})
 	k, _ := r.livePath()
 	if k.Sport != 0 || k.Dport != 0 {
 		t.Fatalf("rotating source leaked into the path key: %d->%d (want 0->0)", k.Sport, k.Dport)

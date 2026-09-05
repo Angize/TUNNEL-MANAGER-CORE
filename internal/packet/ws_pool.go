@@ -62,11 +62,7 @@ type wsPool struct {
 	burns       atomic.Uint64
 	rotDegraded bool
 	chosen      string
-	pinIP       string
-	pinSNI      string
-
-	pinTook map[string]*healthRec
-	now     func() int64
+	now         func() int64
 
 	ev    func(kind, code, detail string)
 	flush func()
@@ -129,10 +125,6 @@ func (p *wsPool) current() (string, wsSNIEntry, bool) {
 func (p *wsPool) currentLocked() (string, wsSNIEntry, bool) {
 	if len(p.ips) == 0 || len(p.snis) == 0 {
 		return "", wsSNIEntry{}, false
-	}
-
-	if p.pinIP != "" || p.pinSNI != "" {
-		return p.resolvePinIPLocked(), p.resolvePinSNILocked(), true
 	}
 
 	if p.chosen != "" {
@@ -209,54 +201,6 @@ const activeSep = " · "
 
 func activeLabel(ip, host string) string { return ip + activeSep + host }
 
-func (p *wsPool) resolvePinIPLocked() string {
-	if p.pinIP != "" {
-		for _, ip := range p.ips {
-			if ip == p.pinIP {
-				return ip
-			}
-		}
-		p.pinIP = ""
-	}
-	return p.healthyOrBestIPLocked()
-}
-
-func (p *wsPool) resolvePinSNILocked() wsSNIEntry {
-	if p.pinSNI != "" {
-		for _, s := range p.snis {
-			if s.host == p.pinSNI {
-				return s
-			}
-		}
-		p.pinSNI = ""
-	}
-	return p.healthyOrBestSNILocked()
-}
-
-func (p *wsPool) healthyOrBestIPLocked() string {
-	for _, ip := range p.ips {
-		if p.ipHealth.healthy(ip) {
-			return ip
-		}
-	}
-	return p.bestIPLocked()
-}
-
-func (p *wsPool) healthyOrBestSNILocked() wsSNIEntry {
-	for _, s := range p.snis {
-		if p.sniHealth.healthy(s.host) {
-			return s
-		}
-	}
-	return p.bestSNILocked()
-}
-
-func (p *wsPool) isPinned() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.pinIP != "" || p.pinSNI != ""
-}
-
 func (p *wsPool) bestIPLocked() string { return p.ipHealth.best(p.ips) }
 
 func (p *wsPool) bestSNILocked() wsSNIEntry {
@@ -316,9 +260,6 @@ func (p *wsPool) advance() bool {
 	defer p.mu.Unlock()
 	beforeIP, beforeSNI, ok := p.currentLocked()
 	if !ok {
-		return false
-	}
-	if p.pinIP != "" || p.pinSNI != "" {
 		return false
 	}
 	if !p.stepToEligibleLocked() {
@@ -410,11 +351,6 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 		return
 	}
 	p.mu.Lock()
-
-	if (kind == "ip" && p.pinIP == key) || (kind == "sni" && p.pinSNI == key) {
-		p.mu.Unlock()
-		return
-	}
 	condemned := p.healthMap(kind).burn(key)
 	p.mu.Unlock()
 	if condemned {
@@ -425,70 +361,6 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 	if condemned && kind == "ip" {
 		p.reassessRotation()
 	}
-}
-
-func (p *wsPool) pinnedOnLocked(kind string) string {
-	if kind == "sni" {
-		return p.pinSNI
-	}
-	return p.pinIP
-}
-
-func (p *wsPool) unstashLocked(kind string) {
-	live := p.pinnedOnLocked(kind)
-	if live == "" {
-		return
-	}
-	k := kind + ":" + live
-	if rec := p.pinTook[k]; rec != nil {
-		p.healthMap(kind).recs[live] = rec
-	}
-	delete(p.pinTook, k)
-}
-
-func (p *wsPool) dropPin(reason string, matched func() bool) bool {
-	p.mu.Lock()
-	hit := matched()
-	if hit {
-		p.unstashLocked("ip")
-		p.unstashLocked("sni")
-		clear(p.pinTook)
-		p.pinIP, p.pinSNI = "", ""
-	}
-	p.mu.Unlock()
-	if hit {
-		p.publish()
-		p.event("pool", "pin_dropped", "edge:"+reason)
-	}
-	return hit
-}
-
-func (p *wsPool) dropPinAxis(kind, key, reason string) bool {
-	p.mu.Lock()
-	live := p.pinnedOnLocked(kind)
-	hit := live != "" && (key == "" || live == key)
-	if hit {
-		p.unstashLocked(kind)
-		if kind == "sni" {
-			p.pinSNI = ""
-		} else {
-			p.pinIP = ""
-		}
-	}
-	p.mu.Unlock()
-	if hit {
-		p.publish()
-		p.event("pool", "pin_dropped", kind+":"+reason)
-	}
-	return hit
-}
-
-func (p *wsPool) pinCannotLand(ip string) bool {
-	return p.dropPinAxis("ip", ip, "cannot-land")
-}
-
-func (p *wsPool) releasePin() {
-	p.dropPin("tun-probe", func() bool { return p.pinIP != "" || p.pinSNI != "" })
 }
 
 func (p *wsPool) reassessRotation() {
@@ -546,48 +418,45 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 		p.mu.Unlock()
 		return false
 	}
-	if p.pinTook == nil {
-		p.pinTook = map[string]*healthRec{}
-	}
-	p.chosen = ""
-
-	if p.pinnedOnLocked(kind) != key {
-		p.unstashLocked(kind)
-		p.pinTook[kind+":"+key] = p.healthMap(kind).rec(key)
-		p.healthMap(kind).clear(key)
-	}
+	before := p.atLocked()
+	p.healthMap(kind).clear(key)
 	if kind == "sni" {
-		p.j, p.pinSNI = idx, key
+		p.j = idx
 	} else {
-		p.i, p.pinIP = idx, key
+		p.i = idx
 	}
-	p.stepToCurrentLocked()
+	p.settleOtherLocked(kind)
+	moved := p.atLocked() != before
 	p.mu.Unlock()
 	p.publish()
 	if kind == "ip" {
 		p.reassessRotation()
 	}
-	return true
+	return moved
 }
 
-func (p *wsPool) pinLandedOn(ip, host string) {
-	p.mu.Lock()
-	changed := false
+func (p *wsPool) atLocked() string {
+	return activeLabel(p.ips[p.i%len(p.ips)], p.snis[p.j%len(p.snis)].host)
+}
 
-	if p.pinIP != "" && p.pinIP == ip {
-		delete(p.pinTook, "ip:"+ip)
-		p.pinIP = ""
-		changed = true
+func (p *wsPool) settleOtherLocked(kind string) {
+	p.chosen = ""
+	if kind == "sni" {
+		for k := 0; k < len(p.ips); k++ {
+			if p.ipHealth.eligible(p.ips[p.i%len(p.ips)]) {
+				break
+			}
+			p.i = (p.i + 1) % len(p.ips)
+		}
+	} else {
+		for k := 0; k < len(p.snis); k++ {
+			if p.sniHealth.eligible(p.snis[p.j%len(p.snis)].host) {
+				break
+			}
+			p.j = (p.j + 1) % len(p.snis)
+		}
 	}
-	if p.pinSNI != "" && p.pinSNI == host {
-		delete(p.pinTook, "sni:"+host)
-		p.pinSNI = ""
-		changed = true
-	}
-	p.mu.Unlock()
-	if changed {
-		p.publish()
-	}
+	p.commitLocked()
 }
 
 func (p *wsPool) clearBurn(kind, key string) bool {
@@ -625,7 +494,6 @@ type healthStatus struct {
 	State      string `json:"state"`
 	Fails      int    `json:"fails"`
 	NextRetest int64  `json:"next_retest_unix"`
-	Pin        bool   `json:"pin,omitempty"`
 }
 
 func (p *wsPool) healthRows() []healthStatus {
@@ -633,37 +501,20 @@ func (p *wsPool) healthRows() []healthStatus {
 	defer p.mu.Unlock()
 	rows := make([]healthStatus, 0, len(p.ips)+len(p.snis))
 	for _, ip := range p.ips {
-		hs := healthStatus{Key: ip, Kind: "ip", State: "healthy", Pin: ip == p.pinIP}
+		hs := healthStatus{Key: ip, Kind: "ip", State: "healthy"}
 		if r := p.ipHealth.rec(ip); r != nil {
 			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
 		}
 		rows = append(rows, hs)
 	}
 	for _, e := range p.snis {
-		hs := healthStatus{Key: e.host, Kind: "sni", State: "healthy", Pin: e.host == p.pinSNI}
+		hs := healthStatus{Key: e.host, Kind: "sni", State: "healthy"}
 		if r := p.sniHealth.rec(e.host); r != nil {
 			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
 		}
 		rows = append(rows, hs)
 	}
 	return rows
-}
-
-func (p *wsPool) stepToCurrentLocked() {
-	ip, sni, ok := p.currentLocked()
-	if !ok {
-		return
-	}
-	for i, v := range p.ips {
-		if v == ip {
-			p.i = i
-		}
-	}
-	for j, v := range p.snis {
-		if v.host == sni.host {
-			p.j = j
-		}
-	}
 }
 
 type edgePair struct{ p *wsPool }

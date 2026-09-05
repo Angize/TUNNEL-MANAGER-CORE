@@ -12,7 +12,7 @@ import (
 func rollingPort(t *testing.T) (*Raw, string) {
 	t.Helper()
 	r := &Raw{isClient: true, profile: "tcp", sportRandom: true, closeCh: make(chan struct{})}
-	r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
+	r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
 	r.cliPort.Store(40000)
 	r.link = &capturingLink{r: r}
 	path := filepath.Join(t.TempDir(), "core.status")

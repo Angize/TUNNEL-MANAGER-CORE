@@ -175,12 +175,9 @@ func TestPinReleasesOnLanding(t *testing.T) {
 	if poolActive(cli) == addr+activeSep+"front-b" {
 		target = "front-a"
 	}
-	writeFileAtomic(cli.st.pinPath(), []byte(`{"kind":"sni","key":"`+target+`"}`), 0o644)
+	writeFileAtomic(cli.st.selectPath(), []byte(`{"kind":"sni","key":"`+target+`"}`), 0o644)
 
-	waitFor(t, 5*time.Second, "pin released on landing", func() bool {
-		pool.mu.Lock()
-		pinned := pool.pinSNI
-		pool.mu.Unlock()
-		return pinned == "" && poolActive(cli) == addr+activeSep+target
+	waitFor(t, 5*time.Second, "the carrier moved onto the operator's domain", func() bool {
+		return poolActive(cli) == addr+activeSep+target
 	})
 }

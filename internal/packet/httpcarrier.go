@@ -421,7 +421,6 @@ func (b *TCP) establishHTTPC() (net.Conn, string, string, error) {
 	}
 
 	if err != nil {
-		b.pinFailedOn(dialAddr)
 		return nil, dialAddr, "", err
 	}
 	return conn, dialAddr, activeLabel(dialAddr, host), nil

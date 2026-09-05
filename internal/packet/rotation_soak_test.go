@@ -128,7 +128,7 @@ func TestRotationSoakPinStorm(t *testing.T) {
 			case <-stop:
 				return
 			case <-tk.C:
-				writeFileAtomic(cli.st.pinPath(),
+				writeFileAtomic(cli.st.selectPath(),
 					[]byte(`{"kind":"sni","key":"`+targets[i%2]+`"}`), 0o644)
 				i++
 			}

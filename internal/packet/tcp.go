@@ -460,12 +460,6 @@ func (b *TCP) setECH(ech []byte) bool {
 	return true
 }
 
-func (b *TCP) pinFailedOn(ip string) {
-	if b.pool != nil {
-		b.pool.pinCannotLand(ip)
-	}
-}
-
 func (b *TCP) rotateDestTCP(proactive bool) (addr string, moved bool) {
 	if b.pp == nil {
 		return "", false
@@ -559,7 +553,7 @@ func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 	if src == "" {
 		return d
 	}
-	ip := adoptableSource("tcp", b.sp, src, &b.srcWarned)
+	ip := adoptableSource("tcp", src, &b.srcWarned)
 	if ip == nil {
 		if b.sp != nil {
 			b.sp.rejectCandidate(prev)
@@ -676,7 +670,7 @@ func (b *TCP) Run() error {
 		b.rc.port.setRoll(b.rollSourcePort)
 		b.st.trackPath(b.livePath, b.closeCh)
 		if b.rc.polls() {
-			go b.peerPinPollLoop()
+			go b.cmdPollLoop()
 		}
 
 		go func() {
@@ -1108,7 +1102,6 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 	b.noteAttempt(dialAddr, host)
 	conn, err := b.dialer(connectTimeout).Dial("tcp", dialAddr)
 	if err != nil {
-		b.pinFailedOn(dialAddr)
 		return nil, dialAddr, "", err
 	}
 
@@ -1262,16 +1255,8 @@ func (b *TCP) dialLoop() {
 
 			b.livePair.Store(&pairNow{low: label, high: sni})
 			b.st.setActive(combo)
-
-			b.pool.pinLandedOn(label, sni)
 		} else {
 			b.livePair.Store(&pairNow{low: label, high: b.lastSourceUsed()})
-			if b.pp != nil {
-				b.pp.pinLandedOn(label)
-			}
-			if b.sp != nil {
-				b.sp.pinLandedOn(b.lastSourceUsed())
-			}
 		}
 
 		back := label
@@ -1300,11 +1285,6 @@ func (b *TCP) dialLoop() {
 				if !timerLive.Load() {
 					return
 				}
-				if b.pool.isPinned() {
-					rearm(b.rotate)
-					return
-				}
-
 				prevIP, prevSNI, ok := b.pool.current()
 				if !ok || !b.pool.advance() {
 					rearm(b.rotate)
@@ -1337,11 +1317,6 @@ func (b *TCP) dialLoop() {
 				if !timerLive.Load() {
 					return
 				}
-				if (b.pp != nil && b.pp.isPinned()) || (b.sp != nil && b.sp.isPinned()) {
-					rearm(iv)
-					return
-				}
-
 				dstMoved := false
 				lap := true
 				if b.pp != nil {
@@ -1493,7 +1468,7 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 	return cf, nil
 }
 
-func (b *TCP) peerPinPollLoop() {
+func (b *TCP) cmdPollLoop() {
 	t := time.NewTicker(1 * time.Second)
 	defer t.Stop()
 	for {
@@ -1514,7 +1489,7 @@ func (b *TCP) dropCarrier() {
 }
 
 func (b *TCP) pollPeerCmd() {
-	if b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.pinApplied, b.st.pathEpoch) {
+	if b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.selectedTCP, b.st.pathEpoch) {
 		b.dropCarrier()
 	}
 	if hosts := b.readECHCmd(); len(hosts) > 0 {
@@ -1554,7 +1529,7 @@ func (b *TCP) rotateHighTCP(proactive bool) {
 	}
 }
 
-func (b *TCP) pinApplied(kind, key string) {
+func (b *TCP) selectedTCP(kind, key string) {
 	if b.pool == nil && kind == "dst" {
 		b.st.setActive(b.stTag + activeSep + key)
 	}

@@ -56,7 +56,7 @@ func TestAFixedSourcePortReachesTheWireThePathAndTheAntiLeakRule(t *testing.T) {
 
 			// the path the status file publishes
 			r.localIP.Store(&net.IPAddr{IP: testSrc})
-			r.peer.Store(&net.IPAddr{IP: testDst})
+			r.soloPeer.Store(&net.IPAddr{IP: testDst})
 			k, _ := r.livePath()
 			ws, wd := rawPorts(isClient, rawServerPort, custom)
 			if k.Sport != ws || k.Dport != wd {

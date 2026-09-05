@@ -32,7 +32,7 @@ func TestRawRefusesASourceThisHostCannotSendFrom(t *testing.T) {
 		}
 	})
 
-	t.Run("raw pin onto an unusable source is abandoned", func(t *testing.T) {
+	t.Run("a raw jump onto an unusable source is refused, not adopted", func(t *testing.T) {
 		var sink syncBuf
 		old := log.Writer()
 		log.SetOutput(&sink)
@@ -45,15 +45,15 @@ func TestRawRefusesASourceThisHostCannotSendFrom(t *testing.T) {
 		if !sp.selectEntry(unusableIP) {
 			t.Fatal("selectEntry rejected a pool member")
 		}
-		if !sp.isPinned() {
-			t.Fatal("Pin did not take — the rest of this case would be vacuous")
+		if got := sp.current(); got != unusableIP {
+			t.Fatalf("the jump did not take (pool is on %q) — the rest of this case would be vacuous", got)
 		}
 		r.adoptSourceRaw()
 		if got := srcOf(r.localIP.Load()); got == unusableIP {
-			t.Error("the pin was adopted: the tunnel now stamps a source this host cannot send from, and on the udp/tcp raw profiles that is a silent blackout")
+			t.Error("the jump was adopted: the tunnel now stamps a source this host cannot send from, and on the udp/tcp raw profiles that is a silent blackout")
 		}
-		if sp.isPinned() {
-			t.Error("the jump is still in progress: it holds the whole pinTTL forcing a source that cannot work, with nothing in the panel explaining why")
+		if burned := burnedIn(sp); !burned[unusableIP] {
+			t.Error("the unusable source was not condemned, so the walk comes straight back to it")
 		}
 		if got := sink.String(); !strings.Contains(got, unusableIP) {
 			t.Errorf("nothing named the unusable source — the operator sees a dead tunnel and no reason.\nlog was:\n%s", got)

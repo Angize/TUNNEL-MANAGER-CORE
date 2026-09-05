@@ -32,7 +32,7 @@ func TestPinningARefusingEdgeDoesNotBurnAHealthyOne(t *testing.T) {
 	b, p := edgeCarrier(t, []string{good, dead}, snis(sni))
 
 	b.pretendConnected(good, sni)
-	if !b.operatorPin(t, "ip", dead) {
+	if !b.operatorJump(t, "ip", dead) {
 		t.Fatal("setup: the pin was not applied")
 	}
 
@@ -40,7 +40,6 @@ func TestPinningARefusingEdgeDoesNotBurnAHealthyOne(t *testing.T) {
 	// refused, release the pin, and retry -- which now resolves to the healthy edge.
 	b.pretendDown()
 	b.noteAttempt(dead, sni)
-	b.pinFailedOn(dead)
 	b.noteAttempt(good, sni)
 
 	if low, _ := b.livePairNow(); low != dead {

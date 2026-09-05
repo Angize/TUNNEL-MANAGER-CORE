@@ -31,16 +31,13 @@ func peerInvariants(t *testing.T, p *PeerPool, step int, log []string) {
 			got, p.addrs[p.cur])
 	}
 
-	if p.pinKey != "" && got != p.pinKey {
-		fail("pin is on %q but current() gave %q", p.pinKey, got)
-	}
-
 	if p.chosen != "" && p.addrs[p.cur] != p.chosen {
 		fail("chosen=%q while the cursor names %q", p.chosen, p.addrs[p.cur])
 	}
 
-	if p.pinKey != "" && !p.health.healthy(p.pinKey) {
-		fail("the pinned endpoint %q is burned while the pin is in force", p.pinKey)
+	if live := p.liveAddr(); live == nil || live.s != p.addrs[p.cur] {
+		fail("the carrier is reading %+v while the cursor names %q — the address the packets "+
+			"actually go to and the one the panel reports have come apart", live, p.addrs[p.cur])
 	}
 
 	for k := range p.health.recs {
@@ -82,7 +79,7 @@ func TestPeerPoolInvariantsUnderRandomSequences(t *testing.T) {
 
 			var log []string
 			for step := 1; step <= 120; step++ {
-				op := rng.Intn(10)
+				op := rng.Intn(7)
 				switch op {
 				case 0:
 					log = append(log, "fail")
@@ -92,31 +89,19 @@ func TestPeerPoolInvariantsUnderRandomSequences(t *testing.T) {
 					p.rotateOnce()
 				case 2:
 					k := pick()
-					log = append(log, "pin:"+k)
+					log = append(log, "jump:"+k)
 					p.selectEntry(k)
 				case 3:
-					k := pick()
-					log = append(log, "landed:"+k)
-					p.pinLandedOn(k)
-				case 4:
-					k := pick()
-					log = append(log, "pinFailed:"+k)
-					p.pinCannotLand(k)
-				case 5:
-					log = append(log, "releasePin")
-					p.releasePin()
-				case 6:
-
 					log = append(log, "current")
 					p.current()
-				case 7:
+				case 4:
 					k := pick()
 					log = append(log, "clearBurn:"+k)
 					p.clearBurn(k)
-				case 8:
+				case 5:
 					clk += int64(rng.Intn(4000))
 					log = append(log, fmt.Sprintf("clock=%d", clk))
-				case 9:
+				case 6:
 					k := pick()
 					log = append(log, "retest:"+k)
 					p.retestNow(k)
@@ -154,19 +139,6 @@ func edgeInvariants(t *testing.T, p *wsPool, step int, log []string) {
 	}
 	if !inIPs || !inSNIs {
 		fail("current() returned %s · %s, which is not a combination this pool holds", ip, sni.host)
-	}
-
-	if p.pinIP != "" && ip != p.pinIP {
-		fail("ip pin is on %q but current() gave %q", p.pinIP, ip)
-	}
-	if p.pinSNI != "" && sni.host != p.pinSNI {
-		fail("sni pin is on %q but current() gave %q", p.pinSNI, sni.host)
-	}
-	if p.pinIP != "" && !p.ipHealth.healthy(p.pinIP) {
-		fail("the pinned edge %q is burned while the pin is in force", p.pinIP)
-	}
-	if p.pinSNI != "" && !p.sniHealth.healthy(p.pinSNI) {
-		fail("the pinned domain %q is burned while the pin is in force", p.pinSNI)
 	}
 
 	if p.chosen != "" {
@@ -245,7 +217,7 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 					b.rc.fail(b.rotateLowTCP, b.rotateHighTCP)
 				case 2:
 					k, v := axis()
-					log = append(log, "pin:"+k+":"+v)
+					log = append(log, "jump:"+k+":"+v)
 					p.selectEntry(k, v)
 				case 3:
 					k, v := axis()
@@ -269,14 +241,6 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 					log = append(log, "advanceIP+restoreSNIs")
 					p.advanceIP()
 					p.restoreIPs()
-				case 9:
-					ip := ips[rng.Intn(len(ips))]
-					log = append(log, "pinApplied:"+ip)
-					p.pinLandedOn(ip, hosts[rng.Intn(len(hosts))])
-				case 10:
-					ip := ips[rng.Intn(len(ips))]
-					log = append(log, "pinFailed:"+ip)
-					p.pinCannotLand(ip)
 				}
 				edgeInvariants(t, p, step, log)
 			}

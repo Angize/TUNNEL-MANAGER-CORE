@@ -44,13 +44,13 @@ func TestUnusableSourceIsBurnedNotSilentlyIgnored(t *testing.T) {
 
 func TestUnusableSourceWarnsPerEntry(t *testing.T) {
 	b := &TCP{}
-	if ip := adoptableSource("tcp", nil, "a", &b.srcWarned); ip != nil {
+	if ip := adoptableSource("tcp", "a", &b.srcWarned); ip != nil {
 		t.Fatalf("%q is not an address the kernel can bind", "a")
 	}
 	if _, seen := b.srcWarned.Load("a"); !seen {
 		t.Fatal("the first unusable source was not recorded")
 	}
-	adoptableSource("tcp", nil, "b", &b.srcWarned)
+	adoptableSource("tcp", "b", &b.srcWarned)
 	if _, seen := b.srcWarned.Load("b"); !seen {
 		t.Fatal("a SECOND unusable source was swallowed — that is the sync.Once behaviour")
 	}
@@ -81,7 +81,7 @@ func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 	sp := NewPeerPool([]string{"127.0.0.1", unbindableSrc}, 0)
 	cli.SetSourcePool(sp)
 	if !sp.selectEntry(unbindableSrc) {
-		t.Fatalf("selectEntry(%s) refused the pin", unbindableSrc)
+		t.Fatalf("selectEntry(%s) refused the jump", unbindableSrc)
 	}
 
 	go srv.Run()
@@ -93,30 +93,12 @@ func TestManualJumpToAnUnusableSourceIsAbandonedNotConsumed(t *testing.T) {
 		t.Fatalf("the connection reports source %q, but %s cannot be bound — nothing was bound at all", got, unbindableSrc)
 	}
 
-	waitFor(t, 5*time.Second, "the impossible jump was abandoned", func() bool { return !sp.isPinned() })
-	if sp.health.recs[unbindableSrc] == nil {
-		t.Fatalf("%s was reported as a landed jump instead of an abandoned one: it stays active in the pool and the next rotation walks straight back onto it", unbindableSrc)
-	}
+	waitFor(t, 5*time.Second, "the impossible source was condemned", func() bool {
+		sp.mu.Lock()
+		defer sp.mu.Unlock()
+		return sp.health.recs[unbindableSrc] != nil
+	})
 	if got := sp.current(); got != "127.0.0.1" {
 		t.Fatalf("after abandoning the jump the pool is still on %s instead of a source that binds", got)
-	}
-}
-
-func TestAbandoningAJumpNeverCancelsADifferentOne(t *testing.T) {
-	sp := NewPeerPool([]string{unbindableSrc, "127.0.0.1"}, 0)
-	if !sp.selectEntry("127.0.0.1") {
-		t.Fatal("selectEntry refused the jump")
-	}
-	if sp.pinCannotLand(unbindableSrc) {
-		t.Fatal("a stale discovery about another IP cancelled the operator's current jump")
-	}
-	if !sp.isPinned() {
-		t.Fatal("the operator's jump to 127.0.0.1 was thrown away")
-	}
-	if !sp.pinCannotLand("127.0.0.1") {
-		t.Fatal("a jump proven impossible on its OWN key was not abandoned")
-	}
-	if sp.isPinned() {
-		t.Fatal("the jump is still forcing an endpoint that cannot be used")
 	}
 }

@@ -82,16 +82,16 @@ func TestPoolCmdRejectsNothingBurgers(t *testing.T) {
 // told nothing.
 func TestTheVerdictAndThePinAreDifferentFiles(t *testing.T) {
 	b, _ := edgeCarrier(t, []string{"e1", "e2"}, snis("s1"))
-	if b.st.verdictPath() == b.st.pinPath() {
-		t.Fatalf("both mailboxes are %q — os.Replace makes the second writer eat the first", b.st.pinPath())
+	if b.st.verdictPath() == b.st.selectPath() {
+		t.Fatalf("both mailboxes are %q — os.Replace makes the second writer eat the first", b.st.selectPath())
 	}
-	if err := os.WriteFile(b.st.pinPath(), []byte(`{"kind":"ip","key":"e2"}`), 0o644); err != nil {
+	if err := os.WriteFile(b.st.selectPath(), []byte(`{"kind":"ip","key":"e2"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(b.st.verdictPath(), []byte(`{"cmd":"fail","low":"s1","high":"e1"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.pinApplied, b.st.pathEpoch)
+	b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.selectedTCP, b.st.pathEpoch)
 	if got, _, _ := b.pool.current(); got != "e2" {
 		t.Fatalf("the pin was lost behind a verdict written in the same tick: current=%s, want e2", got)
 	}

@@ -32,8 +32,7 @@ func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 	run(func() { p.fail("tun-probe") })
 	run(func() { p.rotateOnce() })
 	run(func() { p.selectEntry("d2") })
-	run(func() { p.pinLandedOn("d1") })
-	run(func() { p.pinCannotLand("d2") })
+	run(func() { p.selectEntry("d1") })
 	run(func() { p.clearBurn("d3") })
 	run(func() { p.retestNow("d1") })
 	run(func() { _ = p.eligibleCount() })
@@ -49,11 +48,8 @@ func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 	if p.addrs[p.cur] != got {
 		t.Fatalf("current() gave %q while the cursor names %q", got, p.addrs[p.cur])
 	}
-	if p.pinKey != "" && p.pinKey != got {
-		t.Fatalf("pin is on %q but current() gave %q", p.pinKey, got)
-	}
-	if p.pinKey != "" && !p.health.healthy(p.pinKey) {
-		t.Fatalf("the pinned endpoint %q came out of the storm burned", p.pinKey)
+	if live := p.liveAddr(); live == nil || live.s != p.addrs[p.cur] {
+		t.Fatalf("the carrier is reading %+v while the cursor names %q", live, p.addrs[p.cur])
 	}
 	if p.chosen != "" && p.addrs[p.cur] != p.chosen {
 		t.Fatalf("chosen=%q while the cursor names %q", p.chosen, p.addrs[p.cur])
@@ -107,32 +103,21 @@ func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 		b.pretendConnected(ip, sni.host)
 	})
 	run(func() { p.selectEntry("ip", "e2") })
-	run(func() { p.pinLandedOn("e1", "s1") })
-	run(func() { p.pinCannotLand("e2") })
+	run(func() { p.selectEntry("sni", "s1") })
 	run(func() { p.clearBurn("sni", "s2") })
 	run(func() { p.clearBurn("ip", "e3") })
 	run(func() { _ = p.eligibleIPs() })
-	run(func() { _ = p.isPinned() })
 
 	time.Sleep(400 * time.Millisecond)
 	close(stop)
 	wg.Wait()
 
-	ip, sni, ok := p.current()
+	_, _, ok := p.current()
 	if !ok {
 		t.Fatal("current() gave up on a non-empty pool")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.pinIP != "" && p.pinIP != ip {
-		t.Fatalf("ip pin is on %q but current() gave %q", p.pinIP, ip)
-	}
-	if p.pinSNI != "" && p.pinSNI != sni.host {
-		t.Fatalf("sni pin is on %q but current() gave %q", p.pinSNI, sni.host)
-	}
-	if p.pinIP != "" && !p.ipHealth.healthy(p.pinIP) {
-		t.Fatalf("the pinned edge %q came out of the storm burned", p.pinIP)
-	}
 	if p.chosen != "" {
 		at := activeLabel(p.ips[p.i%len(p.ips)], p.snis[p.j%len(p.snis)].host)
 		if at != p.chosen {

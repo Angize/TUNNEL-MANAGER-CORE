@@ -65,7 +65,7 @@ func TestAPoolThatNeverConnectsStillWalksToItsLastEndpoint(t *testing.T) {
 
 // The other half of the same latch: it must stay shut for as long as the ladder has not answered the
 // accusation, or the guard in one_outage_one_accused_test.go goes with it. A dial that is redirected
-// without the ladder walking -- a released pin retrying onto the healthy edge -- may not rename the
+// without the ladder walking -- a retry landing back on the healthy edge -- may not rename the
 // outage.
 func TestARedirectedDialDoesNotRenameTheOutage(t *testing.T) {
 	const good, dead, sni = "good:443", "dead:443", "front-a"
@@ -73,7 +73,6 @@ func TestARedirectedDialDoesNotRenameTheOutage(t *testing.T) {
 
 	b.pretendDown()
 	b.noteAttempt(dead, sni)
-	b.pinFailedOn(dead)
 	b.noteAttempt(good, sni)
 
 	if low, _ := b.livePairNow(); low != dead {

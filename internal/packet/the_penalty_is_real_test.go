@@ -84,7 +84,7 @@ func helloRaw(t *testing.T) (*Raw, *capturingLink) {
 		psk: "hello-not-a-teardown-psk-0123456789", cipher: "chacha20-poly1305"}
 	cl := &capturingLink{r: r}
 	r.link = cl
-	r.peer.Store(&net.IPAddr{IP: testDst})
+	r.soloPeer.Store(&net.IPAddr{IP: testDst})
 	return r, cl
 }
 

@@ -14,7 +14,7 @@ func rawWithSession(t *testing.T) *Raw {
 		t.Fatal(err)
 	}
 	r := &Raw{isClient: true, profile: "tcp", psk: "a-psk-for-the-gate", wake: make(chan struct{}, 1)}
-	r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 99, 0, 2)})
+	r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 99, 0, 2)})
 	r.session.Store(&sealerBox{s: s})
 	return r
 }
@@ -27,7 +27,7 @@ func rawWithSession(t *testing.T) *Raw {
 //
 // freshTuple has three callers that leave the session alive and send no Init: rotatePeerRaw with
 // proactive=true, rotateSourceRaw, and adoptSourceRaw. Every scheduled destination rotation, every
-// scheduled source rotation and every manual source pin therefore stopped the tunnel carrying user
+// scheduled source rotation and every manual source jump therefore stopped the tunnel carrying user
 // traffic, while keepalives kept flowing and the dashboard kept showing it up.
 //
 // The gate is now itself a reason to knock, so any path that shuts it -- including one not written
@@ -44,14 +44,14 @@ func TestAShutFlowAsksToBeOpened(t *testing.T) {
 		shut func(*Raw)
 	}{
 		{"a scheduled destination rotation", func(r *Raw) {
-			r.peer.Store(&net.IPAddr{IP: net.IPv4(10, 99, 0, 3)})
+			r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 99, 0, 3)})
 			r.freshTuple()
 		}},
 		{"a scheduled source rotation", func(r *Raw) {
 			r.localIP.Store(&net.IPAddr{IP: net.IPv4(10, 99, 0, 9)})
 			r.freshTuple()
 		}},
-		{"a manual source pin", func(r *Raw) { r.freshTuple() }},
+		{"a manual source jump", func(r *Raw) { r.freshTuple() }},
 		{"a redrawn source port", func(r *Raw) { r.usePort(8443) }},
 	} {
 		r := rawWithSession(t)
@@ -66,7 +66,7 @@ func TestAShutFlowAsksToBeOpened(t *testing.T) {
 	}
 }
 
-// The loop only reads mustKnock when it runs, so a rotation driven from the pin-poll goroutine has to
+// The loop only reads mustKnock when it runs, so a rotation driven from the command-poll goroutine has to
 // wake it; otherwise the tunnel stays dark for up to a keepalive interval even though the fix above
 // would have opened it.
 func TestADrawnTupleWakesTheLoop(t *testing.T) {

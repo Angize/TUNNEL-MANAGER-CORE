@@ -40,7 +40,7 @@ func TestAntiLeakScopeIsNotDraggedBackByAStragglerFrame(t *testing.T) {
 		r.link = &directLink{r: r}
 		r.leak.install = rec.installer()
 		r.SetPeerPool(NewPeerPool([]string{old, live}, 0))
-		r.peer.Store(&net.IPAddr{IP: net.ParseIP(live).To4()})
+		r.pp.keepCursorOn(live)
 		r.leak.scope(net.ParseIP(live).To4())
 		if got := rec.last(); got != live {
 			t.Fatalf("pre-scope landed on %q, want %s — the rest of this case would be vacuous", got, live)

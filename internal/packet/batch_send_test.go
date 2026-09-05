@@ -48,7 +48,7 @@ func TestABatchedSendCarriesThePinnedSource(t *testing.T) {
 	if end := strings.Index(body, "r.writeOut(pkt, peer)"); end > 0 {
 		body = body[:end]
 	}
-	if !strings.Contains(body, "r.pinnedSrc()") || !strings.Contains(body, "r.srcOOB(") {
+	if !strings.Contains(body, "r.boundSrc()") || !strings.Contains(body, "r.srcOOB(") {
 		t.Fatal("the batch block never asks for the pinned source, so a server's burst would leave " +
 			"from the kernel's default IP")
 	}

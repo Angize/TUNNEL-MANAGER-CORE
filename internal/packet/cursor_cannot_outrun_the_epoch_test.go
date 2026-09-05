@@ -31,7 +31,7 @@ func TestTheCursorCannotOutrunTheEpoch(t *testing.T) {
 				"A verdict measured on %s would then be accepted as current and charged to %s",
 				round+1, proactive, curBefore, curAfter, epochAfter, curBefore, curAfter)
 		}
-		if live := cli.peer.Load(); live == nil || live.String() != curAfter {
+		if live := cli.dst(); live == nil || live.String() != curAfter {
 			t.Fatalf("round %d: the pool says %s, the carrier is sending to %v — the cursor is supposed to "+
 				"BE the live destination on this carrier", round+1, curAfter, live)
 		}
