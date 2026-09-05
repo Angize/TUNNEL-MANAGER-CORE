@@ -135,6 +135,20 @@ func (h *downHarness) session(t *testing.T, d time.Duration) *httpcSession {
 	return nil
 }
 
+// Waits until n streams have reached the server. dialHTTPCPost opens stream 0 before it returns and
+// the rest in goroutines, so a test that writes as soon as it has a session is racing them -- and a
+// test that then counts how many streams carried is measuring the dial, not the striping.
+func (h *downHarness) waitStreams(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for h.inFlgt.Load() < int64(n) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := h.inFlgt.Load(); got < int64(n) {
+		t.Fatalf("only %d of %d streams reached the server", got, n)
+	}
+}
+
 // Dials the carrier the way the client really does, with n download streams.
 func dialDown(t *testing.T, h *downHarness, n int) (net.Conn, func()) {
 	t.Helper()
@@ -159,6 +173,7 @@ func TestADownloadArrivesWholeAndInOrderAcrossItsStreams(t *testing.T) {
 	defer done()
 
 	s := h.session(t, 3*time.Second)
+	h.waitStreams(t, 4)
 
 	const chunks, chunkLen = 400, 1400
 	want := make([]byte, 0, chunks*chunkLen)
@@ -183,8 +198,15 @@ func TestADownloadArrivesWholeAndInOrderAcrossItsStreams(t *testing.T) {
 
 	got := make([]byte, len(want))
 	conn.SetReadDeadline(time.Now().Add(20 * time.Second))
-	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatalf("read back: %v", err)
+	for off := 0; off < len(got); off += chunkLen * 10 {
+		end := off + chunkLen*10
+		if end > len(got) {
+			end = len(got)
+		}
+		if _, err := io.ReadFull(conn, got[off:end]); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		time.Sleep(time.Millisecond)
 	}
 	if !bytes.Equal(got, want) {
 		for i := range got {
@@ -343,16 +365,10 @@ func TestStreamsAreReleasedWhenTheirClientGoesAwayRatherThanAtTheIdleTimeout(t *
 	_, done := dialDown(t, h, 4)
 	h.session(t, 3*time.Second)
 
-	deadline := time.Now().Add(5 * time.Second)
-	for h.inFlgt.Load() < 4 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if n := h.inFlgt.Load(); n != 4 {
-		t.Fatalf("%d streams reached the server, want 4", n)
-	}
+	h.waitStreams(t, 4)
 
 	done()
-	deadline = time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for h.inFlgt.Load() > 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
