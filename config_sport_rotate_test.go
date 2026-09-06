@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/packet"
+)
 
 // raw_sport_rotate is the operator switch for per-packet source-port cycling. It only means anything on
 // the udp profile: every other profile either forges no L4 ports at all, or (tcp) carries flow state that
@@ -103,8 +107,11 @@ func TestRawDportsOnlyMeansSomethingWhileTheSourceIsCycling(t *testing.T) {
 	}
 }
 
+// The edges are derived from packet.MaxDports, never written down. A test that says "9 is too many"
+// keeps passing for the wrong reason the day the ceiling moves: it stops testing the edge and starts
+// testing a number in the middle of the allowed range.
 func TestRawDportsRange(t *testing.T) {
-	for _, n := range []int{1, 2, 8} {
+	for _, n := range []int{1, 2, packet.MaxDports - 1, packet.MaxDports} {
 		c := validRaw()
 		c.RawProfile = "udp"
 		c.RawSportRotate = 4
@@ -113,7 +120,7 @@ func TestRawDportsRange(t *testing.T) {
 			t.Errorf("raw_dports=%d rejected: %v", n, err)
 		}
 	}
-	for _, n := range []int{-1, 9, 100} {
+	for _, n := range []int{-1, packet.MaxDports + 1, packet.MaxDports + 92} {
 		c := validRaw()
 		c.RawProfile = "udp"
 		c.RawSportRotate = 4
