@@ -131,6 +131,60 @@ func TestRawDportsRange(t *testing.T) {
 	}
 }
 
+// The band and the destination spread are two rules with two different preconditions: the band needs
+// the source port to MOVE (either clock), the spread needs the ROTATION clock specifically. Stating
+// them as one chained decision let one arm shadow the other, so each cell is asserted on its own.
+func TestTheBandAndTheSpreadHaveTheirOwnPreconditions(t *testing.T) {
+	band := func(lo, hi int) *Config {
+		c := validRaw()
+		c.RawProfile = "tcp"
+		c.RawSportLo, c.RawSportHi = lo, hi
+		return c
+	}
+	if err := band(10000, 44999).validate(); err == nil {
+		t.Error("a band with the source port standing still was accepted")
+	}
+	c := band(10000, 44999)
+	c.RawSportRandom = true
+	if err := c.validate(); err != nil {
+		t.Errorf("a band under the reactive clock was rejected: %v", err)
+	}
+	c = band(10000, 44999)
+	c.RawSportRotate = 6
+	if err := c.validate(); err != nil {
+		t.Errorf("a band under the rotation clock was rejected: %v", err)
+	}
+	for _, b := range [][2]int{
+		{500, 44999},                                 // reaches into the privileged ports
+		{packet.MinSportBandLo - 1, 44999},           // one below the floor
+		{30000, 30000 + packet.MinSportBandSpan - 2}, // one short of the span floor
+		{50000, 40000},                               // inverted
+		{10000, 70000},                               // past the last port
+		{10000, 0},                                   // half a range
+		{0, 44999},                                   // the other half
+	} {
+		c := band(b[0], b[1])
+		c.RawSportRotate = 6
+		if err := c.validate(); err == nil {
+			t.Errorf("band %d..%d was accepted", b[0], b[1])
+		}
+	}
+	// exactly the two floors is legal
+	c = band(packet.MinSportBandLo, packet.MinSportBandLo+packet.MinSportBandSpan-1)
+	c.RawSportRotate = 6
+	if err := c.validate(); err != nil {
+		t.Errorf("the smallest legal band was rejected: %v", err)
+	}
+	// and the spread still refuses the reactive clock, which moves the port but not on a lap
+	c = validRaw()
+	c.RawProfile = "tcp"
+	c.RawSportRandom = true
+	c.RawDports = 4
+	if err := c.validate(); err == nil {
+		t.Error("a destination spread was accepted under the reactive clock, which has no lap to spread over")
+	}
+}
+
 // The profile rule is inherited rather than restated: raw_dports rides on raw_sport_rotate, which is
 // udp-only, so a non-udp profile must be refused through that gate and not silently allowed here.
 func TestRawDportsFollowsWhereverTheRotationGoes(t *testing.T) {

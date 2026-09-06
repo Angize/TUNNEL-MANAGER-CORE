@@ -88,6 +88,8 @@ type Raw struct {
 	sportEvery int
 	rotIdx     uint32
 	rotPerm    rotPerm
+	cfgBandLo  int
+	cfgBandHi  int
 	dports     []uint16
 	txCount    atomic.Uint64
 	portEpoch  atomic.Uint64
@@ -387,6 +389,7 @@ func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile str
 	}
 	r.link = &directLink{r: r}
 
+	r.setBand(rot.Lo, rot.Hi)
 	r.setSportMode(sportRandom, rawSport)
 	r.setSportRotate(rot)
 	r.initFec(fec, fecData, fecParity)
@@ -406,6 +409,7 @@ func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 		return nil, err
 	}
 	r.link = &directLink{r: r}
+	r.setBand(rot.Lo, rot.Hi)
 	r.setSportMode(sportRandom, rawSport)
 	r.setSportRotate(rot)
 	applyConnSockBuf(r.conn)
@@ -629,13 +633,15 @@ type rawLeak struct {
 	profile   string
 	port      uint16
 	dports    []uint16
+	bandLo    uint32
+	bandSpan  uint32
 	isClient  bool
 	marked    bool
 	portsMove bool
 }
 
-func inSportBand(p uint16) bool {
-	return int(p) >= sportBandLo && int(p) < sportBandLo+sportBandSpan
+func (l rawLeak) inBand(p uint16) bool {
+	return uint32(p) >= l.bandLo && uint32(p) < l.bandLo+l.bandSpan
 }
 
 func (l rawLeak) heardFrom() []string {
@@ -643,8 +649,8 @@ func (l rawLeak) heardFrom() []string {
 	if !l.portsMove {
 		return []string{strconv.Itoa(int(srv))}
 	}
-	out := []string{strconv.Itoa(sportBandLo) + ":" + strconv.Itoa(sportBandLo+sportBandSpan-1)}
-	if !inSportBand(srv) {
+	out := []string{strconv.Itoa(int(l.bandLo)) + ":" + strconv.Itoa(int(l.bandLo+l.bandSpan-1))}
+	if !l.inBand(srv) {
 		out = append(out, strconv.Itoa(int(srv)))
 	}
 	return out
@@ -760,7 +766,7 @@ func (r *Raw) dportAt(w uint64) uint16 {
 	if len(r.dports) < 2 {
 		return r.port
 	}
-	return r.dports[(w/sportBandSpan)%uint64(len(r.dports))]
+	return r.dports[(w/uint64(r.rotPerm.span))%uint64(len(r.dports))]
 }
 
 func (r *Raw) portsAt(w uint64, cport uint16) (uint16, uint16) {
@@ -795,12 +801,17 @@ func (r *Raw) rotSnapshot() rotStatus {
 	srv, cli := r.portsAt(w, r.cport())
 	sport, dport := rawPorts(r.isClient, srv, cli)
 	return rotStatus{Sport: sport, Dport: dport, Dports: len(r.dports), Every: r.sportEvery,
-		Lo: sportBandLo, Hi: sportBandLo + sportBandSpan - 1, Drawn: w - uint64(r.rotIdx) + 1}
+		Lo: uint16(r.rotPerm.lo), Hi: uint16(r.rotPerm.lo + r.rotPerm.span - 1), Drawn: w - uint64(r.rotIdx) + 1}
+}
+
+func (r *Raw) setBand(lo, hi int) {
+	r.cfgBandLo, r.cfgBandHi = lo, hi
 }
 
 func (r *Raw) armWalk() {
-	r.rotIdx = randBelow(sportBandSpan)
-	r.rotPerm = rotPermFrom(r.psk, r.isClient)
+	lo, span := sportBand(r.cfgBandLo, r.cfgBandHi)
+	r.rotIdx = randBelow(span)
+	r.rotPerm = rotPermFrom(r.psk, r.isClient, lo, span)
 }
 
 func (r *Raw) setSportRotate(rot SportRotation) {
@@ -888,6 +899,7 @@ func (r *Raw) wireAntiLeak() {
 	}
 	r.leak.init(r.closeCh, func(peer net.IP) (func(), bool) {
 		return addRawDrop(rawLeak{peer: peer, profile: r.profile, port: r.port, dports: r.dports,
+			bandLo: r.rotPerm.lo, bandSpan: r.rotPerm.span,
 			isClient: r.isClient, marked: marked, portsMove: r.portsMove()}, r.tunName())
 	})
 	if p := r.dst(); p != nil {

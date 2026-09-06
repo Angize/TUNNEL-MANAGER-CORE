@@ -14,7 +14,8 @@ func TestARawBuiltAnyOtherWayCarriesFromTheStart(t *testing.T) {
 }
 
 func TestADrawnPortCarriesNothingUntilItIsAnswered(t *testing.T) {
-	r := &Raw{isClient: true, profile: "tcp", sportRandom: true}
+	r := &Raw{isClient: true, profile: "tcp"}
+	r.setSportMode(true, 0)
 	r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 99, 0, 2)})
 
 	r.usePort()

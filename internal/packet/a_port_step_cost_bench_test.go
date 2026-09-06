@@ -27,6 +27,23 @@ package packet
 // packet. Re-deriving it per packet through RawProfileHasPorts costs a string map lookup, and there
 // is nothing to re-derive: sportEvery is only ever set by setSportRotate, which refuses a profile
 // that forges no ports.
+//
+// THE BAND, once it became per-tunnel (taskset -c 0, -benchtime 2s -count=3, same box, same session,
+// the pre-change tree measured beside it):
+//
+//   band 10000-59999 (the default)   28.7-31.1 ns   pre-change 28.4-29.4 -- no cost for the knob
+//   band 1024-65535  (the widest)    22.0-22.7 ns
+//   band 30000-30099 (100 ports)     55.8-57.8 ns
+//
+// The width is the rejection loop: at() cycle-walks a Feistel over the smallest power-of-four domain
+// that covers the band, so it rejects domain/span times per draw -- 1.31x at the default, 1.016x at
+// the widest, 2.56x at 100 ports. A narrow band costs about twice a wide one and it is still 56 ns of
+// a packet that also pays AEAD.
+//
+// It first cost 42.5-43.4 ns, a 47% regression, and the reason was NOT the arithmetic: making the
+// band a field grew rotPerm from 16 to 40 bytes and `at` had a VALUE receiver, so every packet copied
+// it. A pointer receiver put it back. Reducing idx in 32-bit instead of 64-bit changed nothing, which
+// is what said the modulo was never the cost.
 
 import "testing"
 
@@ -121,5 +138,37 @@ func BenchmarkRotActive(b *testing.B) {
 	}
 	if n != b.N {
 		b.Fatal("rotActive went false mid-run")
+	}
+}
+
+func benchRawBand(every, lo, hi int) *Raw {
+	r := &Raw{profile: "udp", proto: protoUDP, isClient: true, port: 443, psk: "a-psk"}
+	r.setBand(lo, hi)
+	r.setSportMode(false, 0)
+	r.setSportRotate(SportRotation{Every: every, Lo: lo, Hi: hi})
+	return r
+}
+
+func BenchmarkWirePortsRotationDefaultBand(b *testing.B) {
+	r := benchRawBand(4, 0, 0)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = r.wirePorts(40000)
+	}
+}
+
+func BenchmarkWirePortsRotationNarrowBand(b *testing.B) {
+	r := benchRawBand(4, 30000, 30099)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = r.wirePorts(40000)
+	}
+}
+
+func BenchmarkWirePortsRotationWidestBand(b *testing.B) {
+	r := benchRawBand(4, 1024, 65535)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = r.wirePorts(40000)
 	}
 }

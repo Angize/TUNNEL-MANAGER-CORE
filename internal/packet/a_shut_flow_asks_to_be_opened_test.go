@@ -52,7 +52,7 @@ func TestAShutFlowAsksToBeOpened(t *testing.T) {
 			r.freshTuple()
 		}},
 		{"a manual source jump", func(r *Raw) { r.freshTuple() }},
-		{"a redrawn source port", func(r *Raw) { r.sportRandom = true; r.usePort() }},
+		{"a redrawn source port", func(r *Raw) { r.setSportMode(true, 0); r.usePort() }},
 	} {
 		r := rawWithSession(t)
 		tc.shut(r)
