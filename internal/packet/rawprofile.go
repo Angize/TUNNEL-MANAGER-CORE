@@ -89,7 +89,7 @@ const (
 	sportBandLo   = 10000
 	sportBandSpan = 50000
 
-	MaxDports = 8
+	MaxDports = 16
 
 	rotHalfBits = 8
 	rotHalfMask = 1<<rotHalfBits - 1
@@ -140,7 +140,10 @@ type SportRotation struct {
 	Dports int
 }
 
-var dportPool = [...]uint16{443, 3478, 3479, 5349, 8443, 8801, 19302, 19305}
+var dportPool = [...]uint16{
+	443, 853, 2053, 2083, 2087, 2096, 3478, 3479,
+	5061, 5349, 8443, 8801, 8802, 19302, 19305, 19306,
+}
 
 func dportSet(base uint16, n int, psk string) []uint16 {
 	if n > MaxDports {
