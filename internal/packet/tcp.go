@@ -283,7 +283,7 @@ type TCP struct {
 	sniMode  string
 	splitTTL int
 
-	manualSwitch atomic.Bool
+	dropWhy atomic.Int32
 
 	lastErr atomic.Value
 
@@ -298,8 +298,7 @@ type TCP struct {
 	addr     string
 	bindIP   string
 
-	rc     rotationController
-	rolled atomic.Bool
+	rc rotationController
 
 	srcWarned sync.Map
 
@@ -440,17 +439,61 @@ func (b *TCP) rotateEvery() time.Duration {
 	return iv
 }
 
-func (b *TCP) rotateIn(iv time.Duration) time.Duration {
-	now := time.Now().UnixNano()
+func (b *TCP) rotateDue(iv time.Duration, now time.Time) bool {
 	at := b.rotAt.Load()
 	if at == 0 {
-		at = now + int64(iv)
-		b.rotAt.Store(at)
+		b.rotAt.Store(now.Add(iv).UnixNano())
+		return false
 	}
-	if d := time.Duration(at - now); d > 0 {
-		return d
+	return now.UnixNano() >= at
+}
+
+func (b *TCP) rotationLoop() {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-b.closeCh:
+			return
+		case now := <-t.C:
+			iv := b.rotateEvery()
+			if iv <= 0 || !b.rotateDue(iv, now) {
+				continue
+			}
+			b.rotateFrom(iv)
+			if b.rotateProactive() {
+				b.dropCarrier(dropRotation)
+			}
+		}
 	}
-	return time.Millisecond
+}
+
+func (b *TCP) rotateProactive() bool {
+	if b.pool != nil {
+		prevIP, prevSNI, ok := b.pool.current()
+		if !ok || !b.pool.advance() {
+			return false
+		}
+		nowIP, nowSNI, _ := b.pool.current()
+		if nowIP != prevIP {
+			b.st.rotated("edge", "ip:"+nowIP, true)
+		}
+		if nowSNI.host != prevSNI.host {
+			b.st.rotated("sni", "sni:"+nowSNI.host, true)
+		}
+		return true
+	}
+	dstMoved := false
+	lap := true
+	if b.pp != nil {
+		_, dstMoved = b.rotateDestTCP(true)
+		lap = b.rc.od.beat(dstMoved, b.pp.eligibleCount)
+	}
+	if !lap {
+		return dstMoved
+	}
+	_, srcMoved := b.rotateSourceTCP(true)
+	return dstMoved || srcMoved
 }
 
 func (b *TCP) rotateFrom(iv time.Duration) {
@@ -458,11 +501,9 @@ func (b *TCP) rotateFrom(iv time.Duration) {
 }
 
 func (b *TCP) rollSourcePort() bool {
-	if c := b.curConn.Load(); c != nil {
-		b.rolled.Store(true)
-		(*c).Close()
+	if b.dropCarrier(dropPortRoll) {
+		b.st.portRedrawn()
 	}
-	b.st.portRedrawn()
 	return true
 }
 
@@ -691,6 +732,7 @@ func (b *TCP) Run() error {
 		go b.diagLoop()
 		b.rc.port.setRoll(b.rollSourcePort)
 		b.armRotationClock()
+		go b.rotationLoop()
 		b.st.trackPath(b.livePath, b.closeCh)
 		if b.rc.polls() {
 			go b.cmdPollLoop()
@@ -1266,7 +1308,7 @@ func (b *TCP) dialLoop() {
 		backoff = 0
 		connectedAt := time.Now()
 
-		b.manualSwitch.Store(false)
+		b.dropWhy.Store(dropNone)
 		b.cur.Store(cf)
 		b.adoptRx(cf)
 		cc := conn
@@ -1288,78 +1330,7 @@ func (b *TCP) dialLoop() {
 		}
 		b.st.reconnected(back)
 
-		var rot *time.Timer
-		var rotated atomic.Bool
-
-		var rotp atomic.Pointer[time.Timer]
-		rearm := func(d time.Duration) {
-			b.rotateFrom(d)
-			if t := rotp.Load(); t != nil {
-				t.Reset(d)
-			}
-		}
-
-		var timerLive atomic.Bool
-		timerLive.Store(true)
-		if b.pool != nil && b.rotate > 0 {
-			c := conn
-
-			rot = time.AfterFunc(b.rotateIn(b.rotate), func() {
-				if !timerLive.Load() {
-					return
-				}
-				prevIP, prevSNI, ok := b.pool.current()
-				if !ok || !b.pool.advance() {
-					rearm(b.rotate)
-					return
-				}
-
-				nowIP, nowSNI, _ := b.pool.current()
-				if nowIP != prevIP {
-					b.st.rotated("edge", "ip:"+nowIP, true)
-				}
-				if nowSNI.host != prevSNI.host {
-					b.st.rotated("sni", "sni:"+nowSNI.host, true)
-				}
-				b.rotateFrom(b.rotate)
-				rotated.Store(true)
-				c.Close()
-			})
-			rotp.Store(rot)
-		} else if iv := b.rotateEvery(); iv > 0 {
-			c := conn
-
-			rot = time.AfterFunc(b.rotateIn(iv), func() {
-				if !timerLive.Load() {
-					return
-				}
-				dstMoved := false
-				lap := true
-				if b.pp != nil {
-					_, dstMoved = b.rotateDestTCP(true)
-					lap = b.rc.od.beat(dstMoved, b.pp.eligibleCount)
-				}
-				moved := dstMoved
-				if lap {
-					if _, m := b.rotateSourceTCP(true); m {
-						moved = true
-					}
-				}
-				if !moved {
-					rearm(iv)
-					return
-				}
-				b.rotateFrom(iv)
-				rotated.Store(true)
-				c.Close()
-			})
-			rotp.Store(rot)
-		}
 		b.serve(cf)
-		timerLive.Store(false)
-		if rot != nil {
-			rot.Stop()
-		}
 		b.curConn.CompareAndSwap(&cc, nil)
 		b.liveSNI.Store(nil)
 
@@ -1374,10 +1345,10 @@ func (b *TCP) dialLoop() {
 			if b.pool != nil {
 				cause = b.takeLastErr()
 			}
-			switch {
-			case b.rolled.Swap(false):
+			switch why := b.dropWhy.Swap(dropNone); {
+			case why == dropPortRoll:
 				deliberate = true
-			case b.manualSwitch.Swap(false) || rotated.Load():
+			case why == dropRotation:
 				deliberate = true
 				b.endRound()
 			case b.pool != nil || b.pp != nil || b.sp != nil:
@@ -1497,16 +1468,25 @@ func (b *TCP) cmdPollLoop() {
 	}
 }
 
-func (b *TCP) dropCarrier() {
-	b.manualSwitch.Store(true)
-	if c := b.curConn.Load(); c != nil {
-		(*c).Close()
+const (
+	dropNone int32 = iota
+	dropPortRoll
+	dropRotation
+)
+
+func (b *TCP) dropCarrier(why int32) bool {
+	c := b.curConn.Load()
+	if c == nil {
+		return false
 	}
+	b.dropWhy.Store(why)
+	(*c).Close()
+	return true
 }
 
 func (b *TCP) pollPeerCmd() {
 	if b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.selectedTCP, b.st.pathEpoch) {
-		b.dropCarrier()
+		b.dropCarrier(dropRotation)
 	}
 	if hosts := b.readECHCmd(); len(hosts) > 0 {
 		log.Printf("core/ws: live ECH key updated for %v (no rebuild)", hosts)

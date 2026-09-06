@@ -22,7 +22,7 @@ func TestReassessRotationEvents(t *testing.T) {
 	if got := count("degraded"); got != 1 {
 		t.Fatalf("degraded events = %d, want 1", got)
 	}
-	if !p.watch.degraded {
+	if !p.ipWatch.degraded {
 		t.Fatal("the watch should be set after losing an edge")
 	}
 
@@ -35,7 +35,7 @@ func TestReassessRotationEvents(t *testing.T) {
 	if got := count("restored"); got != 1 {
 		t.Fatalf("restored events = %d, want 1", got)
 	}
-	if p.watch.degraded {
+	if p.ipWatch.degraded {
 		t.Fatal("the watch should be cleared after recovery")
 	}
 
@@ -66,7 +66,7 @@ func TestSelectEntryReassessesRotation(t *testing.T) {
 	if count("restored") != 1 {
 		t.Fatalf("restored = %d, want 1 (selectEntry must reassess rotation)", count("restored"))
 	}
-	if p.watch.degraded {
+	if p.ipWatch.degraded {
 		t.Fatal("rotDegraded must be cleared after the pinned edge's burn was lifted")
 	}
 

@@ -53,11 +53,11 @@ func TestTheFreeRungIsSpentBeforeAnyDestinationBurns(t *testing.T) {
 				"blamed -- a socket carrier redials on a fresh ephemeral source port, which is the same "+
 				"escape raw gets from rolling its crafted one", i, portTries, burned)
 		}
-		if !b.rolled.Load() {
+		if b.dropWhy.Load() != dropPortRoll {
 			t.Fatalf("draw %d did not mark the disconnect as a rung redial; the dial loop would blame the "+
 				"endpoint for a teardown the ladder asked for", i)
 		}
-		b.rolled.Store(false) // the dial loop consumes this; there is no dial loop here
+		b.dropWhy.Store(dropNone) // the dial loop consumes this; there is no dial loop here
 		liveCarrier(t, b)
 	}
 
@@ -84,7 +84,7 @@ func TestCarryingRefillsTheRungSoTheNextOutageGetsAWholeLadder(t *testing.T) {
 
 	liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdFail, Low: b.pp.current()})
 	b.pollPeerCmd()
-	b.rolled.Store(false)
+	b.dropWhy.Store(dropNone)
 	liveCarrier(t, b)
 
 	liveVerdict(t, b.st.verdictPath(), epoch, poolCmd{Cmd: cmdOK, Low: b.pp.current()})
@@ -97,7 +97,7 @@ func TestCarryingRefillsTheRungSoTheNextOutageGetsAWholeLadder(t *testing.T) {
 			t.Fatalf("after a carrying sweep the budget was still %d/%d spent: draw %d already burned %v",
 				portTries-i+1, portTries, i, burned)
 		}
-		b.rolled.Store(false)
+		b.dropWhy.Store(dropNone)
 		liveCarrier(t, b)
 	}
 }
@@ -111,7 +111,7 @@ func TestAPoolLessCarrierStillSpendsItsFreeRung(t *testing.T) {
 
 	b.pollPeerCmd()
 
-	if !b.rolled.Load() {
+	if b.dropWhy.Load() != dropPortRoll {
 		t.Fatal("a tunnel with no endpoint to burn got nothing at all from its verdict. The free rung " +
 			"moves the tunnel nowhere and needs no second endpoint, so it is exactly what a pool-less " +
 			"carrier can still spend")
@@ -133,7 +133,7 @@ func TestWithNoCarrierTheRungIsSpentAndNothingIsTornDown(t *testing.T) {
 		if burned := burnedIn(b.pp); len(burned) != 0 {
 			t.Fatalf("draw %d condemned %v while there was no carrier at all", i, burned)
 		}
-		if b.rolled.Load() {
+		if b.dropWhy.Load() == dropPortRoll {
 			t.Fatal("the rung claimed it tore a carrier down when there was none to tear down; the dial " +
 				"loop would then treat a real failure as a teardown the ladder asked for")
 		}
@@ -181,11 +181,11 @@ func TestTheEdgePoolClimbsTheSameLadder(t *testing.T) {
 			t.Fatalf("draw %d of %d condemned edge %s. A free rung redials the SAME edge on a fresh "+
 				"ephemeral source port and blames nobody; only the burn moves the pool", i, portTries, ip)
 		}
-		if !b.rolled.Load() {
+		if b.dropWhy.Load() != dropPortRoll {
 			t.Fatalf("draw %d did not mark the disconnect as a rung redial; the dial loop would charge "+
 				"the edge for a teardown the ladder asked for", i)
 		}
-		b.rolled.Store(false)
+		b.dropWhy.Store(dropNone)
 		liveCarrier(t, b)
 	}
 

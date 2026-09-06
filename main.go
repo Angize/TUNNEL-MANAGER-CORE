@@ -70,6 +70,9 @@ func main() {
 
 	packet.SetSockBuf(cfg.SockBuf)
 	packet.SetPortTries(cfg.PortTries)
+	if note := sockBufNote(cfg.Transport, cfg.SockBuf); note != "" {
+		log.Print(note)
+	}
 
 	nq := 1
 	if !cfg.Fec && queueingCarrier(cfg.Transport) {
@@ -247,6 +250,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("tnl-core: transport: %v", err)
 	}
+	if cfg.StatusPath != "" {
+		if s, ok := b.(interface{ SetStatusPath(string) }); ok {
+			s.SetStatusPath(cfg.StatusPath)
+			log.Printf("tnl-core: writing status/events to %s", cfg.StatusPath)
+		}
+	}
+
 	switch sourceMode(b, cfg) {
 	case srcByBind:
 		log.Printf("tnl-core: binding outbound source IP to %s", cfg.BindIP)
@@ -254,13 +264,6 @@ func main() {
 		log.Printf("tnl-core: binding outbound source IP to %s (a one-entry source pool — %s has no separate bind)", cfg.BindIP, cfg.Transport)
 	case srcUnsupported:
 		log.Printf("core: WARNING carrier %s ignores bind_ip — it can fix neither a source IP nor a source pool, so this tunnel egresses from whatever source the kernel routes it out of", cfg.Transport)
-	}
-
-	if cfg.StatusPath != "" {
-		if s, ok := b.(interface{ SetStatusPath(string) }); ok {
-			s.SetStatusPath(cfg.StatusPath)
-			log.Printf("tnl-core: writing status/events to %s", cfg.StatusPath)
-		}
 	}
 
 	if cfg.Role == "client" && cfg.FakeDesync {
@@ -347,6 +350,24 @@ const (
 	srcBySrcIPs    = "src_ips"
 	srcUnsupported = "unsupported"
 )
+
+func sockBufCarrier(transport string) bool {
+	switch transport {
+	case "", "udp", "raw":
+		return true
+	}
+	return false
+}
+
+func sockBufNote(transport string, n int) string {
+	if n <= 0 || sockBufCarrier(transport) {
+		return ""
+	}
+	return fmt.Sprintf("core: WARNING carrier %s ignores sock_buf. It sizes a datagram socket, where "+
+		"the buffer is the drop threshold. A stream socket is autotuned by the kernel up to "+
+		"net.ipv4.tcp_rmem, and pinning it turns that off: measured on the fleet link, 4 MB pinned "+
+		"carries 619 Mbit where the kernel's own choice carries 1123", transport)
+}
 
 func sourceMode(b any, cfg *Config) string {
 	if cfg.Role != "client" || cfg.BindIP == "" {

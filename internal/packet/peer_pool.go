@@ -153,6 +153,25 @@ func (p *PeerPool) all() []string {
 	return out
 }
 
+func (p *PeerPool) size() int {
+	if p == nil {
+		return 0
+	}
+	return len(p.addrs)
+}
+
+func landSource(sp *PeerPool, land func(addr string) bool) bool {
+	for left := sp.size(); left > 0; left-- {
+		if land(sp.current()) {
+			return true
+		}
+		if _, moved := sp.fail("unbindable"); !moved {
+			return false
+		}
+	}
+	return false
+}
+
 func (p *PeerPool) tierLocked(addr string) (tier int, next int64) { return p.health.tier(addr) }
 
 func (p *PeerPool) bestIdxLocked(except int) int {
