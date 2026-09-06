@@ -61,6 +61,10 @@ type Config struct {
 
 	RawDports int `json:"raw_dports"`
 
+	RawSportLo int `json:"raw_sport_lo"`
+
+	RawSportHi int `json:"raw_sport_hi"`
+
 	DNSZone      string   `json:"dns_zone"`
 	DNSResolvers []string `json:"dns_resolvers"`
 
@@ -338,6 +342,22 @@ func (c *Config) validate() error {
 			}
 			if c.RawSport != 0 || c.RawSportRandom {
 				return errors.New("raw_sport_rotate continuously re-picks the forged source port, so it cannot combine with raw_sport (fixed) or raw_sport_random (rolls once)")
+			}
+		}
+		if c.RawSportLo != 0 || c.RawSportHi != 0 {
+			if c.RawSportRotate == 0 && !c.RawSportRandom {
+				return errors.New("raw_sport_lo/raw_sport_hi bound the band the forged source port is drawn from," +
+					" which only exists while raw_sport_rotate or raw_sport_random moves it")
+			}
+			if c.RawSportLo < packet.MinSportBandLo || c.RawSportHi > 65535 || c.RawSportHi < c.RawSportLo {
+				return fmt.Errorf("raw_sport_lo/raw_sport_hi must be a range inside %d..65535 with lo <= hi"+
+					" (below %d is a privileged port, which a forged carrier has no reason to claim)",
+					packet.MinSportBandLo, packet.MinSportBandLo)
+			}
+			if c.RawSportHi-c.RawSportLo+1 < packet.MinSportBandSpan {
+				return fmt.Errorf("raw_sport_lo..raw_sport_hi spans %d ports; it must span at least %d"+
+					" (a band narrower than that is a fixed port with extra steps, and raw_sport says that plainly)",
+					c.RawSportHi-c.RawSportLo+1, packet.MinSportBandSpan)
 			}
 		}
 		if c.RawDports != 0 {

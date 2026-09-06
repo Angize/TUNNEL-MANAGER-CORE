@@ -11,7 +11,8 @@ import (
 
 func rollingPort(t *testing.T) (*Raw, string) {
 	t.Helper()
-	r := &Raw{isClient: true, profile: "tcp", sportRandom: true, closeCh: make(chan struct{})}
+	r := &Raw{isClient: true, profile: "tcp", closeCh: make(chan struct{})}
+	r.setSportMode(true, 0)
 	r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
 	r.cliPort.Store(40000)
 	r.link = &capturingLink{r: r}

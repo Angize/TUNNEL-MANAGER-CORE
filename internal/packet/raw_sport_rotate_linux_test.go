@@ -276,7 +276,7 @@ func TestDecoysDrawTheirOwnPortRatherThanRidingTheCurrentOne(t *testing.T) {
 // once before repeating -- that is what keeps a port off the wire for a whole pass -- while the step
 // differs per tunnel and between the two ends of the same tunnel.
 func TestTheBandWalkIsKeyedAndStillVisitsEveryPortOnce(t *testing.T) {
-	perm := rotPermFrom("a-sufficiently-long-preshared-key", true)
+	perm := testPerm("a-sufficiently-long-preshared-key", true)
 	seen := make(map[uint16]bool, sportBandSpan)
 	var steps = map[int]int{}
 	prev := perm.at(0)
@@ -308,7 +308,7 @@ func TestTheBandWalkIsKeyedAndStillVisitsEveryPortOnce(t *testing.T) {
 	}
 
 	// the two ends of one tunnel must not walk the same sequence
-	srv := rotPermFrom("a-sufficiently-long-preshared-key", false)
+	srv := testPerm("a-sufficiently-long-preshared-key", false)
 	same := 0
 	for i := uint64(0); i < 4096; i++ {
 		if perm.at(i) == srv.at(i) {
@@ -320,7 +320,7 @@ func TestTheBandWalkIsKeyedAndStillVisitsEveryPortOnce(t *testing.T) {
 	}
 
 	// and two tunnels must not walk the same sequence either
-	other := rotPermFrom("a-different-preshared-key-entirely", true)
+	other := testPerm("a-different-preshared-key-entirely", true)
 	same = 0
 	for i := uint64(0); i < 4096; i++ {
 		if perm.at(i) == other.at(i) {
@@ -336,8 +336,16 @@ func TestTheBandWalkIsKeyedAndStillVisitsEveryPortOnce(t *testing.T) {
 // to cover the band: if the band ever outgrew it, at() would spin for ever on the indexes past the end,
 // and it would do it inside the per-packet send path.
 func TestTheWalkDomainCoversTheWholeBand(t *testing.T) {
-	if rotDomain < sportBandSpan {
-		t.Fatalf("the permutation domain is %d but the band is %d ports wide", rotDomain, sportBandSpan)
+	// The domain is chosen per band now, so it is read off the permutation rather than a constant.
+	// It has to cover the band (or ports would be unreachable) and stay within four times it (or the
+	// rejection loop that walks the cycle would run long on the send path).
+	dom := uint64(1) << (2 * testPerm("a-sufficiently-long-preshared-key", true).halfBits)
+	if dom < uint64(sportBandSpan) {
+		t.Fatalf("the permutation domain is %d but the band is %d ports wide", dom, sportBandSpan)
+	}
+	if dom >= 4*uint64(sportBandSpan) {
+		t.Fatalf("the permutation domain is %d for a band of %d, so every draw rejects %.1fx on average",
+			dom, sportBandSpan, float64(dom)/float64(sportBandSpan))
 	}
 	if sportBandLo+sportBandSpan-1 > 65535 {
 		t.Fatalf("the band ends at %d, past the last UDP port", sportBandLo+sportBandSpan-1)

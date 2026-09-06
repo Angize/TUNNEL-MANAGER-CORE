@@ -140,8 +140,9 @@ func loopRaw(t *testing.T, sportRandom bool) (*Raw, *countingLink) {
 	t.Helper()
 	link := &countingLink{}
 	r := &Raw{isClient: true, profile: "udp", psk: rungPSK, cipher: crypto.CipherChaCha,
-		ping: pingEvery, sportRandom: sportRandom,
+		ping:    pingEvery,
 		closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
+	r.setSportMode(sportRandom, 0)
 	r.soloPeer.Store(&net.IPAddr{IP: net.IPv4(10, 30, 0, 2)})
 	r.session.Store(&sealerBox{s: rungSealer(t, true)})
 	r.link = link

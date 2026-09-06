@@ -86,21 +86,23 @@ func rawPorts(isClient bool, srv, cli uint16) (sport, dport uint16) {
 }
 
 const (
-	sportBandLo   = 10000
-	sportBandSpan = 50000
+	SportBandLoDefault = 10000
+	SportBandHiDefault = 59999
+	MinSportBandLo     = 1024
+	MinSportBandSpan   = 100
 
 	MaxDports = 16
-
-	rotHalfBits = 8
-	rotHalfMask = 1<<rotHalfBits - 1
-	rotDomain   = 1 << (2 * rotHalfBits)
 )
 
 type rotPerm struct {
-	rk [4]uint32
+	rk       [4]uint32
+	lo       uint32
+	span     uint32
+	halfBits uint
+	halfMask uint32
 }
 
-func rotPermFrom(psk string, isClient bool) rotPerm {
+func rotPermFrom(psk string, isClient bool, lo, span uint32) rotPerm {
 	role := "server"
 	if isClient {
 		role = "client"
@@ -110,34 +112,49 @@ func rotPermFrom(psk string, isClient bool) rotPerm {
 	for i := range p.rk {
 		p.rk[i] = binary.BigEndian.Uint32(h[i*4 : i*4+4])
 	}
+	p.lo, p.span = lo, span
+	p.halfBits = 1
+	for uint64(1)<<(2*p.halfBits) < uint64(span) {
+		p.halfBits++
+	}
+	p.halfMask = 1<<p.halfBits - 1
 	return p
 }
 
-func rotRound(v, k uint32) uint32 {
+func rotRound(v, k, mask uint32) uint32 {
 	x := (v + k) * 0x9E3779B1
 	x ^= x >> 15
 	x *= 0x85EBCA6B
 	x ^= x >> 13
-	return x & rotHalfMask
+	return x & mask
 }
 
-func (p rotPerm) at(idx uint64) uint16 {
-	v := uint32(idx % sportBandSpan)
+func (p *rotPerm) at(idx uint64) uint16 {
+	v := uint32(idx % uint64(p.span))
 	for {
-		l, r := v>>rotHalfBits, v&rotHalfMask
+		l, r := v>>p.halfBits, v&p.halfMask
 		for _, k := range p.rk {
-			l, r = r, l^rotRound(r, k)
+			l, r = r, l^rotRound(r, k, p.halfMask)
 		}
-		v = l<<rotHalfBits | r
-		if v < sportBandSpan {
-			return uint16(sportBandLo + v)
+		v = l<<p.halfBits | r
+		if v < p.span {
+			return uint16(p.lo + v)
 		}
 	}
+}
+
+func sportBand(lo, hi int) (uint32, uint32) {
+	if lo < MinSportBandLo || hi > 65535 || hi < lo || hi-lo+1 < MinSportBandSpan {
+		lo, hi = SportBandLoDefault, SportBandHiDefault
+	}
+	return uint32(lo), uint32(hi - lo + 1)
 }
 
 type SportRotation struct {
 	Every  int
 	Dports int
+	Lo     int
+	Hi     int
 }
 
 var dportPool = [...]uint16{

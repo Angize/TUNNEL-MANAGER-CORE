@@ -182,7 +182,7 @@ func TestTheAntiLeakRuleCoversEveryPortTheDrawCanReturn(t *testing.T) {
 					"kernel is then free to RST the peer", isClient, rule)
 			}
 		}
-		perm := rotPermFrom("a-psk-for-the-anti-leak-rule", isClient)
+		perm := testPerm("a-psk-for-the-anti-leak-rule", isClient)
 		for i := 0; i < 64; i++ {
 			p := int(perm.at(uint64(i)))
 			if strings.Contains(rule, " "+strconv.Itoa(p)+" ") && p != rawServerPort {
