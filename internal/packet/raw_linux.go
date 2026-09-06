@@ -75,6 +75,7 @@ type Raw struct {
 	tsEcr   atomic.Uint32
 
 	peerAnswered atomic.Bool
+	rxTick       atomic.Bool
 	unanswered   atomic.Bool
 
 	fecEnc  *fecEncoder
@@ -1214,6 +1215,7 @@ func (r *Raw) provenFrom(ip net.IP) {
 		}
 	}
 	r.peerAnswered.Store(true)
+	r.rxTick.Store(true)
 }
 
 func (r *Raw) SetPeerPool(pp *PeerPool) {
@@ -1258,19 +1260,23 @@ func srcAllowedIn(set map[string]struct{}, ip net.IP) bool {
 }
 
 func (r *Raw) SetSourcePool(sp *PeerPool) {
-	if !r.isClient {
+	if !r.isClient || sp == nil {
 		return
 	}
 	r.sp = sp
-
-	if sp != nil {
-		joinStatus(r.st, sp, "src")
-		if ip := adoptableSource("raw", sp.current(), &r.srcWarned); ip != nil {
-			r.localIP.Store(&net.IPAddr{IP: ip})
-		} else {
-			sp.fail("unbindable")
-		}
+	joinStatus(r.st, sp, "src")
+	if !landSource(sp, r.landSourceIP) {
+		log.Printf("raw: no source in the pool is configured on this host — the kernel picks the source")
 	}
+}
+
+func (r *Raw) landSourceIP(addr string) bool {
+	ip := adoptableSource("raw", addr, &r.srcWarned)
+	if ip == nil {
+		return false
+	}
+	r.localIP.Store(&net.IPAddr{IP: ip})
+	return true
 }
 
 func (r *Raw) rotateSourceRaw(proactive bool) {
@@ -1363,17 +1369,16 @@ func (r *Raw) adoptSourceRaw() {
 	if r.sp == nil {
 		return
 	}
-	ip := adoptableSource("raw", r.sp.current(), &r.srcWarned)
-	if ip == nil {
-		r.sp.fail("unbindable")
+	prevSrc := r.localIP.Load()
+	if !landSource(r.sp, r.landSourceIP) {
+		log.Printf("raw: no source in the pool is configured on this host — the kernel picks the source")
 		return
 	}
-	prevSrc := r.localIP.Load()
-	r.localIP.Store(&net.IPAddr{IP: ip})
-	if prevSrc == nil || !prevSrc.IP.Equal(ip) {
+	now := r.localIP.Load()
+	if prevSrc == nil || !prevSrc.IP.Equal(now.IP) {
 		r.freshTuple()
 	}
-	log.Printf("raw: source moved to %s (operator)", ip)
+	log.Printf("raw: source moved to %s (operator)", now.IP)
 }
 
 func (r *Raw) cmdPollLoop(rc *rotationController) {
@@ -1393,8 +1398,11 @@ func (r *Raw) clientLoop() {
 		go r.cmdPollLoop(rc)
 	}
 
+	var stall stallWatch
 	for {
-		rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
+		now := time.Now()
+		rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, now)
+		stall.beat(r.rxTick.Swap(false), r.st, "raw", now)
 		asking := r.mustKnock()
 		if asking {
 			r.sendInit()

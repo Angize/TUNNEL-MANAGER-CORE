@@ -60,7 +60,8 @@ type wsPool struct {
 	sniHealth healthSet
 	i, j      int
 	burns     atomic.Uint64
-	watch     rotWatch
+	ipWatch   rotWatch
+	sniWatch  rotWatch
 	chosen    string
 	now       func() int64
 
@@ -313,7 +314,7 @@ func (p *wsPool) restoreIPs() {
 	p.mu.Unlock()
 	if cleared {
 		p.publish()
-		p.reassessRotation()
+		p.reassessRotation("ip")
 	}
 }
 
@@ -372,20 +373,23 @@ func (p *wsPool) markSuspect(kind, key, reason string) {
 		p.event("burn", reason, kind+":"+key)
 	}
 	p.publish()
-	if condemned && kind == "ip" {
-		p.reassessRotation()
+	if condemned {
+		p.reassessRotation(kind)
 	}
 }
 
-func (p *wsPool) reassessRotation() {
+func (p *wsPool) reassessRotation(kind string) {
 	p.mu.Lock()
-	eligible, total := p.ipHealth.countEligible(p.ips), len(p.ips)
-	degraded, report := p.watch.turned(eligible, total)
+	eligible, total, watch := p.ipHealth.countEligible(p.ips), len(p.ips), &p.ipWatch
+	if kind == "sni" {
+		eligible, total, watch = p.sniHealth.countEligible(p.sniHostsLocked()), len(p.snis), &p.sniWatch
+	}
+	degraded, report := watch.turned(eligible, total)
 	p.mu.Unlock()
 	if !report {
 		return
 	}
-	detail := "ip:" + strconv.Itoa(eligible) + "/" + strconv.Itoa(total)
+	detail := kind + ":" + strconv.Itoa(eligible) + "/" + strconv.Itoa(total)
 	if degraded {
 		p.event("pool", "degraded", detail)
 		return
@@ -399,9 +403,7 @@ func (p *wsPool) retestNow(kind, key string) bool {
 	p.mu.Unlock()
 	if ok {
 		p.publish()
-		if kind == "ip" {
-			p.reassessRotation()
-		}
+		p.reassessRotation(kind)
 	}
 	return ok
 }
@@ -439,9 +441,7 @@ func (p *wsPool) selectEntry(kind, key string) bool {
 	moved := p.atLocked() != before
 	p.mu.Unlock()
 	p.publish()
-	if kind == "ip" {
-		p.reassessRotation()
-	}
+	p.reassessRotation(kind)
 	return moved
 }
 
@@ -476,10 +476,7 @@ func (p *wsPool) clearBurn(kind, key string) bool {
 	if had {
 		p.event("heal", "tun-probe", kind+":"+key)
 		p.publish()
-
-		if kind == "ip" {
-			p.reassessRotation()
-		}
+		p.reassessRotation(kind)
 	}
 	return had
 }

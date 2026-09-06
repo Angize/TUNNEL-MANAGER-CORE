@@ -203,10 +203,11 @@ func (s *coreStatus) carrying() {
 	}
 
 	s.tracker.sample()
+	detail := "tries:" + strconv.Itoa(tries)
 	if _, path, _ := s.tracker.snapshot(); path.Sport != 0 {
-		s.event("down", "port-roll",
-			"sport:"+strconv.Itoa(int(path.Sport))+" tries:"+strconv.Itoa(tries))
+		detail = "sport:" + strconv.Itoa(int(path.Sport)) + " " + detail
 	}
+	s.event("down", "port-roll", detail)
 }
 
 func (s *coreStatus) portClaimLost() {

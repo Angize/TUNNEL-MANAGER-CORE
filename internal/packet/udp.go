@@ -74,6 +74,7 @@ type UDP struct {
 	ci       atomic.Pointer[crypto.Ephemeral]
 
 	peerAnswered atomic.Bool
+	rxTick       atomic.Bool
 
 	fecEnc  *fecEncoder
 	fecDec  *fecDecoder
@@ -149,33 +150,24 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 }
 
 func (b *UDP) SetSourcePool(sp *PeerPool) {
-	if !b.isClient {
+	if !b.isClient || sp == nil {
 		return
 	}
 	b.sp = sp
+	joinStatus(b.st, sp, "src")
+	b.landSourceUDP("bound")
+}
 
-	if sp != nil {
-		joinStatus(b.st, sp, "src")
-		host := sp.current()
-		if h, _, e := net.SplitHostPort(host); e == nil {
-			host = h
+func (b *UDP) landSourceUDP(verb string) {
+	landed := landSource(b.sp, func(addr string) bool {
+		host, ok := b.rebindSourceTo(addr)
+		if ok {
+			log.Printf("core/udp: source %s to %s", verb, host)
 		}
-		if ip := net.ParseIP(host); ip != nil {
-			nc, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip})
-			if err != nil {
-				log.Printf("core/udp: initial source bind to %s failed: %v", host, err)
-
-				b.sp.fail("unbindable")
-			}
-			if err == nil {
-				applyConnSockBuf(nc)
-				old := b.conn.Load()
-				b.conn.Store(nc)
-				if old != nil {
-					_ = old.Close()
-				}
-			}
-		}
+		return ok
+	})
+	if !landed {
+		log.Printf("core/udp: no source in the pool would bind — the kernel picks the source")
 	}
 }
 
@@ -294,13 +286,7 @@ func (b *UDP) adoptSourceUDP() {
 	if b.sp == nil {
 		return
 	}
-	addr := b.sp.current()
-	if host, ok := b.rebindSourceTo(addr); ok {
-		log.Printf("core/udp: source moved to %s (operator)", host)
-		return
-	}
-	log.Printf("core/udp: source %s will not bind on this host — rotation moves on", addr)
-	b.sp.fail("unbindable")
+	b.landSourceUDP("moved (operator)")
 }
 
 func runCmdPoll(rc *rotationController, closeCh <-chan struct{}, applied func(kind, key string),
@@ -377,6 +363,7 @@ func (b *UDP) provenFrom(ip net.IP) {
 		}
 	}
 	b.peerAnswered.Store(true)
+	b.rxTick.Store(true)
 }
 
 func Dial(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, fec bool, fecData, fecParity int, extra ...*tun.Device) (*UDP, error) {
@@ -906,8 +893,11 @@ func (b *UDP) clientLoop() {
 	if rc.polls() {
 		go b.cmdPollLoop(rc)
 	}
+	var stall stallWatch
 	for {
-		rc.proactive(b.rotatePeerUDP, b.rotateSourceUDP, time.Now())
+		now := time.Now()
+		rc.proactive(b.rotatePeerUDP, b.rotateSourceUDP, now)
+		stall.beat(b.rxTick.Swap(false), b.st, "udp", now)
 		asking := b.cryptoOn && handshakeOutstanding(b.sealer(), &b.ci)
 		if asking {
 			b.sendInit()

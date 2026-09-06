@@ -81,24 +81,71 @@ func TestTheScheduledRotationSurvivesAChurningCarrier(t *testing.T) {
 }
 
 // The arithmetic on its own, so a future edit that keeps the deadline but re-arms it in the wrong place
-// is caught without a 14-second test.
+// is caught without a 14-second test. rotateDue is a pure predicate over an injected clock, so every
+// case below is the production line the ticker calls, not a stand-in for it.
 func TestARotationDeadlineIsNotRestartedByArming(t *testing.T) {
 	b := &TCP{rotate: time.Minute}
-	if d := b.rotateIn(b.rotate); d > time.Minute || d < 59*time.Second {
-		t.Fatalf("the first arming asked for %v, want the whole interval", d)
+	t0 := time.Now()
+
+	if b.rotateDue(b.rotate, t0) {
+		t.Fatal("the first tick came due immediately; arming must put the deadline a whole interval out")
 	}
-	b.rotAt.Add(-int64(40 * time.Second))
-	d := b.rotateIn(b.rotate)
-	if d > 21*time.Second {
-		t.Fatalf("after 40s of the minute had passed a reconnect armed for %v; the elapsed time was "+
-			"thrown away", d)
+	if b.rotateDue(b.rotate, t0.Add(59*time.Second)) {
+		t.Fatal("59s into a one-minute interval the deadline was already due")
 	}
-	b.rotAt.Add(-int64(30 * time.Second))
-	if d := b.rotateIn(b.rotate); d > time.Millisecond {
-		t.Fatalf("a deadline that passed during an outage armed for %v, want an immediate fire", d)
+	if !b.rotateDue(b.rotate, t0.Add(time.Minute)) {
+		t.Fatal("a minute of a one-minute interval passed and the deadline never came due")
 	}
+	if !b.rotateDue(b.rotate, t0.Add(6*time.Minute)) {
+		t.Fatal("a deadline that passed during an outage was thrown away instead of firing late")
+	}
+
 	b.rotateFrom(b.rotate)
-	if d := b.rotateIn(b.rotate); d < 59*time.Second {
-		t.Fatalf("a rotation that fired left the next deadline at %v, want a fresh interval", d)
+	if b.rotateDue(b.rotate, time.Now().Add(59*time.Second)) {
+		t.Fatal("a rotation that fired did not start a fresh interval")
 	}
+}
+
+// The clock is a standing ticker now, not a timer created after a successful connect, so the interval
+// runs while the carrier is DOWN. Before, a pool whose current entry was black-holed was dialled for
+// ever: no connection meant no timer meant no rotation, and only the node's tun probe could move it.
+// Both addresses here refuse, so the ONLY thing that can move the cursor is the scheduled tick.
+func TestTheScheduledRotationRunsWhileTheCarrierIsDown(t *testing.T) {
+	cliDev, _ := tunPair(t, "rcdown")
+
+	dead := func() string {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := l.Addr().String()
+		l.Close()
+		return a
+	}
+	a1, a2 := dead(), dead()
+
+	cli, err := DialTCP(a1, cliDev, false, true, "a-psk-for-the-down-clock", "aes-256-gcm", false, "")
+	if err != nil {
+		t.Fatalf("DialTCP: %v", err)
+	}
+	cli.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
+	cli.SetPeerPool(NewPeerPool([]string{a1, a2}, 2*time.Second))
+
+	go cli.Run()
+	t.Cleanup(func() { cli.Close() })
+
+	start := cli.pp.current()
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		if cli.curConn.Load() != nil {
+			t.Fatal("setup: something accepted; both addresses must refuse for this test to mean anything")
+		}
+		if cli.pp.current() != start {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("12s with a 2s rotation interval and the pool never left %s. Nothing ever connected, so "+
+		"the deadline only exists if the clock is standing -- a tunnel pointed at a black-holed "+
+		"endpoint has no other way off it without the node", start)
 }

@@ -200,17 +200,16 @@ func TestAJumpRestartsWhicheverClockTheCarrierKeeps(t *testing.T) {
 		b.armRotationClock()
 
 		b.rotateFrom(2 * time.Second)
-		if left := b.rotateIn(period); left > 5*time.Second {
-			t.Fatalf("setup: %v left, want about 2s", left)
+		if !b.rotateDue(period, time.Now().Add(5*time.Second)) {
+			t.Fatal("setup: the deadline is not about 2s out")
 		}
 
 		if !b.operatorJump(t, "ip", "e2") {
 			t.Fatal("the jump was not applied")
 		}
-		left := b.rotateIn(period)
-		if left < period-time.Minute {
-			t.Fatalf("only %v of the %v period is left after the jump — the operator's pick is "+
-				"rotated away almost immediately", left.Round(time.Second), period)
+		if b.rotateDue(period, time.Now().Add(period-time.Minute)) {
+			t.Fatalf("less than %v of the %v period is left after the jump — the operator's pick is "+
+				"rotated away almost immediately", period-time.Minute, period)
 		}
 	})
 
@@ -242,8 +241,8 @@ func TestAJumpRestartsWhicheverClockTheCarrierKeeps(t *testing.T) {
 			t.Fatal("the jump was not applied")
 		}
 		if at := b.rotAt.Load(); at != 0 {
-			t.Errorf("rotation is off, yet the jump armed a deadline (%d) — the next rotateIn would "+
-				"fire in a millisecond", at)
+			t.Errorf("rotation is off, yet the jump armed a deadline (%d) — the next tick would "+
+				"fire straight away", at)
 		}
 	})
 }
