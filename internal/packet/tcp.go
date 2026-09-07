@@ -415,8 +415,6 @@ func (b *TCP) livePath() (pathKey, bool) {
 	return k, b.cur.Load() != nil
 }
 
-func (b *TCP) endRound() { b.rc.success() }
-
 func (b *TCP) armRotationClock() {
 	b.rc.setClock(func() {
 		if iv := b.rotateEvery(); iv > 0 {
@@ -1350,7 +1348,6 @@ func (b *TCP) dialLoop() {
 				deliberate = true
 			case why == dropRotation:
 				deliberate = true
-				b.endRound()
 			case b.pool != nil || b.pp != nil || b.sp != nil:
 				if b.pool != nil {
 					b.st.down(classifyErr(cause), label)
@@ -1358,7 +1355,6 @@ func (b *TCP) dialLoop() {
 
 				if time.Since(connectedAt) >= minLiveness {
 					youngDeaths = 0
-					b.endRound()
 				} else if b.pool != nil && youngDeaths < b.pool.comboCount() && b.pool.advance() {
 					if youngDeaths == 0 {
 						b.pool.event("down", "edge-walk", "ws")
