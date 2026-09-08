@@ -199,20 +199,22 @@ func TestRotationNeverStopsAfterAJumpAndResumesFromIt(t *testing.T) {
 	}
 }
 
-// The same rule on the edge pool, which is where the timer used to be told to stand down.
+// The same rule on the edge pool, which is where the timer used to be told to stand down. The edge IPs
+// are a PeerPool of their own now, so the jump and the walk that answers it are the two calls the direct
+// carrier already makes.
 func TestTheEdgeRotationNeverStopsAfterAJump(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2", "e3"}, snis("x"))
-	if !p.selectEntry("ip", "e3") {
+	b := edgeTCP([]string{"e1", "e2", "e3"}, snis("x"), 0)
+	if !b.pp.selectEntry("e3") {
 		t.Fatal("could not jump to e3")
 	}
-	if ip, _, _ := p.current(); ip != "e3" {
+	if ip := b.pp.current(); ip != "e3" {
 		t.Fatalf("the jump did not land: %q", ip)
 	}
-	if !p.advance() {
+	if !b.walkEdge() {
 		t.Fatal("the rotation timer refused to move after a manual jump — the operator asked for a " +
 			"jump, not a hold")
 	}
-	if ip, _, _ := p.current(); ip != "e1" {
+	if ip := b.pp.current(); ip != "e1" {
 		t.Fatalf("rotation resumed at %q; from e3 the next edge is e1", ip)
 	}
 }

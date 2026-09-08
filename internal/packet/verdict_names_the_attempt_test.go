@@ -12,9 +12,7 @@ import (
 // that had done nothing wrong lost ten minutes, and the operator saw two burns for one bad edge.
 func TestTheStatusNamesWhatIsBeingTriedNotTheCursor(t *testing.T) {
 	const was, pinned, third = "10.0.0.1:443", "10.0.0.2:443", "10.0.0.3:443"
-	p := newWSPool([]string{was, pinned, third}, snis("x"))
-	b := &TCP{isClient: true, ws: true, wsPath: "/", pool: p, closeCh: make(chan struct{})}
-	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
+	b, pp, _ := edgeCarrier(t, []string{was, pinned, third}, snis("x"))
 
 	// Before the first dial the cursor is a fair prediction: it is what that dial will use.
 	if low, _ := b.livePairNow(); low != was {
@@ -33,9 +31,9 @@ func TestTheStatusNamesWhatIsBeingTriedNotTheCursor(t *testing.T) {
 
 	// The pin is dropped and the pool walks on: the cursor is now somewhere else entirely. The last
 	// attempt is still the honest answer until the next dial replaces it.
-	p.markSuspect("ip", pinned, "dial")
-	p.advance()
-	if cur, _, _ := p.current(); cur == pinned {
+	pp.markSuspect(pinned, "dial")
+	b.walkEdge()
+	if cur := pp.current(); cur == pinned {
 		t.Fatal("setup: the pool did not move off the burned edge")
 	}
 	if low, _ := b.livePairNow(); low != pinned {

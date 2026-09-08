@@ -8,13 +8,13 @@ import (
 // While the carrier is DOWN the published pair is the cursor, so it follows a jump at once. A verdict
 // arriving in that window must name the edge the tunnel is attempting, not the one it just left.
 func TestThePublishedPairFollowsAJumpWhileDown(t *testing.T) {
-	b, p := edgeCarrier(t, []string{"e1", "e2"}, snis("s1"))
+	b, p, _ := edgeCarrier(t, []string{"e1", "e2"}, snis("s1"))
 	b.pretendDown()
 	if low, _ := b.livePairNow(); low != "e1" {
 		t.Fatalf("setup: the pair names %q, want e1", low)
 	}
 
-	if !p.selectEntry("ip", "e2") {
+	if !p.selectEntry("e2") {
 		t.Fatal("could not jump to e2")
 	}
 	low, _ := b.livePairNow()

@@ -22,8 +22,9 @@ func TestEveryCarrierSharesOneDeadWindow(t *testing.T) {
 			{"DialWS", func() (*TCP, error) {
 				return DialWS("203.0.113.9:443", nil, false, false, psk, "aes-256-gcm", "cdn.example.com", "/w", true, nil)
 			}},
-			{"DialWSPool", func() (*TCP, error) {
-				return DialWSPool(nil, false, false, psk, "aes-256-gcm", nil, 0, false, "")
+			{"DialWSPoolCfg", func() (*TCP, error) {
+				return DialWSPoolCfg(nil, false, false, psk, "aes-256-gcm", []string{"203.0.113.9:443"},
+					[]WSPoolSNI{{Host: "cdn.example.com", Path: "/w"}}, 0, false, "")
 			}},
 			{"DialHTTPC", func() (*TCP, error) {
 				return DialHTTPC("203.0.113.9:443", nil, false, false, psk, "aes-256-gcm", "cdn.example.com", "/w", true, nil, "")

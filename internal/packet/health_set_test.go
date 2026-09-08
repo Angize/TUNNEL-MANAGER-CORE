@@ -93,21 +93,37 @@ func TestHealthSetEligibleVsHealthy(t *testing.T) {
 	}
 }
 
-func TestHealthSetBestRanksByTier(t *testing.T) {
-	clk := int64(5000)
-	h := newHealthSet(&[]func() int64{func() int64 { return clk }}[0])
+// The ranking every pool falls back to when nothing is healthy and nothing is due yet. It used to have
+// a second implementation on healthSet, reachable only from the edge pool; with one pool for every
+// carrier there is one, and this is it.
+func burnAt(p *PeerPool, key, state string, at int64) {
+	p.mu.Lock()
+	p.health.recs[key] = &healthRec{state: state, nextRetest: at}
+	p.mu.Unlock()
+}
 
-	h.recs["a"] = &healthRec{state: stateDead, nextRetest: clk + 5}
-	h.recs["b"] = &healthRec{state: stateSuspect, nextRetest: clk + 900}
-	h.recs["c"] = &healthRec{state: stateSuspect, nextRetest: clk + 10}
-	if got := h.best([]string{"a", "b", "c"}); got != "c" {
+func bestOf(p *PeerPool) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.addrs[p.bestIdxLocked(-1)]
+}
+
+func TestTheFallbackRanksByTierThenBySoonestRetest(t *testing.T) {
+	clk := int64(5000)
+	load := func(addrs ...string) *PeerPool {
+		p := NewPeerPool(addrs, 0)
+		p.now = func() int64 { return clk }
+		burnAt(p, "a", stateDead, clk+5)
+		burnAt(p, "b", stateSuspect, clk+900)
+		burnAt(p, "c", stateSuspect, clk+10)
+		return p
+	}
+
+	if got := bestOf(load("a", "b", "c")); got != "c" {
 		t.Fatalf("best = %s, want c (suspect beats dead; soonest retest beats a later one)", got)
 	}
-	if got := h.best([]string{"a", "b", "c", "d"}); got != "d" {
+	if got := bestOf(load("a", "b", "c", "d")); got != "d" {
 		t.Fatalf("best = %s, want d — an untracked entry is healthy and outranks every burned one", got)
-	}
-	if got := h.best(nil); got != "" {
-		t.Fatalf("best of nothing = %q, want empty", got)
 	}
 }
 
@@ -167,18 +183,25 @@ func TestABurnStepsOnlyTheEntryItMeasured(t *testing.T) {
 	}
 }
 
+// The SNI hosts are a PeerPool of their own now, and they keep the rule the edge pool had: verdicts that
+// arrive while an entry is still waiting out its backoff must not walk its ladder.
 func TestMarkSuspectDoesNotStepAWaitingEntry(t *testing.T) {
-	p := newWSPool([]string{"e1", "e2"}, snis("s1", "s2"))
+	b := edgeTCP([]string{"e1", "e2"}, snis("s1", "s2"), 0)
 	clk := int64(5000)
-	p.now = func() int64 { return clk }
+	b.sp.now = func() int64 { return clk }
 
-	p.markSuspect("sni", "s1", "tun-probe")
-	first := p.sniHealth.rec("s1").nextRetest
-	p.markSuspect("sni", "s1", "tun-probe")
-	p.markSuspect("sni", "s1", "tun-probe")
+	b.sp.markSuspect("s1", "tun-probe")
+	b.sp.mu.Lock()
+	first := b.sp.health.rec("s1").nextRetest
+	b.sp.mu.Unlock()
+	b.sp.markSuspect("s1", "tun-probe")
+	b.sp.markSuspect("s1", "tun-probe")
 
-	r := p.sniHealth.rec("s1")
-	if r.nextRetest != first || r.fails != 0 {
-		t.Fatalf("repeated verdicts on one SNI walked its ladder: fails=%d nextRetest%+d", r.fails, r.nextRetest-first)
+	b.sp.mu.Lock()
+	r := b.sp.health.rec("s1")
+	next, fails := r.nextRetest, r.fails
+	b.sp.mu.Unlock()
+	if next != first || fails != 0 {
+		t.Fatalf("repeated verdicts on one SNI walked its ladder: fails=%d nextRetest%+d", fails, next-first)
 	}
 }

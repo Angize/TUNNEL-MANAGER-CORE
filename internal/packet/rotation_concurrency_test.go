@@ -69,7 +69,7 @@ func TestPeerPoolUnderConcurrentDrivers(t *testing.T) {
 
 func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(4))
-	b, p := edgeCarrier(t, []string{"e1", "e2", "e3"}, snis("s1", "s2"))
+	b, pp, sp := edgeCarrier(t, []string{"e1", "e2", "e3"}, snis("s1", "s2"))
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -88,40 +88,46 @@ func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 		}()
 	}
 
-	run(func() { p.current() })
-	run(func() { p.advance() })
-	run(func() { p.advanceIP(); p.restoreIPs() })
+	run(func() { b.edgeCombo() })
+	run(func() { b.walkEdge() })
+	run(func() { pp.rotateOnce(); pp.restoreAll() })
 	run(func() {
-		low, high := b.livePairNow()
-		if high != "" {
+		if _, high := b.livePairNow(); high != "" {
 			b.rc.fail(b.rotateLowTCP, b.rotateHighTCP)
-			_ = low
 		}
 	})
 	run(func() {
-		ip, sni, _ := p.current()
-		b.pretendConnected(ip, sni.host)
+		if ip, sni, ok := b.edgeCombo(); ok {
+			b.pretendConnected(ip, sni.host)
+		}
 	})
-	run(func() { p.selectEntry("ip", "e2") })
-	run(func() { p.selectEntry("sni", "s1") })
-	run(func() { p.clearBurn("sni", "s2") })
-	run(func() { p.clearBurn("ip", "e3") })
-	run(func() { _ = p.eligibleIPs() })
+	run(func() { pp.selectEntry("e2") })
+	run(func() { sp.selectEntry("s1") })
+	run(func() { sp.clearBurn("s2") })
+	run(func() { pp.clearBurn("e3") })
+	run(func() { _ = pp.eligibleCount() })
 
 	time.Sleep(400 * time.Millisecond)
 	close(stop)
 	wg.Wait()
 
-	_, _, ok := p.current()
-	if !ok {
-		t.Fatal("current() gave up on a non-empty pool")
+	if _, _, ok := b.edgeCombo(); !ok {
+		t.Fatal("the combo gave up on a pool that has an edge and an SNI in it")
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.chosen != "" {
-		at := activeLabel(p.ips[p.i%len(p.ips)], p.snis[p.j%len(p.snis)].host)
-		if at != p.chosen {
-			t.Fatalf("chosen=%q while the cursor is on %q", p.chosen, at)
+	for _, p := range []*PeerPool{pp, sp} {
+		got := p.current()
+		p.mu.Lock()
+		axis, at, chosen := p.axis, p.addrs[p.cur], p.chosen
+		live := p.liveAddr()
+		p.mu.Unlock()
+		if at != got {
+			t.Fatalf("%s: current() gave %q while the cursor names %q", axis, got, at)
+		}
+		if live == nil || live.s != at {
+			t.Fatalf("%s: the carrier is reading %+v while the cursor names %q", axis, live, at)
+		}
+		if chosen != "" && chosen != at {
+			t.Fatalf("%s: chosen=%q while the cursor names %q", axis, chosen, at)
 		}
 	}
 }

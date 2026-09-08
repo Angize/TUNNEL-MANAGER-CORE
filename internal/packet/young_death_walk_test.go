@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func wsPoolClient(t *testing.T, tag string, hosts []string, addrs ...string) (*TCP, *wsPool) {
+func wsPoolClient(t *testing.T, tag string, hosts []string, addrs ...string) (*TCP, *PeerPool) {
 	t.Helper()
 	const psk = "ws-young-death-psk-abcdefghijkl"
 	const cipher = "aes-256-gcm"
@@ -19,14 +19,12 @@ func wsPoolClient(t *testing.T, tag string, hosts []string, addrs ...string) (*T
 		t.Cleanup(func() { srv.Close() })
 	}
 	cliDev, _ := tunPair(t, tag+"c")
-	pool := newWSPool(addrs, snis(hosts...))
-	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, psk: psk,
-		ws: true, wsTLS: false, pool: pool,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
+	cli := edgeTCP(addrs, snis(hosts...), 0)
+	cli.dev, cli.cryptoOn, cli.cipher, cli.psk, cli.wsTLS = cliDev, true, cipher, psk, false
 	cli.SetStatusPath(runningStatusPath(t, cli))
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
-	return cli, pool
+	return cli, cli.pp
 }
 
 func liveEdge(cli *TCP) string {
@@ -49,8 +47,8 @@ func poolEvents(b *TCP, code string) int {
 }
 
 func TestAYoungDeathWalksOneLapAndStops(t *testing.T) {
-	cli, pool := wsPoolClient(t, "ywlk", []string{"h1", "h2", "h3"}, freeTCPPort(t))
-	lap := pool.comboCount()
+	cli, _ := wsPoolClient(t, "ywlk", []string{"h1", "h2", "h3"}, freeTCPPort(t))
+	lap := cli.comboCount()
 	if lap != 3 {
 		t.Fatalf("one lap of this pool is %d combinations, want 3 — the budget under test is mis-sized", lap)
 	}
@@ -65,8 +63,8 @@ func TestAYoungDeathWalksOneLapAndStops(t *testing.T) {
 			continue
 		}
 		if at := liveEdge(cli); at != "" {
-			_, sni, _ := pool.current()
-			if cur := at + " · " + sni.host; cur != last {
+			_, sni, _ := cli.edgeCombo()
+			if cur := at + activeSep + sni.host; cur != last {
 				if last != "" {
 					changes++
 					tail = 0

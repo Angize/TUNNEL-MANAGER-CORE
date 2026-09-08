@@ -8,9 +8,15 @@ import (
 
 func peerInvariants(t *testing.T, p *PeerPool, step int, log []string) {
 	t.Helper()
+	p.mu.Lock()
+	axis := p.axis
+	p.mu.Unlock()
+	if axis == "" {
+		axis = "pool"
+	}
 	fail := func(format string, a ...any) {
 		t.Helper()
-		t.Fatalf("after step %d (%v): "+format, append([]any{step, log}, a...)...)
+		t.Fatalf("%s: after step %d (%v): "+format, append([]any{axis, step, log}, a...)...)
 	}
 	got := p.current()
 
@@ -112,76 +118,35 @@ func TestPeerPoolInvariantsUnderRandomSequences(t *testing.T) {
 	}
 }
 
-func edgeInvariants(t *testing.T, p *wsPool, step int, log []string) {
+// Both edge axes are ordinary PeerPools now, so every pool invariant must hold on each of them, and on
+// top of that the combo the dial path builds must be exactly the two cursors and the SNI host list must
+// not drift away from the ech/path map beside it.
+func edgeInvariants(t *testing.T, b *TCP, step int, log []string) {
 	t.Helper()
 	fail := func(format string, a ...any) {
 		t.Helper()
-		t.Fatalf("after step %d (%v): "+format, append([]any{step, log}, a...)...)
+		t.Fatalf("edge: after step %d (%v): "+format, append([]any{step, log}, a...)...)
 	}
-	ip, sni, ok := p.current()
+
+	ip, sni, ok := b.edgeCombo()
 	if !ok {
-		fail("current() gave up on a non-empty pool")
+		fail("edgeCombo() gave up on a pool holding %v and %v", b.pp.all(), b.sp.all())
 	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	inIPs, inSNIs := false, false
-	for _, v := range p.ips {
-		if v == ip {
-			inIPs = true
-		}
+	if want := activeLabel(ip, sni.host); b.edgeAt() != want {
+		fail("the status file says %q while the dial path would take %q", b.edgeAt(), want)
 	}
-	for _, v := range p.snis {
-		if v.host == sni.host {
-			inSNIs = true
-		}
-	}
-	if !inIPs || !inSNIs {
-		fail("current() returned %s · %s, which is not a combination this pool holds", ip, sni.host)
-	}
-
-	if p.chosen != "" {
-		at := activeLabel(p.ips[p.i%len(p.ips)], p.snis[p.j%len(p.snis)].host)
-		if at != p.chosen {
-			fail("chosen=%q while the cursor is on %q", p.chosen, at)
+	for _, h := range b.sp.all() {
+		if b.sniEntry(h).path == "" {
+			fail("the SNI pool holds %q but the metadata map has no entry for it — the host list and "+
+				"the ech/path map beside it have come apart", h)
 		}
 	}
 
-	for _, m := range []struct {
-		name string
-		set  healthSet
-		keys []string
-	}{
-		{"ip", p.ipHealth, p.ips},
-		{"sni", p.sniHealth, sniHosts(p.snis)},
-	} {
-		for k, r := range m.set.recs {
-			found := false
-			for _, v := range m.keys {
-				if v == k {
-					found = true
-				}
-			}
-			if !found {
-				fail("%s health map holds %q, which is not in the pool", m.name, k)
-			}
-			if r.fails < 0 || r.fails > len(suspectBackoff) {
-				fail("%s:%s sits at fails=%d, outside the schedule", m.name, k, r.fails)
-			}
-		}
-	}
+	peerInvariants(t, b.pp, step, log)
+	peerInvariants(t, b.sp, step, log)
 }
 
-func sniHosts(e []wsSNIEntry) []string {
-	out := make([]string, len(e))
-	for i, s := range e {
-		out[i] = s.host
-	}
-	return out
-}
-
-func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
+func TestBothEdgeAxesHoldTheirInvariantsUnderRandomSequences(t *testing.T) {
 	for seed := int64(1); seed <= 60; seed++ {
 		seed := seed
 		t.Run(fmt.Sprintf("seed=%d", seed), func(t *testing.T) {
@@ -195,54 +160,58 @@ func TestEdgePoolInvariantsUnderRandomSequences(t *testing.T) {
 				hosts[i] = fmt.Sprintf("s%d", i+1)
 			}
 			clk := int64(1000)
-			b, p := edgeCarrier(t, ips, snis(hosts...))
-			p.now = func() int64 { return clk }
-			axis := func() (string, string) {
+			b, pp, sp := edgeCarrier(t, ips, snis(hosts...))
+			pp.now = func() int64 { return clk }
+			sp.now = func() int64 { return clk }
+			axis := func() (string, *PeerPool, string) {
 				if rng.Intn(2) == 0 {
-					return "ip", ips[rng.Intn(len(ips))]
+					return axisIP, pp, ips[rng.Intn(len(ips))]
 				}
-				return "sni", hosts[rng.Intn(len(hosts))]
+				return axisSNI, sp, hosts[rng.Intn(len(hosts))]
 			}
 
 			var log []string
 			for step := 1; step <= 120; step++ {
 				switch rng.Intn(11) {
 				case 0:
-					log = append(log, "advance")
-					p.advance()
+					log = append(log, "walkEdge")
+					b.walkEdge()
 				case 1:
-					ip, sni, _ := p.current()
+					ip, sni, _ := b.edgeCombo()
 					b.pretendConnected(ip, sni.host)
 					log = append(log, "verdict:"+ip+"/"+sni.host)
 					b.rc.fail(b.rotateLowTCP, b.rotateHighTCP)
 				case 2:
-					k, v := axis()
-					log = append(log, "jump:"+k+":"+v)
-					p.selectEntry(k, v)
+					kind, p, v := axis()
+					log = append(log, "jump:"+kind+":"+v)
+					p.selectEntry(v)
 				case 3:
-					k, v := axis()
-					log = append(log, "clearBurn:"+k+":"+v)
-					p.clearBurn(k, v)
+					kind, p, v := axis()
+					log = append(log, "clearBurn:"+kind+":"+v)
+					p.clearBurn(v)
 				case 4:
-					k, v := axis()
-					log = append(log, "dialFail:"+k+":"+v)
-					p.markSuspect(k, v, "dial")
+					kind, p, v := axis()
+					log = append(log, "dialFail:"+kind+":"+v)
+					p.markSuspect(v, "dial")
 				case 5:
-					k, v := axis()
-					log = append(log, "retest:"+k+":"+v)
-					p.retestNow(k, v)
+					kind, p, v := axis()
+					log = append(log, "retest:"+kind+":"+v)
+					p.retestNow(v)
 				case 6:
 					clk += int64(rng.Intn(4000))
 					log = append(log, fmt.Sprintf("clock=%d", clk))
 				case 7:
-					log = append(log, "advanceIP")
-					p.advanceIP()
+					log = append(log, "rotateIP")
+					pp.rotateOnce()
 				case 8:
-					log = append(log, "advanceIP+restoreSNIs")
-					p.advanceIP()
-					p.restoreIPs()
+					log = append(log, "rotateIP+restoreAll")
+					pp.rotateOnce()
+					pp.restoreAll()
+				case 9:
+					log = append(log, "rotateSNI")
+					sp.rotateOnce()
 				}
-				edgeInvariants(t, p, step, log)
+				edgeInvariants(t, b, step, log)
 			}
 		})
 	}

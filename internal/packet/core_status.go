@@ -8,6 +8,24 @@ import (
 	"time"
 )
 
+type coreEvent struct {
+	Seq    int64  `json:"seq"`
+	TS     int64  `json:"ts"`
+	Kind   string `json:"kind"`
+	Code   string `json:"code"`
+	Detail string `json:"detail"`
+}
+
+const coreEventRing = 48
+
+type healthStatus struct {
+	Key        string `json:"key"`
+	Kind       string `json:"kind"`
+	State      string `json:"state"`
+	Fails      int    `json:"fails"`
+	NextRetest int64  `json:"next_retest_unix"`
+}
+
 type coreStatus struct {
 	mu        sync.Mutex
 	writeMu   sync.Mutex

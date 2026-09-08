@@ -69,15 +69,34 @@ func runningStatusPath(t *testing.T, closer interface{ Close() error }) string {
 	return filepath.Join(dir, "core.status")
 }
 
-// A ws edge carrier wired the way SetStatusPath wires one in production: the pool reports through the
-// tunnel's one status file, and the walk is bound to its two axes.
-func edgeCarrier(t *testing.T, ips []string, snis []wsSNIEntry) (*TCP, *wsPool) {
+// A ws edge carrier wired the way DialWSPoolCfg + SetStatusPath wire one in production: two PeerPools,
+// the edge IPs on the low axis and the SNI hosts on the high axis, both reporting through the tunnel's
+// one status file. Returns (carrier, edge-IP pool, SNI pool).
+func edgeCarrier(t *testing.T, ips []string, snis []wsSNIEntry) (*TCP, *PeerPool, *PeerPool) {
 	t.Helper()
-	p := newWSPool(ips, snis)
-	b := &TCP{isClient: true, ws: true, wsTLS: true, pool: p, addr: "pool", closeCh: make(chan struct{})}
+	b := edgeTCP(ips, snis, 0)
 	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
-	return b, p
+	return b, b.pp, b.sp
 }
+
+// The same wiring without a status file, for tests that drive the pools or the dial path directly.
+// This is exactly what DialWSPoolCfg builds: edge IPs on the low axis, SNI hosts on the high axis.
+func edgeTCP(ips []string, snis []wsSNIEntry, rotate time.Duration) *TCP {
+	hosts := make([]string, 0, len(snis))
+	meta := make(map[string]wsSNIEntry, len(snis))
+	for _, s := range snis {
+		hosts = append(hosts, s.host)
+		meta[s.host] = s
+	}
+	b := &TCP{isClient: true, ws: true, wsTLS: true, wsPath: "/", sniMeta: meta,
+		idle: connIdle, ping: pingEvery, addr: "pool", closeCh: make(chan struct{})}
+	b.pp, b.sp = NewPeerPool(ips, rotate), NewPeerPool(hosts, rotate)
+	b.rc.bind(b.pp, b.sp, axisIP, axisSNI)
+	return b
+}
+
+// The edge combo the way the status file and the dial path spell it.
+func (b *TCP) edgeAt() string { return activeLabel(b.pp.current(), b.sp.current()) }
 
 // The same for a direct carrier. src may be nil for a destination-only pool.
 func peerCarrier(t *testing.T, dst, src []string) (*TCP, *PeerPool, *PeerPool) {

@@ -1222,7 +1222,7 @@ func (r *Raw) SetPeerPool(pp *PeerPool) {
 	if r.isClient {
 		r.pp = pp
 		if pp != nil {
-			joinStatus(r.st, pp, "dst")
+			joinStatus(r.st, pp, axisDst)
 
 			m := buildSrcAllow(pp.all())
 			r.poolIPs = m
@@ -1264,7 +1264,7 @@ func (r *Raw) SetSourcePool(sp *PeerPool) {
 		return
 	}
 	r.sp = sp
-	joinStatus(r.st, sp, "src")
+	joinStatus(r.st, sp, axisSrc)
 	if !landSource(sp, r.landSourceIP) {
 		log.Printf("raw: no source in the pool is configured on this host — the kernel picks the source")
 	}

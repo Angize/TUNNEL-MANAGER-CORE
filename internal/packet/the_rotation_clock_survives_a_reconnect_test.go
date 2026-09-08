@@ -19,8 +19,8 @@ import (
 // to move -- never rotated at all, and the panel showed no event because none happened.
 //
 // The two ends of this test are one listener with two addresses and a client whose pool holds both, so
-// the ONLY thing that can move the pool is the scheduled tick: a plain disconnect on a pp client takes
-// the endRound branch, never pool.advance().
+// the ONLY thing that can move the pool is the scheduled tick: nothing here writes a verdict, and a
+// disconnect on its own never walks a direct pool -- only rotationLoop and rc.poll ever call into it.
 func TestTheScheduledRotationSurvivesAChurningCarrier(t *testing.T) {
 	const psk = "a-psk-for-the-rotation-clock"
 	const cipher = "aes-256-gcm"
@@ -82,26 +82,32 @@ func TestTheScheduledRotationSurvivesAChurningCarrier(t *testing.T) {
 
 // The arithmetic on its own, so a future edit that keeps the deadline but re-arms it in the wrong place
 // is caught without a 14-second test. rotateDue is a pure predicate over an injected clock, so every
-// case below is the production line the ticker calls, not a stand-in for it.
+// case below is the production line the ticker calls, not a stand-in for it. The interval itself is no
+// longer a field on the carrier: it lives on the pool, and rotateEvery() is what the ticker reads.
 func TestARotationDeadlineIsNotRestartedByArming(t *testing.T) {
-	b := &TCP{rotate: time.Minute}
+	b := &TCP{isClient: true}
+	b.pp = NewPeerPool([]string{"d1", "d2"}, time.Minute)
+	iv := b.rotateEvery()
+	if iv != time.Minute {
+		t.Fatalf("rotateEvery() = %v, want the minute the pool was built with", iv)
+	}
 	t0 := time.Now()
 
-	if b.rotateDue(b.rotate, t0) {
+	if b.rotateDue(iv, t0) {
 		t.Fatal("the first tick came due immediately; arming must put the deadline a whole interval out")
 	}
-	if b.rotateDue(b.rotate, t0.Add(59*time.Second)) {
+	if b.rotateDue(iv, t0.Add(59*time.Second)) {
 		t.Fatal("59s into a one-minute interval the deadline was already due")
 	}
-	if !b.rotateDue(b.rotate, t0.Add(time.Minute)) {
+	if !b.rotateDue(iv, t0.Add(time.Minute)) {
 		t.Fatal("a minute of a one-minute interval passed and the deadline never came due")
 	}
-	if !b.rotateDue(b.rotate, t0.Add(6*time.Minute)) {
+	if !b.rotateDue(iv, t0.Add(6*time.Minute)) {
 		t.Fatal("a deadline that passed during an outage was thrown away instead of firing late")
 	}
 
-	b.rotateFrom(b.rotate)
-	if b.rotateDue(b.rotate, time.Now().Add(59*time.Second)) {
+	b.rotateFrom(iv)
+	if b.rotateDue(iv, time.Now().Add(59*time.Second)) {
 		t.Fatal("a rotation that fired did not start a fresh interval")
 	}
 }

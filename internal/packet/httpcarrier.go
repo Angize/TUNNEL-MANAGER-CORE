@@ -386,8 +386,8 @@ func (u *httpcUp) post(sc seqChunk) error {
 
 func (b *TCP) httpcEdge() (dialAddr, host string, ech []byte, path string, err error) {
 	dialAddr, host, ech, path = b.addr, b.wsHost, b.ech(), b.wsPath
-	if b.pool != nil {
-		ip, sni, ok := b.pool.current()
+	if b.edgePool() {
+		ip, sni, ok := b.edgeCombo()
 		if !ok {
 			return "", "", nil, "", fmt.Errorf("httpc: edge pool is empty")
 		}

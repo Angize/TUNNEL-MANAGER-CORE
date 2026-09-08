@@ -31,17 +31,17 @@ func eventCodes(b *TCP, t *testing.T) []string {
 // Jumping to a key the pool does not have must change nothing at all: not the cursor, not the health
 // of the entry the pool is standing on.
 func TestJumpingToAKeyThePoolDoesNotHaveChangesNothing(t *testing.T) {
-	_, p := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis("front-a", "front-b"))
-	p.markSuspect("sni", "front-b", "tun-probe")
-	p.selectEntry("sni", "front-b")
-	before, beforeSNI, _ := p.current()
+	_, pp, sp := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis("front-a", "front-b"))
+	sp.markSuspect("front-b", "tun-probe")
+	sp.selectEntry("front-b")
+	before, beforeSNI := pp.current(), sp.current()
 
-	if p.selectEntry("sni", "nope.example") {
+	if sp.selectEntry("nope.example") {
 		t.Fatal("selectEntry reported it moved onto a domain the pool does not have")
 	}
-	now, nowSNI, _ := p.current()
-	if now != before || nowSNI.host != beforeSNI.host {
-		t.Errorf("the cursor moved from %q · %q to %q · %q", before, beforeSNI.host, now, nowSNI.host)
+	now, nowSNI := pp.current(), sp.current()
+	if now != before || nowSNI != beforeSNI {
+		t.Errorf("the cursor moved from %q · %q to %q · %q", before, beforeSNI, now, nowSNI)
 	}
 }
 
@@ -60,10 +60,8 @@ func TestOneConnectIsOneEpoch(t *testing.T) {
 	go srv.Run()
 	t.Cleanup(func() { srv.Close() })
 
-	pool := newWSPool([]string{addr}, snis("front-a"))
-	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: "aes-256-gcm", psk: psk,
-		ws: true, wsTLS: false, pool: pool,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
+	cli := edgeTCP([]string{addr}, snis("front-a"), 0)
+	cli.dev, cli.cryptoOn, cli.cipher, cli.psk, cli.wsTLS = cliDev, true, "aes-256-gcm", psk, false
 	cli.SetStatusPath(runningStatusPath(t, cli))
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
@@ -81,10 +79,10 @@ func TestOneConnectIsOneEpoch(t *testing.T) {
 
 // Two commands in one tick are two commands. The mailbox was a single slot, so the second erased the
 // first while the panel reported both as done -- and a jump and a retest are orders on different
-// entries, so neither supersedes the other.
+// entries, on the two different pools, so neither supersedes the other.
 func TestTheOperatorMailboxKeepsEveryCommand(t *testing.T) {
-	b, p := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis("front-a", "front-b"))
-	p.markSuspect("ip", "ip2:443", "tun-probe")
+	b, pp, sp := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis("front-a", "front-b"))
+	pp.markSuspect("ip2:443", "tun-probe")
 
 	box := b.st.selectPath()
 	f, err := os.OpenFile(box, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -98,15 +96,15 @@ func TestTheOperatorMailboxKeepsEveryCommand(t *testing.T) {
 	f.Close()
 
 	b.pollPeerCmd()
-	if _, sni, _ := p.current(); sni.host != "front-b" {
-		t.Errorf("the second command was dropped: the pool is on %q", sni.host)
+	if got := sp.current(); got != "front-b" {
+		t.Errorf("the second command was dropped: the SNI pool is on %q", got)
 	}
 	rec := func() *healthRec {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		return p.ipHealth.rec("ip2:443")
+		pp.mu.Lock()
+		defer pp.mu.Unlock()
+		return pp.health.rec("ip2:443")
 	}()
-	if rec != nil && rec.nextRetest > p.now() {
+	if rec != nil && rec.nextRetest > pp.now() {
 		t.Errorf("the first command was dropped: ip2 still waits until %d", rec.nextRetest)
 	}
 	if _, err := os.Stat(box); !os.IsNotExist(err) {
@@ -120,7 +118,7 @@ func TestTheOperatorMailboxKeepsEveryCommand(t *testing.T) {
 // did not.
 func TestEveryWalkSaysWhereItWent(t *testing.T) {
 	t.Run("edge pool", func(t *testing.T) {
-		b, _ := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis("front-a", "front-b"))
+		b, _, _ := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis("front-a", "front-b"))
 		b.pretendConnected("ip1:443", "front-a")
 		if !b.tunFailUntilItMoves(t, "ip1:443", "front-a") {
 			t.Fatal("setup: the ladder never walked")
@@ -141,15 +139,21 @@ func TestEveryWalkSaysWhereItWent(t *testing.T) {
 			t.Errorf("events = %s, want the destination it moved to", got)
 		}
 	})
-	// One entry on an axis is a step to nowhere. Saying "rotated" there is a lie the operator would
-	// read as movement, and it would arrive on every single verdict for the life of the outage.
-	t.Run("nowhere to go", func(t *testing.T) {
-		b, _ := edgeCarrier(t, []string{"ip1:443"}, snis("front-a"))
+	// One entry on an axis is still a step to nowhere, and saying "rotated" there is a lie the operator
+	// would read as movement -- it would arrive on every verdict for the life of the outage. What a
+	// single-edge pool DOES do now is condemn the entry it was standing on: the burn lives inside
+	// PeerPool.fail(), which burns first and only then looks for somewhere to step.
+	t.Run("nowhere to go, still condemned", func(t *testing.T) {
+		b, pp, _ := edgeCarrier(t, []string{"ip1:443"}, snis("front-a"))
 		b.pretendConnected("ip1:443", "front-a")
 		b.tunFailUntilItMoves(t, "ip1:443", "front-a")
 		got := strings.Join(eventCodes(b, t), " ")
 		if strings.Contains(got, "-rotate") {
 			t.Errorf("events = %s: a pool of one announced a rotation", got)
+		}
+		if state := stateOf(pp.healthRows(), "ip", "ip1:443"); state != stateSuspect {
+			t.Errorf("the only edge is %q after the walk answered an outage on it, want %q", state,
+				stateSuspect)
 		}
 	})
 }

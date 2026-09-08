@@ -148,6 +148,9 @@ func poolActive(b *TCP) string {
 	return b.st.active
 }
 
+// The operator names a domain in the select mailbox and the carrier lands on it. The SNI hosts are the
+// high axis of the edge carrier's second PeerPool now, so the jump goes through peerPair.pick exactly
+// as a source-IP jump does on a direct carrier, and the status file shows the new combination.
 func TestPinReleasesOnLanding(t *testing.T) {
 	const psk = "ws-pin-release-psk-abcdefghijklmn"
 	const cipher = "aes-256-gcm"
@@ -161,10 +164,8 @@ func TestPinReleasesOnLanding(t *testing.T) {
 	go srv.Run()
 	t.Cleanup(func() { srv.Close() })
 
-	pool := newWSPool([]string{addr}, snis("front-a", "front-b"))
-	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, psk: psk,
-		ws: true, wsTLS: false, pool: pool,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
+	cli := edgeTCP([]string{addr}, snis("front-a", "front-b"), 0)
+	cli.dev, cli.cryptoOn, cli.cipher, cli.psk, cli.wsTLS = cliDev, true, cipher, psk, false
 	cli.SetStatusPath(runningStatusPath(t, cli))
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
