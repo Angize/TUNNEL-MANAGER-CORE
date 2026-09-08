@@ -260,8 +260,6 @@ func main() {
 	switch sourceMode(b, cfg) {
 	case srcByBind:
 		log.Printf("tnl-core: binding outbound source IP to %s", cfg.BindIP)
-	case srcByPool:
-		log.Printf("tnl-core: binding outbound source IP to %s (a one-entry source pool — %s has no separate bind)", cfg.BindIP, cfg.Transport)
 	case srcUnsupported:
 		log.Printf("core: WARNING carrier %s ignores bind_ip — it can fix neither a source IP nor a source pool, so this tunnel egresses from whatever source the kernel routes it out of", cfg.Transport)
 	}
@@ -346,7 +344,6 @@ func coverTag(cover bool) string {
 const (
 	srcNone        = ""
 	srcByBind      = "bind"
-	srcByPool      = "pool"
 	srcBySrcIPs    = "src_ips"
 	srcUnsupported = "unsupported"
 )
@@ -373,16 +370,12 @@ func sourceMode(b any, cfg *Config) string {
 	if cfg.Role != "client" || cfg.BindIP == "" {
 		return srcNone
 	}
-	switch s := b.(type) {
-	case interface{ SetSourceIP(string) }:
+	if len(cfg.SrcIPs) > 0 {
+		return srcBySrcIPs
+	}
+	if s, ok := b.(interface{ SetSourceIP(string) }); ok {
 		s.SetSourceIP(cfg.BindIP)
 		return srcByBind
-	case interface{ SetSourcePool(*packet.PeerPool) }:
-		if len(cfg.SrcIPs) > 0 {
-			return srcBySrcIPs
-		}
-		s.SetSourcePool(packet.NewPeerPool([]string{cfg.BindIP}, 0))
-		return srcByPool
 	}
 	return srcUnsupported
 }

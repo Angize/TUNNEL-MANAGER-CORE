@@ -180,6 +180,46 @@ func TestAJumpRestartsTheRotationClock(t *testing.T) {
 	}
 }
 
+// The TCP family is on that same clock now. It used to keep its own deadline in b.rotAt, which
+// jumped() never reached: an operator's pick on a ws edge inherited whatever was left of the previous
+// period, so landing on B with two seconds to go rotated B away two seconds later.
+func TestAJumpRestartsTheClockOnTheTCPFamilyToo(t *testing.T) {
+	const period = 10 * time.Minute
+	b := edgeTCP([]string{"e1", "e2"}, snis("x"), period)
+	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
+
+	b.rc.mu.Lock()
+	b.rc.rotateAt = time.Now().Add(2 * time.Second)
+	b.rc.mu.Unlock()
+
+	if !b.operatorJump(t, "ip", "e2") {
+		t.Fatal("the jump was not applied")
+	}
+
+	b.rc.mu.Lock()
+	left := time.Until(b.rc.rotateAt)
+	b.rc.mu.Unlock()
+	if left < period-time.Minute {
+		t.Fatalf("only %v of the %v period is left after the jump — the operator's pick is rotated "+
+			"away almost immediately", left.Round(time.Second), period)
+	}
+}
+
+// Rotation switched off means no deadline at all. A jump must not arm one, or the very next tick of
+// the shared poller fires a rotation the operator never asked for.
+func TestAJumpArmsNoDeadlineWhenRotationIsOff(t *testing.T) {
+	b, _, _ := edgeCarrier(t, []string{"e1", "e2"}, snis("x"))
+	if !b.operatorJump(t, "ip", "e2") {
+		t.Fatal("the jump was not applied")
+	}
+	b.rc.mu.Lock()
+	at := b.rc.rotateAt
+	b.rc.mu.Unlock()
+	if !at.IsZero() {
+		t.Errorf("rotation is off, yet the jump armed a deadline (%v)", at)
+	}
+}
+
 // The one rule the operator asked for in so many words: the rotation does not stop, ever, and it
 // carries on FROM where they put it.
 func TestRotationNeverStopsAfterAJumpAndResumesFromIt(t *testing.T) {

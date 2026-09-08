@@ -149,6 +149,17 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 	wakeLoop(b.wake)
 }
 
+func (b *UDP) SetSourceIP(ip string) {
+	if !b.isClient || ip == "" {
+		return
+	}
+	if host, ok := b.rebindSourceTo(ip); ok {
+		log.Printf("core/udp: source bound to %s", host)
+		return
+	}
+	log.Printf("core/udp: source %s would not bind — the kernel picks the source", ip)
+}
+
 func (b *UDP) SetSourcePool(sp *PeerPool) {
 	if !b.isClient || sp == nil {
 		return
@@ -289,8 +300,7 @@ func (b *UDP) adoptSourceUDP() {
 	b.landSourceUDP("moved (operator)")
 }
 
-func runCmdPoll(rc *rotationController, closeCh <-chan struct{}, applied func(kind, key string),
-	rotLow, rotHigh func(proactive bool), pathEpoch func() int64) {
+func runCmdPoll(closeCh <-chan struct{}, tick func()) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
@@ -298,7 +308,7 @@ func runCmdPoll(rc *rotationController, closeCh <-chan struct{}, applied func(ki
 		case <-closeCh:
 			return
 		case <-t.C:
-			rc.poll(rotLow, rotHigh, applied, pathEpoch)
+			tick()
 		}
 	}
 }
@@ -312,7 +322,10 @@ func (b *UDP) selectedUDP(kind, _ string) {
 }
 
 func (b *UDP) cmdPollLoop(rc *rotationController) {
-	runCmdPoll(rc, b.closeCh, b.selectedUDP, b.rotatePeerUDP, b.rotateSourceUDP, b.st.pathEpoch)
+	runCmdPoll(b.closeCh, func() {
+		rc.proactive(b.rotatePeerUDP, b.rotateSourceUDP, time.Now())
+		rc.poll(b.rotatePeerUDP, b.rotateSourceUDP, b.selectedUDP, b.st.pathEpoch)
+	})
 }
 
 func (b *UDP) SetStatusPath(path string) {
@@ -896,7 +909,6 @@ func (b *UDP) clientLoop() {
 	var stall stallWatch
 	for {
 		now := time.Now()
-		rc.proactive(b.rotatePeerUDP, b.rotateSourceUDP, now)
 		stall.beat(b.rxTick.Swap(false), b.st, "udp", now)
 		asking := b.cryptoOn && handshakeOutstanding(b.sealer(), &b.ci)
 		if asking {

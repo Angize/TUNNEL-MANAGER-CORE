@@ -268,7 +268,6 @@ type TCP struct {
 	sniMu   sync.Mutex
 	sniMeta map[string]wsSNIEntry
 
-	rotAt  atomic.Int64
 	st     *coreStatus
 	stTag  string
 	lastRx atomic.Int64
@@ -416,70 +415,11 @@ func (b *TCP) livePath() (pathKey, bool) {
 	return k, b.cur.Load() != nil
 }
 
-func (b *TCP) armRotationClock() {
-	b.rc.setClock(func() {
-		if iv := b.rotateEvery(); iv > 0 {
-			b.rotateFrom(iv)
-		}
-	})
-}
-
-func (b *TCP) rotateEvery() time.Duration {
-	iv := time.Duration(0)
-	if b.pp != nil {
-		iv = b.pp.rotate
+func (b *TCP) cmdPollTick() {
+	if b.rc.proactive(b.rotateLowTCP, b.rotateHighTCP, time.Now()) {
+		b.dropCarrier(dropRotation)
 	}
-	if b.sp != nil && b.sp.rotate > iv {
-		iv = b.sp.rotate
-	}
-	return iv
-}
-
-func (b *TCP) rotateDue(iv time.Duration, now time.Time) bool {
-	at := b.rotAt.Load()
-	if at == 0 {
-		b.rotAt.Store(now.Add(iv).UnixNano())
-		return false
-	}
-	return now.UnixNano() >= at
-}
-
-func (b *TCP) rotationLoop() {
-	t := time.NewTicker(time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-b.closeCh:
-			return
-		case now := <-t.C:
-			iv := b.rotateEvery()
-			if iv <= 0 || !b.rotateDue(iv, now) {
-				continue
-			}
-			b.rotateFrom(iv)
-			if b.rotateProactive() {
-				b.dropCarrier(dropRotation)
-			}
-		}
-	}
-}
-
-func (b *TCP) rotateProactive() bool {
-	dstMoved := false
-	lap := true
-	if b.pp != nil {
-		_, dstMoved = b.rotateDestTCP(true)
-		lap = b.rc.od.beat(dstMoved, b.pp.eligibleCount)
-	}
-	if !lap {
-		return dstMoved
-	}
-	_, srcMoved := b.rotateSourceTCP(true)
-	return dstMoved || srcMoved
-}
-
-func (b *TCP) rotateFrom(iv time.Duration) {
-	b.rotAt.Store(time.Now().Add(iv).UnixNano())
+	b.pollPeerCmd()
 }
 
 func (b *TCP) rollSourcePort() bool {
@@ -811,11 +751,9 @@ func (b *TCP) Run() error {
 		go b.keepaliveLoop()
 		go b.diagLoop()
 		b.rc.port.setRoll(b.rollSourcePort)
-		b.armRotationClock()
-		go b.rotationLoop()
 		b.st.trackPath(b.livePath, b.closeCh)
 		if b.rc.polls() {
-			go b.cmdPollLoop()
+			go runCmdPoll(b.closeCh, b.cmdPollTick)
 		}
 
 		go func() {
@@ -1531,19 +1469,6 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 	}
 
 	return cf, nil
-}
-
-func (b *TCP) cmdPollLoop() {
-	t := time.NewTicker(1 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-b.closeCh:
-			return
-		case <-t.C:
-			b.pollPeerCmd()
-		}
-	}
 }
 
 const (

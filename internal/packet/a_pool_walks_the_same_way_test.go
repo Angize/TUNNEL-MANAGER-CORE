@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
 func funcBody(t *testing.T, file, sig string) string {
@@ -198,72 +197,6 @@ func TestBothPoolsSayWhenRotationHasStopped(t *testing.T) {
 		pp.retestNow("a")
 		if got := seen(b.readStatus(t).Events, "restored"); len(got) != 1 {
 			t.Errorf("an endpoint pulled back into the rotation did not report the recovery: %v", got)
-		}
-	})
-}
-
-// The clock. `jumped()` restarts c.rotateAt, which only raw and udp ever read -- the TCP family
-// keeps its own deadline in b.rotAt and nothing was resetting it. Land on edge B with two seconds
-// left of a ten-minute period and B was rotated away two seconds later.
-func TestAJumpRestartsWhicheverClockTheCarrierKeeps(t *testing.T) {
-	const period = 10 * time.Minute
-
-	t.Run("Run wires it, so the cases below are not testing a hook only this file installs",
-		func(t *testing.T) {
-			run := funcBody(t, "tcp.go", "func (b *TCP) Run()")
-			if !strings.Contains(run, "b.armRotationClock()") {
-				t.Fatal("TCP.Run does not arm the rotation clock, so nothing in production resets it")
-			}
-		})
-
-	t.Run("the tcp family", func(t *testing.T) {
-		b := edgeTCP([]string{"e1", "e2"}, snis("x"), period)
-		b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
-		b.armRotationClock()
-
-		b.rotateFrom(2 * time.Second)
-		if !b.rotateDue(period, time.Now().Add(5*time.Second)) {
-			t.Fatal("setup: the deadline is not about 2s out")
-		}
-
-		if !b.operatorJump(t, "ip", "e2") {
-			t.Fatal("the jump was not applied")
-		}
-		if b.rotateDue(period, time.Now().Add(period-time.Minute)) {
-			t.Fatalf("less than %v of the %v period is left after the jump — the operator's pick is "+
-				"rotated away almost immediately", period-time.Minute, period)
-		}
-	})
-
-	t.Run("raw and udp, which keep the controller's clock", func(t *testing.T) {
-		dst := NewPeerPool([]string{"d1", "d2", "d3"}, period)
-		rc := newRotationController(dst, nil)
-		rc.attachStatus(newCoreStatus(t.TempDir()+"/core.json", ""))
-		rc.mu.Lock()
-		rc.rotateAt = time.Now().Add(2 * time.Second)
-		rc.mu.Unlock()
-
-		writeFileAtomic(rc.selbox, []byte(`{"kind":"dst","key":"d3"}`), 0o644)
-		if !rc.poll(func(bool) {}, func(bool) {}, nil, func() int64 { return 0 }) {
-			t.Fatal("the jump was not applied")
-		}
-		rc.mu.Lock()
-		left := time.Until(rc.rotateAt)
-		rc.mu.Unlock()
-		if left < period-time.Minute {
-			t.Fatalf("only %v of the %v period is left after the jump", left.Round(time.Second), period)
-		}
-	})
-
-	t.Run("a carrier with no rotation is not handed a deadline of zero", func(t *testing.T) {
-		b, _, _ := edgeCarrier(t, []string{"e1", "e2"}, snis("x"))
-		b.armRotationClock()
-		if !b.operatorJump(t, "ip", "e2") {
-			t.Fatal("the jump was not applied")
-		}
-		if at := b.rotAt.Load(); at != 0 {
-			t.Errorf("rotation is off, yet the jump armed a deadline (%d) — the next tick would "+
-				"fire straight away", at)
 		}
 	})
 }
