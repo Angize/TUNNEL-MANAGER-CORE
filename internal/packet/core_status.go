@@ -193,7 +193,7 @@ func (s *coreStatus) down(code, detail string) {
 
 func (s *coreStatus) rotated(axis, detail string, proactive bool) {
 	if proactive {
-		s.event("down", axis+"-rotate", detail)
+		s.event("rot", axis+"-rotate", detail)
 		return
 	}
 	s.down(axis+"-rotate", detail)
