@@ -13,12 +13,20 @@ func rungSpent(b *TCP) int {
 	return b.rc.port.spent
 }
 
+// A verdict every sweep until the rung is actually spent, which is how the node sends one. A single
+// write loses a race it cannot see: spending a port rung IS a carrier drop, the redial bumps the path
+// epoch, and the verdict written a moment before then arrives stale and is dropped on the floor.
+// Measured under -race on this tree and the one before it: about one run in four lost that race and
+// then sat out the full 20s waiting for a rung that nothing was going to spend.
 func spendTheRungs(t *testing.T, b *TCP) {
 	t.Helper()
 	for i := 1; i <= portTries; i++ {
-		liveVerdict(t, b.st.verdictPath(), b.st.pathEpoch(), poolCmd{Cmd: cmdFail})
 		waitFor(t, 20*time.Second, "the ladder to spend free rung "+string(rune('0'+i)), func() bool {
-			return rungSpent(b) >= i
+			if rungSpent(b) >= i {
+				return true
+			}
+			liveVerdict(t, b.st.verdictPath(), b.st.pathEpoch(), poolCmd{Cmd: cmdFail})
+			return false
 		})
 	}
 }
@@ -43,6 +51,13 @@ func TestALongLivedConnectionDoesNotResetTheLadder(t *testing.T) {
 	waitFor(t, 20*time.Second, "the client to connect", func() bool { return cli.curConn.Load() != nil })
 	spendTheRungs(t, cli)
 
+	// Spending a port rung IS a carrier drop, so the client is mid-redial the moment the last one lands.
+	// Grabbing curConn here without waiting loads a nil pointer and the Close below dereferences it --
+	// measured at 1 run in 6 under -race, on this tree and on the one before it.
+	waitFor(t, 20*time.Second, "the carrier back up after the rungs were spent", func() bool {
+		return cli.curConn.Load() != nil
+	})
+
 	cc := cli.curConn.Load()
 	born := time.Now()
 	time.Sleep(4 * minLiveness)
@@ -64,11 +79,11 @@ func TestALongLivedConnectionDoesNotResetTheLadder(t *testing.T) {
 // The other half of the same rule: the node's ok is what refills it, on the TCP family exactly as on
 // udp and raw. Without this the test above would pass on a ladder that can never be reset at all.
 func TestTheNodesOkStillRefillsTheLadder(t *testing.T) {
-	cli, pool := wsPoolClient(t, "lrok", []string{"h1"}, freeTCPPort(t))
+	cli, _ := wsPoolClient(t, "lrok", []string{"h1"}, freeTCPPort(t))
 	waitFor(t, 20*time.Second, "the client to connect", func() bool { return cli.curConn.Load() != nil })
 	spendTheRungs(t, cli)
 
-	ip, sni, _ := pool.current()
+	ip, sni, _ := cli.edgeCombo()
 	liveVerdict(t, cli.st.verdictPath(), cli.st.pathEpoch(),
 		poolCmd{Cmd: cmdOK, Low: ip, High: sni.host})
 	waitFor(t, 20*time.Second, "the ok verdict to refill the ladder", func() bool { return rungSpent(cli) == 0 })

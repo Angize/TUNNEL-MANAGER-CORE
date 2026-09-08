@@ -265,8 +265,9 @@ type TCP struct {
 	echMu sync.Mutex
 	wsECH []byte
 
-	pool   *wsPool
-	rotate time.Duration
+	sniMu   sync.Mutex
+	sniMeta map[string]wsSNIEntry
+
 	rotAt  atomic.Int64
 	st     *coreStatus
 	stTag  string
@@ -336,8 +337,8 @@ func (b *TCP) SetSourceIP(ip string) { b.bindIP = ip }
 func (b *TCP) SetPeerPool(pp *PeerPool) {
 	if b.isClient && !b.ws {
 		b.pp = pp
-		joinStatus(b.st, pp, "dst")
-		b.rc.bind(pp, b.sp)
+		joinStatus(b.st, pp, axisDst)
+		b.rc.bind(pp, b.sp, axisDst, axisSrc)
 		b.publishPair()
 	}
 }
@@ -387,14 +388,14 @@ func (b *TCP) lastSourceUsed() string {
 func (b *TCP) SetSourcePool(sp *PeerPool) {
 	if b.isClient && !b.ws {
 		b.sp = sp
-		joinStatus(b.st, sp, "src")
-		b.rc.bind(b.pp, sp)
+		joinStatus(b.st, sp, axisSrc)
+		b.rc.bind(b.pp, sp, axisDst, axisSrc)
 		b.publishPair()
 	}
 }
 
 func (b *TCP) sourceIP() string {
-	if b.sp != nil {
+	if b.sp != nil && !b.ws {
 		return b.sp.current()
 	}
 	return b.bindIP
@@ -424,9 +425,6 @@ func (b *TCP) armRotationClock() {
 }
 
 func (b *TCP) rotateEvery() time.Duration {
-	if b.pool != nil {
-		return b.rotate
-	}
 	iv := time.Duration(0)
 	if b.pp != nil {
 		iv = b.pp.rotate
@@ -467,20 +465,6 @@ func (b *TCP) rotationLoop() {
 }
 
 func (b *TCP) rotateProactive() bool {
-	if b.pool != nil {
-		prevIP, prevSNI, ok := b.pool.current()
-		if !ok || !b.pool.advance() {
-			return false
-		}
-		nowIP, nowSNI, _ := b.pool.current()
-		if nowIP != prevIP {
-			b.st.rotated("edge", "ip:"+nowIP, true)
-		}
-		if nowSNI.host != prevSNI.host {
-			b.st.rotated("sni", "sni:"+nowSNI.host, true)
-		}
-		return true
-	}
 	dstMoved := false
 	lap := true
 	if b.pp != nil {
@@ -529,9 +513,12 @@ func (b *TCP) rotateDestTCP(proactive bool) (addr string, moved bool) {
 	if !moved {
 		return addr, false
 	}
-	log.Printf("core/tcp: rotated destination to %s", addr)
-	b.st.setActive(b.stTag + activeSep + addr)
-	b.st.rotated("peer", "ip:"+addr, proactive)
+	log.Printf("core/%s: rotated destination to %s", b.stTag, addr)
+	if !b.edgePool() {
+		b.st.setActive(b.stTag + activeSep + addr)
+	}
+	low, _ := b.axes()
+	b.st.rotated(low.tag, low.detail(addr), proactive)
 	return addr, true
 }
 
@@ -544,8 +531,9 @@ func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
 		return addr, false
 	}
 
-	log.Printf("core/tcp: rotated source to %s", addr)
-	b.st.rotated("src", "ip:"+addr, proactive)
+	_, high := b.axes()
+	log.Printf("core/%s: rotated %s to %s", b.stTag, high.tag, addr)
+	b.st.rotated(high.tag, high.detail(addr), proactive)
 	return addr, true
 }
 
@@ -590,16 +578,15 @@ func (b *TCP) SetStatusPath(path string) {
 		carrier = "cover"
 	}
 	active := carrier + activeSep + b.addr
-	if b.pool != nil {
+	if b.edgePool() {
 		active = ""
 	}
 	b.st = newCoreStatus(path, active)
 	b.stTag = carrier
 	b.rc.attachStatus(b.st)
-	if b.pool != nil {
-		b.pool.attach(b.st.event, b.st.write)
-		b.st.addHealth(b.pool.healthRows)
-		b.rc.bindEdges(b.pool)
+	if b.edgePool() {
+		joinStatus(b.st, b.pp, axisIP)
+		joinStatus(b.st, b.sp, axisSNI)
 		b.publishPair()
 	}
 }
@@ -616,7 +603,7 @@ func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 	}
 	ip := adoptableSource("tcp", src, &b.srcWarned)
 	if ip == nil {
-		if b.sp != nil {
+		if b.sp != nil && !b.ws {
 			b.sp.rejectCandidate(prev)
 		}
 		return d
@@ -647,19 +634,114 @@ func DialWS(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, 
 		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
 }
 
-func DialWSPool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, pool *wsPool, rotate time.Duration, httpc bool, httpcMode string) (*TCP, error) {
+type WSPoolSNI struct {
+	Host string
+	ECH  string
+	Path string
+}
+
+type wsSNIEntry struct {
+	host string
+	ech  []byte
+	path string
+}
+
+const activeSep = " · "
+
+func activeLabel(ip, host string) string { return ip + activeSep + host }
+
+func DialWSPoolCfg(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []WSPoolSNI, rotate time.Duration, httpc bool, httpcMode string) (*TCP, error) {
+	if len(ips) == 0 || len(snis) == 0 {
+		return nil, errors.New("ws pool: need at least one IP and one SNI")
+	}
+	hosts := make([]string, 0, len(snis))
+	meta := make(map[string]wsSNIEntry, len(snis))
+	for _, s := range snis {
+		var ech []byte
+		if s.ECH != "" {
+			ech, _ = base64.StdEncoding.DecodeString(s.ECH)
+		}
+		hosts = append(hosts, s.Host)
+		meta[s.Host] = wsSNIEntry{host: s.Host, ech: ech, path: s.Path}
+	}
 	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
-		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, pool: pool, rotate: rotate,
+		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, sniMeta: meta,
 		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
-	b.rc.bindEdges(pool)
+	b.pp = NewPeerPool(ips, rotate)
+	b.sp = NewPeerPool(hosts, rotate)
+	b.rc.bind(b.pp, b.sp, axisIP, axisSNI)
 	return b, nil
 }
 
-func newWSPoolFromCfg(ips []string, snis []wsSNIEntry) *wsPool {
-	if len(ips) == 0 || len(snis) == 0 {
-		return nil
+func (b *TCP) edgePool() bool { return b.ws && b.pp != nil }
+
+func (b *TCP) comboCount() int { return b.pp.size() * b.sp.size() }
+
+type axisNames struct{ tag, prefix string }
+
+func (a axisNames) detail(key string) string { return a.prefix + ":" + key }
+
+func (b *TCP) axes() (low, high axisNames) {
+	if b.ws {
+		return axisNames{"edge", axisIP}, axisNames{axisSNI, axisSNI}
 	}
-	return newWSPool(ips, snis)
+	return axisNames{"peer", axisIP}, axisNames{axisSrc, axisIP}
+}
+
+func (b *TCP) sniEntry(host string) wsSNIEntry {
+	b.sniMu.Lock()
+	defer b.sniMu.Unlock()
+	if e, ok := b.sniMeta[host]; ok {
+		return e
+	}
+	return wsSNIEntry{host: host}
+}
+
+func (b *TCP) setSNIECH(host string, ech []byte) bool {
+	b.sniMu.Lock()
+	defer b.sniMu.Unlock()
+	e, ok := b.sniMeta[host]
+	if !ok || bytes.Equal(e.ech, ech) {
+		return false
+	}
+	e.ech = ech
+	b.sniMeta[host] = e
+	return true
+}
+
+func (b *TCP) applyEdgeECH(snis map[string]string) []string {
+	var changed []string
+	for host, b64 := range snis {
+		ech, err := base64.StdEncoding.DecodeString(strings.TrimSpace(b64))
+		if err != nil || len(ech) == 0 {
+			continue
+		}
+		if b.setSNIECH(host, ech) {
+			changed = append(changed, host)
+		}
+	}
+	return changed
+}
+
+func (b *TCP) edgeCombo() (string, wsSNIEntry, bool) {
+	if !b.edgePool() {
+		return "", wsSNIEntry{}, false
+	}
+	ip, host := b.pp.current(), b.sp.current()
+	if ip == "" || host == "" {
+		return "", wsSNIEntry{}, false
+	}
+	return ip, b.sniEntry(host), true
+}
+
+func (b *TCP) walkEdge() bool {
+	at := b.pp.activeIdx()
+	_, moved := b.pp.rotateOnce()
+	if moved && b.pp.activeIdx() > at {
+		return true
+	}
+	_, high := b.sp.rotateOnce()
+	return moved || high
 }
 
 func DialHTTPC(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte, httpcMode string) (*TCP, error) {
@@ -973,9 +1055,9 @@ func (b *TCP) removeAuthConn(cf *connFramer) {
 
 func (b *TCP) noteECHSelfHeal(host string, ech []byte) {
 	detail := host + " " + base64.StdEncoding.EncodeToString(ech)
-	if b.pool != nil {
-		if b.pool.updateECH(host, ech) {
-			b.pool.event("ech", "self_heal", detail)
+	if b.edgePool() {
+		if b.setSNIECH(host, ech) {
+			b.st.event("ech", "self_heal", detail)
 		}
 		return
 	}
@@ -1152,8 +1234,8 @@ func chromeSpec(alpn []string) (utls.ClientHelloSpec, error) {
 
 func (b *TCP) establishWS() (net.Conn, string, string, error) {
 	dialAddr, host, ech, path := b.addr, b.wsHost, b.ech(), b.wsPath
-	if b.pool != nil {
-		ip, sni, ok := b.pool.current()
+	if b.edgePool() {
+		ip, sni, ok := b.edgeCombo()
 		if !ok {
 			return nil, "", "", errors.New("ws: edge pool is empty")
 		}
@@ -1241,8 +1323,8 @@ func (b *TCP) readECHCmd() []string {
 	if json.Unmarshal(data, &c) != nil || len(c.SNIs) == 0 {
 		return nil
 	}
-	if b.pool != nil {
-		return b.pool.applyECH(c.SNIs)
+	if b.edgePool() {
+		return b.applyEdgeECH(c.SNIs)
 	}
 	if b.wsHost == "" {
 		return nil
@@ -1281,7 +1363,7 @@ func (b *TCP) dialLoop() {
 		if b.closed.Load() {
 			return
 		}
-		if b.pool == nil && len(b.readECHCmd()) > 0 {
+		if !b.edgePool() && len(b.readECHCmd()) > 0 {
 			log.Printf("core/ws: live ECH key updated for %s (single edge, no rebuild)", b.wsHost)
 		}
 
@@ -1312,7 +1394,7 @@ func (b *TCP) dialLoop() {
 		cc := conn
 		b.curConn.Store(&cc)
 		b.st.newSession()
-		if b.pool != nil {
+		if b.edgePool() {
 			sni := strings.TrimPrefix(combo, label+activeSep)
 			b.liveSNI.Store(&sni)
 
@@ -1340,7 +1422,7 @@ func (b *TCP) dialLoop() {
 
 		if !b.closed.Load() {
 			var cause string
-			if b.pool != nil {
+			if b.edgePool() {
 				cause = b.takeLastErr()
 			}
 			switch why := b.dropWhy.Swap(dropNone); {
@@ -1348,16 +1430,16 @@ func (b *TCP) dialLoop() {
 				deliberate = true
 			case why == dropRotation:
 				deliberate = true
-			case b.pool != nil || b.pp != nil || b.sp != nil:
-				if b.pool != nil {
+			case b.pp != nil || b.sp != nil:
+				if b.edgePool() {
 					b.st.down(classifyErr(cause), label)
 				}
 
 				if time.Since(connectedAt) >= minLiveness {
 					youngDeaths = 0
-				} else if b.pool != nil && youngDeaths < b.pool.comboCount() && b.pool.advance() {
+				} else if b.edgePool() && youngDeaths < b.comboCount() && b.walkEdge() {
 					if youngDeaths == 0 {
-						b.pool.event("down", "edge-walk", "ws")
+						b.st.event("down", "edge-walk", "ws")
 					}
 					youngDeaths++
 				}
@@ -1490,39 +1572,19 @@ func (b *TCP) pollPeerCmd() {
 }
 
 func (b *TCP) rotateLowTCP(proactive bool) {
-	if b.pool == nil {
-		if _, moved := b.rotateDestTCP(proactive); moved {
-			b.accusationAnswered()
-		}
-		return
-	}
-	low, _ := b.rc.underJudgement()
-	b.pool.markSuspect("ip", low, "tun-probe")
-
-	if now := b.pool.advanceIP(); now != "" {
-		b.st.rotated("edge", "ip:"+now, proactive)
+	if _, moved := b.rotateDestTCP(proactive); moved {
 		b.accusationAnswered()
 	}
 }
 
 func (b *TCP) rotateHighTCP(proactive bool) {
-	if b.pool == nil {
-		if _, moved := b.rotateSourceTCP(proactive); moved {
-			b.accusationAnswered()
-		}
-		return
-	}
-
-	_, sni := b.rc.underJudgement()
-	b.pool.markSuspect("sni", sni, "tun-probe")
-	if now := b.pool.advanceSNI(); now != "" {
-		b.st.rotated("sni", "sni:"+now, proactive)
+	if _, moved := b.rotateSourceTCP(proactive); moved {
 		b.accusationAnswered()
 	}
 }
 
 func (b *TCP) selectedTCP(kind, key string) {
-	if b.pool == nil && kind == "dst" {
+	if !b.edgePool() && kind == axisDst {
 		b.st.setActive(b.stTag + activeSep + key)
 	}
 }

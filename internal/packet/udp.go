@@ -96,7 +96,7 @@ func (b *UDP) SetPeerPool(pp *PeerPool) {
 	if b.isClient {
 		b.pp = pp
 		if pp != nil {
-			joinStatus(b.st, pp, "dst")
+			joinStatus(b.st, pp, axisDst)
 			b.poolIPs = buildSrcAllow(pp.all())
 		}
 	}
@@ -154,7 +154,7 @@ func (b *UDP) SetSourcePool(sp *PeerPool) {
 		return
 	}
 	b.sp = sp
-	joinStatus(b.st, sp, "src")
+	joinStatus(b.st, sp, axisSrc)
 	b.landSourceUDP("bound")
 }
 

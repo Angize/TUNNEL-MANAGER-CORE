@@ -26,13 +26,13 @@ func TestOnePoolCmdReadsBothWriters(t *testing.T) {
 			poolCmd{Cmd: cmdFail, Low: "10.0.0.1", High: "192.168.1.1"}},
 		{"direct verdict, carrying pair", `{"cmd":"ok","low":"10.0.0.1","high":"192.168.1.1"}`,
 			poolCmd{Cmd: cmdOK, Low: "10.0.0.1", High: "192.168.1.1"}},
-		{"direct pin", `{"kind":"dst","key":"10.0.0.2"}`,
+		{"direct jump", `{"kind":"dst","key":"10.0.0.2"}`,
 			poolCmd{Kind: "dst", Key: "10.0.0.2"}},
-		{"edge verdict, dead combination", `{"cmd":"fail","low":"a.example","high":"1.1.1.1"}`,
-			poolCmd{Cmd: cmdFail, Low: "a.example", High: "1.1.1.1"}},
-		{"edge verdict, carrying combination", `{"cmd":"ok","low":"a.example","high":"1.1.1.1"}`,
-			poolCmd{Cmd: cmdOK, Low: "a.example", High: "1.1.1.1"}},
-		{"edge pin, sni axis", `{"kind":"sni","key":"a.example"}`,
+		{"edge verdict, dead combination", `{"cmd":"fail","low":"1.1.1.1:443","high":"a.example"}`,
+			poolCmd{Cmd: cmdFail, Low: "1.1.1.1:443", High: "a.example"}},
+		{"edge verdict, carrying combination", `{"cmd":"ok","low":"1.1.1.1:443","high":"a.example"}`,
+			poolCmd{Cmd: cmdOK, Low: "1.1.1.1:443", High: "a.example"}},
+		{"edge jump, sni axis", `{"kind":"sni","key":"a.example"}`,
 			poolCmd{Kind: "sni", Key: "a.example"}},
 		{"a retest of one entry", `{"cmd":"retest","kind":"ip","key":"1.1.1.1"}`,
 			poolCmd{Cmd: cmdRetest, Kind: "ip", Key: "1.1.1.1"}},
@@ -78,21 +78,23 @@ func TestPoolCmdRejectsNothingBurgers(t *testing.T) {
 }
 
 // The two mailboxes are separate files, and that is the whole point: one writer each. Sharing one path
-// meant a verdict landing between a pin's write and the core's poll replaced it, and the operator was
-// told nothing.
-func TestTheVerdictAndThePinAreDifferentFiles(t *testing.T) {
-	b, _ := edgeCarrier(t, []string{"e1", "e2"}, snis("s1"))
+// meant a verdict landing between a jump's write and the core's poll replaced it, and the operator was
+// told nothing. The verdict names the live pair the way an edge carrier spells it now -- the edge IP on
+// the low axis, the SNI host on the high one -- so it really does walk, e1 to e2; the operator asked for
+// e3, and e3 is where the tick has to end.
+func TestTheVerdictAndTheJumpAreDifferentFiles(t *testing.T) {
+	b, pp, _ := edgeCarrier(t, []string{"e1", "e2", "e3"}, snis("s1"))
 	if b.st.verdictPath() == b.st.selectPath() {
 		t.Fatalf("both mailboxes are %q — os.Replace makes the second writer eat the first", b.st.selectPath())
 	}
-	if err := os.WriteFile(b.st.selectPath(), []byte(`{"kind":"ip","key":"e2"}`), 0o644); err != nil {
+	if err := os.WriteFile(b.st.selectPath(), []byte(`{"kind":"ip","key":"e3"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(b.st.verdictPath(), []byte(`{"cmd":"fail","low":"s1","high":"e1"}`), 0o644); err != nil {
+	if err := os.WriteFile(b.st.verdictPath(), []byte(`{"cmd":"fail","low":"e1","high":"s1"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.selectedTCP, b.st.pathEpoch)
-	if got, _, _ := b.pool.current(); got != "e2" {
-		t.Fatalf("the pin was lost behind a verdict written in the same tick: current=%s, want e2", got)
+	if got := pp.current(); got != "e3" {
+		t.Fatalf("the jump was lost behind a verdict written in the same tick: current=%s, want e3", got)
 	}
 }

@@ -23,18 +23,17 @@ import "testing"
 // dialCarrier and dialDirect both do.
 func TestAPoolThatNeverConnectsStillWalksToItsLastEndpoint(t *testing.T) {
 	t.Run("edge pool", func(t *testing.T) {
-		b, p := edgeCarrier(t, []string{"e1", "e2", "e3"}, snis("s"))
+		b, pp, _ := edgeCarrier(t, []string{"e1", "e2", "e3"}, snis("s"))
 		b.rc.port.setRoll(func() bool { return false })
 		b.rc.session.setDrop(func() bool { return false })
 
 		seen := map[string]bool{}
 		for i := 0; i < 60; i++ {
-			ip, sni, _ := p.current()
+			ip, sni, _ := b.edgeCombo()
 			b.noteAttempt(ip, sni.host)
 			low, high := b.livePairNow()
 			b.tunFail(t, low, high)
-			now, _, _ := p.current()
-			seen[now] = true
+			seen[pp.current()] = true
 		}
 		for _, want := range []string{"e2", "e3"} {
 			if !seen[want] {
@@ -69,7 +68,7 @@ func TestAPoolThatNeverConnectsStillWalksToItsLastEndpoint(t *testing.T) {
 // outage.
 func TestARedirectedDialDoesNotRenameTheOutage(t *testing.T) {
 	const good, dead, sni = "good:443", "dead:443", "front-a"
-	b, _ := edgeCarrier(t, []string{good, dead}, snis(sni))
+	b, _, _ := edgeCarrier(t, []string{good, dead}, snis(sni))
 
 	b.pretendDown()
 	b.noteAttempt(dead, sni)

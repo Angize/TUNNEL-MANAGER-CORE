@@ -6,19 +6,19 @@ import "testing"
 // never what the cursor has stepped to while a warm dial is still being built.
 func TestThePublishedPairIsNotCorruptedByARotationStep(t *testing.T) {
 	hosts := []wsSNIEntry{{host: "a.example"}, {host: "b.example"}}
-	b, p := edgeCarrier(t, []string{"1.1.1.1", "2.2.2.2"}, hosts)
+	b, _, _ := edgeCarrier(t, []string{"1.1.1.1", "2.2.2.2"}, hosts)
 
-	ip0, sni0, ok := p.current()
+	ip0, sni0, ok := b.edgeCombo()
 	if !ok {
-		t.Fatal("current: pool empty")
+		t.Fatal("edgeCombo: pool empty")
 	}
 	b.pretendConnected(ip0, sni0.host)
 	if low, high := b.livePairNow(); low != ip0 || high != sni0.host {
 		t.Fatalf("the connected pair is %s · %s, want %s · %s", low, high, ip0, sni0.host)
 	}
 
-	p.advance()
-	ipN, sniN, _ := p.current()
+	b.walkEdge()
+	ipN, sniN, _ := b.edgeCombo()
 	if ipN == ip0 && sniN.host == sni0.host {
 		t.Fatal("test setup: the rotation step resolved back to the live edge")
 	}

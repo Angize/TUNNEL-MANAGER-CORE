@@ -104,7 +104,7 @@ func TestCarryingRefillsTheRungSoTheNextOutageGetsAWholeLadder(t *testing.T) {
 
 func TestAPoolLessCarrierStillSpendsItsFreeRung(t *testing.T) {
 	b, path := rigTCP(t, nil)
-	if b.pp != nil || b.sp != nil || b.pool != nil {
+	if b.pp != nil || b.sp != nil {
 		t.Fatal("setup: this rig must have no pool of any kind")
 	}
 	liveVerdict(t, b.st.verdictPath(), b.st.pathEpoch(), poolCmd{Cmd: cmdFail})
@@ -158,20 +158,20 @@ func TestWithNoCarrierTheRungIsSpentAndNothingIsTornDown(t *testing.T) {
 }
 
 func TestTheEdgePoolClimbsTheSameLadder(t *testing.T) {
-	b, pool := edgeCarrier(t, []string{"e1", "e2"}, snis("x"))
+	b, edges, _ := edgeCarrier(t, []string{"e1", "e2"}, snis("x"))
 	armLikeRun(b)
 	liveCarrier(t, b)
 
-	ip, sni, _ := pool.current()
+	ip, sni, _ := b.edgeCombo()
 	b.pretendConnected(ip, sni.host)
 	b.st.tracker.observe(pathKey{Dst: ip, Dport: 443, Sport: 40001, SNI: sni.host}, true)
 	epoch := b.st.pathEpoch()
 	fail := poolCmd{Cmd: cmdFail, Low: ip, High: sni.host}
 
 	burned := func() bool {
-		pool.mu.Lock()
-		defer pool.mu.Unlock()
-		return !pool.ipHealth.healthy(ip)
+		edges.mu.Lock()
+		defer edges.mu.Unlock()
+		return !edges.health.healthy(ip)
 	}
 
 	for i := 1; i <= portTries; i++ {

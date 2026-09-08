@@ -474,6 +474,13 @@ func readPoolCmds(path string) []poolCmd {
 	return out
 }
 
+const (
+	axisDst = "dst"
+	axisSrc = "src"
+	axisIP  = "ip"
+	axisSNI = "sni"
+)
+
 const cmdFail = "fail"
 
 const cmdOK = "ok"
@@ -559,8 +566,6 @@ type rotationController struct {
 	verdict  string
 	selbox   string
 
-	measured atomic.Pointer[pairNow]
-
 	accused  atomic.Pointer[pairNow]
 	port     portRung
 	session  sessionRung
@@ -571,18 +576,18 @@ type rotationController struct {
 
 func newRotationController(dst, src *PeerPool) *rotationController {
 	c := &rotationController{}
-	c.bind(dst, src)
+	c.bind(dst, src, axisDst, axisSrc)
 	if c.rotate > 0 {
 		c.rotateAt = time.Now().Add(c.rotate)
 	}
 	return c
 }
 
-func (c *rotationController) bind(dst, src *PeerPool) {
+func (c *rotationController) bind(dst, src *PeerPool, lowKind, highKind string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.dst, c.src = dst, src
-	c.pair = peerPair{dst: dst, src: src}
+	c.pair = peerPair{dst: dst, src: src, lowKind: lowKind, highKind: highKind}
 	c.high, c.rotate = nil, 0
 	c.setLowLocked(nil)
 	if dst != nil {
@@ -597,23 +602,13 @@ func (c *rotationController) bind(dst, src *PeerPool) {
 	}
 }
 
-func (c *rotationController) bindEdges(p *wsPool) {
-	if p == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.pair = edgePair{p}
-	c.high = wsSNIs{p}
-	c.setLowLocked(nil)
-	if p.ipsCount() >= 2 {
-		c.setLowLocked(wsEdges{p})
-	}
+type peerPair struct {
+	dst, src *PeerPool
+
+	lowKind, highKind string
 }
 
-type peerPair struct{ dst, src *PeerPool }
-
-func (p peerPair) kinds() (string, string) { return "dst", "src" }
+func (p peerPair) kinds() (string, string) { return p.lowKind, p.highKind }
 
 func (p peerPair) live() (low, high string) {
 	if p.dst != nil {
@@ -626,7 +621,7 @@ func (p peerPair) live() (low, high string) {
 }
 
 func (p peerPair) axis(kind string) *PeerPool {
-	if kind == "src" {
+	if kind == p.highKind {
 		return p.src
 	}
 	return p.dst
@@ -668,13 +663,6 @@ func (c *rotationController) livePair() (low, high string) {
 		return "", ""
 	}
 	return c.pair.live()
-}
-
-func (c *rotationController) underJudgement() (low, high string) {
-	if m := c.measured.Load(); m != nil {
-		return m.low, m.high
-	}
-	return "", ""
 }
 
 func (c *rotationController) pairStatus() (low, high, lowKind, highKind string) {
@@ -879,9 +867,7 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 		}
 
 		c.pair.keepCursorOn(liveLow, liveHigh)
-		c.measured.Store(&pairNow{low: liveLow, high: liveHigh})
 		burned := c.fail(rotLow, rotHigh)
-		c.measured.Store(nil)
 
 		nowLow, nowHigh := c.pair.live()
 		moved = burned || nowLow != liveLow || nowHigh != liveHigh

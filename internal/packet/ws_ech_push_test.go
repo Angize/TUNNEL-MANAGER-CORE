@@ -22,7 +22,7 @@ func pushECH(t *testing.T, b *TCP, host string, ech []byte) {
 }
 
 func TestAnECHPushReachesAPool(t *testing.T) {
-	b, p := edgeCarrier(t, []string{"1.1.1.1"}, []wsSNIEntry{{host: "a.example", ech: []byte("OLD")}})
+	b, _, _ := edgeCarrier(t, []string{"1.1.1.1"}, []wsSNIEntry{{host: "a.example", ech: []byte("OLD")}})
 
 	newECH := []byte("FRESH-ech-config-list-bytes")
 	pushECH(t, b, "a.example", newECH)
@@ -32,9 +32,7 @@ func TestAnECHPushReachesAPool(t *testing.T) {
 		t.Fatalf("readECHCmd changed = %v, want [a.example]", changed)
 	}
 
-	p.mu.Lock()
-	got := append([]byte(nil), p.snis[0].ech...)
-	p.mu.Unlock()
+	got := b.sniEntry("a.example").ech
 	if !bytes.Equal(got, newECH) {
 		t.Fatalf("pool ech = %q, want %q — live push did not hot-swap the key", got, newECH)
 	}

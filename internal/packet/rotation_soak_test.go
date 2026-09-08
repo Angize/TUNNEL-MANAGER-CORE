@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func newSoakClient(t *testing.T, rotate time.Duration) (*TCP, *wsPool, *os.File, *os.File) {
+func newSoakClient(t *testing.T, rotate time.Duration) (*TCP, *os.File, *os.File) {
 	t.Helper()
 	const psk = "rotation-soak-psk-abcdefghijklmnop"
 	const cipher = "aes-256-gcm"
@@ -22,15 +22,13 @@ func newSoakClient(t *testing.T, rotate time.Duration) (*TCP, *wsPool, *os.File,
 	go srv.Run()
 	t.Cleanup(func() { srv.Close() })
 
-	pool := newWSPool([]string{addr}, snis("front-a", "front-b"))
-	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: cipher, psk: psk,
-		ws: true, wsTLS: false, pool: pool, rotate: rotate,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
+	cli := edgeTCP([]string{addr}, snis("front-a", "front-b"), rotate)
+	cli.dev, cli.cryptoOn, cli.cipher, cli.psk, cli.wsTLS = cliDev, true, cipher, psk, false
 	cli.SetStatusPath(runningStatusPath(t, cli))
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
 	waitFor(t, 5*time.Second, "active up", func() bool { return cli.cur.Load() != nil })
-	return cli, pool, cliCtrl, srvCtrl
+	return cli, cliCtrl, srvCtrl
 }
 
 func drainCounter(ctrl *os.File, n *int64) {
@@ -49,7 +47,7 @@ func drainCounter(ctrl *os.File, n *int64) {
 }
 
 func TestRotationSoakRapidRotate(t *testing.T) {
-	cli, _, cliCtrl, srvCtrl := newSoakClient(t, 150*time.Millisecond)
+	cli, cliCtrl, srvCtrl := newSoakClient(t, 150*time.Millisecond)
 
 	var delivered int64
 	drainCounter(srvCtrl, &delivered)
@@ -112,7 +110,7 @@ func TestRotationSoakRapidRotate(t *testing.T) {
 }
 
 func TestRotationSoakPinStorm(t *testing.T) {
-	cli, _, cliCtrl, srvCtrl := newSoakClient(t, 0)
+	cli, cliCtrl, srvCtrl := newSoakClient(t, 0)
 
 	var delivered int64
 	drainCounter(srvCtrl, &delivered)
@@ -153,7 +151,7 @@ func TestRotationSoakPinStorm(t *testing.T) {
 }
 
 func TestRotationSoakFailoverStorm(t *testing.T) {
-	cli, _, cliCtrl, srvCtrl := newSoakClient(t, 0)
+	cli, cliCtrl, srvCtrl := newSoakClient(t, 0)
 
 	var delivered int64
 	drainCounter(srvCtrl, &delivered)

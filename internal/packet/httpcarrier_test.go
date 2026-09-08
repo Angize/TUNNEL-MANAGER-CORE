@@ -74,21 +74,26 @@ func TestAnHTTPCOriginThatAnswers502FailsTheDialWithoutCondemning(t *testing.T) 
 	}))
 	defer bad.Close()
 
-	dial := func(addr string) (*wsPool, error) {
-		p := newWSPool([]string{addr}, []wsSNIEntry{{path: "/"}})
-		b := &TCP{addr: addr, ws: true, httpc: true, wsPath: "/", wsTLS: false, pool: p}
+	dial := func(addr string) (*PeerPool, error) {
+		b := edgeTCP([]string{addr}, snis("front-a"), 0)
+		b.httpc, b.wsTLS = true, false
 		c, _, _, err := b.dialCarrier()
 		if c != nil {
 			c.Close()
 		}
-		return p, err
+		return b.pp, err
+	}
+	healthy := func(p *PeerPool, addr string) bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.health.healthy(addr)
 	}
 
 	p, err := dial(good.Listener.Addr().String())
 	if err != nil {
 		t.Fatalf("a working httpc origin must carry: %v", err)
 	}
-	if !p.ipHealth.healthy(good.Listener.Addr().String()) {
+	if !healthy(p, good.Listener.Addr().String()) {
 		t.Fatal("a successful dial burned its own edge")
 	}
 
@@ -98,7 +103,7 @@ func TestAnHTTPCOriginThatAnswers502FailsTheDialWithoutCondemning(t *testing.T) 
 		t.Fatal("a 502-origin behind a reachable front must fail the dial (a TLS-only reach would wrongly " +
 			"pass it, and the carrier would be handed a socket that swallows every frame)")
 	}
-	if !p.ipHealth.healthy(addr) {
+	if !healthy(p, addr) {
 		t.Fatal("the 502 edge was condemned by the dial itself. The tun probe is the one judge on this " +
 			"pool, the same as on a direct carrier; the dial only reports that it could not carry")
 	}

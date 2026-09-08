@@ -68,6 +68,10 @@ func TestTheDirectWalkFindsTheOnePairThatWorks(t *testing.T) {
 	}
 }
 
+// The edge carrier now walks the very same two PeerPools a direct one does -- edge IPs on the low axis,
+// SNI hosts on the high axis -- so whatever the shape, the walk must reach the one combination that
+// carries and then stay on it. The 1xN and Nx1 shapes are the interesting ones: an axis of one is no
+// longer skipped, it is burned in place and the other axis is what moves.
 func TestTheEdgeWalkFindsTheOneComboThatWorks(t *testing.T) {
 	shapes := []struct {
 		edges, hosts int
@@ -94,18 +98,19 @@ func TestTheEdgeWalkFindsTheOneComboThatWorks(t *testing.T) {
 			goodH := fmt.Sprintf("s%d", sh.goodH)
 
 			clk := int64(1000)
-			b, p := edgeCarrier(t, ips, snis(hosts...))
-			p.now = func() int64 { return clk }
+			b, pp, sp := edgeCarrier(t, ips, snis(hosts...))
+			pp.now = func() int64 { return clk }
+			sp.now = func() int64 { return clk }
 
 			found := 0
 			var seen []string
 			for round := 1; round <= convergeRounds; round++ {
-				ip, sni, _ := p.current()
+				ip, sni, _ := b.edgeCombo()
 				b.pretendConnected(ip, sni.host)
 				seen = append(seen, ip+"/"+sni.host)
 				if ip == goodE && sni.host == goodH {
-					p.clearBurn("ip", ip)
-					p.clearBurn("sni", sni.host)
+					pp.clearBurn(ip)
+					sp.clearBurn(sni.host)
 					found++
 					if found >= 12 {
 						return
@@ -155,26 +160,30 @@ func TestNothingWorksAndTheNodeHandsItAllBack(t *testing.T) {
 
 	t.Run("edge", func(t *testing.T) {
 		clk := int64(1000)
-		b, p := edgeCarrier(t, []string{"e1", "e2", "e3"}, snis("s1", "s2"))
-		p.now = func() int64 { return clk }
+		b, pp, sp := edgeCarrier(t, []string{"e1", "e2", "e3"}, snis("s1", "s2"))
+		pp.now = func() int64 { return clk }
+		sp.now = func() int64 { return clk }
 		for i := 0; i < 12; i++ {
-			ip, sni, _ := p.current()
+			ip, sni, _ := b.edgeCombo()
 			b.pretendConnected(ip, sni.host)
 			b.rc.fail(b.rotateLowTCP, b.rotateHighTCP)
 			clk += 30
 		}
 		for _, e := range []string{"e1", "e2", "e3"} {
-			b.operatorRetest(t, "ip", e)
+			b.operatorRetest(t, axisIP, e)
 		}
 		for _, h := range []string{"s1", "s2"} {
-			b.operatorRetest(t, "sni", h)
+			b.operatorRetest(t, axisSNI, h)
 		}
 
+		if n := pp.eligibleCount(); n != 3 {
+			t.Fatalf("after the hand-back only %d of 3 edge IPs can be reached — the pool is still "+
+				"condemned and the walk cannot resume", n)
+		}
 		combos := map[string]bool{}
 		for i := 0; i < 12; i++ {
-			p.advance()
-			ip, sni, _ := p.current()
-			combos[activeLabel(ip, sni.host)] = true
+			b.walkEdge()
+			combos[b.edgeAt()] = true
 		}
 		if len(combos) < 2 {
 			t.Fatalf("after the hand-back the walk only ever reached %v — a pool that was handed back "+

@@ -29,7 +29,7 @@ func (b *TCP) tunFailAsTheNodeWould(t *testing.T) bool {
 func TestPinningARefusingEdgeDoesNotBurnAHealthyOne(t *testing.T) {
 	const good, sni = "good:443", "front-a"
 	dead := freeTCPPort(t) // nothing listens there, so the dial is refused
-	b, p := edgeCarrier(t, []string{good, dead}, snis(sni))
+	b, p, _ := edgeCarrier(t, []string{good, dead}, snis(sni))
 
 	b.pretendConnected(good, sni)
 	if !b.operatorJump(t, "ip", dead) {
@@ -73,7 +73,7 @@ func TestPinningARefusingEdgeDoesNotBurnAHealthyOne(t *testing.T) {
 // honest is spending a climb on one endpoint and landing it on another.
 func TestAClimbDoesNotLandOnWhoeverCameBack(t *testing.T) {
 	const dead, back, sni = "dead:443", "back:443", "front-a"
-	b, p := edgeCarrier(t, []string{dead, back}, snis(sni))
+	b, p, sp := edgeCarrier(t, []string{dead, back}, snis(sni))
 	// The two rungs Run() wires. Without a budget every verdict walks, and there is no climb to
 	// protect in the first place.
 	b.rc.port.setRoll(func() bool { return true })
@@ -98,7 +98,7 @@ func TestAClimbDoesNotLandOnWhoeverCameBack(t *testing.T) {
 	if got := stateOf(p.healthRows(), "ip", back); got != "healthy" {
 		t.Errorf("the edge the tunnel had just come back on is %q; the climb was about %s", got, dead)
 	}
-	if got := stateOf(p.healthRows(), "sni", sni); got != "healthy" {
+	if got := stateOf(sp.healthRows(), "sni", sni); got != "healthy" {
 		t.Errorf("the domain is %q; the lap it rode in on belonged to the other edge's climb", got)
 	}
 }
@@ -109,7 +109,7 @@ func TestAClimbDoesNotLandOnWhoeverCameBack(t *testing.T) {
 // core13 with that spend in place: connected at 435.858, torn down at 437.233, burned at 438.233.
 func TestNoticingTheMoveCostsTheNewcomerNothing(t *testing.T) {
 	const dead, back, sni = "dead:443", "back:443", "front-a"
-	b, _ := edgeCarrier(t, []string{dead, back}, snis(sni))
+	b, _, _ := edgeCarrier(t, []string{dead, back}, snis(sni))
 	rolls := 0
 	b.rc.port.setRoll(func() bool { rolls++; return true })
 	b.rc.session.setDrop(func() bool { return true })
@@ -146,7 +146,7 @@ func TestNoticingTheMoveCostsTheNewcomerNothing(t *testing.T) {
 //	t+12.022  verdict: fail 104                 the probe had run while it was down
 //	t+12.073  104 burned
 func TestEverySessionGetsItsOwnEpoch(t *testing.T) {
-	b, _ := edgeCarrier(t, []string{"ip1:443"}, snis("front-a"))
+	b, _, _ := edgeCarrier(t, []string{"ip1:443"}, snis("front-a"))
 	// What an http carrier's path looks like: no local address at all.
 	live := pathKey{Dst: "ip1", Dport: 443, SNI: "front-a"}
 	up := false
@@ -205,23 +205,27 @@ func TestAClimbDoesNotLandOnWhoeverCameBackOnADirectPool(t *testing.T) {
 }
 
 // And the same rule one level down: the walk must condemn the pair the verdict was ABOUT, not whatever
-// the carrier reports by the time the arm runs. The dial loop connects on another goroutine, and the
-// likeliest moment for it to succeed is the end of the outage the walk is answering.
-func TestTheWalkCondemnsWhatTheVerdictMeasured(t *testing.T) {
+// the pool cursor happens to be parked on when the arm runs. The dial loop moves that cursor on another
+// goroutine, and the likeliest moment for it to move is the end of the outage the walk is answering.
+//
+// The edge pools carry the burn the way the direct pools always have: it happens inside the pool's own
+// fail(), on the entry the CURSOR names. So what protects the newcomer is judge dragging the cursor back
+// onto the measured pair with keepCursorOn before it spends a rung -- not the arm re-reading a snapshot
+// of its own.
+func TestTheWalkCondemnsWhereTheVerdictParkedTheCursor(t *testing.T) {
 	const sni = "front-a"
-	b, p := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis(sni))
-	b.pretendConnected("ip1:443", sni)
+	b, p, _ := edgeCarrier(t, []string{"ip1:443", "ip2:443"}, snis(sni))
 
-	for i := 0; i < portTries+1; i++ {
-		b.tunFail(t, "ip1:443", sni)
+	// The dial loop has already walked the cursor onto the second edge, while the carrier is still
+	// crossing on the first -- which is the pair the node measured and the verdict names.
+	if !p.selectEntry("ip2:443") {
+		t.Fatal("setup: the cursor never moved to ip2")
 	}
-	// The carrier lands on the other edge just as the walk is about to run its arm.
-	b.rc.measured.Store(&pairNow{low: "ip1:443", high: sni})
-	b.pretendConnected("ip2:443", sni)
-	b.rotateLowTCP(false)
+	b.pretendConnected("ip1:443", sni)
+	b.tunFail(t, "ip1:443", sni)
 
 	if got := stateOf(p.healthRows(), "ip", "ip2:443"); got != "healthy" {
-		t.Errorf("the edge the carrier had just connected on is %q; the verdict was about ip1", got)
+		t.Errorf("the edge the cursor was parked on is %q; the verdict was about ip1", got)
 	}
 	if got := stateOf(p.healthRows(), "ip", "ip1:443"); got == "healthy" {
 		t.Errorf("the edge the verdict measured is still %q", got)

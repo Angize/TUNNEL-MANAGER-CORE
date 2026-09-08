@@ -5,73 +5,84 @@ import (
 )
 
 func TestAProactiveRotationHandsADueEdgeLiveTraffic(t *testing.T) {
-	p, now := clockPool([]string{"e1", "e2"}, snis("x"))
-	if ip, _, _ := p.current(); ip != "e1" {
+	b := edgeTCP([]string{"e1", "e2"}, snis("x"), 0)
+	clk := int64(1000)
+	b.pp.now = func() int64 { return clk }
+	b.sp.now = func() int64 { return clk }
+	if ip := b.pp.current(); ip != "e1" {
 		t.Fatalf("setup: the cursor starts on %q, want e1", ip)
 	}
-	p.markSuspect("ip", "e2", "tun-probe")
+	b.pp.markSuspect("e2", "tun-probe")
 
-	if p.advance() {
+	if b.walkEdge() {
 		t.Fatal("e2 is still waiting out its backoff, so there is nowhere to go — reporting a move tears " +
 			"the live connection down every rotation tick for nothing")
 	}
-	if ip, _, _ := p.current(); ip != "e1" {
+	if ip := b.pp.current(); ip != "e1" {
 		t.Fatalf("the walk moved onto a waiting edge: %q", ip)
 	}
 
-	*now += suspectBackoff[0]
-	if !p.advance() {
+	clk += suspectBackoff[0]
+	if !b.walkEdge() {
 		t.Fatal("e2 came due and the rotation still would not go there — a burned edge that is never " +
 			"selected can never be proven to have recovered, so it stays condemned forever")
 	}
-	ip, _, _ := p.current()
-	if ip != "e2" {
-		t.Fatalf("the rotation stepped onto e2 and current() resolved back to %q — the walk must not "+
+	ip, _, ok := b.edgeCombo()
+	if !ok || ip != "e2" {
+		t.Fatalf("the rotation stepped onto e2 and the combo resolved back to %q — the walk must not "+
 			"re-select past the combination it deliberately moved onto", ip)
 	}
 
-	if ip2, _, _ := p.current(); ip2 != "e2" {
+	if ip2, _, _ := b.edgeCombo(); ip2 != "e2" {
 		t.Fatalf("the second ask gave %q — the commitment did not hold for the life of the attempt", ip2)
 	}
 }
 
 func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 	t.Run("fail: burned again, and further down the ladder", func(t *testing.T) {
-		p, now := clockPool([]string{"e1", "e2"}, snis("x"))
-		p.markSuspect("ip", "e2", "tun-probe")
-		*now += suspectBackoff[0]
-		p.advance()
-		ip, sni, _ := p.current()
-		if ip != "e2" {
+		b, pp, sp := edgeCarrier(t, []string{"e1", "e2"}, snis("x"))
+		clk := int64(1000)
+		pp.now = func() int64 { return clk }
+		sp.now = func() int64 { return clk }
+		pp.markSuspect("e2", "tun-probe")
+		clk += suspectBackoff[0]
+		b.walkEdge()
+		ip, sni, ok := b.edgeCombo()
+		if !ok || ip != "e2" {
 			t.Fatalf("setup: the try landed on %q", ip)
 		}
-		b, _ := edgeCarrier(t, nil, nil)
-		b.pool = p
-		b.rc.bindEdges(p)
-		b.publishPair()
 		b.pretendConnected(ip, sni.host)
 		if !b.tunFail(t, ip, sni.host) {
 			t.Fatal("the verdict did nothing")
 		}
-		if p.ipHealth.due("e2") {
+		pp.mu.Lock()
+		due := pp.health.due("e2")
+		pp.mu.Unlock()
+		if due {
 			t.Fatal("e2 is STILL due after failing the try the ladder granted it — every rotation tick " +
 				"now returns to a proven-dead edge, drops the tunnel, and walks off it again, forever")
 		}
-		if got, _, _ := p.current(); got != "e1" {
+		if got := pp.current(); got != "e1" {
 			t.Fatalf("after the verdict the walk stayed on %q", got)
 		}
 	})
 
 	t.Run("ok: cleared outright, no ladder left to wait out", func(t *testing.T) {
-		p, now := clockPool([]string{"e1", "e2"}, snis("x"))
-		p.markSuspect("ip", "e2", "tun-probe")
-		*now += suspectBackoff[0]
-		p.advance()
+		b := edgeTCP([]string{"e1", "e2"}, snis("x"), 0)
+		clk := int64(1000)
+		b.pp.now = func() int64 { return clk }
+		b.sp.now = func() int64 { return clk }
+		b.pp.markSuspect("e2", "tun-probe")
+		clk += suspectBackoff[0]
+		b.walkEdge()
 
-		if !p.clearBurn("ip", "e2") {
+		if !b.pp.clearBurn("e2") {
 			t.Fatal("the tun probe said data crossed and the pool had nothing to clear")
 		}
-		if !p.ipHealth.healthy("e2") {
+		b.pp.mu.Lock()
+		healthy := b.pp.health.healthy("e2")
+		b.pp.mu.Unlock()
+		if !healthy {
 			t.Fatal("data crossed on e2 and it is not healthy — that IS the proof, and there is nothing " +
 				"stronger the pool could ever be given")
 		}

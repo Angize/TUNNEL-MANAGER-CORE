@@ -2,11 +2,11 @@ package packet
 
 import "testing"
 
-func wsBurned(p *wsPool, kind string) map[string]bool {
+func verdictBurned(p *PeerPool) map[string]bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := map[string]bool{}
-	for k, r := range p.healthMap(kind).recs {
+	for k, r := range p.health.recs {
 		if r != nil {
 			out[k] = true
 		}
@@ -16,8 +16,8 @@ func wsBurned(p *wsPool, kind string) map[string]bool {
 
 func newVerdictPool(t *testing.T, ips, hosts []string) *TCP {
 	t.Helper()
-	b, p := edgeCarrier(t, ips, snis(hosts...))
-	ip, sni, ok := p.current()
+	b, _, _ := edgeCarrier(t, ips, snis(hosts...))
+	ip, sni, ok := b.edgeCombo()
 	if !ok {
 		t.Fatal("fresh pool has no current edge")
 	}
@@ -48,23 +48,23 @@ func TestWSFailBurnsWhatItMeasured(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2"})
 
 	measuredLow, measuredHigh := b.livePairNow()
-	b.pool.advance()
-	ip, sni, _ := b.pool.current()
+	b.walkEdge()
+	ip, sni, _ := b.edgeCombo()
 	b.pretendConnected(ip, sni.host)
 	if ip == measuredLow {
-		t.Fatalf("advance() did not change the edge (%s) — the test cannot show the stale case", ip)
+		t.Fatalf("the walk did not change the edge (%s) — the test cannot show the stale case", ip)
 	}
 
 	b.tunFail(t, measuredLow, measuredHigh)
 
-	burned := wsBurned(b.pool, "ip")
+	burned := verdictBurned(b.pp)
 	if !burned[measuredLow] {
 		t.Fatalf("the edge the probe MEASURED (%s) was not burned; burned=%v", measuredLow, burned)
 	}
 	if burned[ip] {
 		t.Fatalf("burned %s — the combo the carrier moved TO, which nothing measured", ip)
 	}
-	if got, _, _ := b.pool.current(); got != ip {
+	if got := b.pp.current(); got != ip {
 		t.Fatalf("a stale verdict moved the pool off %s; it must stay put, got %s", ip, got)
 	}
 }
@@ -74,50 +74,50 @@ func TestWSFailBurnsWhatItMeasured(t *testing.T) {
 // under it has failed, because losing a domain loses it on every edge at once.
 func TestWSVerdictWalksTheMatrix(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2", "e3"}, []string{"s1", "s2"})
-	_, startSNI, _ := b.pool.current()
+	_, startSNI, _ := b.edgeCombo()
 
 	for i := 1; i <= 3; i++ {
-		ip, sni, _ := b.pool.current()
+		ip, sni, _ := b.edgeCombo()
 		b.pretendConnected(ip, sni.host)
 		if !b.tunFailUntilItMoves(t, ip, sni.host) {
 			t.Fatalf("edge %d of 3 under %s: the pool would not move", i, startSNI.host)
 		}
-		if _, got, _ := b.pool.current(); i < 3 && got.host != startSNI.host {
+		if _, got, _ := b.edgeCombo(); i < 3 && got.host != startSNI.host {
 			t.Fatalf("the domain turned after %d of 3 edges (%s -> %s) — it is convicted too early, and "+
 				"a burned domain is burned on every edge at once", i, startSNI.host, got.host)
 		}
 	}
-	if _, got, _ := b.pool.current(); got.host == startSNI.host {
+	if _, got, _ := b.edgeCombo(); got.host == startSNI.host {
 		t.Fatalf("every edge under %s failed and the domain still did not turn", startSNI.host)
 	}
 }
 
 func TestWSOKClearsBothAxes(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2"})
-	b.pool.markSuspect("ip", "e1", "test")
-	b.pool.markSuspect("sni", "s1", "test")
+	b.pp.markSuspect("e1", "test")
+	b.sp.markSuspect("s1", "test")
 
 	b.tunOK(t, "e1", "s1")
 
-	if wsBurned(b.pool, "ip")["e1"] {
+	if verdictBurned(b.pp)["e1"] {
 		t.Fatal("the edge stayed burned while the probe watched it carry")
 	}
-	if wsBurned(b.pool, "sni")["s1"] {
+	if verdictBurned(b.sp)["s1"] {
 		t.Fatal("the SNI stayed burned while the probe watched it carry")
 	}
 }
 
 func TestWSStaleOKClearsOnlyWhatItMeasured(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2"})
-	b.pool.markSuspect("sni", "s1", "test")
-	b.pool.markSuspect("sni", "s2", "test")
+	b.sp.markSuspect("s1", "test")
+	b.sp.markSuspect("s2", "test")
 
 	b.tunOK(t, "e1", "s1")
 
-	if wsBurned(b.pool, "sni")["s1"] {
+	if verdictBurned(b.sp)["s1"] {
 		t.Fatal("s1 was measured carrying and stayed burned")
 	}
-	if !wsBurned(b.pool, "sni")["s2"] {
+	if !verdictBurned(b.sp)["s2"] {
 		t.Fatal("s2 was cleared by a verdict that never measured it")
 	}
 }
@@ -127,7 +127,7 @@ func TestWSPinStillWorks(t *testing.T) {
 
 	b.operatorJump(t, "ip", "e2")
 
-	if got, _, _ := b.pool.current(); got != "e2" {
+	if got := b.pp.current(); got != "e2" {
 		t.Fatalf("the panel's pin did not land: current edge is %s, want e2", got)
 	}
 }

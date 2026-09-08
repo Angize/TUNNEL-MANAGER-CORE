@@ -9,7 +9,7 @@ import (
 // that used it agreed with whatever the test passed -- and said nothing about the line in dialLoop
 // that builds it in production. That line kept the old axis order through the swap, and the whole
 // suite stayed green: the status published a domain under low_kind "ip", the node keyed its verdict on
-// that, and rotateLowTCP burned the domain into the EDGE's health map.
+// that, and the walk burned the domain into the EDGE pool's health map.
 func TestTheConnectedPairAgreesWithTheKindsItIsPublishedUnder(t *testing.T) {
 	const psk = "ws-pair-agree-psk-abcdefghijklmn"
 	srvDev, _ := tunPair(t, "wpasrv")
@@ -23,10 +23,8 @@ func TestTheConnectedPairAgreesWithTheKindsItIsPublishedUnder(t *testing.T) {
 	t.Cleanup(func() { srv.Close() })
 
 	const domain = "front-a"
-	pool := newWSPool([]string{addr}, snis(domain))
-	cli := &TCP{dev: cliDev, cryptoOn: true, cipher: "aes-256-gcm", psk: psk,
-		ws: true, wsTLS: false, pool: pool,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
+	cli := edgeTCP([]string{addr}, snis(domain), 0)
+	cli.dev, cli.cryptoOn, cli.cipher, cli.psk, cli.wsTLS = cliDev, true, "aes-256-gcm", psk, false
 	cli.SetStatusPath(runningStatusPath(t, cli))
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
@@ -40,11 +38,11 @@ func TestTheConnectedPairAgreesWithTheKindsItIsPublishedUnder(t *testing.T) {
 	low, high := cli.livePairNow()
 	lowKind, highKind := cli.rc.pair.kinds()
 	if lowKind != "ip" || highKind != "sni" {
-		t.Fatalf("setup: the edge pool reports kinds %q/%q", lowKind, highKind)
+		t.Fatalf("setup: the edge carrier reports kinds %q/%q", lowKind, highKind)
 	}
 	if low != addr {
 		t.Errorf("the low half is %q under low_kind %q, but the edge is %q. The node keys its verdict on "+
-			"this pair and the walk burns the low half into the edge's health map", low, lowKind, addr)
+			"this pair and the walk burns the low half into the edge pool's health map", low, lowKind, addr)
 	}
 	if high != domain {
 		t.Errorf("the high half is %q under high_kind %q, want the domain %q", high, highKind, domain)

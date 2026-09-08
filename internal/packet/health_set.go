@@ -1,5 +1,16 @@
 package packet
 
+const (
+	stateSuspect = "suspect"
+	stateDead    = "dead"
+)
+
+type healthRec struct {
+	state      string
+	fails      int
+	nextRetest int64
+}
+
 type healthSet struct {
 	recs map[string]*healthRec
 
@@ -33,20 +44,6 @@ func (h healthSet) tier(key string) (tier int, next int64) {
 		return 2, r.nextRetest
 	}
 	return 1, r.nextRetest
-}
-
-func (h healthSet) best(keys []string) string {
-	if len(keys) == 0 {
-		return ""
-	}
-	best := keys[0]
-	bt, bn := h.tier(best)
-	for _, k := range keys[1:] {
-		if t, n := h.tier(k); t < bt || (t == bt && n < bn) {
-			best, bt, bn = k, t, n
-		}
-	}
-	return best
 }
 
 func (h healthSet) burn(key string) (condemned bool) {
