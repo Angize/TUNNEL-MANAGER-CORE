@@ -3,7 +3,6 @@ package packet
 import (
 	"fmt"
 	"net"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -44,7 +43,7 @@ func TestTheScheduledRotationSurvivesAChurningCarrier(t *testing.T) {
 		t.Fatalf("DialTCP: %v", err)
 	}
 	cli.SetPeerPool(NewPeerPool([]string{a1, a2}, 3*time.Second))
-	cli.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
+	cli.SetStatusPath(runningStatusPath(t, cli))
 
 	go srv.Run()
 	go cli.Run()
@@ -151,7 +150,7 @@ func TestTheScheduledRotationRunsWhileTheCarrierIsDown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialTCP: %v", err)
 	}
-	cli.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
+	cli.SetStatusPath(runningStatusPath(t, cli))
 	cli.SetPeerPool(NewPeerPool([]string{a1, a2}, 2*time.Second))
 
 	go cli.Run()
