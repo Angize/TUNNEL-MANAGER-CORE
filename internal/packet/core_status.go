@@ -78,10 +78,10 @@ func (s *coreStatus) trackRot(live func() rotStatus, closeCh <-chan struct{}) {
 		return
 	}
 	s.setRot(live)
+	last := live()
 	go func() {
 		tick := time.NewTicker(time.Second)
 		defer tick.Stop()
-		last := live()
 		for {
 			select {
 			case <-closeCh:
