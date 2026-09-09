@@ -25,6 +25,7 @@ type poolRig struct {
 	st                *coreStatus
 	rc                *rotationController
 	poll              func()
+	rotLow            func(proactive bool)
 }
 
 func (r *poolRig) live() (string, string) { return r.rc.livePair() }
@@ -131,7 +132,8 @@ func udpRig(t *testing.T) *poolRig {
 	rc.port.setRoll(nil)
 	rc.session.setDrop(nil)
 	return &poolRig{name: "udp", lowKind: axisDst, highKind: axisSrc, lowRotate: "peer-rotate", low: b.pp, high: b.sp, st: b.st, rc: rc,
-		poll: func() { rc.poll(b.rotatePeerUDP, b.rotateSourceUDP, b.selectedUDP, b.st.pathEpoch) }}
+		rotLow: b.rotatePeerUDP,
+		poll:   func() { rc.poll(b.rotatePeerUDP, b.rotateSourceUDP, b.selectedUDP, b.st.pathEpoch) }}
 }
 
 func rawRig(t *testing.T) *poolRig {
@@ -145,21 +147,24 @@ func rawRig(t *testing.T) *poolRig {
 	rc.attachStatus(r.st)
 	r.st.setPair(rc.pairStatus)
 	return &poolRig{name: "raw", lowKind: axisDst, highKind: axisSrc, lowRotate: "peer-rotate", low: r.pp, high: r.sp, st: r.st, rc: rc,
-		poll: func() { rc.poll(r.rotatePeerRaw, r.rotateSourceRaw, r.selectedRaw, r.st.pathEpoch) }}
+		rotLow: r.rotatePeerRaw,
+		poll:   func() { rc.poll(r.rotatePeerRaw, r.rotateSourceRaw, r.selectedRaw, r.st.pathEpoch) }}
 }
 
 func tcpRig(t *testing.T) *poolRig {
 	t.Helper()
 	b, pp, sp := peerCarrier(t, rigDsts, rigSrcs)
 	return &poolRig{name: "tcp", lowKind: axisDst, highKind: axisSrc, lowRotate: "peer-rotate", low: pp, high: sp, st: b.st, rc: &b.rc,
-		poll: func() { b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.selectedTCP, b.st.pathEpoch) }}
+		rotLow: b.rotateLowTCP,
+		poll:   func() { b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.selectedTCP, b.st.pathEpoch) }}
 }
 
 func wsRig(t *testing.T) *poolRig {
 	t.Helper()
 	b, pp, sp := edgeCarrier(t, rigDsts, snis("front-a", "front-b"))
 	return &poolRig{name: "ws", lowKind: axisIP, highKind: axisSNI, lowRotate: "edge-rotate", low: pp, high: sp, st: b.st, rc: &b.rc,
-		poll: func() { b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.selectedTCP, b.st.pathEpoch) }}
+		rotLow: b.rotateLowTCP,
+		poll:   func() { b.rc.poll(b.rotateLowTCP, b.rotateHighTCP, b.selectedTCP, b.st.pathEpoch) }}
 }
 
 var everyCarrier = []func(*testing.T) *poolRig{udpRig, rawRig, tcpRig, wsRig}
