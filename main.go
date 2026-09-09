@@ -38,10 +38,9 @@ func openTUN(open tunOpener, name string, mtu int, addr string, gso bool, n int)
 
 func tuningFrom(t *TuningCfg) packet.TuningInput {
 	return packet.TuningInput{
-		SuspectBackoff:  t.SuspectBackoff,
-		DeadRetestSecs:  t.DeadRetestSecs,
-		MinLivenessSecs: t.MinLivenessSecs,
-		LadderRevive:    t.LadderRevive,
+		SuspectBackoff: t.SuspectBackoff,
+		DeadRetestSecs: t.DeadRetestSecs,
+		LadderRevive:   t.LadderRevive,
 	}
 }
 

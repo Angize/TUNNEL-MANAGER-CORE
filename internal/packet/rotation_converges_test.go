@@ -182,7 +182,7 @@ func TestNothingWorksAndTheNodeHandsItAllBack(t *testing.T) {
 		}
 		combos := map[string]bool{}
 		for i := 0; i < 12; i++ {
-			b.walkEdge()
+			b.stepEdge()
 			combos[b.edgeAt()] = true
 		}
 		if len(combos) < 2 {

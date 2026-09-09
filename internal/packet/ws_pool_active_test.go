@@ -17,7 +17,7 @@ func TestThePublishedPairIsNotCorruptedByARotationStep(t *testing.T) {
 		t.Fatalf("the connected pair is %s · %s, want %s · %s", low, high, ip0, sni0.host)
 	}
 
-	b.walkEdge()
+	b.stepEdge()
 	ipN, sniN, _ := b.edgeCombo()
 	if ipN == ip0 && sniN.host == sni0.host {
 		t.Fatal("test setup: the rotation step resolved back to the live edge")

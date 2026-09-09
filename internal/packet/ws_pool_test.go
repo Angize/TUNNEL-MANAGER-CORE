@@ -29,7 +29,7 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 		if !ok {
 			t.Fatal("edgeCombo() returned not-ok on a healthy 2-IP pool")
 		}
-		if !b.walkEdge() {
+		if !b.stepEdge() {
 			t.Fatalf("round %d: a healthy 2-IP pool reported no move", round)
 		}
 		if got := b.pp.current(); got == before {
@@ -41,7 +41,7 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 	seenIP, seenSNI := map[string]bool{}, map[string]bool{}
 	for round := 0; round < 8; round++ {
 		before := b2.edgeAt()
-		if !b2.walkEdge() {
+		if !b2.stepEdge() {
 			t.Fatalf("round %d: a healthy 2x2 pool reported no move", round)
 		}
 		ip, sni, ok := b2.edgeCombo()
@@ -65,7 +65,7 @@ func TestARotationMovesOffTheLiveEdgeAndVariesBothAxes(t *testing.T) {
 	b3 := edgeTCP([]string{"a", "b"}, snis("x", "y"), 0)
 	b3.sp.markSuspect("y", "test")
 	for round := 0; round < 4; round++ {
-		b3.walkEdge()
+		b3.stepEdge()
 		if _, sni, _ := b3.edgeCombo(); sni.host != "x" {
 			t.Fatalf("round %d: burned domain y was selected (%q)", round, sni.host)
 		}
@@ -76,7 +76,7 @@ func TestPoolAdvanceReportsRealMove(t *testing.T) {
 
 	b := edgeTCP([]string{"a", "b"}, snis("x", "y"), 0)
 	for i := 0; i < 4; i++ {
-		if !b.walkEdge() {
+		if !b.stepEdge() {
 			t.Fatalf("healthy 2x2 pool: the walk must report a move (step %d)", i)
 		}
 	}
@@ -88,7 +88,7 @@ func TestPoolAdvanceReportsRealMove(t *testing.T) {
 		t.Fatalf("only a is healthy; got ip=%q", ipBefore)
 	}
 	for i := 0; i < 5; i++ {
-		if b2.walkEdge() {
+		if b2.stepEdge() {
 			t.Fatalf("single healthy edge: the walk must report no move (step %d)", i)
 		}
 		if ip := b2.pp.current(); ip != "a" {
@@ -97,12 +97,12 @@ func TestPoolAdvanceReportsRealMove(t *testing.T) {
 	}
 
 	b2.pp.clearBurn("b")
-	if !b2.walkEdge() {
+	if !b2.stepEdge() {
 		t.Fatal("after edge b healed, the walk must report a move again")
 	}
 
 	b3 := edgeTCP([]string{"a"}, snis("x"), 0)
-	if b3.walkEdge() {
+	if b3.stepEdge() {
 		t.Fatal("1x1 pool: the walk must report no move")
 	}
 
@@ -126,7 +126,7 @@ func TestPoolRotatesAllCombos(t *testing.T) {
 			t.Fatal("pool empty unexpectedly")
 		}
 		seen[ip+"|"+sni.host] = true
-		b.walkEdge()
+		b.stepEdge()
 	}
 	for _, want := range []string{"a|x", "a|y", "b|x", "b|y"} {
 		if !seen[want] {
@@ -208,7 +208,7 @@ func TestMarkSuspectPullsFromRotation(t *testing.T) {
 		if ip := b.pp.current(); ip != "b" {
 			t.Fatalf("suspect a must be skipped while b is healthy; got ip=%q", ip)
 		}
-		b.walkEdge()
+		b.stepEdge()
 	}
 }
 
@@ -488,7 +488,7 @@ func TestAdvanceIPAndSNIIndependently(t *testing.T) {
 		t.Fatalf("after one edge step = %s/%s, want b/x (SNI unchanged)", ip1, sni1.host)
 	}
 	// One step varies the EDGE and leaves the domain alone: the edge is the cheap digit.
-	b.walkEdge()
+	b.stepEdge()
 	ip2, sni2, _ := b.edgeCombo()
 	if ip2 != "c" || sni2.host != "x" {
 		t.Fatalf("after one step = %s/%s, want c/x (the domain must not turn until the row is spent)",

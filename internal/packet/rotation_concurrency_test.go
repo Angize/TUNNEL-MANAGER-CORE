@@ -89,7 +89,7 @@ func TestEdgePoolUnderConcurrentDrivers(t *testing.T) {
 	}
 
 	run(func() { b.edgeCombo() })
-	run(func() { b.walkEdge() })
+	run(func() { b.stepEdge() })
 	run(func() { pp.rotateOnce(); pp.restoreAll() })
 	run(func() {
 		if _, high := b.livePairNow(); high != "" {

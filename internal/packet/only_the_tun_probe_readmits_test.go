@@ -14,7 +14,7 @@ func TestAProactiveRotationHandsADueEdgeLiveTraffic(t *testing.T) {
 	}
 	b.pp.markSuspect("e2", "tun-probe")
 
-	if b.walkEdge() {
+	if b.stepEdge() {
 		t.Fatal("e2 is still waiting out its backoff, so there is nowhere to go — reporting a move tears " +
 			"the live connection down every rotation tick for nothing")
 	}
@@ -23,7 +23,7 @@ func TestAProactiveRotationHandsADueEdgeLiveTraffic(t *testing.T) {
 	}
 
 	clk += suspectBackoff[0]
-	if !b.walkEdge() {
+	if !b.stepEdge() {
 		t.Fatal("e2 came due and the rotation still would not go there — a burned edge that is never " +
 			"selected can never be proven to have recovered, so it stays condemned forever")
 	}
@@ -46,7 +46,7 @@ func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 		sp.now = func() int64 { return clk }
 		pp.markSuspect("e2", "tun-probe")
 		clk += suspectBackoff[0]
-		b.walkEdge()
+		b.stepEdge()
 		ip, sni, ok := b.edgeCombo()
 		if !ok || ip != "e2" {
 			t.Fatalf("setup: the try landed on %q", ip)
@@ -74,7 +74,7 @@ func TestOnlyTheTunProbeEndsTheTry(t *testing.T) {
 		b.sp.now = func() int64 { return clk }
 		b.pp.markSuspect("e2", "tun-probe")
 		clk += suspectBackoff[0]
-		b.walkEdge()
+		b.stepEdge()
 
 		if !b.pp.clearBurn("e2") {
 			t.Fatal("the tun probe said data crossed and the pool had nothing to clear")

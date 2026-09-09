@@ -200,3 +200,38 @@ func (b *TCP) tunFailUntilItMoves(t *testing.T, low, high string) bool {
 	}
 	return false
 }
+
+func wsPoolClient(t *testing.T, tag string, hosts []string, addrs ...string) (*TCP, *PeerPool) {
+	t.Helper()
+	const psk = "ws-edge-pool-client-psk-abcdefghi"
+	const cipher = "aes-256-gcm"
+	for i, a := range addrs {
+		dev, _ := tunPair(t, tag+"s"+string(rune('0'+i)))
+		srv, err := ListenWS(a, dev, false, true, psk, cipher, "")
+		if err != nil {
+			t.Fatalf("ListenWS %s: %v", a, err)
+		}
+		go srv.Run()
+		t.Cleanup(func() { srv.Close() })
+	}
+	cliDev, _ := tunPair(t, tag+"c")
+	cli := edgeTCP(addrs, snis(hosts...), 0)
+	cli.dev, cli.cryptoOn, cli.cipher, cli.psk, cli.wsTLS = cliDev, true, cipher, psk, false
+	cli.SetStatusPath(runningStatusPath(t, cli))
+	go cli.Run()
+	t.Cleanup(func() { cli.Close() })
+	return cli, cli.pp
+}
+
+// One step of the edge grid: the low axis first, the high axis when the low one wraps. Production
+// drives both pools through rotateOnce on the rotation clock and on a verdict; this composes the same
+// two calls so a test can take one deterministic step without waiting for either.
+func (b *TCP) stepEdge() bool {
+	at := b.pp.activeIdx()
+	_, moved := b.pp.rotateOnce()
+	if moved && b.pp.activeIdx() > at {
+		return true
+	}
+	_, high := b.sp.rotateOnce()
+	return moved || high
+}

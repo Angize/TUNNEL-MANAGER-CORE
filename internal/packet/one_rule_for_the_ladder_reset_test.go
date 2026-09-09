@@ -42,10 +42,10 @@ func spendTheRungs(t *testing.T, b *TCP) {
 // first tier: the tunnel could climb for an hour and never leave the edge it was stuck on.
 //
 // One rule for every carrier now: the ladder is reset by the node's verdict, or by the operator.
+// Nothing about how long a connection lived is an input any more, so this holds for a connection of
+// any age -- there is no threshold left to tune it against.
 func TestALongLivedConnectionDoesNotResetTheLadder(t *testing.T) {
-	was := minLiveness
-	minLiveness = 150 * time.Millisecond
-	t.Cleanup(func() { minLiveness = was })
+	const lifetime = 600 * time.Millisecond
 
 	cli, _ := wsPoolClient(t, "lrst", []string{"h1"}, freeTCPPort(t))
 	waitFor(t, 20*time.Second, "the client to connect", func() bool { return cli.curConn.Load() != nil })
@@ -60,7 +60,7 @@ func TestALongLivedConnectionDoesNotResetTheLadder(t *testing.T) {
 
 	cc := cli.curConn.Load()
 	born := time.Now()
-	time.Sleep(4 * minLiveness)
+	time.Sleep(lifetime)
 	(*cc).Close()
 	waitFor(t, 20*time.Second, "the carrier to come back", func() bool {
 		c := cli.curConn.Load()
@@ -69,10 +69,9 @@ func TestALongLivedConnectionDoesNotResetTheLadder(t *testing.T) {
 	lived := time.Since(born)
 
 	if got := rungSpent(cli); got != portTries {
-		t.Fatalf("a connection that lived %v (min_liveness is %v) put the rung budget back to %d of %d. "+
-			"Nothing judged that tunnel -- no probe verdict, no operator -- so the climb the node had "+
-			"paid for is gone, and the next outage starts from the bottom again", lived, minLiveness,
-			portTries-got, portTries)
+		t.Fatalf("a connection that lived %v put the rung budget back to %d of %d. Nothing judged that "+
+			"tunnel -- no probe verdict, no operator -- so the climb the node had paid for is gone, "+
+			"and the next outage starts from the bottom again", lived, portTries-got, portTries)
 	}
 }
 
