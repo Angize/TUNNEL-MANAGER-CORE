@@ -343,6 +343,12 @@ func (p *PeerPool) rejectCandidate(prev string) {
 	p.publish()
 }
 
+func (p *PeerPool) condemned(addr string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.health.eligible(addr)
+}
+
 func (p *PeerPool) clearBurn(addr string) bool {
 	p.mu.Lock()
 	cleared := p.health.clear(addr)
@@ -506,6 +512,7 @@ type poolPair interface {
 	burn(kind, key, reason string)
 	pick(kind, key string) bool
 	retest(kind, key string) bool
+	condemned(kind, key string) bool
 }
 
 type walkPolicy struct {
@@ -651,6 +658,11 @@ func (p peerPair) pick(kind, key string) bool {
 func (p peerPair) retest(kind, key string) bool {
 	a := p.axis(kind)
 	return a != nil && key != "" && a.retestNow(key)
+}
+
+func (p peerPair) condemned(kind, key string) bool {
+	a := p.axis(kind)
+	return a != nil && key != "" && a.condemned(key)
 }
 
 func (c *rotationController) active() bool { return c != nil && (c.dst != nil || c.src != nil) }
@@ -859,6 +871,11 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 				"%s · %s — starting over rather than charging this one", liveLow, liveHigh, a.low, a.high)
 			c.restart()
 			c.accused.Store(&pairNow{low: liveLow, high: liveHigh})
+			return false
+		}
+
+		if poolLow, _ := c.pair.live(); cmd.Low != "" && cmd.Low != poolLow &&
+			c.pair.condemned(lowKind, cmd.Low) {
 			return false
 		}
 
