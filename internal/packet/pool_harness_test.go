@@ -88,7 +88,7 @@ func edgeTCP(ips []string, snis []wsSNIEntry, rotate time.Duration) *TCP {
 		meta[s.host] = s
 	}
 	b := &TCP{isClient: true, ws: true, wsTLS: true, wsPath: "/", sniMeta: meta,
-		idle: connIdle, ping: pingEvery, addr: "pool", closeCh: make(chan struct{})}
+		idle: connIdle, ping: pingEvery, addr: "pool", closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
 	b.pp, b.sp = NewPeerPool(ips, rotate), NewPeerPool(hosts, rotate)
 	b.rc.bind(b.pp, b.sp, axisIP, axisSNI)
 	return b
@@ -100,7 +100,7 @@ func (b *TCP) edgeAt() string { return activeLabel(b.pp.current(), b.sp.current(
 // The same for a direct carrier. src may be nil for a destination-only pool.
 func peerCarrier(t *testing.T, dst, src []string) (*TCP, *PeerPool, *PeerPool) {
 	t.Helper()
-	b := &TCP{isClient: true, closeCh: make(chan struct{})}
+	b := &TCP{isClient: true, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
 	b.SetStatusPath(filepath.Join(t.TempDir(), "core.status"))
 	pp := NewPeerPool(dst, 0)
 	b.SetPeerPool(pp)

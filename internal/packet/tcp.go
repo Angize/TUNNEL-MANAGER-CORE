@@ -325,6 +325,7 @@ type TCP struct {
 	attempted atomic.Bool
 	closed    atomic.Bool
 	closeCh   chan struct{}
+	wake      chan struct{}
 	preAuth   chan struct{}
 
 	authMu    sync.Mutex
@@ -459,6 +460,7 @@ func (b *TCP) rotateDestTCP(proactive bool) (addr string, moved bool) {
 	}
 	low, _ := b.axes()
 	b.st.rotated(low.tag, low.detail(addr), proactive)
+	wakeLoop(b.wake)
 	return addr, true
 }
 
@@ -474,6 +476,7 @@ func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
 	_, high := b.axes()
 	log.Printf("core/%s: rotated %s to %s", b.stTag, high.tag, addr)
 	b.st.rotated(high.tag, high.detail(addr), proactive)
+	wakeLoop(b.wake)
 	return addr, true
 }
 
@@ -565,13 +568,13 @@ func canBindSource(ip net.IP) bool {
 func DialTCP(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string) (*TCP, error) {
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		cover: cover, coverSNI: coverSNI,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
+		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
 }
 
 func DialWS(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte) (*TCP, error) {
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
+		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
 }
 
 type WSPoolSNI struct {
@@ -606,7 +609,7 @@ func DialWSPoolCfg(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips
 	}
 	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, sniMeta: meta,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{})}
+		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
 	b.pp = NewPeerPool(ips, rotate)
 	b.sp = NewPeerPool(hosts, rotate)
 	b.rc.bind(b.pp, b.sp, axisIP, axisSNI)
@@ -687,7 +690,7 @@ func (b *TCP) walkEdge() bool {
 func DialHTTPC(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte, httpcMode string) (*TCP, error) {
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, httpc: true, httpcMode: httpcMode, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{})}, nil
+		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
 }
 
 func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string) (*TCP, error) {
@@ -1301,6 +1304,10 @@ func (b *TCP) dialLoop() {
 		if b.closed.Load() {
 			return
 		}
+		select {
+		case <-b.wake:
+		default:
+		}
 		if !b.edgePool() && len(b.readECHCmd()) > 0 {
 			log.Printf("core/ws: live ECH key updated for %s (single edge, no rebuild)", b.wsHost)
 		}
@@ -1308,7 +1315,8 @@ func (b *TCP) dialLoop() {
 		conn, label, combo, err := b.dialCarrier()
 		if err != nil {
 			backoff = nextReconnectDelay(backoff)
-			if b.sleep(backoff) {
+			var stop bool
+			if backoff, stop = b.waitToRedial(backoff); stop {
 				return
 			}
 			continue
@@ -1317,7 +1325,8 @@ func (b *TCP) dialLoop() {
 		if err != nil {
 			conn.Close()
 			backoff = nextReconnectDelay(backoff)
-			if b.sleep(backoff) {
+			var stop bool
+			if backoff, stop = b.waitToRedial(backoff); stop {
 				return
 			}
 			continue
@@ -1390,7 +1399,8 @@ func (b *TCP) dialLoop() {
 
 		if !deliberate {
 			backoff = nextReconnectDelay(backoff)
-			if b.sleep(backoff) {
+			var stop bool
+			if backoff, stop = b.waitToRedial(backoff); stop {
 				return
 			}
 		}
@@ -1665,6 +1675,17 @@ func (b *TCP) recentData() bool {
 		return false
 	}
 	return time.Since(time.Unix(0, last)) < b.ping
+}
+
+func (b *TCP) waitToRedial(backoff time.Duration) (time.Duration, bool) {
+	select {
+	case <-b.closeCh:
+		return backoff, true
+	case <-b.wake:
+		return 0, false
+	case <-time.After(backoff):
+		return backoff, false
+	}
 }
 
 func (b *TCP) sleep(d time.Duration) bool {
