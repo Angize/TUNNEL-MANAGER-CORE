@@ -143,13 +143,6 @@ func (p *rotPerm) at(idx uint64) uint16 {
 	}
 }
 
-func sportBand(lo, hi int) (uint32, uint32) {
-	if lo < MinSportBandLo || hi > 65535 || hi < lo || hi-lo+1 < MinSportBandSpan {
-		lo, hi = SportBandLoDefault, SportBandHiDefault
-	}
-	return uint32(lo), uint32(hi - lo + 1)
-}
-
 type SportRotation struct {
 	Every  int
 	Dports int
@@ -468,55 +461,6 @@ func skip(pkt []byte, n int) ([]byte, bool) {
 		return nil, false
 	}
 	return pkt[n:], true
-}
-
-func sumBytes(b []byte) uint32 {
-	var sum uint64
-	for len(b) >= 8 {
-		v := binary.BigEndian.Uint64(b)
-		sum += v >> 48
-		sum += (v >> 32) & 0xffff
-		sum += (v >> 16) & 0xffff
-		sum += v & 0xffff
-		b = b[8:]
-	}
-	for len(b) >= 2 {
-		sum += uint64(binary.BigEndian.Uint16(b))
-		b = b[2:]
-	}
-	if len(b) == 1 {
-		sum += uint64(b[0]) << 8
-	}
-
-	for sum>>32 != 0 {
-		sum = (sum & 0xffffffff) + (sum >> 32)
-	}
-	return uint32(sum)
-}
-
-func foldComplement(sum uint32) uint16 {
-	for sum>>16 != 0 {
-		sum = (sum & 0xffff) + (sum >> 16)
-	}
-	return ^uint16(sum)
-}
-
-func onesComplementSum(b []byte) uint16 {
-	return foldComplement(sumBytes(b))
-}
-
-func l4Checksum(src, dst net.IP, proto int, l4 []byte) uint16 {
-	s, d := src.To4(), dst.To4()
-	var ph [12]byte
-	if s != nil {
-		copy(ph[0:4], s)
-	}
-	if d != nil {
-		copy(ph[4:8], d)
-	}
-	ph[9] = byte(proto)
-	binary.BigEndian.PutUint16(ph[10:12], uint16(len(l4)))
-	return foldComplement(sumBytes(ph[:]) + sumBytes(l4))
 }
 
 func rawPortOr(port int) uint16 {
