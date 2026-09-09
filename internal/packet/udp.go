@@ -210,21 +210,32 @@ func (b *UDP) rebindSourceTo(addr string) (string, bool) {
 	if ip == nil {
 		return "", false
 	}
-	if err := b.rebind(&net.UDPAddr{IP: ip}); err != nil {
+	if err := b.rebind(ip); err != nil {
 		log.Printf("core/udp: source rebind to %s failed: %v", host, err)
 		return "", false
 	}
 	return host, true
 }
 
-func (b *UDP) rebind(la *net.UDPAddr) error {
+func listenBand(ip net.IP) (*net.UDPConn, error) {
+	var err error
+	for i := 0; i < sportBindTries; i++ {
+		var c *net.UDPConn
+		if c, err = net.ListenUDP("udp", &net.UDPAddr{IP: ip, Port: int(drawSport())}); err == nil {
+			applyConnSockBuf(c)
+			return c, nil
+		}
+	}
+	return nil, err
+}
+
+func (b *UDP) rebind(ip net.IP) error {
 	b.rebindMu.Lock()
 	defer b.rebindMu.Unlock()
-	nc, err := net.ListenUDP("udp", la)
+	nc, err := listenBand(ip)
 	if err != nil {
 		return err
 	}
-	applyConnSockBuf(nc)
 	old := b.conn.Load()
 
 	b.conn.Store(nc)
@@ -244,16 +255,14 @@ func (b *UDP) rollSourcePort() bool {
 	if !ok {
 		return false
 	}
-	for i := 0; i < 8; i++ {
-		p := rollRepairPort()
-		if err := b.rebind(&net.UDPAddr{IP: la.IP, Port: int(p)}); err == nil {
-			log.Printf("core/udp: redrew the source port %d -> %d", la.Port, p)
-			b.st.portRedrawn()
-			wakeLoop(b.wake)
-			return true
-		}
+	if err := b.rebind(la.IP); err != nil {
+		return false
 	}
-	return false
+	now, _ := b.conn.Load().LocalAddr().(*net.UDPAddr)
+	log.Printf("core/udp: redrew the source port %d -> %d", la.Port, now.Port)
+	b.st.portRedrawn()
+	wakeLoop(b.wake)
+	return true
 }
 
 func (b *UDP) dst() *net.UDPAddr {
@@ -384,11 +393,14 @@ func Dial(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher str
 	if err != nil {
 		return nil, err
 	}
-	conn, err := net.ListenUDP("udp", nil)
+	conn, err := listenBand(nil)
 	if err != nil {
-		return nil, err
+		log.Printf("core/udp: no port in the band would bind (%v) — the kernel picks the source port", err)
+		if conn, err = net.ListenUDP("udp", nil); err != nil {
+			return nil, err
+		}
+		applyConnSockBuf(conn)
 	}
-	applyConnSockBuf(conn)
 	b := &UDP{obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, isClient: true, ping: pingEvery,
 		closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
 	b.initQueues(dev, extra)

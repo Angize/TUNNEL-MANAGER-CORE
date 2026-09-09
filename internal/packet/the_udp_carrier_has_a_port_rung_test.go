@@ -90,10 +90,10 @@ func TestTheUdpCarrierRedrawsItsSourcePortBeforeItBurnsAnything(t *testing.T) {
 			t.Fatalf("draw %d did not move the source port off %d", i, p)
 		}
 		seen[p] = true
-		if p < repairPortLo || p > repairPortHi {
-			t.Errorf("draw %d landed on port %d, outside the repair range %d..%d: the measured dead "+
-				"rate is 6.5%% below 47000 and 26%% above it, so a repair draw must stay low",
-				i, p, repairPortLo, repairPortHi)
+		lo, hi := SportBand()
+		if int(p) < lo || int(p) > hi {
+			t.Errorf("draw %d landed on port %d, outside the band %d..%d the tunnel is allowed",
+				i, p, lo, hi)
 		}
 	}
 }
@@ -119,11 +119,51 @@ func TestARedrawnUdpPortIsADifferentSocket(t *testing.T) {
 	}
 }
 
-func TestARepairPortIsDrawnFromTheLowHalf(t *testing.T) {
+// One band for every carrier, and it is the operator's. The default is the same 10000-59999 raw's
+// rotation already used, chosen by the operator on 2026-09-09 over the narrower 32768-46999 the udp
+// repair rung used to hard-code. The cost is on the record: the 2026-08-17 sweep measured 6.5% of
+// ports dead below 47000 and 26% above it, and 26% of this band is above 47000, so a repair draw
+// lands on a dead port about 11.5% of the time instead of 6.5%. A dead draw is invisible -- the port
+// binds, the traffic does not flow -- so it costs the whole rung. An operator on a path with a low
+// ceiling narrows the band on that tunnel.
+func TestOneBandForEveryCarrierAndItIsTheOperators(t *testing.T) {
+	t.Cleanup(func() { SetSportBand(0, 0) })
+
+	if lo, hi := SportBand(); lo != SportBandLoDefault || hi != SportBandHiDefault {
+		t.Fatalf("unset, the band is %d..%d, want the default %d..%d",
+			lo, hi, SportBandLoDefault, SportBandHiDefault)
+	}
 	for i := 0; i < 20000; i++ {
-		p := rollRepairPort()
-		if p < repairPortLo || p > repairPortHi {
-			t.Fatalf("draw %d landed on %d", i, p)
+		if p := drawSport(); int(p) < SportBandLoDefault || int(p) > SportBandHiDefault {
+			t.Fatalf("draw %d landed on %d, outside the default band", i, p)
 		}
+	}
+
+	SetSportBand(20000, 20999)
+	if lo, hi := SportBand(); lo != 20000 || hi != 20999 {
+		t.Fatalf("the band the operator set reads back as %d..%d", lo, hi)
+	}
+	for i := 0; i < 20000; i++ {
+		if p := drawSport(); p < 20000 || p > 20999 {
+			t.Fatalf("draw %d landed on %d, outside the band the operator set", i, p)
+		}
+	}
+
+	SetSportBand(1023, 40000)
+	if lo, hi := SportBand(); lo != SportBandLoDefault || hi != SportBandHiDefault {
+		t.Errorf("a band starting below the privileged floor was taken as %d..%d; core validates the "+
+			"config, but a carrier handed a bad band must still draw from something sane", lo, hi)
+	}
+}
+
+// raw's rotation and every other carrier's repair rung read the SAME band now, so a tunnel that sets
+// one number does not get two different answers depending on which mechanism moves its port.
+func TestTheRotationAndTheRepairShareOneBand(t *testing.T) {
+	t.Cleanup(func() { SetSportBand(0, 0) })
+	SetSportBand(24000, 25999)
+	lo, span := sportBand(24000, 25999)
+	if bLo, bHi := SportBand(); int(lo) != bLo || int(lo+span-1) != bHi {
+		t.Fatalf("the rotation resolves %d..%d and the repair draw %d..%d from the same two numbers",
+			lo, lo+span-1, bLo, bHi)
 	}
 }

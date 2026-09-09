@@ -435,7 +435,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 		if d > connectTimeout {
 			d = connectTimeout
 		}
-		return b.dialer(d).DialContext(ctx, "tcp", dialAddr)
+		return dialFromBand(ctx, func() *net.Dialer { return b.dialer(d) }, dialAddr)
 	}
 
 	var dialedMu sync.Mutex

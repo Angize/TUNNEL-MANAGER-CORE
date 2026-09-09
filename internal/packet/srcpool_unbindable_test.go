@@ -19,8 +19,12 @@ func TestUnusableSourceIsBurnedNotSilentlyIgnored(t *testing.T) {
 	}
 
 	d := b.dialer(time.Second)
-	if d.LocalAddr != nil {
-		t.Fatalf("the dialer bound %v, which the kernel cannot honour", d.LocalAddr)
+	ta, _ := d.LocalAddr.(*net.TCPAddr)
+	if ta == nil {
+		t.Fatal("the dialer has no LocalAddr at all; the source port band is bound on every dial")
+	}
+	if ta.IP != nil {
+		t.Fatalf("the dialer bound source IP %v, which the kernel cannot honour", ta.IP)
 	}
 	if got := b.lastSourceUsed(); got != "" {
 		t.Fatalf("lastSourceUsed reports %q for a dial that applied no bind — a source pin would be released against it", got)

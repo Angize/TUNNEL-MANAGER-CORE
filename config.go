@@ -61,9 +61,9 @@ type Config struct {
 
 	RawDports int `json:"raw_dports"`
 
-	RawSportLo int `json:"raw_sport_lo"`
+	SportLo int `json:"sport_lo"`
 
-	RawSportHi int `json:"raw_sport_hi"`
+	SportHi int `json:"sport_hi"`
 
 	Listen string `json:"listen"`
 
@@ -341,22 +341,6 @@ func (c *Config) validate() error {
 				return errors.New("raw_sport_rotate continuously re-picks the forged source port, so it cannot combine with raw_sport (fixed) or raw_sport_random (rolls once)")
 			}
 		}
-		if c.RawSportLo != 0 || c.RawSportHi != 0 {
-			if c.RawSportRotate == 0 && !c.RawSportRandom {
-				return errors.New("raw_sport_lo/raw_sport_hi bound the band the forged source port is drawn from," +
-					" which only exists while raw_sport_rotate or raw_sport_random moves it")
-			}
-			if c.RawSportLo < packet.MinSportBandLo || c.RawSportHi > 65535 || c.RawSportHi < c.RawSportLo {
-				return fmt.Errorf("raw_sport_lo/raw_sport_hi must be a range inside %d..65535 with lo <= hi"+
-					" (below %d is a privileged port, which a forged carrier has no reason to claim)",
-					packet.MinSportBandLo, packet.MinSportBandLo)
-			}
-			if c.RawSportHi-c.RawSportLo+1 < packet.MinSportBandSpan {
-				return fmt.Errorf("raw_sport_lo..raw_sport_hi spans %d ports; it must span at least %d"+
-					" (a band narrower than that is a fixed port with extra steps, and raw_sport says that plainly)",
-					c.RawSportHi-c.RawSportLo+1, packet.MinSportBandSpan)
-			}
-		}
 		if c.RawDports != 0 {
 			if c.RawSportRotate == 0 {
 				return errors.New("raw_dports spreads the forged DESTINATION port so each source port is worth that many flow-table buckets, which only means something while raw_sport_rotate is cycling the source; set raw_sport_rotate too")
@@ -528,6 +512,18 @@ func (c *Config) validate() error {
 	}
 	if c.PeerRotateSecs < 0 {
 		return errors.New("peer_rotate_secs must be >= 0 (0 = rotate only on a dead peer)")
+	}
+	if c.SportLo != 0 || c.SportHi != 0 {
+		if c.SportLo < packet.MinSportBandLo || c.SportHi > 65535 || c.SportHi < c.SportLo {
+			return fmt.Errorf("sport_lo/sport_hi must be a range inside %d..65535 with lo <= hi"+
+				" (below %d is a privileged port, which no carrier has a reason to claim as a source)",
+				packet.MinSportBandLo, packet.MinSportBandLo)
+		}
+		if c.SportHi-c.SportLo+1 < packet.MinSportBandSpan {
+			return fmt.Errorf("sport_lo..sport_hi spans %d ports; it must span at least %d"+
+				" (a band narrower than that is a fixed port with extra steps)",
+				c.SportHi-c.SportLo+1, packet.MinSportBandSpan)
+		}
 	}
 	if c.TunAddr == "" {
 		return errors.New("tun_addr is required")
