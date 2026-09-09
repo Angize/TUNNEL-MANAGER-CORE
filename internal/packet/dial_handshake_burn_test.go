@@ -5,7 +5,6 @@ package packet
 import (
 	"net"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -34,11 +33,10 @@ func TestDialFailureLeavesTheDirectPoolAlone(t *testing.T) {
 	second := net.JoinHostPort("127.0.0.2", port)
 
 	dev, _ := tunPair(t, "hsburn")
-	dir := t.TempDir()
 	b := &TCP{dev: dev, cryptoOn: true, cipher: "aes-256-gcm", psk: "handshake-burn-psk-abcdefghijkl",
 		idle: connIdle, ping: pingEvery, isClient: true, addr: addr,
 		closeCh: make(chan struct{})}
-	b.SetStatusPath(filepath.Join(dir, "core.json"))
+	b.SetStatusPath(runningStatusPath(t, b))
 	pp := NewPeerPool([]string{addr, second}, 0)
 	b.SetPeerPool(pp)
 	go b.Run()

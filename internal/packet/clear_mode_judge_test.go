@@ -3,7 +3,6 @@ package packet
 import (
 	"fmt"
 	"net"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -27,7 +26,7 @@ func clearModePair(t *testing.T, tag string) (*UDP, *UDP) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	cli.SetStatusPath(filepath.Join(t.TempDir(), "core.json"))
+	cli.SetStatusPath(runningStatusPath(t, cli))
 	go srv.Run()
 	go cli.Run()
 	t.Cleanup(func() { cli.Close(); srv.Close() })
