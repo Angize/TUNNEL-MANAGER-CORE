@@ -7,11 +7,6 @@ import (
 
 func TestFecRejectionNamesTheCarrier(t *testing.T) {
 	build := map[string]func() *Config{
-		"dns": func() *Config {
-			c := validRaw()
-			c.Transport, c.DNSZone, c.DNSResolvers = "dns", "t.example.com", []string{"10.0.0.1"}
-			return c
-		},
 		"tcp": func() *Config {
 			c := validRaw()
 			c.Transport = "tcp"

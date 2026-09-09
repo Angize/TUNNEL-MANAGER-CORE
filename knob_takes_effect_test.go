@@ -65,7 +65,7 @@ func TestSNISplitIsNotClaimedOnACarrierThatDiscardsIt(t *testing.T) {
 	}
 
 	buf.Reset()
-	applySNISplit(struct{}{}, "dns", "", 0, 0)
+	applySNISplit(struct{}{}, "raw", "", 0, 0)
 	out = buf.String()
 	if !strings.Contains(out, "ignores sni_split") {
 		t.Fatalf("a carrier with no SetSNISplit at all must be reported, got %q", out)

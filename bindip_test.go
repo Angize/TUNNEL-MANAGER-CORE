@@ -57,7 +57,7 @@ func TestBindIPReachesEveryCarrierThatCanHonourIt(t *testing.T) {
 	})
 
 	t.Run("a carrier that can fix nothing says so", func(t *testing.T) {
-		if got := sourceMode(&bindsNothing{}, &Config{Role: "client", BindIP: ip, Transport: "dns"}); got != srcUnsupported {
+		if got := sourceMode(&bindsNothing{}, &Config{Role: "client", BindIP: ip}); got != srcUnsupported {
 			t.Fatalf("sourceMode = %q, want %q — silence here is what made this a no-op nobody could see", got, srcUnsupported)
 		}
 	})

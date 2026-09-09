@@ -8,7 +8,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -214,19 +213,6 @@ func main() {
 					tlsTag += " ech"
 				}
 				log.Printf("tnl-core: dialing (core/ws%s%s) %s", obfsTag, tlsTag, cfg.Peer)
-			}
-		}
-	case "dns":
-		switch cfg.Role {
-		case "server":
-			b, err = packet.ListenDNS(dev, cfg.Listen, cfg.DNSZone, cfg.Crypto.PSK, cfg.Crypto.Cipher)
-			if err == nil {
-				log.Printf("tnl-core: listening (core/dns zone=%s) on %s", cfg.DNSZone, cfg.Listen)
-			}
-		case "client":
-			b, err = packet.DialDNS(dev, cfg.DNSResolvers, cfg.DNSZone, cfg.Crypto.PSK, cfg.Crypto.Cipher)
-			if err == nil {
-				log.Printf("tnl-core: dialing (core/dns zone=%s via resolvers %s)", cfg.DNSZone, strings.Join(cfg.DNSResolvers, ", "))
 			}
 		}
 	default:
