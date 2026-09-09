@@ -250,7 +250,7 @@ func TestTheEdgeRotationNeverStopsAfterAJump(t *testing.T) {
 	if ip := b.pp.current(); ip != "e3" {
 		t.Fatalf("the jump did not land: %q", ip)
 	}
-	if !b.walkEdge() {
+	if !b.stepEdge() {
 		t.Fatal("the rotation timer refused to move after a manual jump — the operator asked for a " +
 			"jump, not a hold")
 	}

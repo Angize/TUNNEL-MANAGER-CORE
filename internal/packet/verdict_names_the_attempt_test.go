@@ -32,7 +32,7 @@ func TestTheStatusNamesWhatIsBeingTriedNotTheCursor(t *testing.T) {
 	// The pin is dropped and the pool walks on: the cursor is now somewhere else entirely. The last
 	// attempt is still the honest answer until the next dial replaces it.
 	pp.markSuspect(pinned, "dial")
-	b.walkEdge()
+	b.stepEdge()
 	if cur := pp.current(); cur == pinned {
 		t.Fatal("setup: the pool did not move off the burned edge")
 	}

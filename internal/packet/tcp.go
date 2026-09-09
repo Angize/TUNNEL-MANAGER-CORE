@@ -620,8 +620,6 @@ func DialWSPoolCfg(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips
 
 func (b *TCP) edgePool() bool { return b.ws && b.pp != nil }
 
-func (b *TCP) comboCount() int { return b.pp.size() * b.sp.size() }
-
 type axisNames struct{ tag, prefix string }
 
 func (a axisNames) detail(key string) string { return a.prefix + ":" + key }
@@ -677,16 +675,6 @@ func (b *TCP) edgeCombo() (string, wsSNIEntry, bool) {
 		return "", wsSNIEntry{}, false
 	}
 	return ip, b.sniEntry(host), true
-}
-
-func (b *TCP) walkEdge() bool {
-	at := b.pp.activeIdx()
-	_, moved := b.pp.rotateOnce()
-	if moved && b.pp.activeIdx() > at {
-		return true
-	}
-	_, high := b.sp.rotateOnce()
-	return moved || high
 }
 
 func DialHTTPC(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte, httpcMode string) (*TCP, error) {
@@ -1301,7 +1289,6 @@ func nextReconnectDelay(cur time.Duration) time.Duration {
 func (b *TCP) dialLoop() {
 	backoff := time.Duration(0)
 
-	youngDeaths := 0
 	for {
 		if b.closed.Load() {
 			return
@@ -1335,7 +1322,6 @@ func (b *TCP) dialLoop() {
 		}
 		log.Printf("core/tcp: connected to %s", label)
 		backoff = 0
-		connectedAt := time.Now()
 
 		b.dropWhy.Store(dropNone)
 		b.cur.Store(cf)
@@ -1372,19 +1358,8 @@ func (b *TCP) dialLoop() {
 		cause := ""
 		if !b.closed.Load() {
 			cause = b.takeLastErr()
-			switch why := b.dropWhy.Swap(dropNone); {
-			case why == dropPortRoll, why == dropRotation:
-				deliberate = true
-			case b.pp != nil || b.sp != nil:
-				if time.Since(connectedAt) >= minLiveness {
-					youngDeaths = 0
-				} else if b.edgePool() && youngDeaths < b.comboCount() && b.walkEdge() {
-					if youngDeaths == 0 {
-						b.st.event("down", "edge-walk", "ws")
-					}
-					youngDeaths++
-				}
-			}
+			why := b.dropWhy.Swap(dropNone)
+			deliberate = why == dropPortRoll || why == dropRotation
 		}
 
 		if b.st != nil && !deliberate && !b.closed.Load() {

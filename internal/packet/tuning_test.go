@@ -3,17 +3,15 @@ package packet
 import (
 	"reflect"
 	"testing"
-	"time"
 )
 
 func TestApplyTuning(t *testing.T) {
 	save := struct {
 		sb []int64
 		dr int64
-		ml time.Duration
-	}{suspectBackoff, deadRetest, minLiveness}
+	}{suspectBackoff, deadRetest}
 	defer func() {
-		suspectBackoff, deadRetest, minLiveness = save.sb, save.dr, save.ml
+		suspectBackoff, deadRetest = save.sb, save.dr
 	}()
 
 	ApplyTuning(TuningInput{})
@@ -21,23 +19,12 @@ func TestApplyTuning(t *testing.T) {
 		t.Fatalf("zero input mutated a default: deadRetest=%d backoff=%v", deadRetest, suspectBackoff)
 	}
 
-	ApplyTuning(TuningInput{
-		SuspectBackoff: []int64{5, 10, 20}, DeadRetestSecs: 900,
-		MinLivenessSecs: 12,
-	})
+	ApplyTuning(TuningInput{SuspectBackoff: []int64{5, 10, 20}, DeadRetestSecs: 900})
 	if !reflect.DeepEqual(suspectBackoff, []int64{5, 10, 20}) {
 		t.Errorf("suspectBackoff=%v", suspectBackoff)
 	}
 	if deadRetest != 900 {
 		t.Errorf("health FSM: deadRetest=%d", deadRetest)
-	}
-	if minLiveness != 12*time.Second {
-		t.Errorf("durations: minLiveness=%v", minLiveness)
-	}
-
-	ApplyTuning(TuningInput{MinLivenessSecs: 999999})
-	if minLiveness != 3600*time.Second {
-		t.Errorf("minLiveness not clamped: %v", minLiveness)
 	}
 }
 

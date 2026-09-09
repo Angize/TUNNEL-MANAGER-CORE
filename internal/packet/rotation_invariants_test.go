@@ -174,8 +174,8 @@ func TestBothEdgeAxesHoldTheirInvariantsUnderRandomSequences(t *testing.T) {
 			for step := 1; step <= 120; step++ {
 				switch rng.Intn(11) {
 				case 0:
-					log = append(log, "walkEdge")
-					b.walkEdge()
+					log = append(log, "stepEdge")
+					b.stepEdge()
 				case 1:
 					ip, sni, _ := b.edgeCombo()
 					b.pretendConnected(ip, sni.host)

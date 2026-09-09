@@ -85,7 +85,7 @@ func TestAStaleComboVerdictBurnsTheAxisTheWalkVaries(t *testing.T) {
 				t.Fatal("setup: the edge pools have no combination")
 			}
 			b.pretendConnected(measIP, measSNI.host)
-			if !b.walkEdge() {
+			if !b.stepEdge() {
 				t.Fatal("setup: the pools would not move")
 			}
 

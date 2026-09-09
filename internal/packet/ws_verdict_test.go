@@ -48,7 +48,7 @@ func TestWSFailBurnsWhatItMeasured(t *testing.T) {
 	b := newVerdictPool(t, []string{"e1", "e2"}, []string{"s1", "s2"})
 
 	measuredLow, measuredHigh := b.livePairNow()
-	b.walkEdge()
+	b.stepEdge()
 	ip, sni, _ := b.edgeCombo()
 	b.pretendConnected(ip, sni.host)
 	if ip == measuredLow {
