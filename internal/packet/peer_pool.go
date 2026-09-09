@@ -628,10 +628,13 @@ func (p peerPair) live() (low, high string) {
 }
 
 func (p peerPair) axis(kind string) *PeerPool {
-	if kind == p.highKind {
+	switch kind {
+	case p.highKind:
 		return p.src
+	case p.lowKind:
+		return p.dst
 	}
-	return p.dst
+	return nil
 }
 
 func (p peerPair) keepCursorOn(low, high string) {
