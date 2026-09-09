@@ -1367,21 +1367,13 @@ func (b *TCP) dialLoop() {
 
 		deliberate := false
 
+		cause := ""
 		if !b.closed.Load() {
-			var cause string
-			if b.edgePool() {
-				cause = b.takeLastErr()
-			}
+			cause = b.takeLastErr()
 			switch why := b.dropWhy.Swap(dropNone); {
-			case why == dropPortRoll:
-				deliberate = true
-			case why == dropRotation:
+			case why == dropPortRoll, why == dropRotation:
 				deliberate = true
 			case b.pp != nil || b.sp != nil:
-				if b.edgePool() {
-					b.st.down(classifyErr(cause), label)
-				}
-
 				if time.Since(connectedAt) >= minLiveness {
 					youngDeaths = 0
 				} else if b.edgePool() && youngDeaths < b.comboCount() && b.walkEdge() {
@@ -1394,7 +1386,7 @@ func (b *TCP) dialLoop() {
 		}
 
 		if b.st != nil && !deliberate && !b.closed.Load() {
-			b.st.down(classifyErr(b.takeLastErr()), label)
+			b.st.down(classifyErr(cause), label)
 		}
 
 		if !deliberate {
