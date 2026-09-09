@@ -30,13 +30,6 @@ func init() {
 	}
 }
 
-func gmul(a, b byte) byte {
-	if a == 0 || b == 0 {
-		return 0
-	}
-	return gfExp[int(gfLog[a])+int(gfLog[b])]
-}
-
 func gdiv(a, b byte) byte {
 	if a == 0 {
 		return 0

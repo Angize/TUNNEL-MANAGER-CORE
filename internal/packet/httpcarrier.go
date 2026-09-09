@@ -841,16 +841,6 @@ func (s *httpcSession) close(b *TCP, sid string) {
 	})
 }
 
-func newHTTPCServerConn(w http.ResponseWriter, rd io.Reader, wr io.Writer, flush func(), remote string, closeFn func()) *httpcConn {
-	return &httpcConn{
-		r: rd, w: wr, flush: flush,
-		setWD:   http.NewResponseController(w).SetWriteDeadline,
-		ra:      strAddr(remote),
-		la:      strAddr("http-server"),
-		closeFn: closeFn,
-	}
-}
-
 func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request, sid string) {
 	fl, ok := w.(http.Flusher)
 	if !ok {

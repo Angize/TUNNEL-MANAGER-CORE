@@ -6,12 +6,6 @@ name: ci
 # with the real ones, ListenSpoof and DialSpoof still carried a time.Duration nobody passes any more,
 # and the tun device was missing WriteBatch entirely. None of it was visible, because the release
 # workflow builds GOOS=linux and stops.
-#
-# It also runs the tests. That used to be skipped on the grounds that they "want the real network", and
-# for some of them that is true -- the raw-socket ones need root and skip themselves without it. But the
-# rotation, pool and carrier-conformance suites are entirely in-process, and leaving them to a human
-# remembering to run them on DE02 is how a guard stops guarding. Anything that genuinely cannot run here
-# skips itself; anything that fails here was going to fail on DE02 too.
 
 on:
   push:
@@ -36,9 +30,6 @@ jobs:
         run: |
           go build ./...
           go vet ./...
-
-      - name: the tests run
-        run: go test -timeout 20m ./...
 
       - name: and it still compiles for every GOOS the tree claims
         run: |

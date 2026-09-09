@@ -53,15 +53,6 @@ func GenerateEphemeral() (*Ephemeral, error) {
 	return e, nil
 }
 
-func GenerateEphemeralNoPad() (*Ephemeral, error) {
-	e, err := GenerateEphemeral()
-	if err != nil {
-		return nil, err
-	}
-	e.padLen = 0
-	return e, nil
-}
-
 func hsMACKey(psk string) []byte {
 	k := sha256.Sum256([]byte("tnl-core|v2|hs-mac|" + psk))
 	return k[:]
