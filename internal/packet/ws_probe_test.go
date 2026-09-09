@@ -11,6 +11,56 @@ type wsRawReq struct {
 	path, upgrade, connection, version, key string
 }
 
+// The rejections carry a Date header, so they are only byte-identical when every probe in the loop
+// lands inside the same wall-clock second. Nine sequential dials do on an idle box and did not on a
+// loaded CI runner: the test failed on «Date: ...00:16:25 GMT» against «...00:16:24 GMT» with every
+// other byte the same, which reads as a security finding and is a stopwatch.
+//
+// A ticking clock is not an oracle. It says nothing about WHICH request was rejected, and an observer
+// watching the origin sees it move whatever they send. So the VALUE is excused and nothing else is:
+// the header still has to be present, in the same position, in all of them, and any other line that
+// varies still fails -- naming the line, which the old whole-string comparison did not.
+// The excuse has to stay narrow, or the oracle check above is toothless: everything that is not the
+// Date VALUE still counts, including a Date header present on one side and missing on the other.
+func TestOnlyTheClockIsExcusedWhenTheRejectionsAreCompared(t *testing.T) {
+	const base = "HTTP/1.1 404 Not Found\r\nDate: Wed, 09 Sep 2026 00:16:24 GMT\r\nServer: nginx\r\n\r\n"
+	for _, c := range []struct{ name, other, want string }{
+		{"a later clock is the same rejection",
+			"HTTP/1.1 404 Not Found\r\nDate: Wed, 09 Sep 2026 00:16:25 GMT\r\nServer: nginx\r\n\r\n", ""},
+		{"a different server banner is not",
+			"HTTP/1.1 404 Not Found\r\nDate: Wed, 09 Sep 2026 00:16:24 GMT\r\nServer: caddy\r\n\r\n",
+			"Server: nginx"},
+		{"a different status line is not",
+			"HTTP/1.1 400 Bad Request\r\nDate: Wed, 09 Sep 2026 00:16:24 GMT\r\nServer: nginx\r\n\r\n",
+			"HTTP/1.1 404 Not Found"},
+		{"a Date header on one side only is not",
+			"HTTP/1.1 404 Not Found\r\nServer: nginx\r\n\r\n", "a different number of header lines"},
+		{"an extra header is not",
+			"HTTP/1.1 404 Not Found\r\nDate: Wed, 09 Sep 2026 00:16:24 GMT\r\nServer: nginx\r\n" +
+				"X-Cache: MISS\r\n\r\n", "a different number of header lines"},
+	} {
+		if got := firstDifferenceThatIsNotTheClock(base, c.other); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func firstDifferenceThatIsNotTheClock(a, b string) string {
+	la, lb := strings.Split(a, "\r\n"), strings.Split(b, "\r\n")
+	if len(la) != len(lb) {
+		return "a different number of header lines"
+	}
+	for i := range la {
+		if strings.HasPrefix(la[i], "Date: ") && strings.HasPrefix(lb[i], "Date: ") {
+			continue
+		}
+		if la[i] != lb[i] {
+			return la[i]
+		}
+	}
+	return ""
+}
+
 func ours(p string) wsRawReq {
 	return wsRawReq{path: p, upgrade: "websocket", connection: "Upgrade", version: "13",
 		key: "dGhlIHNhbXBsZSBub25jZQ=="}
@@ -113,7 +163,7 @@ func TestWSServerAnswers101OnlyForAWellFormedUpgradeOnItsOwnPath(t *testing.T) {
 			func() wsRawReq { r := ours(secret); r.connection = ""; return r }()},
 		{"a plain browser GET", wsRawReq{path: secret}},
 	}
-	var seen string
+	var seen, seenName string
 	for _, c := range reject {
 		raw, err := wsProbe(t, secret, c.req)
 		if err != errNotWS {
@@ -127,10 +177,10 @@ func TestWSServerAnswers101OnlyForAWellFormedUpgradeOnItsOwnPath(t *testing.T) {
 		}
 
 		if seen == "" {
-			seen = raw
-		} else if raw != seen {
-			t.Fatalf("%s: rejection response differs from the others (%q vs %q) — the reason is an oracle",
-				c.name, raw, seen)
+			seen, seenName = raw, c.name
+		} else if line := firstDifferenceThatIsNotTheClock(raw, seen); line != "" {
+			t.Fatalf("%s: its rejection differs from the one for %q, on %q (%q vs %q) — the reason "+
+				"is an oracle", c.name, seenName, line, raw, seen)
 		}
 	}
 }
