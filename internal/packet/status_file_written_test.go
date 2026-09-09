@@ -3,14 +3,12 @@ package packet
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestEveryStatusPathCarrierWritesItsFile(t *testing.T) {
 	const psk = "e2e-shared-pre-shared-key-1234567890"
-	dir := t.TempDir()
 
 	read := func(path string) (active string, ts int64, ok bool) {
 		b, err := os.ReadFile(path)
@@ -33,11 +31,9 @@ func TestEveryStatusPathCarrierWritesItsFile(t *testing.T) {
 		Close() error
 	}
 
-	udpAddr, dnsAddr := freeUDPPort(t), freeUDPPort(t)
+	udpAddr := freeUDPPort(t)
 	srvDev, _ := tunPair(t, "sfwus")
 	cliDev, _ := tunPair(t, "sfwuc")
-	dnsSrvDev, _ := tunPair(t, "sfwds")
-	dnsCliDev, _ := tunPair(t, "sfwdc")
 
 	usrv, err := Listen([]string{udpAddr}, srvDev, false, true, psk, "aes-256-gcm", false, 0, 0)
 	if err != nil {
@@ -47,14 +43,6 @@ func TestEveryStatusPathCarrierWritesItsFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	dsrv, err := ListenDNS(dnsSrvDev, dnsAddr, "t.example.com", psk, "aes-256-gcm")
-	if err != nil {
-		t.Fatalf("ListenDNS: %v", err)
-	}
-	dcli, err := DialDNS(dnsCliDev, []string{dnsAddr}, "t.example.com", psk, "aes-256-gcm")
-	if err != nil {
-		t.Fatalf("DialDNS: %v", err)
-	}
 
 	cases := []struct {
 		name   string
@@ -62,16 +50,14 @@ func TestEveryStatusPathCarrierWritesItsFile(t *testing.T) {
 		want   string
 		status string
 	}{
-		{"udp server", usrv, "udp", filepath.Join(dir, "usrv.status")},
-		{"udp client", ucli, "udp", filepath.Join(dir, "ucli.status")},
-		{"dns client", dcli, "dns · t.example.com", filepath.Join(dir, "dcli.status")},
+		{"udp server", usrv, "udp", runningStatusPath(t, usrv)},
+		{"udp client", ucli, "udp", runningStatusPath(t, ucli)},
 	}
 	for _, tc := range cases {
 		tc.c.SetStatusPath(tc.status)
 	}
-	for _, c := range []carrier{usrv, ucli, dsrv, dcli} {
+	for _, c := range []carrier{usrv, ucli} {
 		go c.Run()
-		t.Cleanup(func() { c.Close() })
 	}
 
 	for _, tc := range cases {

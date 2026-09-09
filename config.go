@@ -65,9 +65,6 @@ type Config struct {
 
 	RawSportHi int `json:"raw_sport_hi"`
 
-	DNSZone      string   `json:"dns_zone"`
-	DNSResolvers []string `json:"dns_resolvers"`
-
 	Listen string `json:"listen"`
 
 	ListenIPs []string `json:"listen_ips"`
@@ -276,7 +273,7 @@ func (c *Config) validate() error {
 			}
 		}
 	case "client":
-		if c.Transport != "dns" && c.Peer == "" && len(c.PeerIPs) == 0 {
+		if c.Peer == "" && len(c.PeerIPs) == 0 {
 			return errors.New("client role requires \"peer\" (or a peer_ips rotation pool)")
 		}
 	default:
@@ -370,16 +367,6 @@ func (c *Config) validate() error {
 		}
 		if !c.Crypto.Enabled {
 			return errors.New("raw transport requires crypto enabled (the AEAD both encrypts and authenticates each raw packet)")
-		}
-	case "dns":
-		if !c.Crypto.Enabled {
-			return errors.New("dns transport requires crypto enabled (the session handshake and every datagram are AEAD-authenticated)")
-		}
-		if c.DNSZone == "" {
-			return errors.New("dns transport requires dns_zone (the delegated zone whose authoritative NS is the server)")
-		}
-		if c.Role == "client" && len(c.DNSResolvers) == 0 {
-			return errors.New("dns client requires at least one dns_resolvers entry (a recursive resolver to query)")
 		}
 	case "ws":
 		if c.WSTLS && c.Role == "client" && c.WSHost == "" && len(c.WSEdgeIPs) == 0 {
@@ -478,7 +465,7 @@ func (c *Config) validate() error {
 			}
 		}
 	default:
-		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", \"ws\", or \"dns\"")
+		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", or \"ws\"")
 	}
 
 	if len(c.PeerIPs) > 0 {
@@ -552,9 +539,6 @@ func (c *Config) validate() error {
 		return errors.New("obfs requires crypto enabled")
 	}
 
-	if c.Obfs && c.Transport == "dns" {
-		return errors.New("obfs is not supported on the dns transport (the DNS carrier has no obfs framing)")
-	}
 	if c.Fec {
 		switch c.Transport {
 		case "", "udp", "raw":

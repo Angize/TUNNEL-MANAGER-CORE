@@ -202,12 +202,8 @@ func TestListenIPsRejectedWhereItIsIgnored(t *testing.T) {
 			Listen: "0.0.0.0:9000", TunAddr: "10.200.0.1/24", Crypto: psk,
 		}
 	}
-	for _, tr := range []string{"raw", "ws", "dns"} {
+	for _, tr := range []string{"raw", "ws"} {
 		c := srv(tr)
-		switch tr {
-		case "dns":
-			c.DNSZone = "t.example.com"
-		}
 		if err := c.validate(); err != nil {
 			t.Fatalf("%s: base server config is not valid, so this case proves nothing: %v", tr, err)
 		}
@@ -436,47 +432,9 @@ func TestSrcIPsValidation(t *testing.T) {
 	}
 }
 
-func validDNSClient() *Config {
-	return &Config{
-		Role:         "client",
-		Mode:         "packet",
-		Profile:      "core",
-		Transport:    "dns",
-		TunAddr:      "10.200.0.2/24",
-		DNSZone:      "t.example.com",
-		DNSResolvers: []string{"10.202.10.202"},
-		Crypto:       CryptoCfg{Enabled: true, PSK: "a-sufficiently-long-preshared-key"},
-	}
-}
-
-func TestDNSTransportValidation(t *testing.T) {
-	if err := validDNSClient().validate(); err != nil {
-		t.Fatalf("valid dns client rejected: %v", err)
-	}
-
-	s := validDNSClient()
-	s.Role, s.DNSResolvers, s.Listen = "server", nil, ":53"
-	if err := s.validate(); err != nil {
-		t.Fatalf("valid dns server rejected: %v", err)
-	}
-
-	for name, mut := range map[string]func(*Config){
-		"no zone":      func(c *Config) { c.DNSZone = "" },
-		"no resolvers": func(c *Config) { c.DNSResolvers = nil },
-		"crypto off":   func(c *Config) { c.Crypto.Enabled = false },
-	} {
-		c := validDNSClient()
-		mut(c)
-		if err := c.validate(); err == nil {
-			t.Errorf("%s: dns config accepted but should be rejected", name)
-		}
-	}
-}
-
 func TestTheCarriersWithNoClearModeRefuseCryptoOff(t *testing.T) {
 	for name, c := range map[string]*Config{
 		"raw": validRaw(),
-		"dns": validDNSClient(),
 	} {
 		if err := c.validate(); err != nil {
 			t.Fatalf("%s: the baseline config is already invalid (%v) — the case below would prove nothing", name, err)

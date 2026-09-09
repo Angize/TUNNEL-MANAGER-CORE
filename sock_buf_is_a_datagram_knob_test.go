@@ -26,7 +26,7 @@ func TestSockBufSaysNothingToTheCarriersThatReadIt(t *testing.T) {
 }
 
 func TestSockBufWarnsTheCarriersThatIgnoreIt(t *testing.T) {
-	for _, transport := range []string{"tcp", "ws", "dns"} {
+	for _, transport := range []string{"tcp", "ws"} {
 		note := sockBufNote(transport, 4<<20)
 		if note == "" {
 			t.Errorf("transport %q ignores sock_buf silently; the operator raises the number, sees no "+
@@ -46,7 +46,7 @@ func TestSockBufWarnsTheCarriersThatIgnoreIt(t *testing.T) {
 
 // Zero means unset, and an unset knob is not worth a line on any carrier.
 func TestAnUnsetSockBufWarnsNobody(t *testing.T) {
-	for _, transport := range []string{"", "udp", "raw", "tcp", "ws", "dns"} {
+	for _, transport := range []string{"", "udp", "raw", "tcp", "ws"} {
 		if note := sockBufNote(transport, 0); note != "" {
 			t.Errorf("transport %q was warned about a knob that is not set: %q", transport, note)
 		}
