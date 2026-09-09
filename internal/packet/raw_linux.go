@@ -576,10 +576,6 @@ func nextIPID() uint16 {
 	return uint16(ipIDCounter.Add(1))
 }
 
-func buildIP4(src, dst net.IP, proto int, payload []byte) []byte {
-	return buildIP4Ext(src, dst, proto, 64, false, payload)
-}
-
 func buildIP4Ext(src, dst net.IP, proto, ttl int, badSum bool, payload []byte) []byte {
 	if len(payload) > 0xffff-20 {
 		return nil
@@ -1463,8 +1459,6 @@ func (r *Raw) send(typ byte, payload []byte, to *net.IPAddr) {
 		return
 	}
 	r.writeCtrl(body, to)
-	if typ == typePing {
-	}
 }
 
 func routeLocalIP(peer net.IP) net.IP {
