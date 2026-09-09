@@ -3,7 +3,6 @@ package packet
 import (
 	"bytes"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -107,7 +106,7 @@ func TestUDPFecDecoderResetAfterServerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	cli.SetStatusPath(filepath.Join(t.TempDir(), "core.json"))
+	cli.SetStatusPath(runningStatusPath(t, cli))
 	go srv1.Run()
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })

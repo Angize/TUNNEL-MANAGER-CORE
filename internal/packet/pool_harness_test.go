@@ -33,8 +33,7 @@ func probePair(t *testing.T, tag string, extra ...string) (cli, srv *UDP, a1, a2
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	dir := t.TempDir()
-	cli.SetStatusPath(filepath.Join(dir, "core.json"))
+	cli.SetStatusPath(runningStatusPath(t, cli))
 	cli.SetPeerPool(NewPeerPool(append([]string{a1, a2}, extra...), 0))
 	go srv.Run()
 	go cli.Run()

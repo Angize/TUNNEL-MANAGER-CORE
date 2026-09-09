@@ -3,7 +3,6 @@ package packet
 import (
 	"fmt"
 	"net"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -29,8 +28,7 @@ func sourcedPair(t *testing.T, tag string) (cli *UDP, dst, src *PeerPool) {
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	dir := t.TempDir()
-	cli.SetStatusPath(filepath.Join(dir, "core.json"))
+	cli.SetStatusPath(runningStatusPath(t, cli))
 	dst = NewPeerPool([]string{a1, a2}, 0)
 	src = NewPeerPool([]string{"127.0.0.1", "127.0.0.2"}, 0)
 	cli.SetPeerPool(dst)
@@ -78,7 +76,7 @@ func TestTheTimedRotationRunsWhileThereIsNoSession(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	dst := NewPeerPool([]string{"127.0.0.1:9", "127.0.0.2:9"}, time.Second)
-	cli.SetStatusPath(filepath.Join(t.TempDir(), "core.json"))
+	cli.SetStatusPath(runningStatusPath(t, cli))
 	cli.SetPeerPool(dst)
 	go cli.Run()
 	t.Cleanup(func() { cli.Close() })
