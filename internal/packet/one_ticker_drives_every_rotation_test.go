@@ -55,6 +55,26 @@ func tickStatus(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "core.status")
 }
 
+// The poll goroutine writes the status file on every tick, and t.TempDir() deletes the directory it
+// writes into. Closing closeCh only ASKS it to stop, so the removal can land while a write is in
+// flight -- «TempDir RemoveAll cleanup: directory not empty», seen once in CI on a commit whose other
+// build of the same tree passed. Cleanups run last-registered-first, and tickStatus has already
+// registered the removal by the time this does, so waiting here provably drains the writer first.
+func tickRunner(t *testing.T, closeCh chan struct{}, loop func()) func() {
+	t.Helper()
+	done, started := make(chan struct{}), false
+	t.Cleanup(func() {
+		close(closeCh)
+		if started {
+			<-done
+		}
+	})
+	return func() {
+		started = true
+		go func() { defer close(done); loop() }()
+	}
+}
+
 func buildTickUDP(t *testing.T) (*PeerPool, func()) {
 	t.Helper()
 	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -68,8 +88,7 @@ func buildTickUDP(t *testing.T) (*PeerPool, func()) {
 	b.soloPeer.Store(&net.UDPAddr{IP: net.IPv4(198, 51, 100, 1), Port: 5555})
 	b.SetPeerPool(NewPeerPool(rigDsts, 2*time.Second))
 	rc := b.newController()
-	t.Cleanup(func() { close(b.closeCh) })
-	return b.pp, func() { go b.cmdPollLoop(rc) }
+	return b.pp, tickRunner(t, b.closeCh, func() { b.cmdPollLoop(rc) })
 }
 
 func buildTickRaw(t *testing.T) (*PeerPool, func()) {
@@ -80,8 +99,7 @@ func buildTickRaw(t *testing.T) (*PeerPool, func()) {
 	r.SetPeerPool(NewPeerPool(rigDsts, 2*time.Second))
 	rc := newRotationController(r.pp, r.sp)
 	rc.attachStatus(r.st)
-	t.Cleanup(func() { close(r.closeCh) })
-	return r.pp, func() { go r.cmdPollLoop(rc) }
+	return r.pp, tickRunner(t, r.closeCh, func() { r.cmdPollLoop(rc) })
 }
 
 func buildTickTCP(t *testing.T) (*PeerPool, func()) {
@@ -89,14 +107,12 @@ func buildTickTCP(t *testing.T) (*PeerPool, func()) {
 	b := &TCP{isClient: true, closeCh: make(chan struct{})}
 	b.SetStatusPath(tickStatus(t))
 	b.SetPeerPool(NewPeerPool(rigDsts, 2*time.Second))
-	t.Cleanup(func() { close(b.closeCh) })
-	return b.pp, func() { go runCmdPoll(b.closeCh, b.cmdPollTick) }
+	return b.pp, tickRunner(t, b.closeCh, func() { runCmdPoll(b.closeCh, b.cmdPollTick) })
 }
 
 func buildTickWS(t *testing.T) (*PeerPool, func()) {
 	t.Helper()
 	b := edgeTCP(rigDsts, snis("front-a", "front-b"), 2*time.Second)
 	b.SetStatusPath(tickStatus(t))
-	t.Cleanup(func() { close(b.closeCh) })
-	return b.pp, func() { go runCmdPoll(b.closeCh, b.cmdPollTick) }
+	return b.pp, tickRunner(t, b.closeCh, func() { runCmdPoll(b.closeCh, b.cmdPollTick) })
 }
