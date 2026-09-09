@@ -138,11 +138,12 @@ func TestTheBandAndTheSpreadHaveTheirOwnPreconditions(t *testing.T) {
 	band := func(lo, hi int) *Config {
 		c := validRaw()
 		c.RawProfile = "tcp"
-		c.RawSportLo, c.RawSportHi = lo, hi
+		c.SportLo, c.SportHi = lo, hi
 		return c
 	}
-	if err := band(10000, 44999).validate(); err == nil {
-		t.Error("a band with the source port standing still was accepted")
+	if err := band(10000, 44999).validate(); err != nil {
+		t.Errorf("a band on a carrier whose source port only moves on the repair rung was rejected: %v."+
+			" Every carrier draws its source port from this band now, so it always means something", err)
 	}
 	c := band(10000, 44999)
 	c.RawSportRandom = true

@@ -70,6 +70,11 @@ func main() {
 
 	packet.SetSockBuf(cfg.SockBuf)
 	packet.SetPortTries(cfg.PortTries)
+	packet.SetSportBand(cfg.SportLo, cfg.SportHi)
+	if cfg.SportLo != 0 || cfg.SportHi != 0 {
+		lo, hi := packet.SportBand()
+		log.Printf("tnl-core: source ports are drawn from %d-%d", lo, hi)
+	}
 	if note := sockBufNote(cfg.Transport, cfg.SockBuf); note != "" {
 		log.Print(note)
 	}
@@ -147,12 +152,12 @@ func main() {
 	case "raw":
 		switch cfg.Role {
 		case "server":
-			b, err = packet.ListenRaw(cfg.Listen, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports, Lo: cfg.RawSportLo, Hi: cfg.RawSportHi}, devs[1:]...)
+			b, err = packet.ListenRaw(cfg.Listen, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports, Lo: cfg.SportLo, Hi: cfg.SportHi}, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/raw:%s%s%s) on %s", cfg.RawProfile, obfsTag, fecTag, cfg.Listen)
 			}
 		case "client":
-			b, err = packet.DialRaw(cfg.Peer, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports, Lo: cfg.RawSportLo, Hi: cfg.RawSportHi}, devs[1:]...)
+			b, err = packet.DialRaw(cfg.Peer, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports, Lo: cfg.SportLo, Hi: cfg.SportHi}, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/raw:%s%s%s) %s", cfg.RawProfile, obfsTag, fecTag, cfg.Peer)
 			}

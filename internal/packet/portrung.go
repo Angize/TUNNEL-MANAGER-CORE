@@ -8,13 +8,6 @@ var portTries = 2
 
 const maxPortTries = 60
 
-const (
-	repairPortLo = 32768
-	repairPortHi = 46999
-)
-
-func rollRepairPort() uint16 { return randPort(repairPortLo, repairPortHi-repairPortLo+1) }
-
 func SetPortTries(n int) {
 	if n <= 0 {
 		return

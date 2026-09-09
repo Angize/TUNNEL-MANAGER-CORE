@@ -51,8 +51,14 @@ func TestDialerAcceptsSourceWithPort(t *testing.T) {
 			t.Errorf("source %q: bound %v, want 127.0.0.1", src, ta.IP)
 		}
 
-		if ta.Port != 0 {
-			t.Errorf("source %q: bound port %d, want 0 (a source entry's port is not a bind port)", src, ta.Port)
+		lo, hi := SportBand()
+		if int(ta.Port) < lo || int(ta.Port) > hi {
+			t.Errorf("source %q: bound port %d, outside the band %d..%d. The port a source entry carries "+
+				"is NOT a bind port -- 8080 there names the source, and the port the carrier binds is a "+
+				"draw from the operator's band", src, ta.Port, lo, hi)
+		}
+		if ta.Port == 8080 {
+			t.Errorf("source %q: the entry's own port became the bind port", src)
 		}
 	}
 }
@@ -64,8 +70,9 @@ func TestDialerNeverDropsASourceInSilence(t *testing.T) {
 		restore := captureSrcLog(&sink)
 		d := (&TCP{isClient: true, bindIP: src}).dialer(time.Second)
 		restore()
-		if d.LocalAddr != nil {
-			t.Errorf("source %q: bound %v, but it is not a usable address", src, d.LocalAddr)
+		if ta, _ := d.LocalAddr.(*net.TCPAddr); ta == nil || ta.IP != nil {
+			t.Errorf("source %q: bound %v, but it is not a usable address. The port is always the "+
+				"band's; the IP is only ever a source the kernel can honour", src, d.LocalAddr)
 		}
 		out := sink.String()
 		if out == "" {
@@ -81,8 +88,8 @@ func TestDialerNeverDropsASourceInSilence(t *testing.T) {
 	restore := captureSrcLog(&sink)
 	d := (&TCP{isClient: true}).dialer(time.Second)
 	restore()
-	if d.LocalAddr != nil {
-		t.Errorf("an unset source bound %v", d.LocalAddr)
+	if ta, _ := d.LocalAddr.(*net.TCPAddr); ta == nil || ta.IP != nil {
+		t.Errorf("an unset source bound %v, want a band port on no particular address", d.LocalAddr)
 	}
 	if out := sink.String(); out != "" {
 		t.Errorf("an unset source logged: %q", out)

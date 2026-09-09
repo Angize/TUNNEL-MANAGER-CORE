@@ -535,7 +535,9 @@ func (b *TCP) SetStatusPath(path string) {
 }
 
 func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
-	d := &net.Dialer{Timeout: timeout}
+	d := &net.Dialer{Timeout: timeout, Control: reuseAddr}
+	sport := int(drawSport())
+	d.LocalAddr = &net.TCPAddr{Port: sport}
 	src := b.sourceIP()
 	prev := b.lastSourceUsed()
 
@@ -551,7 +553,7 @@ func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
 		}
 		return d
 	}
-	d.LocalAddr = &net.TCPAddr{IP: ip}
+	d.LocalAddr = &net.TCPAddr{IP: ip, Port: sport}
 	b.lastSrc.Store(&src)
 	return d
 }
@@ -1028,7 +1030,7 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 			log.Printf("core/ws: ECH-SELFHEAL[reactive/in-band] for %s (%s) — stale key rejected, retrying with fresh key %s",
 				host, dialAddr, base64.StdEncoding.EncodeToString(ech))
 			healed = true
-			if conn, err = b.dialer(budget).Dial("tcp", dialAddr); err != nil {
+			if conn, err = b.dialBand(budget, dialAddr); err != nil {
 				return nil, err
 			}
 
@@ -1186,7 +1188,7 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 		host = dialAddr
 	}
 	b.noteAttempt(dialAddr, host)
-	conn, err := b.dialer(connectTimeout).Dial("tcp", dialAddr)
+	conn, err := b.dialBand(connectTimeout, dialAddr)
 	if err != nil {
 		return nil, dialAddr, "", err
 	}
@@ -1425,7 +1427,7 @@ func (b *TCP) dialCarrier() (net.Conn, string, string, error) {
 	}
 	target := b.dialTarget()
 	b.noteAttempt(target, b.sourceIP())
-	c, err := b.dialer(connectTimeout).Dial("tcp", target)
+	c, err := b.dialBand(connectTimeout, target)
 	if err != nil {
 		log.Printf("core/tcp: dial %s failed: %v", target, err)
 		return nil, target, "", err
