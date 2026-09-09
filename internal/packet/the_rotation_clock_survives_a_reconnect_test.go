@@ -20,7 +20,7 @@ import (
 //
 // The two ends of this test are one listener with two addresses and a client whose pool holds both, so
 // the ONLY thing that can move the pool is the scheduled tick: nothing here writes a verdict, and a
-// disconnect on its own never walks a direct pool -- only rotationLoop and rc.poll ever call into it.
+// disconnect on its own never walks a direct pool -- only the one-second cmdPollTick calls into it.
 func TestTheScheduledRotationSurvivesAChurningCarrier(t *testing.T) {
 	const psk = "a-psk-for-the-rotation-clock"
 	const cipher = "aes-256-gcm"
@@ -80,35 +80,52 @@ func TestTheScheduledRotationSurvivesAChurningCarrier(t *testing.T) {
 	t.Logf("14s of 700ms churn, 3s interval: %d rotations", moves)
 }
 
-// The arithmetic on its own, so a future edit that keeps the deadline but re-arms it in the wrong place
-// is caught without a 14-second test. rotateDue is a pure predicate over an injected clock, so every
-// case below is the production line the ticker calls, not a stand-in for it. The interval itself is no
-// longer a field on the carrier: it lives on the pool, and rotateEvery() is what the ticker reads.
+// The arithmetic on its own, so a future edit that keeps the deadline but re-arms it in the wrong
+// place is caught without a 14-second test. There is one clock for every carrier now: bind() arms
+// rotationController.rotateAt from the pool's own interval, and proactive() is the production line the
+// ticker calls with an injected `now`, not a stand-in for it.
 func TestARotationDeadlineIsNotRestartedByArming(t *testing.T) {
-	b := &TCP{isClient: true}
-	b.pp = NewPeerPool([]string{"d1", "d2"}, time.Minute)
-	iv := b.rotateEvery()
-	if iv != time.Minute {
-		t.Fatalf("rotateEvery() = %v, want the minute the pool was built with", iv)
-	}
+	rc := newRotationController(NewPeerPool([]string{"d1", "d2"}, time.Minute), nil)
+	fired := 0
+	rot := func(bool) { fired++ }
 	t0 := time.Now()
 
-	if b.rotateDue(iv, t0) {
+	rc.proactive(rot, rot, t0)
+	if fired != 0 {
 		t.Fatal("the first tick came due immediately; arming must put the deadline a whole interval out")
 	}
-	if b.rotateDue(iv, t0.Add(59*time.Second)) {
+	rc.proactive(rot, rot, t0.Add(59*time.Second))
+	if fired != 0 {
 		t.Fatal("59s into a one-minute interval the deadline was already due")
 	}
-	if !b.rotateDue(iv, t0.Add(time.Minute)) {
-		t.Fatal("a minute of a one-minute interval passed and the deadline never came due")
-	}
-	if !b.rotateDue(iv, t0.Add(6*time.Minute)) {
-		t.Fatal("a deadline that passed during an outage was thrown away instead of firing late")
+	rc.proactive(rot, rot, t0.Add(time.Minute+time.Second))
+	if fired != 1 {
+		t.Fatalf("a minute of a one-minute interval passed and the deadline never came due (fired=%d)", fired)
 	}
 
-	b.rotateFrom(iv)
-	if b.rotateDue(iv, time.Now().Add(59*time.Second)) {
-		t.Fatal("a rotation that fired did not start a fresh interval")
+	rc.proactive(rot, rot, t0.Add(time.Minute+30*time.Second))
+	if fired != 1 {
+		t.Fatalf("a rotation that fired did not start a fresh interval (fired=%d)", fired)
+	}
+	rc.proactive(rot, rot, t0.Add(10*time.Minute))
+	if fired != 2 {
+		t.Fatalf("a deadline that passed during an outage was thrown away instead of firing late (fired=%d)", fired)
+	}
+}
+
+// A pool with no interval never arms a deadline at all, so the shared ticker cannot fire on it.
+func TestAPoolWithNoIntervalArmsNoDeadline(t *testing.T) {
+	rc := newRotationController(NewPeerPool([]string{"d1", "d2"}, 0), nil)
+	rc.mu.Lock()
+	at := rc.rotateAt
+	rc.mu.Unlock()
+	if !at.IsZero() {
+		t.Fatalf("rotation is off and the deadline is %v", at)
+	}
+	fired := 0
+	rc.proactive(func(bool) { fired++ }, func(bool) { fired++ }, time.Now().Add(time.Hour))
+	if fired != 0 {
+		t.Fatalf("an hour later a carrier with rotation off rotated %d times", fired)
 	}
 }
 

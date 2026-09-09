@@ -16,10 +16,16 @@ func (p *bindsViaPool) SetSourcePool(sp *packet.PeerPool) { p.got = sp }
 
 type bindsNothing struct{}
 
+// bind_ip means one thing on every carrier: hand it the address and let it bind. The datagram carriers
+// used to be handed a one-entry PeerPool instead, which gave them an axis that could be condemned and
+// could never move, plus a health row for something that never rotates. They take the address now.
+//
+// A carrier that can only take a pool no longer has bind_ip forced into one -- it is reported as
+// unsupported, which is a warning the operator sees rather than a rotation axis nobody asked for.
 func TestBindIPReachesEveryCarrierThatCanHonourIt(t *testing.T) {
 	const ip = "203.0.113.9"
 
-	t.Run("tcp family binds directly", func(t *testing.T) {
+	t.Run("a carrier that can fix a source is handed the address", func(t *testing.T) {
 		c := &bindsDirectly{}
 		if got := sourceMode(c, &Config{Role: "client", BindIP: ip, Transport: "tcp"}); got != srcByBind {
 			t.Fatalf("sourceMode = %q, want %q", got, srcByBind)
@@ -29,25 +35,24 @@ func TestBindIPReachesEveryCarrierThatCanHonourIt(t *testing.T) {
 		}
 	})
 
-	t.Run("datagram carriers fix the source through a one-entry pool", func(t *testing.T) {
+	t.Run("a pool is never built for a bare bind_ip", func(t *testing.T) {
 		c := &bindsViaPool{}
-		if got := sourceMode(c, &Config{Role: "client", BindIP: ip, Transport: "raw"}); got != srcByPool {
-			t.Fatalf("sourceMode = %q, want %q — bind_ip must not be dropped on a carrier that can fix a source", got, srcByPool)
+		if got := sourceMode(c, &Config{Role: "client", BindIP: ip, Transport: "raw"}); got != srcUnsupported {
+			t.Fatalf("sourceMode = %q, want %q — a bare bind_ip must not become a rotation axis", got, srcUnsupported)
 		}
-		if c.got == nil {
-			t.Fatal("no source pool was installed, so the kernel still chooses the source")
+		if c.got != nil {
+			t.Error("bind_ip was turned into a one-entry source pool: an axis that burns and cannot move")
 		}
-
 	})
 
 	t.Run("an explicit src_ips pool supersedes it", func(t *testing.T) {
-		c := &bindsViaPool{}
+		c := &bindsDirectly{}
 		cfg := &Config{Role: "client", BindIP: ip, Transport: "udp", SrcIPs: []string{"198.51.100.4", "198.51.100.5"}}
 		if got := sourceMode(c, cfg); got != srcBySrcIPs {
 			t.Fatalf("sourceMode = %q, want %q", got, srcBySrcIPs)
 		}
-		if c.got != nil {
-			t.Error("bind_ip installed a pool over the operator's src_ips — the field doc says src_ips wins")
+		if c.got != "" {
+			t.Errorf("bind_ip bound %q over the operator's src_ips — the field doc says src_ips wins", c.got)
 		}
 	})
 

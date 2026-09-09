@@ -562,7 +562,6 @@ type rotationController struct {
 	liveFn   func() (low, high string)
 	dst, src *PeerPool
 	st       *coreStatus
-	clock    func()
 	verdict  string
 	selbox   string
 
@@ -577,9 +576,6 @@ type rotationController struct {
 func newRotationController(dst, src *PeerPool) *rotationController {
 	c := &rotationController{}
 	c.bind(dst, src, axisDst, axisSrc)
-	if c.rotate > 0 {
-		c.rotateAt = time.Now().Add(c.rotate)
-	}
 	return c
 }
 
@@ -599,6 +595,10 @@ func (c *rotationController) bind(dst, src *PeerPool, lowKind, highKind string) 
 		if src.rotate > c.rotate {
 			c.rotate = src.rotate
 		}
+	}
+	c.rotateAt = time.Time{}
+	if c.rotate > 0 {
+		c.rotateAt = time.Now().Add(c.rotate)
 	}
 }
 
@@ -733,22 +733,12 @@ func (c *rotationController) restart() {
 	c.refill()
 }
 
-func (c *rotationController) setClock(f func()) {
-	c.mu.Lock()
-	c.clock = f
-	c.mu.Unlock()
-}
-
 func (c *rotationController) jumped() {
 	c.mu.Lock()
 	if c.rotate > 0 {
 		c.rotateAt = time.Now().Add(c.rotate)
 	}
-	f := c.clock
 	c.mu.Unlock()
-	if f != nil {
-		f()
-	}
 	c.success()
 }
 
@@ -758,24 +748,30 @@ func (c *rotationController) success() {
 	c.restart()
 }
 
-func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now time.Time) {
+func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now time.Time) (moved bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.rotate <= 0 || c.rotateAt.IsZero() || !now.After(c.rotateAt) {
-		return
+		return false
 	}
 	c.rotateAt = now.Add(c.rotate)
 	if c.dst == nil {
-		if c.src != nil {
-			rotSrc(true)
+		if c.src == nil {
+			return false
 		}
-		return
+		at := c.src.activeIdx()
+		rotSrc(true)
+		return c.src.activeIdx() != at
 	}
 	before := c.dst.activeIdx()
 	rotDst(true)
-	if lap := c.od.beat(c.dst.activeIdx() != before, c.dst.eligibleCount); c.src != nil && lap {
+	moved = c.dst.activeIdx() != before
+	if lap := c.od.beat(moved, c.dst.eligibleCount); c.src != nil && lap {
+		at := c.src.activeIdx()
 		rotSrc(true)
+		moved = moved || c.src.activeIdx() != at
 	}
+	return moved
 }
 
 func (c *rotationController) poll(rotLow, rotHigh func(proactive bool), applied func(kind, key string),

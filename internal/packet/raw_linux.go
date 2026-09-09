@@ -232,7 +232,6 @@ func newRaw(conn *net.IPConn, dev *tun.Device, obfs bool, psk, cipher, profile s
 		icmpID: icmpID, closeCh: make(chan struct{}), wake: make(chan struct{}, 1), spi: spi,
 	}
 
-	r.rxw = newTunWriters([]*tun.Device{dev})
 	r.txq = []txQueue{{dev: dev, batch: r.batch}}
 	r.newTCPFlow()
 	return r
@@ -1053,7 +1052,6 @@ func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
 		if typ, session, seq, payload, oerr := r.openWith(s, body); oerr == nil && r.rp.ok(session, seq) {
 			settleHandshake(&r.ci)
 			r.unanswered.Store(false)
-			r.markRx(addr.IP)
 			r.provenFrom(addr.IP)
 			r.learnPeer(addr)
 			r.learnClientPort(sport)
@@ -1068,7 +1066,6 @@ func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
 			r.fecDec.reset()
 			r.rp = st.rp
 			r.staged = nil
-			r.markRx(addr.IP)
 			r.learnPeer(addr)
 			r.learnClientPort(sport)
 			r.dispatch(typ, payload, addr)
@@ -1117,7 +1114,6 @@ func (r *Raw) tryHandshake(body []byte, addr *net.IPAddr, hsSport uint16) {
 
 		r.ci.Store(nil)
 		r.unanswered.Store(false)
-		r.markRx(addr.IP)
 		r.provenFrom(addr.IP)
 		r.st.newSession()
 		r.st.reconnected("raw")
@@ -1199,11 +1195,6 @@ func (r *Raw) rehandshake() bool {
 	return true
 }
 
-func (r *Raw) markRx(from net.IP) {
-	if p := r.dst(); p != nil && from != nil && p.IP.Equal(from) {
-	}
-}
-
 func (r *Raw) provenFrom(ip net.IP) {
 	if ip != nil && len(r.poolIPs) > 0 {
 		if p := r.dst(); p != nil && !p.IP.Equal(ip) {
@@ -1257,6 +1248,17 @@ func srcAllowedIn(set map[string]struct{}, ip net.IP) bool {
 	}
 	_, ok := set[string(v4)]
 	return ok
+}
+
+func (r *Raw) SetSourceIP(ip string) {
+	if !r.isClient || ip == "" {
+		return
+	}
+	if r.landSourceIP(ip) {
+		log.Printf("raw: source bound to %s", ip)
+		return
+	}
+	log.Printf("raw: source %s is not configured on this host — the kernel picks the source", ip)
 }
 
 func (r *Raw) SetSourcePool(sp *PeerPool) {
@@ -1382,7 +1384,10 @@ func (r *Raw) adoptSourceRaw() {
 }
 
 func (r *Raw) cmdPollLoop(rc *rotationController) {
-	runCmdPoll(rc, r.closeCh, r.selectedRaw, r.rotatePeerRaw, r.rotateSourceRaw, r.st.pathEpoch)
+	runCmdPoll(r.closeCh, func() {
+		rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, time.Now())
+		rc.poll(r.rotatePeerRaw, r.rotateSourceRaw, r.selectedRaw, r.st.pathEpoch)
+	})
 }
 
 func (r *Raw) clientLoop() {
@@ -1401,7 +1406,6 @@ func (r *Raw) clientLoop() {
 	var stall stallWatch
 	for {
 		now := time.Now()
-		rc.proactive(r.rotatePeerRaw, r.rotateSourceRaw, now)
 		stall.beat(r.rxTick.Swap(false), r.st, "raw", now)
 		asking := r.mustKnock()
 		if asking {
