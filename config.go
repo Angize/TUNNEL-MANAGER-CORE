@@ -46,9 +46,7 @@ func (c *Config) cdnMode() string {
 }
 
 type Config struct {
-	Role    string `json:"role"`
-	Mode    string `json:"mode"`
-	Profile string `json:"profile"`
+	Role string `json:"role"`
 
 	Transport string `json:"transport"`
 
@@ -256,12 +254,6 @@ func rawProtoBorrowed(proto int) error {
 }
 
 func (c *Config) validate() error {
-	if c.Mode != "packet" {
-		return errors.New("mode must be \"packet\" in this build")
-	}
-	if c.Profile != "core" {
-		return errors.New("profile must be \"core\" in this build")
-	}
 	switch c.Role {
 	case "server":
 		if c.Listen == "" {

@@ -314,7 +314,6 @@ type TCP struct {
 	cur     atomic.Pointer[connFramer]
 	curConn atomic.Pointer[net.Conn]
 
-	liveSNI  atomic.Pointer[string]
 	livePair atomic.Pointer[pairNow]
 	tryPair  atomic.Pointer[pairNow]
 
@@ -405,10 +404,6 @@ func (b *TCP) livePath() (pathKey, bool) {
 	}
 	k.Src, k.Sport = addrParts((*c).LocalAddr())
 	k.Dst, k.Dport = addrParts((*c).RemoteAddr())
-	if s := b.liveSNI.Load(); s != nil {
-		k.SNI = *s
-	}
-
 	return k, b.cur.Load() != nil
 }
 
@@ -575,7 +570,7 @@ func DialWS(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, 
 		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
 }
 
-type WSPoolSNI struct {
+type EdgeSNI struct {
 	Host string
 	ECH  string
 	Path string
@@ -591,7 +586,7 @@ const activeSep = " · "
 
 func activeLabel(ip, host string) string { return ip + activeSep + host }
 
-func DialWSPoolCfg(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []WSPoolSNI, rotate time.Duration, httpc bool, httpcMode string) (*TCP, error) {
+func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []EdgeSNI, rotate time.Duration, httpc bool, httpcMode string) (*TCP, error) {
 	if len(ips) == 0 || len(snis) == 0 {
 		return nil, errors.New("ws pool: need at least one IP and one SNI")
 	}
@@ -679,13 +674,13 @@ func DialHTTPC(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, ciphe
 		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
 }
 
-func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string) (*TCP, error) {
+func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string) (*TCP, error) {
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return nil, err
 	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
-		ws: true, httpc: true, idle: connIdle, ping: pingEvery, addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
+		ws: true, httpc: true, wsPath: wsPath, idle: connIdle, ping: pingEvery, addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns), httpcSessions: make(map[string]*httpcSession)}, nil
 }
 
@@ -1320,8 +1315,6 @@ func (b *TCP) dialLoop() {
 		b.st.newSession()
 		if b.edgePool() {
 			sni := strings.TrimPrefix(combo, label+activeSep)
-			b.liveSNI.Store(&sni)
-
 			b.livePair.Store(&pairNow{low: label, high: sni})
 			b.st.setActive(combo)
 		} else {
@@ -1336,8 +1329,6 @@ func (b *TCP) dialLoop() {
 
 		b.serve(cf)
 		b.curConn.CompareAndSwap(&cc, nil)
-		b.liveSNI.Store(nil)
-
 		b.tryPair.Store(b.livePair.Swap(nil))
 		b.attempted.Store(false)
 		b.cur.CompareAndSwap(cf, nil)
