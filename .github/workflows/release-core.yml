@@ -63,11 +63,13 @@ jobs:
         run: |
           set -eux
           mkdir -p out
+          TAG="${{ steps.t.outputs.tag }}"
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-              go build -trimpath -ldflags "-s -w" -o "out/tnl-core-linux-$arch" .
+              go build -trimpath -ldflags "-s -w -X main.version=$TAG" -o "out/tnl-core-linux-$arch" .
             ( cd out && sha256sum "tnl-core-linux-$arch" > "tnl-core-linux-$arch.sha256" )
           done
+          ./out/tnl-core-linux-amd64 --version
           ls -l out
 
       - name: Publish the release + assets
