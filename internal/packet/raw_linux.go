@@ -553,8 +553,6 @@ func (r *Raw) replyAddr(addr *net.IPAddr) *net.IPAddr {
 	return addr
 }
 
-const ipFlagDF = 1 << 14
-
 var ipIDCounter atomic.Uint32
 
 func init() {
