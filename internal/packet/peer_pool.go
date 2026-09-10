@@ -902,5 +902,3 @@ func (p *PeerPool) healthRows() []healthStatus {
 	}
 	return rows
 }
-
-type pairNow struct{ low, high string }

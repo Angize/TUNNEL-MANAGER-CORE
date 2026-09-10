@@ -553,6 +553,54 @@ func (r *Raw) replyAddr(addr *net.IPAddr) *net.IPAddr {
 	return addr
 }
 
+const ipFlagDF = 1 << 14
+
+var ipIDCounter atomic.Uint32
+
+func init() {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	ipIDCounter.Store(binary.BigEndian.Uint32(b[:]))
+}
+
+func nextIPID() uint16 {
+	if id := uint16(ipIDCounter.Add(1)); id != 0 {
+		return id
+	}
+	return uint16(ipIDCounter.Add(1))
+}
+
+func buildIP4Ext(src, dst net.IP, proto, ttl int, badSum bool, payload []byte) []byte {
+	if len(payload) > 0xffff-20 {
+		return nil
+	}
+	if ttl < 1 {
+		ttl = 1
+	} else if ttl > 255 {
+		ttl = 255
+	}
+	h := make([]byte, 20+len(payload))
+	h[0] = 0x45
+	binary.BigEndian.PutUint16(h[2:4], uint16(len(h)))
+
+	binary.BigEndian.PutUint16(h[4:6], nextIPID())
+	binary.BigEndian.PutUint16(h[6:8], ipFlagDF)
+	h[8] = byte(ttl)
+	h[9] = byte(proto)
+	copy(h[12:16], src.To4())
+	copy(h[16:20], dst.To4())
+	sum := onesComplementSum(h[:20])
+	binary.BigEndian.PutUint16(h[10:12], sum)
+	if badSum {
+		binary.BigEndian.PutUint16(h[10:12], ^sum)
+		if onesComplementSum(h[:20]) == 0 {
+			binary.BigEndian.PutUint16(h[10:12], ^sum^0x0001)
+		}
+	}
+	copy(h[20:], payload)
+	return h
+}
+
 const ethPIP = 0x0800
 
 func openHdrincl(proto int) (int, error) {

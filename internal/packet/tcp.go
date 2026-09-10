@@ -3,7 +3,6 @@ package packet
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/base64"
@@ -1647,8 +1646,4 @@ func (b *TCP) sleep(d time.Duration) bool {
 	}
 }
 
-func (b *TCP) dialBand(timeout time.Duration, addr string) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return dialFromBand(ctx, func() *net.Dialer { return b.dialer(timeout) }, addr)
-}
+type pairNow struct{ low, high string }
