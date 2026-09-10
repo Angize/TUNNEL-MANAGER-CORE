@@ -16,7 +16,7 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
 
-const version = "0.1.0-core"
+var version = "dev"
 
 type tunOpener func(name string, mtu int, addr string, gso bool, n int) ([]*tun.Device, error)
 
