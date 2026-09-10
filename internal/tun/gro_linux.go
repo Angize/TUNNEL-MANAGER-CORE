@@ -14,7 +14,6 @@ const (
 
 	udpHdrLen = 8
 
-	tcpFIN = 0x01
 	tcpPSH = 0x08
 	tcpACK = 0x10
 )
@@ -224,7 +223,7 @@ func (d *Device) writeSuper(pkts [][]byte, segSize int, proto byte) error {
 			vnet[1] = gsoTCPv6
 		}
 	}
-	binary.BigEndian.PutUint16(lead[ipHdr+csumOff:ipHdr+csumOff+2], pseudoSum(lead, ipHdr, v6, proto, l4Len))
+	binary.BigEndian.PutUint16(lead[ipHdr+csumOff:ipHdr+csumOff+2], pseudoSum(lead, v6, proto, l4Len))
 
 	vnet[0] = vnetNeedsCsum
 	binary.LittleEndian.PutUint16(vnet[2:4], uint16(hdrLen))
@@ -284,7 +283,7 @@ func (d *Device) WriteBatch(pkts [][]byte) error {
 	return ferr
 }
 
-func pseudoSum(pkt []byte, ipHdrLen int, v6 bool, proto byte, l4Len int) uint16 {
+func pseudoSum(pkt []byte, v6 bool, proto byte, l4Len int) uint16 {
 	var s uint32
 	if v6 {
 		s = sumBytes(pkt[8:40], 0)

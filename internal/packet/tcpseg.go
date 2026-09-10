@@ -7,7 +7,6 @@ import (
 
 const (
 	tcpPshAck = 0x18
-	tcpFin    = 0x01
 	tcpSyn    = 0x02
 	tcpAckBit = 0x10
 	tcpSynAck = 0x12

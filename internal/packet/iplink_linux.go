@@ -6,14 +6,6 @@ import (
 	"net"
 )
 
-type ipLink interface {
-	send(pkt []byte, to *net.IPAddr)
-
-	recvLoop() error
-
-	close()
-}
-
 type directLink struct{ r *Raw }
 
 func (l *directLink) send(pkt []byte, to *net.IPAddr) { sendViaConn(l.r, pkt, to) }

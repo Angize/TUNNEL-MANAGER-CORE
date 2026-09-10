@@ -18,7 +18,6 @@ const (
 
 	gsoNone  = 0
 	gsoTCPv4 = 1
-	gsoUFO   = 3
 	gsoTCPv6 = 4
 	gsoUDPL4 = 5
 	gsoECN   = 0x80

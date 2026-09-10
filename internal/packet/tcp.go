@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
@@ -289,7 +288,6 @@ type TCP struct {
 
 	httpc         bool
 	httpcMode     string
-	httpcTLS      *tls.Config
 	httpSrv       atomic.Pointer[http.Server]
 	httpcMu       sync.Mutex
 	httpcSessions map[string]*httpcSession
@@ -310,8 +308,6 @@ type TCP struct {
 	dsMode     string
 	dsFailOnce sync.Once
 	dsSend     desyncSend
-
-	dsWatch func(net.Conn)
 
 	ln      net.Listener
 	lns     []net.Listener
@@ -1004,7 +1000,7 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 	for attempt := 0; attempt < 2; attempt++ {
 		var uc net.Conn
 
-		uc, err = uEdgeHandshake(b.fragWrap(conn, host, ech), host, ech, []string{"http/1.1"}, false, budget, nil)
+		uc, err = uEdgeHandshake(b.fragWrap(conn, host, ech), host, ech, []string{"http/1.1"}, false, budget)
 		if err == nil {
 			if healed && live {
 				b.noteECHSelfHeal(host, ech)
@@ -1030,15 +1026,8 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 	return nil, err
 }
 
-func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFingerprint bool, budget time.Duration, verify *tls.Config) (net.Conn, error) {
+func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFingerprint bool, budget time.Duration) (net.Conn, error) {
 	cfg := &utls.Config{ServerName: host}
-	if verify != nil {
-		cfg.InsecureSkipVerify = verify.InsecureSkipVerify
-		cfg.RootCAs = verify.RootCAs
-		if verify.ServerName != "" {
-			cfg.ServerName = verify.ServerName
-		}
-	}
 	var echPub []string
 
 	echRejected := false

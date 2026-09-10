@@ -19,12 +19,12 @@ import (
 
 var ErrGSOUnsupported = errors.New("the gso-specific part of the tun open failed")
 
-var setIff = func(f *os.File, ifr *[ifReqSize]byte) syscall.Errno {
+func setIff(f *os.File, ifr *[ifReqSize]byte) syscall.Errno {
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), tunSetIff, uintptr(unsafe.Pointer(ifr)))
 	return errno
 }
 
-var setOffload = func(f *os.File, flags uintptr) syscall.Errno {
+func setOffload(f *os.File, flags uintptr) syscall.Errno {
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), tunSetOffload, flags)
 	return errno
 }

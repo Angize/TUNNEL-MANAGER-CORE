@@ -361,7 +361,7 @@ func (u *httpcUp) worker() {
 	}
 }
 
-var upPostTimeout = writeTimeout
+const upPostTimeout = writeTimeout
 
 func (u *httpcUp) post(sc seqChunk) error {
 	ctx, cancel := context.WithTimeout(u.ctx, u.postTO)
@@ -473,7 +473,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 				return nil, err
 			}
 
-			uc, err := uEdgeHandshake(b.fragWrap(c, host, ech), host, ech, alpn, h2, budget, b.httpcTLS)
+			uc, err := uEdgeHandshake(b.fragWrap(c, host, ech), host, ech, alpn, h2, budget)
 			if err != nil {
 				c.Close()
 				return nil, err

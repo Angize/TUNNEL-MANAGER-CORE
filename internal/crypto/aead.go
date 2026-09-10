@@ -27,8 +27,6 @@ const (
 	maskKeyLen  = 32
 )
 
-var Supported = []string{CipherAES256, CipherAES128, CipherChaCha, CipherXChaCha}
-
 type Sealer struct {
 	sendAEAD cipher.AEAD
 	recvAEAD cipher.AEAD
