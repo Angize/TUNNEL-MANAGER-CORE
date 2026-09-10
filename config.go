@@ -31,6 +31,11 @@ func queueingCarrier(t string) bool { return t == "raw" || t == "udp" }
 
 const maxWorkers = 8
 
+const (
+	defaultFecData   = 16
+	defaultFecParity = 4
+)
+
 const maxSportEvery = 60
 
 func (c *Config) cdnMode() string {
@@ -169,7 +174,7 @@ func (c *Config) applyDefaults() {
 	if c.Workers > maxWorkers {
 		c.Workers = maxWorkers
 	}
-	if c.SockBuf == 0 {
+	if c.SockBuf == 0 && sockBufCarrier(c.Transport) {
 		c.SockBuf = 4 << 20
 	}
 	if c.SockBuf > 0 && c.SockBuf < 64<<10 {
@@ -193,10 +198,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Fec {
 		if c.FecData == 0 {
-			c.FecData = 16
+			c.FecData = defaultFecData
 		}
 		if c.FecParity == 0 {
-			c.FecParity = 4
+			c.FecParity = defaultFecParity
 		}
 	}
 	if c.Transport == "ws" && c.WSPath == "" {
@@ -451,6 +456,27 @@ func (c *Config) validate() error {
 		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", or \"ws\"")
 	}
 
+	if c.Transport != "ws" {
+		for _, k := range []struct {
+			name string
+			set  bool
+		}{
+			{"cdn_carrier", c.CDNCarrier != ""},
+			{"http_streams", c.HTTPStreams != 0},
+			{"http_up_workers", c.HTTPUpWorkers != 0},
+			{"http_up_batch_kb", c.HTTPUpBatchKB != 0},
+			{"http_up_rate", c.HTTPUpRate != 0},
+			{"ws_edge_ips", len(c.WSEdgeIPs) > 0},
+			{"ws_edge_snis", len(c.WSEdgeSNIs) > 0},
+			{"ws_rotate_secs", c.WSRotateSecs != 0},
+		} {
+			if k.set {
+				return errors.New(k.name + " belongs to the ws transport; transport \"" + c.Transport +
+					"\" would carry it no further than this file")
+			}
+		}
+	}
+
 	if len(c.PeerIPs) > 0 {
 		if c.Role != "client" {
 			return errors.New("peer_ips is a client rotation pool (a server listens, it does not dial)")
@@ -541,18 +567,18 @@ func (c *Config) validate() error {
 			return fmt.Errorf("fec is not supported on the %s carrier — only on the datagram carriers (udp, raw)", c.Transport)
 		}
 		if c.FecData < 0 || c.FecParity < 0 {
-			return errors.New("fec_data / fec_parity must be >= 0 (0 defaults to 10 / 3)")
+			return fmt.Errorf("fec_data / fec_parity must be >= 0 (0 defaults to %d / %d)", defaultFecData, defaultFecParity)
 		}
 
 		ed, ep := c.FecData, c.FecParity
 		if ed == 0 {
-			ed = 10
+			ed = defaultFecData
 		}
 		if ep == 0 {
-			ep = 3
+			ep = defaultFecParity
 		}
 		if ed < 1 || ep < 1 || ed+ep > 255 {
-			return errors.New("effective fec_data (default 10) + fec_parity (default 3) must satisfy fec_data>=1, fec_parity>=1, fec_data+fec_parity<=255")
+			return fmt.Errorf("effective fec_data (default %d) + fec_parity (default %d) must satisfy fec_data>=1, fec_parity>=1, fec_data+fec_parity<=255", defaultFecData, defaultFecParity)
 		}
 
 		if ed > packet.MaxFecData {

@@ -219,7 +219,7 @@ const (
 )
 
 var (
-	maxUpBatch = 128 << 10
+	maxUpBatch = 512 << 10
 
 	upWorkers = 8
 
