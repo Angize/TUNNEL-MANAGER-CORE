@@ -69,7 +69,7 @@ func main() {
 	packet.SetSockBuf(cfg.SockBuf)
 	packet.SetPortTries(cfg.PortTries)
 	packet.SetSportBand(cfg.SportLo, cfg.SportHi)
-	if cfg.SportLo != 0 || cfg.SportHi != 0 {
+	if (cfg.SportLo != 0 || cfg.SportHi != 0) && drawsSourcePort(cfg.Transport, cfg.RawProfile) {
 		lo, hi := packet.SportBand()
 		log.Printf("tnl-core: source ports are drawn from %d-%d", lo, hi)
 	}
@@ -340,6 +340,13 @@ const (
 	srcByBind   = "bind"
 	srcBySrcIPs = "src_ips"
 )
+
+func drawsSourcePort(transport, profile string) bool {
+	if transport == "raw" {
+		return packet.RawProfileHasPorts(profile)
+	}
+	return true
+}
 
 func portTriesNote(transport string, sportRandom bool, n int) string {
 	if n <= 0 || transport != "raw" || sportRandom {
