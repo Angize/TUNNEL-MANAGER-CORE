@@ -945,7 +945,7 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 
 func (b *TCP) runHTTPCServer() {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", b.httpcHandler)
+	mux.HandleFunc(httpcPath(b.wsPath), b.httpcHandler)
 
 	srv := &http.Server{Handler: h2c.NewHandler(mux, &http2.Server{})}
 	b.httpSrv.Store(srv)

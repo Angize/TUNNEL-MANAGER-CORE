@@ -22,7 +22,6 @@ type pathKey struct {
 	Sport uint16 `json:"sport"`
 	Dst   string `json:"dst"`
 	Dport uint16 `json:"dport"`
-	SNI   string `json:"sni,omitempty"`
 }
 
 func addrParts(a net.Addr) (host string, port uint16) {

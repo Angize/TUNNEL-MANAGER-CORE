@@ -79,6 +79,9 @@ func main() {
 	if note := workersNote(cfg.Transport, cfg.Fec, cfg.Workers); note != "" {
 		log.Print(note)
 	}
+	if note := portTriesNote(cfg.Transport, cfg.RawSportRandom, cfg.PortTries); note != "" {
+		log.Print(note)
+	}
 
 	nq := 1
 	if !cfg.Fec && queueingCarrier(cfg.Transport) {
@@ -167,7 +170,7 @@ func main() {
 		switch cfg.Role {
 		case "server":
 			if cfg.cdnIsHTTP() {
-				b, err = packet.ListenHTTPC(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher)
+				b, err = packet.ListenHTTPC(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath)
 				if err == nil {
 					log.Printf("tnl-core: listening (core/http%s) on %s", obfsTag, cfg.Listen)
 				}
@@ -183,11 +186,11 @@ func main() {
 				carrier = "http"
 			}
 			if len(cfg.WSEdgeIPs) > 0 {
-				snis := make([]packet.WSPoolSNI, len(cfg.WSEdgeSNIs))
+				snis := make([]packet.EdgeSNI, len(cfg.WSEdgeSNIs))
 				for i, s := range cfg.WSEdgeSNIs {
-					snis[i] = packet.WSPoolSNI{Host: s.Host, ECH: s.ECH, Path: s.Path}
+					snis[i] = packet.EdgeSNI{Host: s.Host, ECH: s.ECH, Path: s.Path}
 				}
-				b, err = packet.DialWSPoolCfg(dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher,
+				b, err = packet.DialEdgePool(dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher,
 					cfg.WSEdgeIPs, snis, time.Duration(cfg.WSRotateSecs)*time.Second, cfg.cdnIsHTTP(), cfg.cdnMode())
 				if err == nil {
 					log.Printf("tnl-core: dialing (core/%s%s wss ech pool: %dIP×%dSNI rotate=%ds)",
@@ -337,6 +340,15 @@ const (
 	srcByBind   = "bind"
 	srcBySrcIPs = "src_ips"
 )
+
+func portTriesNote(transport string, sportRandom bool, n int) string {
+	if n <= 0 || transport != "raw" || sportRandom {
+		return ""
+	}
+	return fmt.Sprintf("core: WARNING port_tries=%d is ignored on raw unless raw_sport_random is on. It "+
+		"counts how many source ports one rung may spend, and a raw carrier only draws a source port in "+
+		"that mode", n)
+}
 
 func workersNote(transport string, fec bool, n int) string {
 	if n <= 1 {
