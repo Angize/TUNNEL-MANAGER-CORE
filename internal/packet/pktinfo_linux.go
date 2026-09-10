@@ -82,7 +82,7 @@ func pktinfoDst(oob []byte) net.IP {
 
 func sameIP4(cur *net.IP, ip net.IP) bool { return cur != nil && cur.Equal(ip) }
 
-var localIPRescan = 5 * time.Second
+const localIPRescan = 5 * time.Second
 
 type ourIPs struct {
 	mu      sync.Mutex

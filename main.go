@@ -250,8 +250,6 @@ func main() {
 	switch sourceMode(b, cfg) {
 	case srcByBind:
 		log.Printf("tnl-core: binding outbound source IP to %s", cfg.BindIP)
-	case srcUnsupported:
-		log.Printf("core: WARNING carrier %s ignores bind_ip — it can fix neither a source IP nor a source pool, so this tunnel egresses from whatever source the kernel routes it out of", cfg.Transport)
 	}
 
 	if cfg.Role == "client" && cfg.FakeDesync {
@@ -332,10 +330,9 @@ func coverTag(cover bool) string {
 }
 
 const (
-	srcNone        = ""
-	srcByBind      = "bind"
-	srcBySrcIPs    = "src_ips"
-	srcUnsupported = "unsupported"
+	srcNone     = ""
+	srcByBind   = "bind"
+	srcBySrcIPs = "src_ips"
 )
 
 func sockBufCarrier(transport string) bool {
@@ -363,14 +360,11 @@ func sourceMode(b any, cfg *Config) string {
 	if len(cfg.SrcIPs) > 0 {
 		return srcBySrcIPs
 	}
-	if s, ok := b.(interface{ SetSourceIP(string) }); ok {
-		s.SetSourceIP(cfg.BindIP)
-		return srcByBind
-	}
-	return srcUnsupported
+	b.(interface{ SetSourceIP(string) }).SetSourceIP(cfg.BindIP)
+	return srcByBind
 }
 
-func applySNISplit(b any, transport, mode string, pos, ttl int) bool {
+func applySNISplit(b any, transport, mode string, pos, ttl int) {
 	if mode == "" {
 		mode = "split"
 	}
@@ -383,8 +377,7 @@ func applySNISplit(b any, transport, mode string, pos, ttl int) bool {
 		} else {
 			log.Printf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d; split_ttl does not apply to this mode)", mode, pos)
 		}
-		return true
+		return
 	}
 	log.Printf("core: WARNING carrier %s ignores sni_split — it sends no TLS ClientHello of its own, so nothing is fragmented", transport)
-	return false
 }

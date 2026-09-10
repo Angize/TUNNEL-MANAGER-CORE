@@ -20,8 +20,6 @@ func OpenN(name string, mtu int, addr string, gso bool, n int) ([]*Device, error
 	return nil, errNotLinux
 }
 
-func FromFile(f *os.File, name string) *Device { return &Device{Name: name, f: f} }
-
 func (d *Device) TryRead(buf []byte) (int, bool, error) { return 0, false, nil }
 func (d *Device) Read(buf []byte) (int, error)          { return d.f.Read(buf) }
 func (d *Device) Write(pkt []byte) (int, error)         { return d.f.Write(pkt) }

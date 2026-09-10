@@ -51,7 +51,7 @@ func (f *fragConn) fakeDegraded(why string) {
 	})
 }
 
-func (f *fragConn) noSplit(p []byte, at int) {
+func (f *fragConn) noSplit(p []byte) {
 	f.warnNoSplit.Do(func() {
 		switch {
 		case f.pos > 0:
@@ -92,7 +92,7 @@ func (f *fragConn) Write(p []byte) (int, error) {
 	}
 	at := f.splitAt(p)
 	if at <= 0 || at >= len(p) {
-		f.noSplit(p, at)
+		f.noSplit(p)
 		return f.Conn.Write(p)
 	}
 	switch f.mode {

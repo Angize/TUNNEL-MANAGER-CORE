@@ -17,7 +17,7 @@ func ownerMatch(tun string) []string {
 	return []string{"-m", "comment", "--comment", ruleOwnerPrefix + tun}
 }
 
-var iptablesRun = func(args []string) ([]byte, error) {
+func iptablesRun(args []string) ([]byte, error) {
 	return exec.Command("iptables", args...).CombinedOutput()
 }
 

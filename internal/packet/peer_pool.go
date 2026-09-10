@@ -132,7 +132,7 @@ func (p *PeerPool) currentLocked() string {
 		}
 	}
 
-	return p.pickLocked(p.bestIdxLocked(-1))
+	return p.pickLocked(p.bestIdxLocked())
 }
 
 func (p *PeerPool) eligibleCount() int {
@@ -174,21 +174,15 @@ func landSource(sp *PeerPool, land func(addr string) bool) bool {
 
 func (p *PeerPool) tierLocked(addr string) (tier int, next int64) { return p.health.tier(addr) }
 
-func (p *PeerPool) bestIdxLocked(except int) int {
+func (p *PeerPool) bestIdxLocked() int {
 	best := -1
 	var bt int
 	var bn int64
 	for i := range p.addrs {
-		if i == except {
-			continue
-		}
 		t, n := p.tierLocked(p.addrs[i])
 		if best == -1 || t < bt || (t == bt && n < bn) {
 			best, bt, bn = i, t, n
 		}
-	}
-	if best == -1 {
-		return except
 	}
 	return best
 }

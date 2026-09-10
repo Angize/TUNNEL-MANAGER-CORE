@@ -4,8 +4,4 @@ package packet
 
 import "net"
 
-func (b *TCP) sendTCPFakes(conn net.Conn) {
-	if b.dsWatch != nil {
-		b.dsWatch(conn)
-	}
-}
+func (b *TCP) sendTCPFakes(net.Conn) {}

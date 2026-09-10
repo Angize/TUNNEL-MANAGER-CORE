@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-var (
+const (
 	antiLeakRetryMin = 2 * time.Second
 	antiLeakRetryMax = time.Minute
 

@@ -42,7 +42,7 @@ type Raw struct {
 
 	proto int
 
-	link ipLink
+	link *directLink
 
 	localIP  atomic.Pointer[net.IPAddr]
 	soloPeer atomic.Pointer[net.IPAddr]
@@ -104,8 +104,6 @@ type Raw struct {
 	inj    *l2inject
 	dsSend desyncSend
 
-	openFakeFd func(int) (int, error)
-
 	closeCh   chan struct{}
 	closeOnce sync.Once
 	wake      chan struct{}
@@ -138,11 +136,7 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 	}
 
 	if d.usesLowTTL() {
-		open := r.openFakeFd
-		if open == nil {
-			open = openHdrincl
-		}
-		fd, err := open(r.proto)
+		fd, err := openHdrincl(r.proto)
 		if err != nil {
 			if d.mode == "both" {
 				log.Printf("raw: low-TTL decoys disabled (cannot open raw socket: %v) — the bad-checksum decoys still fire", err)
