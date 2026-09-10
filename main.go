@@ -69,7 +69,7 @@ func main() {
 	packet.SetSockBuf(cfg.SockBuf)
 	packet.SetPortTries(cfg.PortTries)
 	packet.SetSportBand(cfg.SportLo, cfg.SportHi)
-	if (cfg.SportLo != 0 || cfg.SportHi != 0) && drawsSourcePort(cfg.Transport, cfg.RawProfile) {
+	if (cfg.SportLo != 0 || cfg.SportHi != 0) && drawsSourcePort(cfg.Role, cfg.Transport, cfg.RawProfile) {
 		lo, hi := packet.SportBand()
 		log.Printf("tnl-core: source ports are drawn from %d-%d", lo, hi)
 	}
@@ -341,7 +341,10 @@ const (
 	srcBySrcIPs = "src_ips"
 )
 
-func drawsSourcePort(transport, profile string) bool {
+func drawsSourcePort(role, transport, profile string) bool {
+	if role != "client" {
+		return false
+	}
 	if transport == "raw" {
 		return packet.RawProfileHasPorts(profile)
 	}
@@ -414,7 +417,7 @@ func applySNISplit(b any, transport, mode string, pos, ttl int) {
 		if mode == "disorder" {
 			log.Printf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d ttl=%d)", mode, pos, ttl)
 		} else {
-			log.Printf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d; split_ttl does not apply to this mode)", mode, pos)
+			log.Printf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d; split_ttl only applies to disorder)", mode, pos)
 		}
 		return
 	}

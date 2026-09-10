@@ -225,7 +225,7 @@ func wsUpgradeForUs(req *http.Request, wantPath string) bool {
 	if wantPath == "" {
 		wantPath = "/"
 	}
-	if req.URL == nil || req.URL.Path != wantPath {
+	if req.URL == nil || req.URL.EscapedPath() != wantPath {
 		return false
 	}
 	if !strings.EqualFold(req.Header.Get("Upgrade"), "websocket") ||

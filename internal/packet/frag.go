@@ -32,6 +32,7 @@ type fragConn struct {
 	warn        sync.Once
 	warnFake    sync.Once
 	warnNoSplit sync.Once
+	warnPos     sync.Once
 
 	dsSend *desyncSend
 }
@@ -54,9 +55,6 @@ func (f *fragConn) fakeDegraded(why string) {
 func (f *fragConn) noSplit(p []byte) {
 	f.warnNoSplit.Do(func() {
 		switch {
-		case f.pos > 0:
-			log.Printf("core/tls: sni_split is on but split_pos=%d is outside the %d-byte ClientHello — "+
-				"nothing was fragmented", f.pos, len(p))
 		case f.host == "":
 			log.Printf("core/tls: sni_split is on but this carrier dials with no SNI — nothing was fragmented")
 		case f.ech:
@@ -173,7 +171,13 @@ func decoyLabels(n int) []byte {
 
 func (f *fragConn) splitAt(p []byte) int {
 	if f.pos > 0 {
-		return f.pos
+		if f.pos < len(p) {
+			return f.pos
+		}
+		f.warnPos.Do(func() {
+			log.Printf("core/tls: split_pos=%d is past the end of this %d-byte ClientHello — "+
+				"using the automatic point inside the hostname instead", f.pos, len(p))
+		})
 	}
 	if f.host == "" {
 		return 0
