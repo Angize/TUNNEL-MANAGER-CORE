@@ -69,7 +69,7 @@ func main() {
 	packet.SetSockBuf(cfg.SockBuf)
 	packet.SetPortTries(cfg.PortTries)
 	packet.SetSportBand(cfg.SportLo, cfg.SportHi)
-	if (cfg.SportLo != 0 || cfg.SportHi != 0) && drawsSourcePort(cfg.Role, cfg.Transport, cfg.RawProfile) {
+	if (cfg.SportLo != 0 || cfg.SportHi != 0) && drawsSourcePort(cfg) {
 		lo, hi := packet.SportBand()
 		log.Printf("tnl-core: source ports are drawn from %d-%d", lo, hi)
 	}
@@ -263,7 +263,11 @@ func main() {
 			SetDesync(bool, int, int, string)
 		}); ok {
 			s.SetDesync(true, cfg.FakeTTL, cfg.FakeCount, cfg.FakeMode)
-			log.Printf("tnl-core: fake-desync on (%d decoys, ttl=%d, mode=%s)", cfg.FakeCount, cfg.FakeTTL, cfg.FakeMode)
+			if usesFakeTTL(cfg) {
+				log.Printf("tnl-core: fake-desync on (%d decoys, ttl=%d, mode=%s)", cfg.FakeCount, cfg.FakeTTL, cfg.FakeMode)
+			} else {
+				log.Printf("tnl-core: fake-desync on (%d decoys, mode=%s) — every decoy on this carrier is a bad-checksum packet sent at TTL 64, so fake_ttl is not read", cfg.FakeCount, cfg.FakeMode)
+			}
 		}
 	}
 
@@ -325,7 +329,7 @@ func wantsDestPool(cfg *Config) bool {
 }
 
 func wantsSourcePool(cfg *Config) bool {
-	return cfg.Role == "client" && len(cfg.SrcIPs) >= 1
+	return cfg.Role == "client" && len(cfg.SrcIPs) >= 2
 }
 
 func coverTag(cover bool) string {
@@ -341,14 +345,15 @@ const (
 	srcBySrcIPs = "src_ips"
 )
 
-func drawsSourcePort(role, transport, profile string) bool {
-	if role != "client" {
-		return false
+func usesFakeTTL(cfg *Config) bool {
+	return !(cfg.Transport == "raw" && cfg.FakeMode == "badsum")
+}
+
+func drawsSourcePort(cfg *Config) bool {
+	if cfg.Transport == "raw" {
+		return packet.RawProfileHasPorts(cfg.RawProfile) && (cfg.RawSportRandom || cfg.RawSportRotate != 0)
 	}
-	if transport == "raw" {
-		return packet.RawProfileHasPorts(profile)
-	}
-	return true
+	return cfg.Role == "client"
 }
 
 func portTriesNote(transport string, sportRandom bool, n int) string {
@@ -399,7 +404,7 @@ func sourceMode(b any, cfg *Config) string {
 	if cfg.Role != "client" || cfg.BindIP == "" {
 		return srcNone
 	}
-	if len(cfg.SrcIPs) > 0 {
+	if wantsSourcePool(cfg) {
 		return srcBySrcIPs
 	}
 	b.(interface{ SetSourceIP(string) }).SetSourceIP(cfg.BindIP)

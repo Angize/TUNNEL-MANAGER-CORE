@@ -552,9 +552,12 @@ func l4Checksum(src, dst net.IP, proto int, l4 []byte) uint16 {
 	return foldComplement(sumBytes(ph[:]) + sumBytes(l4))
 }
 
-func rawPortOr(port int) uint16 {
-	if port < 1 || port > 65535 {
-		return 0
+func rawEffPort(profile string, port int) uint16 {
+	if port >= 1 && port <= 65535 {
+		return uint16(port)
 	}
-	return uint16(port)
+	if RawProfileHasPorts(profile) {
+		return rawServerPort
+	}
+	return 0
 }
