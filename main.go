@@ -76,6 +76,9 @@ func main() {
 	if note := sockBufNote(cfg.Transport, cfg.SockBuf); note != "" {
 		log.Print(note)
 	}
+	if note := workersNote(cfg.Transport, cfg.Fec, cfg.Workers); note != "" {
+		log.Print(note)
+	}
 
 	nq := 1
 	if !cfg.Fec && queueingCarrier(cfg.Transport) {
@@ -334,6 +337,23 @@ const (
 	srcByBind   = "bind"
 	srcBySrcIPs = "src_ips"
 )
+
+func workersNote(transport string, fec bool, n int) string {
+	if n <= 1 {
+		return ""
+	}
+	if fec {
+		return fmt.Sprintf("core: WARNING workers=%d is ignored while fec is on. FEC needs one ordered "+
+			"stream to rebuild a block from, so the datapath runs a single queue and the extra workers "+
+			"are never created", n)
+	}
+	if !queueingCarrier(transport) {
+		return fmt.Sprintf("core: WARNING carrier %s ignores workers=%d. It multiplies the TUN read "+
+			"queues a datagram carrier drains in parallel, and a stream carrier has one connection to "+
+			"feed", transport, n)
+	}
+	return ""
+}
 
 func sockBufCarrier(transport string) bool {
 	switch transport {
