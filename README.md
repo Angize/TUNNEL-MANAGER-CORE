@@ -1,95 +1,44 @@
 # TUNNEL-MANAGER-CORE
 
-هستهٔ دیتاپلینِ رمزنگاری‌شده — یک باینریِ Go استاتیک و بدونِ وابستگی. پنلِ مرکزی و
-نودِ Python ارکستریت می‌کنند؛ این هسته فقط بسته‌های L3 را بینِ یک دستگاهِ TUN و یک
-همتای نقطه‌به‌نقطه جابه‌جا می‌کند و ورودی/خروجیِ تعاملی ندارد. ترنسپورت، رمز، ضدِDPI،
-جعلِ IP و چرخشِ هدفِ متحرک همه از روی یک فایلِ config انتخاب می‌شوند.
+نصبِ دستی لازم نیست: پنل باینریِ ریلیز را دانلود و به نودها push می‌کند. مراحلِ زیر برای
+گرفتنِ دستیِ باینری یا ساخت از سورس است.
 
-> در استقرارِ واقعی هسته را **دستی نمی‌سازی**: پنل نسخهٔ ریلیز را دانلود و به نودها
-> push می‌کند. مراحلِ زیر فقط برای توسعه/ساختِ دستی است.
+## باینریِ آماده
 
-## پیش‌نیاز
+```bash
+curl -fsSL https://github.com/Angize/TUNNEL-MANAGER-CORE/releases/latest/download/tnl-core-linux-amd64 -o tnl-core && chmod +x tnl-core
+```
 
-| ابزار | نسخه | برای چه |
-|---|---|---|
-| `go` | 1.25+ | ساختِ باینری (فقط دستی) |
-| `git` | — | دریافتِ کد |
-| Linux | kernel با TUN | اجرا |
+برای ARM، `amd64` را با `arm64` عوض کن. چک‌سام: همان URL با پسوندِ `.sha256`.
 
-راه‌های ضدِسانسورِ خام (`raw`/جعلِ IP/بعضی حالت‌های `fake_desync`) به
-`CAP_NET_RAW` نیاز دارند و فقط روی Linux کار می‌کنند.
+## ساخت از سورس
 
-## راه‌اندازی از صفر
+Go **1.25+** لازم است. بستهٔ `golang` دبیان/اوبونتو معمولاً قدیمی‌تر است:
 
-```sh
-# ۱) پیش‌نیازها (Debian/Ubuntu) — یا Go رسمیِ 1.25+
-sudo apt update && sudo apt install -y golang git
+```bash
+curl -fsSL https://go.dev/dl/go1.27.1.linux-amd64.tar.gz | sudo tar -C /usr/local -xz && export PATH=/usr/local/go/bin:$PATH
+```
 
-# ۲) کلون
-git clone https://github.com/Angize/TUNNEL-MANAGER-CORE.git
-cd TUNNEL-MANAGER-CORE
+بعد (نیاز به دسترسیِ اینترنت برای ماژول‌ها — `vendor/` ندارد):
 
-# ۳) ساخت (استاتیک، بدونِ CGO)
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-  go build -trimpath -ldflags "-s -w" -o tnl-core .
+```bash
+git clone https://github.com/Angize/TUNNEL-MANAGER-CORE.git && cd TUNNEL-MANAGER-CORE && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o tnl-core .
+```
 
-# ۴) تست
-go test ./...
+## اجرا
 
-# ۵) اجرا (معمولاً نود این کار را می‌کند)
+```bash
 sudo ./tnl-core --config core-<id>.json
 ```
 
-نود فایلِ `core-<id>.json` را می‌نویسد و باینری را با `--config <path>` اجرا می‌کند.
+فقط لینوکس. اجرا به root (یا `CAP_NET_RAW` + `CAP_NET_ADMIN`)، به `/dev/net/tun` و به
+`iproute2` نیاز دارد؛ ترنسپورتِ `raw` به `iptables` هم. فایلِ کانفیگ را در استقرارِ واقعی
+نود می‌نویسد.
 
 | فلگ | کار |
 |---|---|
 | `--config <path>` | مسیرِ فایلِ JSONِ پیکربندی (تنها راهِ اجرای واقعی) |
 | `--version` | چاپِ نسخه و خروج |
-| `--probe-spoof` | چاپِ توانِ جعلِ IP به‌صورت JSON و خروج (نود برای `spoof-probe` صدا می‌زند) |
-
-## ترنسپورت‌ها
-
-| `transport` | کاربرد |
-|---|---|
-| `udp` | پیش‌فرض، سبک، سازگار با NAT |
-| `tcp` | استریمی، پایدار پشتِ فایروال؛ تنها ترنسپورتی که `cover` (پوششِ TLS) می‌پذیرد |
-| `raw` | بستهٔ خامِ IP — پروفایل `bip` (253 نیتیو) / `ipip` / `gre` / `icmp` / `udp` / `tcp` / `esp` (50)؛ پشتیبانِ جعلِ IP |
-| `ws` | پشتِ CDN (دامنه‌فرونتینگ)، با حاملِ `ws` / `http` / `grpc` — با ECH، poolِ چرخشیِ edge و warm-standby |
-
-## قابلیت‌ها
-
-| کلید | کار |
-|---|---|
-| `crypto` | AEAD (`aes-256-gcm` پیش‌فرض، `aes-128-gcm`, `chacha20-poly1305`, `xchacha20-poly1305`؛ `auto`→aes-256-gcm) با **دست‌دادِ زودگذرِ X25519 برای هر نشست** (forward secrecy) + احرازِ PSK + ضدِبازپخش (anti-replay) |
-| `obfs` | حذفِ بایتِ ثابت + padding + jitter + ماسکِ طولِ TCP (ضدِ DPI)؛ به `crypto` نیاز دارد |
-| `cover` | پوششِ TLS به‌سبکِ REALITY (اثرِانگشتِ Chrome، فقط `tcp`) — پروبِ ناشناس را شفاف به `cover_sni:443`ِ واقعی پراکسی می‌کند |
-| `fec` | تصحیحِ خطای Reed-Solomon روی خطِ پرتلفات (`udp`/`raw`) |
-| `spoof_src_ip` / `spoof_dst_ip` | جعلِ IPِ مبدأ / مقصدِ طعمه (روی پروفایلِ `raw` `bip`) |
-| ECH | رمزکردنِ SNIِ واقعی داخلِ ClientHello (`ws` + `wss`)؛ نود کلید را از رکوردِ HTTPSِ دامنه روی DoH می‌گیرد |
-| poolِ edge | چرخشِ ترکیبِ (IPِ edge × SNI) با auto-burn و warm-standby (make-before-break) برای `ws` |
-| `cdn_carrier` | شکلِ حامل پشتِ CDN: `ws` (upgrade) / `http` (GET-پایین + POST-بالا) / `grpc` (استریمِ دوطرفه) — `http`/`grpc` از CDNهایی که WebSocket را می‌بندند رد می‌شوند |
-| SNI-split | تکه‌کردنِ ClientHelloِ wss (`split`/`disorder`/`fake`) برای شکستِ DPIِ مبتنی بر SNI |
-| `fake_desync` | بسته‌های طعمه پیش از هر دست‌داد برای بی‌سنکرون‌کردنِ DPIِ حالت‌مند (`raw`/`tcp`/`ws`) |
-| poolِ چرخشی | چرخشِ IPِ مقصد و مبدأ برای ترنسپورت‌های مستقیم (`udp`/`tcp`/`raw`) با burnِ IPِ بلاک‌شده |
-| `tuning` | تنظیمِ عملیاتیِ تایمینگِ سلامت/تشخیصِ مرگ/چرخش توسطِ اپراتور |
-| `gso` | سگمنت‌آفلودِ TUN برای گذردهیِ بالاتر (بهینه‌سازیِ محلی، فرمتِ سیم بی‌تغییر) |
-
-## فرمتِ سیم
-
-با `obfs` روشن، هیچ فیلدِ ثابتی روی سیم نیست: کل فریم ciphertextِ AEAD به‌علاوهٔ
-padding است و طولِ واقعی داخلِ فریمِ sealed قرار دارد. با `crypto` روشن ولی `obfs`
-خاموش (فرمتِ legacy):
-
-```
-[0] magic = 0xB1
-[1] type  = 0 data | 1 ping | 2 pong
-[2:] payload   (رمز روشن: sealed؛ خاموش: بستهٔ خامِ IP)
-```
-
-> ⚠️ با `crypto` خاموش هیچ احراز و ضدِبازپخشی نیست؛ هرکس بتواند بسته‌ای به listener
-> بفرستد می‌تواند تونل را برباید یا به آن تزریق کند. جز روی لینکِ مطمئن و ایزوله،
-> `crypto` را روشن نگه دار.
 
 ---
 
