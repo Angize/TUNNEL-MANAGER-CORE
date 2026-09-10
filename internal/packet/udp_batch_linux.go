@@ -4,8 +4,10 @@ package packet
 
 import (
 	"net"
+	"unsafe"
 
 	"golang.org/x/net/ipv4"
+	"golang.org/x/sys/unix"
 )
 
 type udpBatch struct {
@@ -139,4 +141,14 @@ func (t *udpTx) flush(errs *sendErrLog) int {
 		}
 	}
 	return sent
+}
+
+func udpSegmentOOB(size int) []byte {
+	b := make([]byte, unix.CmsgSpace(2))
+	h := (*unix.Cmsghdr)(unsafe.Pointer(&b[0]))
+	h.Level = unix.IPPROTO_UDP
+	h.Type = unix.UDP_SEGMENT
+	h.SetLen(unix.CmsgLen(2))
+	*(*uint16)(unsafe.Pointer(&b[unix.CmsgLen(0)])) = uint16(size)
+	return b
 }

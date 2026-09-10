@@ -6,7 +6,6 @@ import (
 	"net"
 	"sync/atomic"
 	"syscall"
-	"time"
 )
 
 var band atomic.Uint64
@@ -46,8 +45,9 @@ func dialFromBand(ctx context.Context, d func() *net.Dialer, addr string) (net.C
 	return nil, err
 }
 
-func (b *TCP) dialBand(timeout time.Duration, addr string) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return dialFromBand(ctx, func() *net.Dialer { return b.dialer(timeout) }, addr)
+func sportBand(lo, hi int) (uint32, uint32) {
+	if lo < MinSportBandLo || hi > 65535 || hi < lo || hi-lo+1 < MinSportBandSpan {
+		lo, hi = SportBandLoDefault, SportBandHiDefault
+	}
+	return uint32(lo), uint32(hi - lo + 1)
 }
