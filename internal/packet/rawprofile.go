@@ -49,7 +49,7 @@ var rawProfiles = map[string]int{
 
 var rawHeaderLens = map[string]int{
 	"bare":    0,
-	"ipip":    0,
+	"ipip":    20,
 	"etherip": 2,
 	"ipcomp":  4,
 	"gre":     4,
@@ -62,6 +62,30 @@ var rawHeaderLens = map[string]int{
 }
 
 func rawHeaderLen(profile string) int { return rawHeaderLens[profile] }
+
+const (
+	ipFlagDF       = 1 << 14
+	ipipInnerProto = protoESP
+	ipipInnerTTL   = 64
+)
+
+func ipipInnerAddr(spi, which uint32) [4]byte {
+	v := splitmix64(uint64(spi)<<32 | uint64(which+1))
+	return [4]byte{10, byte(v >> 24), byte(v >> 16), byte(v>>8)%254 + 1}
+}
+
+func buildInnerIP4(h []byte, payload int, seq, spi uint32) {
+	h[0] = 0x45
+	binary.BigEndian.PutUint16(h[2:4], uint16(len(h)+payload))
+	binary.BigEndian.PutUint16(h[4:6], uint16(seq))
+	binary.BigEndian.PutUint16(h[6:8], ipFlagDF)
+	h[8] = ipipInnerTTL
+	h[9] = ipipInnerProto
+	src, dst := ipipInnerAddr(spi, 0), ipipInnerAddr(spi, 1)
+	copy(h[12:16], src[:])
+	copy(h[16:20], dst[:])
+	binary.BigEndian.PutUint16(h[10:12], onesComplementSum(h))
+}
 
 const (
 	rawClientPort = 51820
@@ -315,8 +339,14 @@ func peerTSVal(tcp []byte) uint32 {
 
 func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte) []byte {
 	switch rawProfiles[profile] {
-	case protoBare, protoIPIP:
+	case protoBare:
 		return payload
+
+	case protoIPIP:
+		h := make([]byte, rawHeaderLen(profile)+len(payload))
+		buildInnerIP4(h[:20], len(payload), seq, spi)
+		copy(h[20:], payload)
+		return h
 
 	case protoGRE:
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
@@ -441,8 +471,11 @@ func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16,
 		}
 	}
 	switch framing {
-	case protoBare, protoIPIP:
+	case protoBare:
 		return pkt, 0, 0, true
+	case protoIPIP:
+		b, ok := skip(pkt, rawHeaderLen(profile))
+		return b, 0, 0, ok
 	case protoTCP:
 		if len(pkt) < 20 {
 			return nil, 0, 0, false
