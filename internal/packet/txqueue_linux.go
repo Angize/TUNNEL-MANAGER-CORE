@@ -70,6 +70,7 @@ func (r *Raw) closeTxQueues() {
 			q.own.Close()
 		}
 	}
+	r.txq = r.txq[:1]
 }
 
 func (r *Raw) logTxQueues() {

@@ -387,12 +387,12 @@ func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile str
 	r.setSportMode(sportRandom, rawSport)
 	r.setSportRotate(rot)
 	r.initFec(fec, fecData, fecParity)
-	r.wireAntiLeak()
 	r.rxw = newTunWriters(append([]*tun.Device{dev}, extraQ...))
 	if err := r.buildTxQueues(extraQ, r.proto); err != nil {
 		r.Close()
 		return nil, err
 	}
+	r.wireAntiLeak()
 	r.logTxQueues()
 	return r, nil
 }
@@ -408,12 +408,12 @@ func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 	r.setSportRotate(rot)
 	applyConnSockBuf(r.conn)
 	r.initFec(fec, fecData, fecParity)
-	r.wireAntiLeak()
 	r.rxw = newTunWriters(append([]*tun.Device{dev}, extraQ...))
 	if err := r.buildTxQueues(extraQ, r.proto); err != nil {
 		r.Close()
 		return nil, err
 	}
+	r.wireAntiLeak()
 	r.logTxQueues()
 	return r, nil
 }
@@ -501,11 +501,8 @@ func (r *Raw) sealer() Sealer {
 }
 
 func (r *Raw) srcIP() net.IP {
-	if rs := r.replySrc.Load(); rs != nil {
-		return *rs
-	}
-	if l := r.localIP.Load(); l != nil {
-		return l.IP
+	if ip := r.boundSrc(); ip != nil {
+		return ip
 	}
 	return net.IPv4zero
 }
@@ -541,10 +538,8 @@ func (r *Raw) boundSrc() net.IP {
 	if rs := r.replySrc.Load(); rs != nil {
 		return *rs
 	}
-	if r.sp != nil {
-		if l := r.localIP.Load(); l != nil {
-			return l.IP
-		}
+	if l := r.localIP.Load(); l != nil {
+		return l.IP
 	}
 	return nil
 }
@@ -876,15 +871,25 @@ func (r *Raw) tunName() string {
 	return r.dev.Name
 }
 
-func (r *Raw) wireAntiLeak() {
-	marked := false
-	if r.profile == "icmp" && !r.isClient {
-		if err := setSendMark(r.conn); err != nil {
-			log.Printf("raw: SO_MARK could not be set (%v) — the icmp anti-leak rule is OFF, so the kernel will keep mirroring our frames back to the peer", err)
-		} else {
-			marked = true
+func (r *Raw) markSendPath() bool {
+	if err := setSendMark(r.conn); err != nil {
+		log.Printf("raw: SO_MARK could not be set (%v) — the icmp anti-leak rule is OFF, so the kernel will keep mirroring our frames back to the peer", err)
+		return false
+	}
+	for i, q := range r.txq[1:] {
+		if q.own == nil {
+			continue
+		}
+		if err := setSendMark(q.own); err != nil {
+			log.Printf("raw: SO_MARK could not be set on send queue %d (%v) — the icmp anti-leak rule is OFF, so the kernel will keep mirroring our frames back to the peer", i+1, err)
+			return false
 		}
 	}
+	return true
+}
+
+func (r *Raw) wireAntiLeak() {
+	marked := r.profile == "icmp" && !r.isClient && r.markSendPath()
 	r.leak.init(r.closeCh, func(peer net.IP) (func(), bool) {
 		return addRawDrop(rawLeak{peer: peer, profile: r.profile, port: r.port, dports: r.dports,
 			bandLo: r.rotPerm.lo, bandSpan: r.rotPerm.span,
