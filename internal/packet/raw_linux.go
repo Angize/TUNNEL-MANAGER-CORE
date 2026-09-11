@@ -344,7 +344,7 @@ func dialRawBase(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 	}
 	applyConnSockBuf(conn)
 	r := newRaw(conn, dev, obfs, psk, cipher, profile, true)
-	r.proto, r.port = proto, rawPortOr(rawPort)
+	r.proto, r.port = proto, rawEffPort(profile, rawPort)
 	r.soloPeer.Store(&net.IPAddr{IP: ip})
 	if lip := routeLocalIP(ip); lip != nil {
 		r.localIP.Store(&net.IPAddr{IP: lip})
@@ -372,7 +372,7 @@ func listenRawBase(listenIP string, dev *tun.Device, obfs bool, psk, cipher, pro
 		log.Printf("raw: WARNING IP_PKTINFO could not be enabled (%v) — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one", err)
 	}
 	r := newRaw(conn, dev, obfs, psk, cipher, profile, false)
-	r.proto, r.port = proto, rawPortOr(rawPort)
+	r.proto, r.port = proto, rawEffPort(profile, rawPort)
 	return r, nil
 }
 
