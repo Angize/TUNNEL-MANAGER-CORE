@@ -52,7 +52,7 @@ var rawHeaderLens = map[string]int{
 	"ipip":    20,
 	"etherip": 2,
 	"ipcomp":  4,
-	"gre":     4,
+	"gre":     24,
 	"icmp":    8,
 	"udp":     8,
 	"esp":     8,
@@ -67,6 +67,9 @@ const (
 	ipFlagDF       = 1 << 14
 	ipipInnerProto = protoESP
 	ipipInnerTTL   = 64
+
+	greHeaderLen = 4
+	greProtoIP4  = 0x0800
 )
 
 func ipipInnerAddr(spi, which uint32) [4]byte {
@@ -351,8 +354,9 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 	case protoGRE:
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 
-		binary.BigEndian.PutUint16(h[2:4], 0x0800)
-		copy(h[4:], payload)
+		binary.BigEndian.PutUint16(h[2:4], greProtoIP4)
+		buildInnerIP4(h[greHeaderLen:rawHeaderLen(profile)], len(payload), seq, spi)
+		copy(h[rawHeaderLen(profile):], payload)
 		return h
 
 	case protoICMP:
