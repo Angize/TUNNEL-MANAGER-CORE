@@ -49,10 +49,10 @@ var rawProfiles = map[string]int{
 
 var rawHeaderLens = map[string]int{
 	"bare":    0,
-	"ipip":    20,
+	"ipip":    28,
 	"etherip": 2,
 	"ipcomp":  4,
-	"gre":     24,
+	"gre":     32,
 	"icmp":    8,
 	"udp":     8,
 	"esp":     8,
@@ -70,11 +70,24 @@ const (
 
 	greHeaderLen = 4
 	greProtoIP4  = 0x0800
+
+	innerIP4Len  = 20
+	espHeaderLen = 8
 )
 
 func ipipInnerAddr(spi, which uint32) [4]byte {
 	v := splitmix64(uint64(spi)<<32 | uint64(which+1))
 	return [4]byte{10, byte(v >> 24), byte(v >> 16), byte(v>>8)%254 + 1}
+}
+
+func buildEncapESP(h []byte, payload int, seq, spi uint32) {
+	buildInnerIP4(h[:innerIP4Len], espHeaderLen+payload, seq, spi)
+	buildESP(h[innerIP4Len:innerIP4Len+espHeaderLen], seq, spi)
+}
+
+func buildESP(h []byte, seq, spi uint32) {
+	binary.BigEndian.PutUint32(h[0:4], spi)
+	binary.BigEndian.PutUint32(h[4:8], seq)
 }
 
 func buildInnerIP4(h []byte, payload int, seq, spi uint32) {
@@ -347,15 +360,15 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 
 	case protoIPIP:
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
-		buildInnerIP4(h[:20], len(payload), seq, spi)
-		copy(h[20:], payload)
+		buildEncapESP(h[:rawHeaderLen(profile)], len(payload), seq, spi)
+		copy(h[rawHeaderLen(profile):], payload)
 		return h
 
 	case protoGRE:
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
 
 		binary.BigEndian.PutUint16(h[2:4], greProtoIP4)
-		buildInnerIP4(h[greHeaderLen:rawHeaderLen(profile)], len(payload), seq, spi)
+		buildEncapESP(h[greHeaderLen:rawHeaderLen(profile)], len(payload), seq, spi)
 		copy(h[rawHeaderLen(profile):], payload)
 		return h
 
@@ -396,9 +409,8 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 
 	case protoESP:
 		h := make([]byte, rawHeaderLen(profile)+len(payload))
-		binary.BigEndian.PutUint32(h[0:4], spi)
-		binary.BigEndian.PutUint32(h[4:8], seq)
-		copy(h[8:], payload)
+		buildESP(h[:espHeaderLen], seq, spi)
+		copy(h[espHeaderLen:], payload)
 		return h
 
 	case protoL2TPv3:
