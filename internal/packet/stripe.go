@@ -53,8 +53,10 @@ func (d *stripeTx) write(p []byte, deadline int64) (int, error) {
 
 	d.mu.Lock()
 	binary.BigEndian.PutUint64(rec[0:8], d.seq)
-	d.seq++
 	err := d.offer(rec, deadline)
+	if err == nil {
+		d.seq++
+	}
 	d.mu.Unlock()
 	if err != nil {
 		return 0, err
