@@ -590,29 +590,24 @@ func buildIP4Ext(src, dst net.IP, proto, ttl int, badSum bool, payload []byte) [
 	return h
 }
 
-func l4SumOffset(proto int) int {
+func spoilL4Sum(l4 []byte, proto int) {
+	off := -1
 	switch proto {
 	case protoICMP:
-		return 2
+		off = 2
 	case protoTCP:
-		return 16
+		off = 16
 	case protoUDP:
-		return 6
+		off = 6
 	}
-	return -1
-}
-
-func spoilL4Sum(l4 []byte, proto int) bool {
-	off := l4SumOffset(proto)
 	if off < 0 || len(l4) < off+2 {
-		return false
+		return
 	}
 	bad := ^binary.BigEndian.Uint16(l4[off : off+2])
 	if proto == protoUDP && bad == 0 {
 		bad = 1
 	}
 	binary.BigEndian.PutUint16(l4[off:off+2], bad)
-	return true
 }
 
 const ethPIP = 0x0800
