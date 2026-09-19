@@ -582,16 +582,32 @@ func buildIP4Ext(src, dst net.IP, proto, ttl int, badSum bool, payload []byte) [
 	h[9] = byte(proto)
 	copy(h[12:16], src.To4())
 	copy(h[16:20], dst.To4())
-	sum := onesComplementSum(h[:20])
-	binary.BigEndian.PutUint16(h[10:12], sum)
-	if badSum {
-		binary.BigEndian.PutUint16(h[10:12], ^sum)
-		if onesComplementSum(h[:20]) == 0 {
-			binary.BigEndian.PutUint16(h[10:12], ^sum^0x0001)
-		}
-	}
+	binary.BigEndian.PutUint16(h[10:12], onesComplementSum(h[:20]))
 	copy(h[20:], payload)
+	if badSum {
+		spoilL4Sum(h[20:], proto)
+	}
 	return h
+}
+
+func spoilL4Sum(l4 []byte, proto int) {
+	off := -1
+	switch proto {
+	case protoICMP:
+		off = 2
+	case protoTCP:
+		off = 16
+	case protoUDP:
+		off = 6
+	}
+	if off < 0 || len(l4) < off+2 {
+		return
+	}
+	bad := ^binary.BigEndian.Uint16(l4[off : off+2])
+	if proto == protoUDP && bad == 0 {
+		bad = 1
+	}
+	binary.BigEndian.PutUint16(l4[off:off+2], bad)
 }
 
 const ethPIP = 0x0800
@@ -977,7 +993,7 @@ func (r *Raw) recvConnLoop() error {
 			if addr == nil {
 				continue
 			}
-			if peer := r.dst(); peer != nil && !addr.IP.Equal(peer.IP) && !r.srcAllowed(addr.IP) {
+			if !r.acceptSrc(addr.IP) {
 				continue
 			}
 			if !r.isClient {
@@ -1227,8 +1243,15 @@ func (r *Raw) SetPeerSources(ips []string) {
 	r.leak.scopeAll(parseIP4s(ips))
 }
 
-func (r *Raw) srcAllowed(ip net.IP) bool {
-	return srcAllowedIn(r.srcAllow, ip)
+func (r *Raw) acceptSrc(ip net.IP) bool {
+	peer := r.dst()
+	if peer != nil && ip.Equal(peer.IP) {
+		return true
+	}
+	if len(r.srcAllow) != 0 {
+		return srcAllowedIn(r.srcAllow, ip)
+	}
+	return peer == nil
 }
 
 func srcAllowedIn(set map[string]struct{}, ip net.IP) bool {
