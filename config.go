@@ -461,6 +461,10 @@ func (c *Config) validate() error {
 			{"ws_edge_ips", len(c.WSEdgeIPs) > 0},
 			{"ws_edge_snis", len(c.WSEdgeSNIs) > 0},
 			{"ws_rotate_secs", c.WSRotateSecs != 0},
+			{"ws_host", c.WSHost != ""},
+			{"ws_path", c.WSPath != ""},
+			{"ws_tls", c.WSTLS},
+			{"ws_ech", c.WSECH != ""},
 		} {
 			if k.set {
 				return errors.New(k.name + " belongs to the ws transport; transport \"" + c.Transport +
