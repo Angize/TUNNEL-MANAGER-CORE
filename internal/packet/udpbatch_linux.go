@@ -44,6 +44,7 @@ func (b *udpBatch) recv() ([]datagram, error) {
 const (
 	gsoMaxSegs  = 45
 	gsoMaxBytes = 60000
+	gsoFailCap  = 16
 )
 
 type udpTx struct {
@@ -51,8 +52,9 @@ type udpTx struct {
 	ms []ipv4.Message
 	n  int
 
-	gm    ipv4.Message
-	noGSO bool
+	gm     ipv4.Message
+	gsoBad int
+	noGSO  bool
 }
 
 func newUDPTx(c *net.UDPConn) *udpTx {
@@ -124,9 +126,10 @@ func (t *udpTx) flush(errs *sendErrLog) int {
 	if !t.noGSO {
 		if segs, size := t.gsoRun(); segs > 0 {
 			if n := t.sendGSO(segs, size); n >= 0 {
-				sent = n
+				sent, t.gsoBad = n, 0
 			} else {
-				t.noGSO = true
+				t.gsoBad++
+				t.noGSO = t.gsoBad >= gsoFailCap
 			}
 		}
 	}

@@ -2,6 +2,7 @@ package packet
 
 import (
 	"log"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -70,9 +71,9 @@ func (g *replayGuard) ok(session, seq uint64) bool {
 const replayDropEvery = 30 * time.Second
 
 type replayDropLog struct {
-	last  atomic.Int64
 	n     atomic.Int64
 	worst atomic.Uint64
+	once  sync.Once
 }
 
 var replayDrops replayDropLog
@@ -85,19 +86,23 @@ func (r *replayDropLog) note(offset uint64) {
 			break
 		}
 	}
-	now := time.Now().UnixNano()
-	prev := r.last.Load()
-	if prev == 0 {
-		r.last.CompareAndSwap(0, now)
+	r.once.Do(func() { go r.loop() })
+}
+
+func (r *replayDropLog) loop() {
+	t := time.NewTicker(replayDropEvery)
+	defer t.Stop()
+	for range t.C {
+		r.flush()
+	}
+}
+
+func (r *replayDropLog) flush() {
+	n := r.n.Swap(0)
+	worst := r.worst.Swap(0)
+	if n == 0 {
 		return
 	}
-	if now-prev < int64(replayDropEvery) {
-		return
-	}
-	if !r.last.CompareAndSwap(prev, now) {
-		return
-	}
-	n, worst := r.n.Swap(0), r.worst.Swap(0)
 	log.Printf("core: %d authenticated frames discarded by the replay guard in the last %s, the "+
 		"furthest %d behind the newest (the window is %d). Either a peer is replaying, or this build "+
 		"reorders its own frames further than the window covers -- lower workers if it is the latter",
