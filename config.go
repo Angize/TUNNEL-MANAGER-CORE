@@ -120,6 +120,7 @@ type Config struct {
 	WSEdgeIPs    []string `json:"ws_edge_ips"`
 	WSEdgeSNIs   []WSSNI  `json:"ws_edge_snis"`
 	WSRotateSecs int      `json:"ws_rotate_secs"`
+	WSPortRoll   bool     `json:"ws_port_roll"`
 
 	StatusPath string `json:"status_path"`
 
@@ -420,6 +421,11 @@ func (c *Config) validate() error {
 			return errors.New("ws_rotate_secs must be >= 0 (0 = rotate only on a failed edge)")
 		}
 
+		if c.WSPortRoll && len(c.WSEdgeIPs) == 0 {
+			return errors.New("ws_port_roll belongs to the ws edge pool (ws_edge_ips on a client); " +
+				"a single-edge ws carrier always re-dials on the port rung")
+		}
+
 		if len(c.WSEdgeIPs) > 0 || len(c.WSEdgeSNIs) > 0 {
 			if c.Role != "client" || !c.WSTLS {
 				return errors.New("ws edge pool requires ws_tls on a client")
@@ -461,6 +467,7 @@ func (c *Config) validate() error {
 			{"ws_edge_ips", len(c.WSEdgeIPs) > 0},
 			{"ws_edge_snis", len(c.WSEdgeSNIs) > 0},
 			{"ws_rotate_secs", c.WSRotateSecs != 0},
+			{"ws_port_roll", c.WSPortRoll},
 			{"ws_host", c.WSHost != ""},
 			{"ws_path", c.WSPath != ""},
 			{"ws_tls", c.WSTLS},

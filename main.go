@@ -79,7 +79,8 @@ func main() {
 	if note := workersNote(cfg.Transport, cfg.Fec, cfg.Workers); note != "" {
 		log.Print(note)
 	}
-	if note := portTriesNote(cfg.Transport, cfg.RawSportRandom, cfg.PortTries); note != "" {
+	if note := portTriesNote(cfg.Transport, cfg.RawSportRandom, len(cfg.WSEdgeIPs) > 0 && !cfg.WSPortRoll,
+		cfg.PortTries); note != "" {
 		log.Print(note)
 	}
 
@@ -191,10 +192,11 @@ func main() {
 					snis[i] = packet.EdgeSNI{Host: s.Host, ECH: s.ECH, Path: s.Path}
 				}
 				b, err = packet.DialEdgePool(dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher,
-					cfg.WSEdgeIPs, snis, time.Duration(cfg.WSRotateSecs)*time.Second, cfg.cdnIsHTTP(), cfg.cdnMode())
+					cfg.WSEdgeIPs, snis, time.Duration(cfg.WSRotateSecs)*time.Second, cfg.cdnIsHTTP(), cfg.cdnMode(),
+					cfg.WSPortRoll)
 				if err == nil {
-					log.Printf("tnl-core: dialing (core/%s%s wss ech pool: %dIP×%dSNI rotate=%ds)",
-						carrier, obfsTag, len(cfg.WSEdgeIPs), len(cfg.WSEdgeSNIs), cfg.WSRotateSecs)
+					log.Printf("tnl-core: dialing (core/%s%s wss ech pool: %dIP×%dSNI rotate=%ds port_roll=%t)",
+						carrier, obfsTag, len(cfg.WSEdgeIPs), len(cfg.WSEdgeSNIs), cfg.WSRotateSecs, cfg.WSPortRoll)
 				}
 				break
 			}
@@ -356,8 +358,15 @@ func drawsSourcePort(cfg *Config) bool {
 	return cfg.Role == "client"
 }
 
-func portTriesNote(transport string, sportRandom bool, n int) string {
-	if n <= 0 || transport != "raw" || sportRandom {
+func portTriesNote(transport string, sportRandom, edgeNoRoll bool, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if edgeNoRoll {
+		return fmt.Sprintf("core: WARNING port_tries=%d is ignored on this ws edge pool because ws_port_roll "+
+			"is off: a failed verdict burns the edge at once and no fresh connection is spent first", n)
+	}
+	if transport != "raw" || sportRandom {
 		return ""
 	}
 	return fmt.Sprintf("core: WARNING port_tries=%d is ignored on raw unless raw_sport_random is on. It "+

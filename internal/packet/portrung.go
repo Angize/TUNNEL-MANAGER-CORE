@@ -31,6 +31,12 @@ func (p *portRung) setRoll(roll func() bool) {
 	p.mu.Unlock()
 }
 
+func (p *portRung) armed() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.roll != nil
+}
+
 func (p *portRung) try() bool {
 	p.mu.Lock()
 	roll := p.roll

@@ -710,6 +710,9 @@ func (c *rotationController) spendFreeRungs() bool {
 }
 
 func (c *rotationController) reviveIfDue() {
+	if !c.port.armed() && !c.session.armed() {
+		return
+	}
 	if c.revive.try(time.Now()) {
 		c.refill()
 		c.st.event("down", "ladder-revive", "")
