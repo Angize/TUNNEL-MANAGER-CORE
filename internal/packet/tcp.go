@@ -277,6 +277,8 @@ type TCP struct {
 
 	sp *PeerPool
 
+	portRollOff bool
+
 	sniSplit bool
 	splitPos int
 	sniMode  string
@@ -586,7 +588,7 @@ const activeSep = " · "
 
 func activeLabel(ip, host string) string { return ip + activeSep + host }
 
-func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []EdgeSNI, rotate time.Duration, httpc bool, httpcMode string) (*TCP, error) {
+func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []EdgeSNI, rotate time.Duration, httpc bool, httpcMode string, portRoll bool) (*TCP, error) {
 	if len(ips) == 0 || len(snis) == 0 {
 		return nil, errors.New("ws pool: need at least one IP and one SNI")
 	}
@@ -602,7 +604,8 @@ func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips 
 	}
 	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, sniMeta: meta,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
+		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
+		portRollOff: !portRoll}
 	b.pp = NewPeerPool(ips, rotate)
 	b.sp = NewPeerPool(hosts, rotate)
 	b.rc.bind(b.pp, b.sp, axisIP, axisSNI)
@@ -734,7 +737,9 @@ func (b *TCP) Run() error {
 	if b.isClient {
 		go b.keepaliveLoop()
 		go b.diagLoop()
-		b.rc.port.setRoll(b.rollSourcePort)
+		if !b.portRollOff {
+			b.rc.port.setRoll(b.rollSourcePort)
+		}
 		b.st.trackPath(b.livePath, b.closeCh)
 		if b.rc.polls() {
 			go runCmdPoll(b.closeCh, b.cmdPollTick)

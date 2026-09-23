@@ -15,6 +15,12 @@ func (s *sessionRung) setDrop(drop func() bool) {
 	s.mu.Unlock()
 }
 
+func (s *sessionRung) armed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.drop != nil
+}
+
 func (s *sessionRung) try() bool {
 	s.mu.Lock()
 	drop := s.drop
