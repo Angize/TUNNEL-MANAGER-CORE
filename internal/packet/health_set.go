@@ -110,20 +110,6 @@ func (h healthSet) nextFrom(at int, keys []string) int {
 	return best
 }
 
-type rotWatch struct{ degraded bool }
-
-func (w *rotWatch) turned(eligible, total int) (degraded, report bool) {
-	if total < 2 {
-		return w.degraded, false
-	}
-	d := eligible < 2
-	if d == w.degraded {
-		return d, false
-	}
-	w.degraded = d
-	return d, true
-}
-
 func (h healthSet) countEligible(keys []string) int {
 	n := 0
 	for _, k := range keys {
