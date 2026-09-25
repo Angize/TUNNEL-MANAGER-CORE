@@ -45,7 +45,7 @@ const (
 
 	maxPreAuthConns = 128
 
-	maxAuthConns = 3
+	maxAuthConns = 2*MaxLanes + 2
 )
 
 var (
@@ -74,6 +74,8 @@ type connFramer struct {
 	rp replayGuard
 
 	rxAt atomic.Int64
+
+	lane atomic.Int32
 }
 
 func (cf *connFramer) sendSalt() error {
@@ -223,6 +225,9 @@ func (cf *connFramer) readFrame() (typ byte, session uint64, seq uint64, payload
 
 type TCP struct {
 	dev      *tun.Device
+	extra    []*tun.Device
+	lane     int
+	lead     *TCP
 	tw       *tunWriters
 	twOnce   sync.Once
 	cryptoOn bool
@@ -309,6 +314,7 @@ type TCP struct {
 
 	authMu    sync.Mutex
 	authConns []*connFramer
+	laneCur   [MaxLanes]atomic.Pointer[connFramer]
 }
 
 func (b *TCP) SetSourceIP(ip string) { b.bindIP = ip }
@@ -669,17 +675,17 @@ func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, c
 		preAuth: make(chan struct{}, maxPreAuthConns), httpcSessions: make(map[string]*httpcSession)}, nil
 }
 
-func ListenWS(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string) (*TCP, error) {
+func ListenWS(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, extra ...*tun.Device) (*TCP, error) {
 	ln, err := listenTCP(listenAddr)
 	if err != nil {
 		return nil, err
 	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, wsPath: wsPath, idle: connIdle, ping: pingEvery, addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
-		preAuth: make(chan struct{}, maxPreAuthConns)}, nil
+		preAuth: make(chan struct{}, maxPreAuthConns), extra: extra}, nil
 }
 
-func ListenTCP(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string) (*TCP, error) {
+func ListenTCP(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string, extra ...*tun.Device) (*TCP, error) {
 	if len(listenAddrs) == 0 {
 		return nil, errors.New("tcp listen: no listen address")
 	}
@@ -697,7 +703,7 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, 
 	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		cover: cover, coverSNI: coverSNI,
 		idle: connIdle, ping: pingEvery, addr: listenAddrs[0], ln: lns[0], lns: lns, closeCh: make(chan struct{}),
-		preAuth: make(chan struct{}, maxPreAuthConns)}
+		preAuth: make(chan struct{}, maxPreAuthConns), extra: extra}
 	if cover {
 		cs, err := tlscover.NewServer(psk, coverSNI)
 		if err != nil {
@@ -714,11 +720,18 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, 
 }
 
 func (b *TCP) Run() error {
-	errc := make(chan error, 2)
-	go func() { errc <- b.tunLoop() }()
+	errc := make(chan error, 2+len(b.extra))
+	go func() { errc <- b.tunLoop(b.dev, 0) }()
+	for i, d := range b.extra {
+		go func() { errc <- b.tunLoop(d, i+1) }()
+	}
 	if b.isClient {
 		go b.keepaliveLoop()
-		go b.diagLoop()
+		if b.lead == nil {
+			go b.diagLoop()
+		} else {
+			go b.followLoop()
+		}
 		if !b.portRollOff {
 			b.rc.port.setRoll(b.rollSourcePort)
 		}
@@ -743,7 +756,7 @@ func (b *TCP) Run() error {
 }
 
 func (b *TCP) writers() *tunWriters {
-	b.twOnce.Do(func() { b.tw = newTunWriters([]*tun.Device{b.dev}) })
+	b.twOnce.Do(func() { b.tw = newTunWriters(append([]*tun.Device{b.dev}, b.extra...)) })
 	return b.tw
 }
 
@@ -1410,7 +1423,7 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 		}
 	}
 
-	if err := cf.writeFrame(typePing, nil); err != nil {
+	if err := cf.writeFrame(typePing, b.laneHello()); err != nil {
 		return nil, err
 	}
 
@@ -1463,13 +1476,14 @@ func (b *TCP) selectedTCP(kind, key string) {
 func (b *TCP) handleFrame(cf *connFramer, typ byte, payload []byte) {
 	switch typ {
 	case typePing:
+		b.noteLane(cf, payload)
 		_ = cf.writeFrame(typePong, nil)
 	case typePong:
 	case typeData:
 		b.lastRxData.Store(time.Now().UnixNano())
 
 		if !b.isClient {
-			b.cur.Store(cf)
+			b.downFrom(cf)
 		}
 		b.writers().write(payload)
 	}
@@ -1521,6 +1535,7 @@ func (b *TCP) onConnErr(cf *connFramer, err error) {
 	}
 	cf.conn.Close()
 	b.cur.CompareAndSwap(cf, nil)
+	b.dropLane(cf)
 	b.removeAuthConn(cf)
 	if !b.isClient {
 		b.reelectDownstream()
@@ -1530,11 +1545,11 @@ func (b *TCP) onConnErr(cf *connFramer, err error) {
 	}
 }
 
-func (b *TCP) tunLoop() error {
+func (b *TCP) tunLoop(dev *tun.Device, q int) error {
 	buf := make([]byte, maxDatagram)
 	frames := make([][]byte, 0, tunBatchFrames)
 	for {
-		n, err := b.dev.Read(buf)
+		n, err := dev.Read(buf)
 		if err != nil {
 			if b.closed.Load() {
 				return nil
@@ -1543,14 +1558,14 @@ func (b *TCP) tunLoop() error {
 			log.Printf("core/tcp: tun read error: %v", err)
 			return err
 		}
-		cf := b.cur.Load()
+		cf := b.sendConn(q)
 		if cf == nil {
 			continue
 		}
 		frames = frames[:0]
 		frames = b.appendFrame(cf, frames, buf[:n])
-		for len(frames) < cap(frames) && b.cur.Load() == cf {
-			m, ok, err := b.dev.TryRead(buf)
+		for len(frames) < cap(frames) && b.sendConn(q) == cf {
+			m, ok, err := dev.TryRead(buf)
 			if err != nil || !ok {
 				break
 			}
