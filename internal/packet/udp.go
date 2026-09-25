@@ -24,7 +24,6 @@ const (
 )
 
 type Sealer interface {
-	Seal(pt, aad []byte) ([]byte, error)
 	Frame(lead, innerLen int) (buf, head, inner []byte)
 	SealInPlace(buf, inner, aad []byte) ([]byte, error)
 	Open(sealed, aad []byte) (session uint64, seq uint64, pt []byte, err error)
@@ -646,7 +645,7 @@ func (b *UDP) sealer() Sealer {
 }
 
 func (b *UDP) frame(typ byte, payload []byte) ([]byte, error) {
-	return sealBody(b.sealer(), b.obfs, typ, payload, padMaxFor(typ))
+	return sealBody(b.sealer(), b.obfs, 0, typ, payload, padMaxFor(typ))
 }
 
 func (b *UDP) tunToNet(dev *tun.Device) error {
@@ -774,19 +773,19 @@ func aadFor(typ byte) []byte {
 	return []byte{typ}
 }
 
-func sealBody(s Sealer, obfs bool, typ byte, payload []byte, padMax int) ([]byte, error) {
+func sealBody(s Sealer, obfs bool, lead int, typ byte, payload []byte, padMax int) ([]byte, error) {
 	if obfs {
-		return obfsSeal(s, typ, payload, padMax)
+		return obfsSeal(s, lead, typ, payload, padMax)
 	}
 	if s != nil {
-		buf, head, inner := s.Frame(2, len(payload))
-		head[0], head[1] = magic, typ
+		buf, head, inner := s.Frame(lead+2, len(payload))
+		head[lead], head[lead+1] = magic, typ
 		copy(inner, payload)
 		return s.SealInPlace(buf, inner, aadFor(typ))
 	}
-	out := make([]byte, 2+len(payload))
-	out[0], out[1] = magic, typ
-	copy(out[2:], payload)
+	out := make([]byte, lead+2+len(payload))
+	out[lead], out[lead+1] = magic, typ
+	copy(out[lead+2:], payload)
 	return out, nil
 }
 

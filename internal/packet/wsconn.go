@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 )
 
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -25,15 +27,18 @@ type wsConn struct {
 	r      *bufio.Reader
 	client bool
 	rbuf   []byte
+	rstore []byte
 	wmu    sync.Mutex
+	wbuf   []byte
 }
 
 func (c *wsConn) Read(p []byte) (int, error) {
 	for len(c.rbuf) == 0 {
-		payload, opcode, err := readWSFrame(c.r)
+		payload, opcode, err := readWSFrame(c.r, c.rstore)
 		if err != nil {
 			return 0, err
 		}
+		c.rstore = payload
 
 		if opcode >= 0x8 && len(payload) > 125 {
 			return 0, errDesync
@@ -81,43 +86,50 @@ func (c *wsConn) writeWSFrame(opcode byte, payload []byte) error {
 
 func (c *wsConn) sendWSFrame(opcode byte, payload []byte) error {
 	n := len(payload)
-	hdr := make([]byte, 0, 14)
-	hdr = append(hdr, 0x80|opcode)
+	out := append(c.wbuf[:0], 0x80|opcode)
 	var maskBit byte
 	if c.client {
 		maskBit = 0x80
 	}
 	switch {
 	case n < 126:
-		hdr = append(hdr, maskBit|byte(n))
+		out = append(out, maskBit|byte(n))
 	case n < 65536:
-		hdr = append(hdr, maskBit|126, byte(n>>8), byte(n))
+		out = append(out, maskBit|126, byte(n>>8), byte(n))
 	default:
-		hdr = append(hdr, maskBit|127)
-		var ext [8]byte
-		binary.BigEndian.PutUint64(ext[:], uint64(n))
-		hdr = append(hdr, ext[:]...)
+		out = append(out, maskBit|127)
+		out = binary.BigEndian.AppendUint64(out, uint64(n))
 	}
-	body := payload
 	if c.client {
 		var key [4]byte
-		if _, err := io.ReadFull(rand.Reader, key[:]); err != nil {
+		if err := crypto.RandRead(key[:]); err != nil {
 			return err
 		}
-		hdr = append(hdr, key[:]...)
-		body = make([]byte, n)
-		for i := 0; i < n; i++ {
-			body[i] = payload[i] ^ key[i&3]
-		}
+		out = append(out, key[:]...)
+		start := len(out)
+		out = append(out, make([]byte, n)...)
+		maskCopy(out[start:], payload, key)
+	} else {
+		out = append(out, payload...)
 	}
-	if _, err := c.Conn.Write(hdr); err != nil {
-		return err
-	}
-	_, err := c.Conn.Write(body)
+	c.wbuf = out
+	_, err := c.Conn.Write(out)
 	return err
 }
 
-func readWSFrame(r *bufio.Reader) (payload []byte, opcode byte, err error) {
+func maskCopy(dst, src []byte, key [4]byte) {
+	k := uint64(binary.LittleEndian.Uint32(key[:]))
+	k |= k << 32
+	i := 0
+	for ; i+8 <= len(src); i += 8 {
+		binary.LittleEndian.PutUint64(dst[i:], binary.LittleEndian.Uint64(src[i:])^k)
+	}
+	for ; i < len(src); i++ {
+		dst[i] = src[i] ^ key[i&3]
+	}
+}
+
+func readWSFrame(r *bufio.Reader, store []byte) (payload []byte, opcode byte, err error) {
 	var h [2]byte
 	if _, err = io.ReadFull(r, h[:]); err != nil {
 		return nil, 0, err
@@ -148,14 +160,16 @@ func readWSFrame(r *bufio.Reader) (payload []byte, opcode byte, err error) {
 			return nil, 0, err
 		}
 	}
-	buf := make([]byte, n)
+	buf := store[:0]
+	if cap(buf) < n {
+		buf = make([]byte, n)
+	}
+	buf = buf[:n]
 	if _, err = io.ReadFull(r, buf); err != nil {
 		return nil, 0, err
 	}
 	if masked {
-		for i := 0; i < n; i++ {
-			buf[i] ^= mask[i&3]
-		}
+		maskCopy(buf, buf, mask)
 	}
 	return buf, opcode, nil
 }

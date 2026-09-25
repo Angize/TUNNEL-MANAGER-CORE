@@ -49,12 +49,12 @@ func randUint(max int) (int, error) {
 	}
 }
 
-func obfsSeal(s Sealer, typ byte, payload []byte, padMax int) ([]byte, error) {
+func obfsSeal(s Sealer, lead int, typ byte, payload []byte, padMax int) ([]byte, error) {
 	n, err := randUint(padMax)
 	if err != nil {
 		return nil, err
 	}
-	buf, _, inner := s.Frame(0, obfsInnerHdr+len(payload)+n)
+	buf, _, inner := s.Frame(lead, obfsInnerHdr+len(payload)+n)
 	inner[0] = typ
 	binary.BigEndian.PutUint16(inner[1:3], uint16(len(payload)))
 	copy(inner[obfsInnerHdr:], payload)

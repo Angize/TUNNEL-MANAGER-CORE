@@ -146,25 +146,6 @@ func mask(key, salt, buf []byte) error {
 	return nil
 }
 
-func (s *Sealer) Seal(plaintext, aad []byte) ([]byte, error) {
-	ns := s.sendAEAD.NonceSize()
-	out := make([]byte, maskSaltLen+ns, maskSaltLen+ns+len(plaintext)+s.sendAEAD.Overhead())
-
-	if err := RandRead(out[:maskSaltLen]); err != nil {
-		return nil, err
-	}
-	nonce := out[maskSaltLen:]
-	copy(nonce, s.prefix)
-	binary.BigEndian.PutUint64(nonce[ns-8:], s.ctr.Add(1))
-
-	out = s.sendAEAD.Seal(out, nonce, plaintext, aad)
-
-	if err := mask(s.sendMask, out[:maskSaltLen], out[maskSaltLen:maskSaltLen+ns]); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 func (s *Sealer) Frame(lead, innerLen int) (buf, head, inner []byte) {
 	off := lead + maskSaltLen + s.sendAEAD.NonceSize()
 	buf = make([]byte, off+innerLen, off+innerLen+s.sendAEAD.Overhead())

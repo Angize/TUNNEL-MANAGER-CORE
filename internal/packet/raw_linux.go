@@ -508,7 +508,7 @@ func (r *Raw) srcIP() net.IP {
 }
 
 func (r *Raw) body(typ byte, payload []byte) ([]byte, error) {
-	return sealBody(r.sealer(), r.obfs, typ, payload, padMaxFor(typ))
+	return sealBody(r.sealer(), r.obfs, 0, typ, payload, padMaxFor(typ))
 }
 
 func (r *Raw) wire(body []byte, dst net.IP) []byte { return r.wireTo(body, dst, r.cport()) }
