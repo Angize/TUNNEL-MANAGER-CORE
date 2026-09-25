@@ -74,6 +74,7 @@ type UDP struct {
 	ci       atomic.Pointer[crypto.Ephemeral]
 
 	peerAnswered atomic.Bool
+	peerNew      atomic.Bool
 	rxTick       atomic.Bool
 
 	fecEnc  *fecEncoder
@@ -285,6 +286,7 @@ func (b *UDP) landPeerUDP(hard bool) *net.UDPAddr {
 		b.ci.Store(nil)
 	}
 	b.peerAnswered.Store(false)
+	b.peerNew.Store(false)
 	return ua
 }
 
@@ -384,7 +386,9 @@ func (b *UDP) provenFrom(ip net.IP) {
 			}
 		}
 	}
-	b.peerAnswered.Store(true)
+	if !b.peerAnswered.Swap(true) && b.isClient && !b.cryptoOn {
+		b.peerNew.Store(true)
+	}
 	b.rxTick.Store(true)
 }
 
@@ -927,7 +931,7 @@ func (b *UDP) clientLoop() {
 			b.sendInit()
 		}
 		if !b.cryptoOn || b.sealer() != nil {
-			if !b.cryptoOn && b.peerAnswered.Load() {
+			if b.peerNew.Swap(false) {
 				b.st.newSession()
 				b.st.reconnected("udp")
 			}

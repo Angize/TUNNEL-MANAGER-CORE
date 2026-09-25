@@ -24,6 +24,7 @@ type healthStatus struct {
 	State      string `json:"state"`
 	Fails      int    `json:"fails"`
 	NextRetest int64  `json:"next_retest_unix"`
+	RetestSecs int64  `json:"retest_secs"`
 }
 
 type coreStatus struct {

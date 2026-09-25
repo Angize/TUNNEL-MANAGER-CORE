@@ -9,6 +9,12 @@ type healthRec struct {
 	state      string
 	fails      int
 	nextRetest int64
+	step       int64
+}
+
+func (r *healthRec) waitFrom(now, step int64) {
+	r.step = step
+	r.nextRetest = now + step
 }
 
 type healthSet struct {
@@ -49,7 +55,9 @@ func (h healthSet) tier(key string) (tier int, next int64) {
 func (h healthSet) burn(key string) (condemned bool) {
 	r := h.recs[key]
 	if r == nil {
-		h.recs[key] = &healthRec{state: stateSuspect, nextRetest: h.now() + suspectBackoff[0]}
+		r = &healthRec{state: stateSuspect}
+		r.waitFrom(h.now(), suspectBackoff[0])
+		h.recs[key] = r
 		return true
 	}
 	if r.nextRetest <= h.now() {

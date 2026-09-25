@@ -57,10 +57,17 @@ type httpcConn struct {
 	closed  bool
 	closeFn func()
 	idle    *time.Timer
+	expired atomic.Bool
 	ra, la  net.Addr
 }
 
-func (c *httpcConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+func (c *httpcConn) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	if err != nil && c.expired.Load() {
+		return n, os.ErrDeadlineExceeded
+	}
+	return n, err
+}
 
 func (c *httpcConn) armWrite() func() {
 	dl := c.wdl.Load()
@@ -140,7 +147,10 @@ func (c *httpcConn) SetReadDeadline(t time.Time) error {
 		if d < 0 {
 			d = 0
 		}
-		c.idle = time.AfterFunc(d, func() { c.Close() })
+		c.idle = time.AfterFunc(d, func() {
+			c.expired.Store(true)
+			c.Close()
+		})
 	}
 	return nil
 }

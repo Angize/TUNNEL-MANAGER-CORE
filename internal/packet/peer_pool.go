@@ -193,16 +193,16 @@ func (p *PeerPool) burnCount() uint64 { return p.burns.Load() }
 
 func retestBackoff(r *healthRec, now int64) {
 	if r.state == stateDead {
-		r.nextRetest = now + deadRetest
+		r.waitFrom(now, deadRetest)
 		return
 	}
 	r.fails++
 	if r.fails >= len(suspectBackoff) {
 		r.state = stateDead
-		r.nextRetest = now + deadRetest
+		r.waitFrom(now, deadRetest)
 		return
 	}
-	r.nextRetest = now + suspectBackoff[r.fails]
+	r.waitFrom(now, suspectBackoff[r.fails])
 }
 
 func (p *PeerPool) advanceFailLocked() {
@@ -874,7 +874,7 @@ func (p *PeerPool) healthRows() []healthStatus {
 	for _, a := range p.addrs {
 		hs := healthStatus{Key: a, Kind: p.axis, State: "healthy"}
 		if r := p.health.rec(a); r != nil {
-			hs.State, hs.Fails, hs.NextRetest = r.state, r.fails, r.nextRetest
+			hs.State, hs.Fails, hs.NextRetest, hs.RetestSecs = r.state, r.fails, r.nextRetest, r.step
 		}
 		rows = append(rows, hs)
 	}
