@@ -88,6 +88,8 @@ type Config struct {
 
 	SockBuf int `json:"sock_buf"`
 
+	TCPBuf int `json:"tcp_buf"`
+
 	PortTries int `json:"port_tries"`
 
 	Workers int       `json:"workers"`
@@ -163,6 +165,16 @@ func loadConfig(path string) (*Config, error) {
 
 const minRotateSecs = 10
 
+func sizedBuf(n int, applies bool) int {
+	if n == 0 && applies {
+		n = 16 << 20
+	}
+	if n > 0 && n < 64<<10 {
+		n = 64 << 10
+	}
+	return min(n, 64<<20)
+}
+
 func (c *Config) applyDefaults() {
 	if c.MTU <= 0 {
 		c.MTU = 1400
@@ -173,15 +185,8 @@ func (c *Config) applyDefaults() {
 	if c.Workers > maxWorkers {
 		c.Workers = maxWorkers
 	}
-	if c.SockBuf == 0 && sockBufCarrier(c.Transport) {
-		c.SockBuf = 4 << 20
-	}
-	if c.SockBuf > 0 && c.SockBuf < 64<<10 {
-		c.SockBuf = 64 << 10
-	}
-	if c.SockBuf > 64<<20 {
-		c.SockBuf = 64 << 20
-	}
+	c.SockBuf = sizedBuf(c.SockBuf, sockBufCarrier(c.Transport))
+	c.TCPBuf = sizedBuf(c.TCPBuf, tcpBufCarrier(c.Transport))
 	if c.Crypto.Cipher == "" {
 		c.Crypto.Cipher = "aes-256-gcm"
 	}

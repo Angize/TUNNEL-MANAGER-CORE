@@ -621,7 +621,7 @@ func openHdrincl(proto int) (int, error) {
 		syscall.Close(fd)
 		return -1, err
 	}
-	applyFdSndBuf(fd, wantSockBuf())
+	applyFdSndBuf(fd, wantSockBuf(), "sock_buf")
 	return fd, nil
 }
 

@@ -957,7 +957,12 @@ func (b *TCP) runHTTPCServer() {
 	mux := http.NewServeMux()
 	mux.HandleFunc(httpcPath(b.wsPath), b.httpcHandler)
 
-	srv := &http.Server{Handler: h2c.NewHandler(mux, &http2.Server{})}
+	h2s := &http2.Server{}
+	if n := wantTCPBuf(); n > 0 {
+		h2s.MaxUploadBufferPerConnection = int32(n)
+		h2s.MaxUploadBufferPerStream = int32(n)
+	}
+	srv := &http.Server{Handler: h2c.NewHandler(mux, h2s)}
 	b.httpSrv.Store(srv)
 	if err := srv.Serve(b.ln); err != nil && !b.closed.Load() {
 		log.Printf("core/http: server: %v", err)

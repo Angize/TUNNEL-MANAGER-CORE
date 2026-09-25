@@ -510,7 +510,7 @@ func (b *TCP) SetStatusPath(path string) {
 }
 
 func (b *TCP) dialer(timeout time.Duration) *net.Dialer {
-	d := &net.Dialer{Timeout: timeout, Control: reuseAddr}
+	d := &net.Dialer{Timeout: timeout, Control: dialControl}
 	sport := int(drawSport())
 	d.LocalAddr = &net.TCPAddr{Port: sport}
 	src := b.sourceIP()
@@ -660,7 +660,7 @@ func DialHTTPC(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, ciphe
 }
 
 func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string) (*TCP, error) {
-	ln, err := net.Listen("tcp", listenAddr)
+	ln, err := listenTCP(listenAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -670,7 +670,7 @@ func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, c
 }
 
 func ListenWS(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string) (*TCP, error) {
-	ln, err := net.Listen("tcp", listenAddr)
+	ln, err := listenTCP(listenAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -685,7 +685,7 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, 
 	}
 	var lns []net.Listener
 	for _, addr := range listenAddrs {
-		ln, err := net.Listen("tcp", addr)
+		ln, err := listenTCP(addr)
 		if err != nil {
 			for _, l := range lns {
 				l.Close()
