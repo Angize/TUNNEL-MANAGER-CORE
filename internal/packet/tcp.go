@@ -52,6 +52,8 @@ var (
 	errDesync = errors.New("core/tcp: stream desync")
 
 	errFrameTooBig = errors.New("core/tcp: frame exceeds max size")
+
+	errIdle = errors.New("core/tcp: keepalive unanswered, nothing arrived within the idle window")
 )
 
 type connFramer struct {
@@ -272,6 +274,7 @@ type TCP struct {
 	lastRx atomic.Int64
 
 	lastRxData atomic.Int64
+	lastTxData atomic.Int64
 
 	pp *PeerPool
 
@@ -1208,7 +1211,7 @@ func classifyErr(s string) string {
 	switch {
 	case s == "":
 		return "closed"
-	case strings.Contains(l, "keepalive") || strings.Contains(l, "ping"):
+	case strings.Contains(l, "keepalive"):
 		return "ping_timeout"
 	case strings.Contains(l, "connection reset") || strings.Contains(l, "reset by peer"):
 		return "reset"
@@ -1514,6 +1517,9 @@ func (b *TCP) readLoop(cf *connFramer) error {
 	for {
 		cf.conn.SetReadDeadline(time.Now().Add(b.idle))
 		typ, session, seq, payload, err := cf.readFrame()
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return fmt.Errorf("%w: %w", errIdle, err)
+		}
 		if err != nil {
 			return err
 		}
@@ -1577,6 +1583,7 @@ func (b *TCP) tunLoop() error {
 			b.onConnErr(cf, err)
 			continue
 		}
+		b.lastTxData.Store(time.Now().UnixNano())
 	}
 }
 
@@ -1612,7 +1619,7 @@ func (b *TCP) keepaliveLoop() {
 		case <-b.closeCh:
 			return
 		case <-time.After(keepaliveInterval(b.ping, b.psk)):
-			if cf := b.cur.Load(); cf != nil && !b.recentData() {
+			if cf := b.cur.Load(); cf != nil && !b.flowingBothWays() {
 				if err := b.pingOne(cf); err != nil {
 					b.onConnErr(cf, err)
 				}
@@ -1623,12 +1630,9 @@ func (b *TCP) keepaliveLoop() {
 
 func (b *TCP) pingOne(cf *connFramer) error { return cf.writeFrame(typePing, nil) }
 
-func (b *TCP) recentData() bool {
-	last := b.lastRxData.Load()
-	if last == 0 {
-		return false
-	}
-	return time.Since(time.Unix(0, last)) < b.ping
+func (b *TCP) flowingBothWays() bool {
+	since := time.Now().Add(-b.ping).UnixNano()
+	return b.lastRxData.Load() > since && b.lastTxData.Load() > since
 }
 
 func (b *TCP) waitToRedial(backoff time.Duration) (time.Duration, bool) {

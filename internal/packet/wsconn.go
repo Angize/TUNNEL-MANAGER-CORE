@@ -56,13 +56,30 @@ func (c *wsConn) Read(p []byte) (int, error) {
 }
 
 func (c *wsConn) Write(p []byte) (int, error) {
-	if err := c.writeWSFrame(0x2, p); err != nil {
-		return 0, err
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	c.Conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	sent := 0
+	for {
+		n := min(len(p)-sent, maxFrame)
+		if err := c.sendWSFrame(0x2, p[sent:sent+n]); err != nil {
+			return sent, err
+		}
+		sent += n
+		if sent == len(p) {
+			return sent, nil
+		}
 	}
-	return len(p), nil
 }
 
 func (c *wsConn) writeWSFrame(opcode byte, payload []byte) error {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	c.Conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	return c.sendWSFrame(opcode, payload)
+}
+
+func (c *wsConn) sendWSFrame(opcode byte, payload []byte) error {
 	n := len(payload)
 	hdr := make([]byte, 0, 14)
 	hdr = append(hdr, 0x80|opcode)
@@ -93,9 +110,6 @@ func (c *wsConn) writeWSFrame(opcode byte, payload []byte) error {
 			body[i] = payload[i] ^ key[i&3]
 		}
 	}
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
-	c.Conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	if _, err := c.Conn.Write(hdr); err != nil {
 		return err
 	}
