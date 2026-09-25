@@ -67,13 +67,17 @@ func main() {
 	}
 
 	packet.SetSockBuf(cfg.SockBuf)
+	packet.SetTCPBuf(cfg.TCPBuf)
 	packet.SetPortTries(cfg.PortTries)
 	packet.SetSportBand(cfg.SportLo, cfg.SportHi)
 	if (cfg.SportLo != 0 || cfg.SportHi != 0) && drawsSourcePort(cfg) {
 		lo, hi := packet.SportBand()
 		log.Printf("tnl-core: source ports are drawn from %d-%d", lo, hi)
 	}
-	if note := sockBufNote(cfg.Transport, cfg.SockBuf); note != "" {
+	if note := bufNote(cfg.Transport, "sock_buf", "tcp_buf", cfg.SockBuf, sockBufCarrier(cfg.Transport)); note != "" {
+		log.Print(note)
+	}
+	if note := bufNote(cfg.Transport, "tcp_buf", "sock_buf", cfg.TCPBuf, tcpBufCarrier(cfg.Transport)); note != "" {
 		log.Print(note)
 	}
 	if note := workersNote(cfg.Transport, cfg.Fec, cfg.Workers); note != "" {
@@ -399,14 +403,13 @@ func sockBufCarrier(transport string) bool {
 	return false
 }
 
-func sockBufNote(transport string, n int) string {
-	if n <= 0 || sockBufCarrier(transport) {
+func tcpBufCarrier(transport string) bool { return transport == "tcp" || transport == "ws" }
+
+func bufNote(transport, knob, other string, n int, applies bool) string {
+	if n <= 0 || applies {
 		return ""
 	}
-	return fmt.Sprintf("core: WARNING carrier %s ignores sock_buf. It sizes a datagram socket, where "+
-		"the buffer is the drop threshold. A stream socket is autotuned by the kernel up to "+
-		"net.ipv4.tcp_rmem, and pinning it turns that off: measured on the fleet link, 4 MB pinned "+
-		"carries 619 Mbit where the kernel's own choice carries 1123", transport)
+	return fmt.Sprintf("core: WARNING carrier %s ignores %s; its sockets are sized by %s", transport, knob, other)
 }
 
 func sourceMode(b any, cfg *Config) string {
