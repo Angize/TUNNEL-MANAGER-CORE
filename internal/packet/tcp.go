@@ -126,36 +126,15 @@ func (cf *connFramer) ensureReadKS() error {
 }
 
 func (cf *connFramer) frame(typ byte, payload []byte) ([]byte, error) {
-	if cf.obfs {
-		sealed, err := obfsSeal(cf.sealer, typ, payload, padMaxFor(typ))
-		if err != nil {
-			return nil, err
-		}
-		if len(sealed) > maxFrame {
-			return nil, errFrameTooBig
-		}
-		out := make([]byte, 2+len(sealed))
-		binary.BigEndian.PutUint16(out[0:2], uint16(len(sealed)))
-		copy(out[2:], sealed)
-		return out, nil
+	out, err := sealBody(cf.sealer, cf.obfs, 2, typ, payload, padMaxFor(typ))
+	if err != nil {
+		return nil, err
 	}
-	sealed := payload
-	if cf.sealer != nil {
-		s, err := cf.sealer.Seal(payload, []byte{typ})
-		if err != nil {
-			return nil, err
-		}
-		sealed = s
-	}
-	n := 2 + len(sealed)
+	n := len(out) - 2
 	if n > maxFrame {
 		return nil, errFrameTooBig
 	}
-	out := make([]byte, 2+n)
 	binary.BigEndian.PutUint16(out[0:2], uint16(n))
-	out[2] = magic
-	out[3] = typ
-	copy(out[4:], sealed)
 	return out, nil
 }
 
