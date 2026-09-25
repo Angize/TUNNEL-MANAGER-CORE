@@ -29,7 +29,18 @@ func (c *Config) cdnIsHTTP() bool { return c.CDNCarrier == "http" || c.CDNCarrie
 
 func queueingCarrier(t string) bool { return t == "raw" || t == "udp" }
 
-const maxWorkers = 8
+func (c *Config) laneCarrier() bool {
+	return c.Transport == "tcp" || (c.Transport == "ws" && !c.cdnIsHTTP())
+}
+
+func (c *Config) tunQueues() int {
+	if !c.Fec && (queueingCarrier(c.Transport) || c.laneCarrier()) {
+		return c.Workers
+	}
+	return 1
+}
+
+const maxWorkers = packet.MaxLanes
 
 const (
 	defaultFecData   = 16

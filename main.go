@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -9,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/packet"
@@ -80,7 +78,7 @@ func main() {
 	if note := bufNote(cfg.Transport, "tcp_buf", "sock_buf", cfg.TCPBuf, tcpBufCarrier(cfg.Transport)); note != "" {
 		log.Print(note)
 	}
-	if note := workersNote(cfg.Transport, cfg.Fec, cfg.Workers); note != "" {
+	if note := workersNote(cfg); note != "" {
 		log.Print(note)
 	}
 	if note := portTriesNote(cfg.Transport, cfg.RawSportRandom, len(cfg.WSEdgeIPs) > 0 && !cfg.WSPortRoll,
@@ -88,11 +86,7 @@ func main() {
 		log.Print(note)
 	}
 
-	nq := 1
-	if !cfg.Fec && queueingCarrier(cfg.Transport) {
-		nq = cfg.Workers
-	}
-	devs, gsoOn, err := openTUN(tun.OpenN, cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO, nq)
+	devs, gsoOn, err := openTUN(tun.OpenN, cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO, cfg.tunQueues())
 	if err != nil {
 		log.Fatalf("tnl-core: tun: %v", err)
 	}
@@ -131,10 +125,7 @@ func main() {
 		Close() error
 	}
 	var b carrier
-	obfsTag := ""
-	if cfg.Obfs {
-		obfsTag = " obfs"
-	}
+	obfsTag := obfsLabel(cfg.Obfs)
 	fecTag := ""
 	if cfg.Fec {
 		fecTag = fmt.Sprintf(" fec=%d+%d", cfg.FecData, cfg.FecParity)
@@ -148,14 +139,15 @@ func main() {
 			if len(la) == 0 {
 				la = []string{cfg.Listen}
 			}
-			b, err = packet.ListenTCP(la, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Cover, cfg.CoverSNI)
+			b, err = packet.ListenTCP(la, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Cover, cfg.CoverSNI, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/tcp%s%s) on %v", obfsTag, coverTag(cfg.Cover), la)
 			}
 		case "client":
-			b, err = packet.DialTCP(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Cover, cfg.CoverSNI)
+			var desc string
+			b, desc, err = dialStream(cfg, dev, cryptoOn, true)
 			if err == nil {
-				log.Printf("tnl-core: dialing (core/tcp%s%s) %s", obfsTag, coverTag(cfg.Cover), cfg.Peer)
+				log.Printf("tnl-core: %s", desc)
 			}
 		}
 	case "raw":
@@ -181,54 +173,15 @@ func main() {
 				}
 				break
 			}
-			b, err = packet.ListenWS(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath)
+			b, err = packet.ListenWS(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/ws%s) on %s", obfsTag, cfg.Listen)
 			}
 		case "client":
-			carrier := "ws"
-			if cfg.cdnIsHTTP() {
-				carrier = "http"
-			}
-			if len(cfg.WSEdgeIPs) > 0 {
-				snis := make([]packet.EdgeSNI, len(cfg.WSEdgeSNIs))
-				for i, s := range cfg.WSEdgeSNIs {
-					snis[i] = packet.EdgeSNI{Host: s.Host, ECH: s.ECH, Path: s.Path}
-				}
-				b, err = packet.DialEdgePool(dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher,
-					cfg.WSEdgeIPs, snis, time.Duration(cfg.WSRotateSecs)*time.Second, cfg.cdnIsHTTP(), cfg.cdnMode(),
-					cfg.WSPortRoll)
-				if err == nil {
-					log.Printf("tnl-core: dialing (core/%s%s wss ech pool: %dIP×%dSNI rotate=%ds port_roll=%t)",
-						carrier, obfsTag, len(cfg.WSEdgeIPs), len(cfg.WSEdgeSNIs), cfg.WSRotateSecs, cfg.WSPortRoll)
-				}
-				break
-			}
-			var echList []byte
-			if cfg.WSECH != "" {
-				echList, _ = base64.StdEncoding.DecodeString(cfg.WSECH)
-			}
-			if cfg.cdnIsHTTP() {
-				b, err = packet.DialHTTPC(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath, cfg.WSTLS, echList, cfg.cdnMode())
-				if err == nil {
-					mode := cfg.cdnMode()
-					if mode == "" {
-						mode = "post"
-					}
-					log.Printf("tnl-core: dialing (core/http:%s%s wss) %s", mode, obfsTag, cfg.Peer)
-				}
-				break
-			}
-			b, err = packet.DialWS(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath, cfg.WSTLS, echList)
+			var desc string
+			b, desc, err = dialStream(cfg, dev, cryptoOn, true)
 			if err == nil {
-				tlsTag := ""
-				if cfg.WSTLS {
-					tlsTag = " wss"
-				}
-				if len(echList) > 0 {
-					tlsTag += " ech"
-				}
-				log.Printf("tnl-core: dialing (core/ws%s%s) %s", obfsTag, tlsTag, cfg.Peer)
+				log.Printf("tnl-core: %s", desc)
 			}
 		}
 	default:
@@ -259,22 +212,8 @@ func main() {
 		}
 	}
 
-	switch sourceMode(b, cfg) {
-	case srcByBind:
-		log.Printf("tnl-core: binding outbound source IP to %s", cfg.BindIP)
-	}
-
-	if cfg.Role == "client" && cfg.FakeDesync {
-		if s, ok := b.(interface {
-			SetDesync(bool, int, int, string)
-		}); ok {
-			s.SetDesync(true, cfg.FakeTTL, cfg.FakeCount, cfg.FakeMode)
-			if usesFakeTTL(cfg) {
-				log.Printf("tnl-core: fake-desync on (%d decoys, ttl=%d, mode=%s)", cfg.FakeCount, cfg.FakeTTL, cfg.FakeMode)
-			} else {
-				log.Printf("tnl-core: fake-desync on (%d decoys, mode=%s) — every decoy on this carrier is a bad-checksum packet sent at TTL 64, so fake_ttl is not read", cfg.FakeCount, cfg.FakeMode)
-			}
-		}
+	if cfg.Role == "client" {
+		setupClient(b, cfg, true)
 	}
 
 	if cfg.cdnIsHTTP() && (cfg.HTTPUpWorkers|cfg.HTTPUpBatchKB|cfg.HTTPUpRate) != 0 {
@@ -287,44 +226,26 @@ func main() {
 		log.Printf("tnl-core: httpc carrier streams=%d", cfg.HTTPStreams)
 	}
 
-	if cfg.Role == "client" && cfg.SNISplit {
-		applySNISplit(b, cfg.Transport, cfg.SNIMode, cfg.SplitPos, cfg.SplitTTL)
-	}
-
-	if wantsDestPool(cfg) {
-		if s, ok := b.(interface{ SetPeerPool(*packet.PeerPool) }); ok {
-			pp := packet.NewPeerPool(cfg.PeerIPs, time.Duration(cfg.PeerRotateSecs)*time.Second)
-			s.SetPeerPool(pp)
-			log.Printf("tnl-core: destination pool: %d peers rotate=%ds", len(cfg.PeerIPs), cfg.PeerRotateSecs)
-		}
-	}
-
-	if wantsSourcePool(cfg) {
-		if s, ok := b.(interface{ SetSourcePool(*packet.PeerPool) }); ok {
-			sp := packet.NewPeerPool(cfg.SrcIPs, time.Duration(cfg.PeerRotateSecs)*time.Second)
-			s.SetSourcePool(sp)
-			log.Printf("tnl-core: source pool: %d source IPs rotate=%ds", len(cfg.SrcIPs), cfg.PeerRotateSecs)
-		}
-	}
-
 	if cfg.Role == "server" && len(cfg.PeerSrcIPs) > 0 {
 		if s, ok := b.(interface{ SetPeerSources([]string) }); ok {
 			s.SetPeerSources(cfg.PeerSrcIPs)
 			log.Printf("tnl-core: pooled server follows client source rotation across %d source IPs", len(cfg.PeerSrcIPs))
 		}
 	}
-	defer b.Close()
+	lanes := dialLanes(b, cfg, devs, cryptoOn)
+	defer closeLanes(b, lanes)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sig
 		log.Print("tnl-core: shutting down")
-		b.Close()
+		closeLanes(b, lanes)
 		dev.Close()
 		os.Exit(0)
 	}()
 
+	runLanes(lanes)
 	if err := b.Run(); err != nil {
 		log.Printf("tnl-core: stopped: %v", err)
 	}
@@ -336,6 +257,13 @@ func wantsDestPool(cfg *Config) bool {
 
 func wantsSourcePool(cfg *Config) bool {
 	return cfg.Role == "client" && len(cfg.SrcIPs) >= 2
+}
+
+func obfsLabel(obfs bool) string {
+	if obfs {
+		return " obfs"
+	}
+	return ""
 }
 
 func coverTag(cover bool) string {
@@ -378,19 +306,19 @@ func portTriesNote(transport string, sportRandom, edgeNoRoll bool, n int) string
 		"that mode", n)
 }
 
-func workersNote(transport string, fec bool, n int) string {
+func workersNote(cfg *Config) string {
+	n := cfg.Workers
 	if n <= 1 {
 		return ""
 	}
-	if fec {
+	if cfg.Fec {
 		return fmt.Sprintf("core: WARNING workers=%d is ignored while fec is on. FEC needs one ordered "+
 			"stream to rebuild a block from, so the datapath runs a single queue and the extra workers "+
 			"are never created", n)
 	}
-	if !queueingCarrier(transport) {
-		return fmt.Sprintf("core: WARNING carrier %s ignores workers=%d. It multiplies the TUN read "+
-			"queues a datagram carrier drains in parallel, and a stream carrier has one connection to "+
-			"feed", transport, n)
+	if !queueingCarrier(cfg.Transport) && !cfg.laneCarrier() {
+		return fmt.Sprintf("core: WARNING cdn_carrier %s ignores workers=%d. Parallel lanes are one ws or tcp "+
+			"connection each; the http and grpc carriers spread over http_streams instead", cfg.CDNCarrier, n)
 	}
 	return ""
 }
@@ -423,7 +351,7 @@ func sourceMode(b any, cfg *Config) string {
 	return srcByBind
 }
 
-func applySNISplit(b any, transport, mode string, pos, ttl int) {
+func applySNISplit(b any, transport, mode string, pos, ttl int, logf func(string, ...any)) {
 	if mode == "" {
 		mode = "split"
 	}
@@ -432,11 +360,11 @@ func applySNISplit(b any, transport, mode string, pos, ttl int) {
 	})
 	if ok && s.SetSNISplit(true, pos, mode, ttl) {
 		if mode == "disorder" {
-			log.Printf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d ttl=%d)", mode, pos, ttl)
+			logf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d ttl=%d)", mode, pos, ttl)
 		} else {
-			log.Printf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d; split_ttl only applies to disorder)", mode, pos)
+			logf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d; split_ttl only applies to disorder)", mode, pos)
 		}
 		return
 	}
-	log.Printf("core: WARNING carrier %s ignores sni_split — it sends no TLS ClientHello of its own, so nothing is fragmented", transport)
+	logf("core: WARNING carrier %s ignores sni_split — it sends no TLS ClientHello of its own, so nothing is fragmented", transport)
 }
