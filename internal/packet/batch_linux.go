@@ -10,8 +10,6 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
-const maxBatch = 64
-
 var errShortBatch = errors.New("sendmmsg accepted only part of the batch")
 
 const maxRecvBatch = 64

@@ -21,10 +21,12 @@ const (
 	typePong byte = 2
 
 	maxDatagram = 65535
+	maxBatch    = 64
+	txBufLen    = 2048
 )
 
 type Sealer interface {
-	Frame(lead, innerLen int) (buf, head, inner []byte)
+	Frame(dst []byte, lead, innerLen int) (buf, head, inner []byte)
 	SealInPlace(buf, inner, aad []byte) ([]byte, error)
 	Open(sealed, aad []byte) (session uint64, seq uint64, pt []byte, err error)
 	OpenTo(dst, sealed, aad []byte) (session uint64, seq uint64, pt []byte, err error)
@@ -645,12 +647,21 @@ func (b *UDP) sealer() Sealer {
 	return nil
 }
 
-func (b *UDP) frame(typ byte, payload []byte) ([]byte, error) {
-	return sealBody(b.sealer(), b.obfs, 0, typ, payload, padMaxFor(typ))
+func (b *UDP) frame(dst []byte, typ byte, payload []byte) ([]byte, error) {
+	return sealBody(dst, b.sealer(), b.obfs, 0, typ, payload, padMaxFor(typ))
+}
+
+func txBufs() [][]byte {
+	out := make([][]byte, maxBatch)
+	for i := range out {
+		out[i] = make([]byte, txBufLen)
+	}
+	return out
 }
 
 func (b *UDP) tunToNet(dev *tun.Device) error {
 	buf := make([]byte, maxDatagram)
+	out := txBufs()
 
 	var tx *udpTx
 	var txFor *net.UDPConn
@@ -666,13 +677,18 @@ func (b *UDP) tunToNet(dev *tun.Device) error {
 		if b.cryptoOn && b.sealer() == nil {
 			continue
 		}
-		frame, err := b.frame(typeData, buf[:n])
-		if err != nil {
-			log.Printf("core: seal error: %v", err)
+		if b.fecEnc != nil {
+			frame, err := b.frame(nil, typeData, buf[:n])
+			if err != nil {
+				log.Printf("core: seal error: %v", err)
+				continue
+			}
+			b.fecEnc.addData(frame)
 			continue
 		}
-		if b.fecEnc != nil {
-			b.fecEnc.addData(frame)
+		frame, err := b.frame(out[0], typeData, buf[:n])
+		if err != nil {
+			log.Printf("core: seal error: %v", err)
 			continue
 		}
 		c := b.sendConn()
@@ -690,7 +706,7 @@ func (b *UDP) tunToNet(dev *tun.Device) error {
 				if err != nil || !ok {
 					break
 				}
-				f, err := b.frame(typeData, buf[:m])
+				f, err := b.frame(out[tx.count()], typeData, buf[:m])
 				if err != nil {
 					continue
 				}
@@ -775,17 +791,22 @@ func aadFor(typ byte) []byte {
 	return []byte{typ}
 }
 
-func sealBody(s Sealer, obfs bool, lead int, typ byte, payload []byte, padMax int) ([]byte, error) {
+func sealBody(dst []byte, s Sealer, obfs bool, lead int, typ byte, payload []byte, padMax int) ([]byte, error) {
 	if obfs {
-		return obfsSeal(s, lead, typ, payload, padMax)
+		return obfsSeal(dst, s, lead, typ, payload, padMax)
 	}
 	if s != nil {
-		buf, head, inner := s.Frame(lead+2, len(payload))
+		buf, head, inner := s.Frame(dst, lead+2, len(payload))
 		head[lead], head[lead+1] = magic, typ
 		copy(inner, payload)
 		return s.SealInPlace(buf, inner, aadFor(typ))
 	}
-	out := make([]byte, lead+2+len(payload))
+	out := dst[:0]
+	if need := lead + 2 + len(payload); cap(out) >= need {
+		out = out[:need]
+	} else {
+		out = make([]byte, need)
+	}
 	out[lead], out[lead+1] = magic, typ
 	copy(out[lead+2:], payload)
 	return out, nil
@@ -984,7 +1005,7 @@ func (b *UDP) send(typ byte, payload []byte, to *net.UDPAddr) {
 	if b.cryptoOn && b.sealer() == nil {
 		return
 	}
-	frame, err := b.frame(typ, payload)
+	frame, err := b.frame(nil, typ, payload)
 	if err != nil {
 		return
 	}

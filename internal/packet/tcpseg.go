@@ -18,6 +18,13 @@ func buildTCPSeg(src, dst net.IP, sport, dport uint16, seq, ack uint32, flags by
 	}
 	hdrLen := 20 + len(opts)
 	h := make([]byte, hdrLen+len(payload))
+	copy(h[20:], opts)
+	copy(h[hdrLen:], payload)
+	fillTCPSeg(h, hdrLen, src, dst, sport, dport, seq, ack, flags, window)
+	return h
+}
+
+func fillTCPSeg(h []byte, hdrLen int, src, dst net.IP, sport, dport uint16, seq, ack uint32, flags byte, window uint16) {
 	binary.BigEndian.PutUint16(h[0:2], sport)
 	binary.BigEndian.PutUint16(h[2:4], dport)
 	binary.BigEndian.PutUint32(h[4:8], seq)
@@ -25,9 +32,5 @@ func buildTCPSeg(src, dst net.IP, sport, dport uint16, seq, ack uint32, flags by
 	h[12] = byte(hdrLen/4) << 4
 	h[13] = flags
 	binary.BigEndian.PutUint16(h[14:16], window)
-	copy(h[20:], opts)
-	copy(h[hdrLen:], payload)
-
 	binary.BigEndian.PutUint16(h[16:18], l4Checksum(src, dst, protoTCP, h))
-	return h
 }
