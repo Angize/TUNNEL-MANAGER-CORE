@@ -1071,12 +1071,12 @@ func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
 		}
 	}
 
-	for _, st := range r.staged {
+	for i, st := range r.staged {
 		if typ, session, seq, payload, oerr := r.openWith(st.box.s, body); oerr == nil && st.rp.ok(session, seq) {
 			r.session.Store(st.box)
 			r.fecDec.reset()
 			r.rp = st.rp
-			r.staged = nil
+			r.staged = r.staged[i+1:]
 			r.learnPeer(addr)
 			r.learnClientPort(sport)
 			r.dispatch(typ, payload, addr)
