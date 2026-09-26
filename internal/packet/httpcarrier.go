@@ -240,8 +240,6 @@ var (
 	upMinGap time.Duration
 )
 
-const upWorkCap = 1
-
 func SetHTTPUpstream(workers, batchKB, ratePerSec int) {
 	if workers > 0 {
 		upWorkers = tclamp(workers, 1, upMaxWorkers)
@@ -261,9 +259,12 @@ type httpcUp struct {
 	ctx    context.Context
 	urlFor func(seq uint64) string
 	setHdr func(*http.Request)
-	seq    uint64
 	ch     chan []byte
-	work   chan seqChunk
+
+	mu       sync.Mutex
+	seq      uint64
+	carry    []byte
+	lastSend time.Time
 
 	minGap   time.Duration
 	maxBatch int
@@ -274,9 +275,8 @@ type httpcUp struct {
 
 func newHTTPCUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string, setHdr func(*http.Request), fail func()) *httpcUp {
 	u := &httpcUp{hc: hc, ctx: ctx, urlFor: urlFor, setHdr: setHdr, fail: fail,
-		ch: make(chan []byte, upChanCap), work: make(chan seqChunk, upWorkCap),
+		ch:     make(chan []byte, upChanCap),
 		minGap: upMinGap, maxBatch: maxUpBatch, postTO: upPostTimeout}
-	go u.batcher()
 	for i := 0; i < upWorkers; i++ {
 		go u.worker()
 	}
@@ -306,67 +306,57 @@ func (u *httpcUp) write(p []byte, deadline int64) (int, error) {
 	}
 }
 
-func (u *httpcUp) batcher() {
-	var carry []byte
-	var lastSend time.Time
-	for {
-		var buf []byte
-		if carry != nil {
-			buf, carry = carry, nil
-		} else {
-			select {
-			case buf = <-u.ch:
-			case <-u.ctx.Done():
-				return
-			}
-		}
-	drain:
-		for len(buf) < u.maxBatch {
-			select {
-			case more := <-u.ch:
-				if len(buf)+len(more) > u.maxBatch {
-					carry = more
-					break drain
-				}
-				buf = append(buf, more...)
-			case <-u.ctx.Done():
-				return
-			default:
-				break drain
-			}
-		}
-		if u.minGap > 0 {
-			if d := u.minGap - time.Since(lastSend); d > 0 && !lastSend.IsZero() {
-				t := time.NewTimer(d)
-				select {
-				case <-t.C:
-				case <-u.ctx.Done():
-					t.Stop()
-					return
-				}
-			}
-			lastSend = time.Now()
-		}
-		seq := u.seq
-		u.seq++
+func (u *httpcUp) next() (seqChunk, bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	buf := u.carry
+	u.carry = nil
+	if buf == nil {
 		select {
-		case u.work <- seqChunk{seq, buf}:
+		case buf = <-u.ch:
 		case <-u.ctx.Done():
-			return
+			return seqChunk{}, false
 		}
 	}
+	if u.minGap > 0 && !u.lastSend.IsZero() {
+		if d := u.minGap - time.Since(u.lastSend); d > 0 {
+			t := time.NewTimer(d)
+			select {
+			case <-t.C:
+			case <-u.ctx.Done():
+				t.Stop()
+				return seqChunk{}, false
+			}
+		}
+	}
+drain:
+	for len(buf) < u.maxBatch {
+		select {
+		case more := <-u.ch:
+			if len(buf)+len(more) > u.maxBatch {
+				u.carry = more
+				break drain
+			}
+			buf = append(buf, more...)
+		default:
+			break drain
+		}
+	}
+	u.lastSend = time.Now()
+	sc := seqChunk{u.seq, buf}
+	u.seq++
+	return sc, true
 }
 
 func (u *httpcUp) worker() {
 	for {
-		select {
-		case <-u.ctx.Done():
+		sc, ok := u.next()
+		if !ok {
 			return
-		case sc := <-u.work:
-			if err := u.post(sc); err != nil {
-				u.once.Do(u.fail)
-				return
-			}
+		}
+		if err := u.post(sc); err != nil {
+			u.once.Do(u.fail)
+			return
 		}
 	}
 }
