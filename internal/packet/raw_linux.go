@@ -347,7 +347,6 @@ func dialRawBase(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 	r := newRaw(conn, dev, obfs, psk, cipher, profile, true)
 	r.proto, r.port = proto, rawEffPort(profile, rawPort)
 	r.soloPeer.Store(&net.IPAddr{IP: ip})
-	r.filterSrc(buildSrcAllow([]string{ip.String()}))
 	if lip := routeLocalIP(ip); lip != nil {
 		r.localIP.Store(&net.IPAddr{IP: lip})
 	}
@@ -388,6 +387,7 @@ func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile str
 	r.setBand(rot.Lo, rot.Hi)
 	r.setSportMode(sportRandom, rawSport)
 	r.setSportRotate(rot)
+	r.filterSrc(buildSrcAllow([]string{r.soloPeer.Load().IP.String()}))
 	r.initFec(fec, fecData, fecParity)
 	r.rxw = newTunWriters(append([]*tun.Device{dev}, extraQ...))
 	if err := r.buildTxQueues(extraQ, r.proto); err != nil {
