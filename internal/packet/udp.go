@@ -819,12 +819,12 @@ func (b *UDP) handleCrypto(pkt []byte, addr *net.UDPAddr) {
 		}
 	}
 
-	for _, st := range b.staged {
+	for i, st := range b.staged {
 		if typ, session, seq, payload, oerr := b.openWith(st.box.s, pkt); oerr == nil && st.rp.ok(session, seq) {
 			b.session.Store(st.box)
 			b.fecDec.reset()
 			b.rp = st.rp
-			b.staged = nil
+			b.staged = b.staged[i+1:]
 			if b.pp == nil {
 				b.learnPeer(addr)
 			}
