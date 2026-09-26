@@ -146,9 +146,13 @@ func mask(key, salt, buf []byte) error {
 	return nil
 }
 
-func (s *Sealer) Frame(lead, innerLen int) (buf, head, inner []byte) {
+func (s *Sealer) Frame(dst []byte, lead, innerLen int) (buf, head, inner []byte) {
 	off := lead + maskSaltLen + s.sendAEAD.NonceSize()
-	buf = make([]byte, off+innerLen, off+innerLen+s.sendAEAD.Overhead())
+	if n := off + innerLen + s.sendAEAD.Overhead(); cap(dst) >= n {
+		buf = dst[:off+innerLen]
+	} else {
+		buf = make([]byte, off+innerLen, n)
+	}
 	return buf, buf[:lead], buf[off:]
 }
 

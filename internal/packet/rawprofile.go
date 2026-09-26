@@ -300,11 +300,10 @@ func rawEffProto(profile string, rawProto int) (int, bool) {
 	return base, true
 }
 
-func tcpTSOption(tsval, tsecr uint32) []byte {
-	o := []byte{tcpOptNOPKind, tcpOptNOPKind, tcpOptTSKind, tcpOptTSBytes, 0, 0, 0, 0, 0, 0, 0, 0}
+func putTSOption(o []byte, tsval, tsecr uint32) {
+	o[0], o[1], o[2], o[3] = tcpOptNOPKind, tcpOptNOPKind, tcpOptTSKind, tcpOptTSBytes
 	binary.BigEndian.PutUint32(o[4:8], tsval)
 	binary.BigEndian.PutUint32(o[8:12], tsecr)
-	return o
 }
 
 func tcpSynOptions(tsval, tsecr uint32) []byte {
@@ -354,78 +353,70 @@ func peerTSVal(tcp []byte) uint32 {
 }
 
 func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte) []byte {
-	switch rawProfiles[profile] {
-	case protoBare:
+	framing := rawProfiles[profile]
+	if framing == protoBare {
 		return payload
+	}
+	hl := rawHeaderLen(profile)
+	if framing == protoTCP && flags&tcpSyn != 0 {
+		hl = 20 + len(tcpSynOptions(tsval, tsecr))
+	}
+	h := make([]byte, hl+len(payload))
+	copy(h[hl:], payload)
+	rawFill(framing, h, hl, src, dst, isClient, id, port, cport, seq, ack, spi, tsval, tsecr, flags)
+	return h
+}
 
+func rawFill(framing int, h []byte, hl int, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte) {
+	clear(h[:hl])
+	switch framing {
 	case protoIPIP:
-		h := make([]byte, rawHeaderLen(profile)+len(payload))
-		buildEncapESP(h[:rawHeaderLen(profile)], len(payload), seq, spi)
-		copy(h[rawHeaderLen(profile):], payload)
-		return h
+		buildEncapESP(h[:hl], len(h)-hl, seq, spi)
 
 	case protoGRE:
-		h := make([]byte, rawHeaderLen(profile)+len(payload))
-
 		binary.BigEndian.PutUint16(h[2:4], greProtoIP4)
-		buildEncapESP(h[greHeaderLen:rawHeaderLen(profile)], len(payload), seq, spi)
-		copy(h[rawHeaderLen(profile):], payload)
-		return h
+		buildEncapESP(h[greHeaderLen:hl], len(h)-hl, seq, spi)
 
 	case protoICMP:
-		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		if isClient {
 			h[0] = 8
-		} else {
-			h[0] = 0
 		}
 		binary.BigEndian.PutUint16(h[4:6], id)
 		binary.BigEndian.PutUint16(h[6:8], uint16(seq))
-		copy(h[8:], payload)
 		binary.BigEndian.PutUint16(h[2:4], onesComplementSum(h))
-		return h
 
 	case protoUDP:
 		sp, dp := rawPorts(isClient, port, cport)
-		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		binary.BigEndian.PutUint16(h[0:2], sp)
 		binary.BigEndian.PutUint16(h[2:4], dp)
 		binary.BigEndian.PutUint16(h[4:6], uint16(len(h)))
-		copy(h[8:], payload)
 		cs := l4Checksum(src, dst, protoUDP, h)
 		if cs == 0 {
 			cs = 0xffff
 		}
 		binary.BigEndian.PutUint16(h[6:8], cs)
-		return h
 
 	case protoTCP:
 		sp, dp := rawPorts(isClient, port, cport)
-		opts := tcpTSOption(tsval, tsecr)
 		if flags&tcpSyn != 0 {
-			opts = tcpSynOptions(tsval, tsecr)
+			copy(h[20:hl], tcpSynOptions(tsval, tsecr))
+		} else {
+			putTSOption(h[20:hl], tsval, tsecr)
 		}
-		return buildTCPSeg(src, dst, sp, dp, seq, ack, flags, tcpWindowFor(seq, tsval), opts, payload)
+		fillTCPSeg(h, hl, src, dst, sp, dp, seq, ack, flags, tcpWindowFor(seq, tsval))
 
 	case protoESP:
-		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		buildESP(h[:espHeaderLen], seq, spi)
-		copy(h[espHeaderLen:], payload)
-		return h
 
 	case protoL2TPv3:
-		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		sess := spi
 		if sess == 0 {
 			sess = 1
 		}
 		binary.BigEndian.PutUint32(h[0:4], sess)
 		binary.BigEndian.PutUint32(h[4:8], spi*0x9E3779B9+0x85EBCA6B)
-		copy(h[8:], payload)
-		return h
 
 	case protoAH:
-		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		h[0], h[1] = protoIPIP, 4
 		binary.BigEndian.PutUint32(h[4:8], spi)
 		binary.BigEndian.PutUint32(h[8:12], seq)
@@ -434,23 +425,14 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 			mix = splitmix64(mix)
 			binary.BigEndian.PutUint32(h[12+i:16+i], uint32(mix>>32))
 		}
-		copy(h[24:], payload)
-		return h
 
 	case protoIPComp:
-		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		h[0] = protoIPIP
 		binary.BigEndian.PutUint16(h[2:4], 2)
-		copy(h[4:], payload)
-		return h
 
 	case protoEtherIP:
-		h := make([]byte, rawHeaderLen(profile)+len(payload))
 		h[0] = 0x30
-		copy(h[2:], payload)
-		return h
 	}
-	return payload
 }
 
 func splitmix64(x uint64) uint64 {

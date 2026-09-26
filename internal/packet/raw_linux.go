@@ -40,7 +40,9 @@ type Raw struct {
 	spi      uint32
 	port     uint16
 
-	proto int
+	proto   int
+	framing int
+	hdr     int
 
 	link *directLink
 
@@ -224,6 +226,7 @@ func newRaw(conn *net.IPConn, dev *tun.Device, obfs bool, psk, cipher, profile s
 	r := &Raw{
 		conn: conn, batch: batchConn(conn), dev: dev, obfs: obfs, ping: pingEvery,
 		psk: psk, cipher: cipher, profile: profile, isClient: isClient, fakeFd: -1,
+		framing: rawProfiles[profile], hdr: rawHeaderLen(profile),
 		icmpID: icmpID, closeCh: make(chan struct{}), wake: make(chan struct{}, 1), spi: spi,
 	}
 
@@ -510,20 +513,33 @@ func (r *Raw) srcIP() net.IP {
 }
 
 func (r *Raw) body(typ byte, payload []byte) ([]byte, error) {
-	return sealBody(r.sealer(), r.obfs, 0, typ, payload, padMaxFor(typ))
+	return sealBody(nil, r.sealer(), r.obfs, 0, typ, payload, padMaxFor(typ))
+}
+
+func (r *Raw) dataOut(dst, payload []byte, to net.IP) ([]byte, error) {
+	pkt, err := sealBody(dst, r.sealer(), r.obfs, r.hdr, typeData, payload, padMaxFor(typeData))
+	if err != nil {
+		return nil, err
+	}
+	seq, ack := r.nextSeq(len(pkt) - r.hdr)
+	srv, cli := r.wirePorts(r.cport())
+	rawFill(r.framing, pkt, r.hdr, r.srcIP(), to, r.isClient, r.icmpID, srv, cli,
+		seq, ack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
+	return pkt, nil
 }
 
 func (r *Raw) wire(body []byte, dst net.IP) []byte { return r.wireTo(body, dst, r.cport()) }
 
-func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
-	var seq, ack uint32
+func (r *Raw) nextSeq(n int) (seq, ack uint32) {
 	if r.proto == protoTCP {
-		n := uint32(len(body))
-		seq = r.tcpSeqBase() + r.tcpBytes.Add(n) - n
-		ack = r.tcpAck.Load()
-	} else {
-		seq = r.seq.Add(1)
+		u := uint32(n)
+		return r.tcpSeqBase() + r.tcpBytes.Add(u) - u, r.tcpAck.Load()
 	}
+	return r.seq.Add(1), 0
+}
+
+func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
+	seq, ack := r.nextSeq(len(body))
 	srv, cli := r.wirePorts(cport)
 	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, srv, cli,
 		seq, ack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
@@ -920,6 +936,7 @@ func (r *Raw) wireAntiLeak() {
 
 func (r *Raw) tunToNet(q *txQueue) error {
 	buf := make([]byte, maxDatagram)
+	out := txBufs()
 
 	ms := make([]ipv4.Message, maxBatch)
 	for i := range ms {
@@ -937,16 +954,20 @@ func (r *Raw) tunToNet(q *txQueue) error {
 		if r.sealer() == nil || r.unanswered.Load() {
 			continue
 		}
-		body, err := r.body(typeData, buf[:n])
+		if r.fecEnc != nil {
+			body, err := r.body(typeData, buf[:n])
+			if err != nil {
+				log.Printf("raw: seal error: %v", err)
+				continue
+			}
+			r.fecEnc.addData(body)
+			continue
+		}
+		pkt, err := r.dataOut(out[0], buf[:n], peer.IP)
 		if err != nil {
 			log.Printf("raw: seal error: %v", err)
 			continue
 		}
-		if r.fecEnc != nil {
-			r.fecEnc.addData(body)
-			continue
-		}
-		pkt := r.wire(body, peer.IP)
 
 		if r.canBatch(q) {
 			var oob []byte
@@ -960,11 +981,11 @@ func (r *Raw) tunToNet(q *txQueue) error {
 				if err != nil || !ok {
 					break
 				}
-				b, err := r.body(typeData, buf[:m])
+				p, err := r.dataOut(out[n], buf[:m], peer.IP)
 				if err != nil {
 					continue
 				}
-				ms[n].Buffers[0], ms[n].Addr, ms[n].OOB = r.wire(b, peer.IP), peer, oob
+				ms[n].Buffers[0], ms[n].Addr, ms[n].OOB = p, peer, oob
 				n++
 			}
 			if n > 1 {

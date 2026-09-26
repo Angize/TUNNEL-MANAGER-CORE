@@ -128,7 +128,7 @@ func (cf *connFramer) ensureReadKS() error {
 }
 
 func (cf *connFramer) frame(typ byte, payload []byte) ([]byte, error) {
-	out, err := sealBody(cf.sealer, cf.obfs, 2, typ, payload, padMaxFor(typ))
+	out, err := sealBody(nil, cf.sealer, cf.obfs, 2, typ, payload, padMaxFor(typ))
 	if err != nil {
 		return nil, err
 	}
