@@ -1054,35 +1054,37 @@ func (r *Raw) deliver(body []byte, addr *net.IPAddr, sport uint16) {
 	r.handleCrypto(body, addr, sport)
 }
 
-func (r *Raw) openWith(s Sealer, body []byte) (typ byte, session, seq uint64, payload []byte, oerr error) {
-	return openFrame(s, body, r.obfs)
+func (r *Raw) openWith(s Sealer, dst, body []byte) (typ byte, session, seq uint64, payload []byte, oerr error) {
+	return openFrame(s, dst, body, r.obfs)
 }
 
 func (r *Raw) handleCrypto(body []byte, addr *net.IPAddr, sport uint16) {
+	own := getRxBuf()
 	if s := r.sealer(); s != nil {
-		if typ, session, seq, payload, oerr := r.openWith(s, body); oerr == nil && r.rp.ok(session, seq) {
+		if typ, session, seq, payload, oerr := r.openWith(s, *own, body); oerr == nil && r.rp.ok(session, seq) {
 			settleHandshake(&r.ci)
 			r.unanswered.Store(false)
 			r.provenFrom(addr.IP)
 			r.learnPeer(addr)
 			r.learnClientPort(sport)
-			r.dispatch(typ, payload, addr)
+			r.dispatch(typ, payload, own, addr)
 			return
 		}
 	}
 
 	for i, st := range r.staged {
-		if typ, session, seq, payload, oerr := r.openWith(st.box.s, body); oerr == nil && st.rp.ok(session, seq) {
+		if typ, session, seq, payload, oerr := r.openWith(st.box.s, *own, body); oerr == nil && st.rp.ok(session, seq) {
 			r.session.Store(st.box)
 			r.fecDec.reset()
 			r.rp = st.rp
 			r.staged = r.staged[i+1:]
 			r.learnPeer(addr)
 			r.learnClientPort(sport)
-			r.dispatch(typ, payload, addr)
+			r.dispatch(typ, payload, own, addr)
 			return
 		}
 	}
+	putRxBuf(own)
 	r.tryHandshake(body, addr, sport)
 }
 
@@ -1176,14 +1178,16 @@ func (r *Raw) writeCtrlTo(body []byte, to *net.IPAddr, cport uint16) {
 	r.writeOut(r.wireTo(fecTag(r.fecEnc, body), to.IP, cport), to)
 }
 
-func (r *Raw) dispatch(typ byte, payload []byte, addr *net.IPAddr) {
+func (r *Raw) dispatch(typ byte, payload []byte, own *[]byte, addr *net.IPAddr) {
 	switch typ {
 	case typePing:
 		r.send(typePong, nil, r.replyAddr(addr))
 	case typePong:
 	case typeData:
-		r.rxw.write(payload)
+		r.rxw.writeOwned(payload, own)
+		return
 	}
+	putRxBuf(own)
 }
 
 func (r *Raw) livePath() (pathKey, bool) {

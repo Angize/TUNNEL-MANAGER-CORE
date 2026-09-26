@@ -174,19 +174,22 @@ func (s *Sealer) SealInPlace(buf, inner, aad []byte) ([]byte, error) {
 }
 
 func (s *Sealer) Open(wire, aad []byte) (session uint64, seq uint64, pt []byte, err error) {
+	return s.OpenTo(nil, wire, aad)
+}
+
+func (s *Sealer) OpenTo(dst, wire, aad []byte) (session uint64, seq uint64, pt []byte, err error) {
 	ns := s.recvAEAD.NonceSize()
 	if len(wire) < maskSaltLen+ns {
 		return 0, 0, nil, errors.New("sealed payload too short")
 	}
-	body := make([]byte, len(wire)-maskSaltLen)
-	copy(body, wire[maskSaltLen:])
-
-	if err := mask(s.recvMask, wire[:maskSaltLen], body[:ns]); err != nil {
+	var nb [chacha20poly1305.NonceSizeX]byte
+	nonce := nb[:ns]
+	copy(nonce, wire[maskSaltLen:])
+	if err := mask(s.recvMask, wire[:maskSaltLen], nonce); err != nil {
 		return 0, 0, nil, err
 	}
-	nonce := body[:ns]
 
-	pt, err = s.recvAEAD.Open(body[ns:][:0], nonce, body[ns:], aad)
+	pt, err = s.recvAEAD.Open(dst[:0], nonce, wire[maskSaltLen+ns:], aad)
 	if err != nil {
 		return 0, 0, nil, err
 	}

@@ -61,8 +61,8 @@ func obfsSeal(s Sealer, lead int, typ byte, payload []byte, padMax int) ([]byte,
 	return s.SealInPlace(buf, inner, nil)
 }
 
-func obfsOpen(s Sealer, sealed []byte) (typ byte, session uint64, seq uint64, payload []byte, err error) {
-	session, seq, inner, err := s.Open(sealed, nil)
+func obfsOpen(s Sealer, dst, sealed []byte) (typ byte, session uint64, seq uint64, payload []byte, err error) {
+	session, seq, inner, err := s.OpenTo(dst, sealed, nil)
 	if err != nil {
 		return 0, 0, 0, nil, err
 	}
