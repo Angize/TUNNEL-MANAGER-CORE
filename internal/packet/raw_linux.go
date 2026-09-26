@@ -44,8 +44,9 @@ type Raw struct {
 
 	link *directLink
 
-	localIP  atomic.Pointer[net.IPAddr]
-	soloPeer atomic.Pointer[net.IPAddr]
+	localIP      atomic.Pointer[net.IPAddr]
+	soloPeer     atomic.Pointer[net.IPAddr]
+	peerFiltered atomic.Bool
 
 	replySrc  atomic.Pointer[net.IP]
 	ours      ourIPs
@@ -346,6 +347,7 @@ func dialRawBase(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 	r := newRaw(conn, dev, obfs, psk, cipher, profile, true)
 	r.proto, r.port = proto, rawEffPort(profile, rawPort)
 	r.soloPeer.Store(&net.IPAddr{IP: ip})
+	r.filterSrc(buildSrcAllow([]string{ip.String()}))
 	if lip := routeLocalIP(ip); lip != nil {
 		r.localIP.Store(&net.IPAddr{IP: lip})
 	}
@@ -1088,6 +1090,9 @@ func (r *Raw) learnPeer(addr *net.IPAddr) {
 	if r.pp == nil {
 		r.soloPeer.Store(addr)
 	}
+	if !r.isClient && len(r.srcAllow) == 0 && !r.peerFiltered.Load() && r.peerFiltered.CompareAndSwap(false, true) {
+		r.filterSrc(buildSrcAllow([]string{addr.IP.String()}))
+	}
 	r.learnLocalIP(addr.IP)
 
 	if p := r.dst(); p != nil {
@@ -1228,6 +1233,7 @@ func (r *Raw) SetPeerPool(pp *PeerPool) {
 			r.poolIPs = m
 			if len(m) > 0 {
 				r.srcAllow = m
+				r.filterSrc(m)
 			}
 		}
 	}
@@ -1239,6 +1245,7 @@ func (r *Raw) SetPeerSources(ips []string) {
 	}
 	if m := buildSrcAllow(ips); len(m) > 0 {
 		r.srcAllow = m
+		r.filterSrc(m)
 	}
 	r.leak.scopeAll(parseIP4s(ips))
 }
