@@ -27,17 +27,15 @@ type WSSNI struct {
 
 func (c *Config) cdnIsHTTP() bool { return c.CDNCarrier == "http" || c.CDNCarrier == "grpc" }
 
-func queueingCarrier(t string) bool { return t == "raw" || t == "udp" }
-
 func (c *Config) laneCarrier() bool {
-	return c.Transport == "tcp" || (c.Transport == "ws" && !c.cdnIsHTTP())
+	return c.Transport == "tcp" || c.Transport == "ws"
 }
 
 func (c *Config) tunQueues() int {
-	if !c.Fec && (queueingCarrier(c.Transport) || c.laneCarrier()) {
-		return c.Workers
+	if c.Fec {
+		return 1
 	}
-	return 1
+	return c.Workers
 }
 
 const maxWorkers = packet.MaxLanes

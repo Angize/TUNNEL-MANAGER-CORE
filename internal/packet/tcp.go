@@ -665,14 +665,14 @@ func DialHTTPC(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, ciphe
 		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
 }
 
-func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string) (*TCP, error) {
+func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, extra ...*tun.Device) (*TCP, error) {
 	ln, err := listenTCP(listenAddr)
 	if err != nil {
 		return nil, err
 	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, httpc: true, wsPath: wsPath, idle: connIdle, ping: pingEvery, addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
-		preAuth: make(chan struct{}, maxPreAuthConns), httpcSessions: make(map[string]*httpcSession)}, nil
+		preAuth: make(chan struct{}, maxPreAuthConns), httpcSessions: make(map[string]*httpcSession), extra: extra}, nil
 }
 
 func ListenWS(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, extra ...*tun.Device) (*TCP, error) {

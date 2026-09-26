@@ -167,7 +167,7 @@ func main() {
 		switch cfg.Role {
 		case "server":
 			if cfg.cdnIsHTTP() {
-				b, err = packet.ListenHTTPC(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath)
+				b, err = packet.ListenHTTPC(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath, devs[1:]...)
 				if err == nil {
 					log.Printf("tnl-core: listening (core/http%s) on %s", obfsTag, cfg.Listen)
 				}
@@ -307,20 +307,12 @@ func portTriesNote(transport string, sportRandom, edgeNoRoll bool, n int) string
 }
 
 func workersNote(cfg *Config) string {
-	n := cfg.Workers
-	if n <= 1 {
+	if cfg.Workers <= 1 || !cfg.Fec {
 		return ""
 	}
-	if cfg.Fec {
-		return fmt.Sprintf("core: WARNING workers=%d is ignored while fec is on. FEC needs one ordered "+
-			"stream to rebuild a block from, so the datapath runs a single queue and the extra workers "+
-			"are never created", n)
-	}
-	if !queueingCarrier(cfg.Transport) && !cfg.laneCarrier() {
-		return fmt.Sprintf("core: WARNING cdn_carrier %s ignores workers=%d. Parallel lanes are one ws or tcp "+
-			"connection each; the http and grpc carriers spread over http_streams instead", cfg.CDNCarrier, n)
-	}
-	return ""
+	return fmt.Sprintf("core: WARNING workers=%d is ignored while fec is on. FEC needs one ordered "+
+		"stream to rebuild a block from, so the datapath runs a single queue and the extra workers "+
+		"are never created", cfg.Workers)
 }
 
 func sockBufCarrier(transport string) bool {
