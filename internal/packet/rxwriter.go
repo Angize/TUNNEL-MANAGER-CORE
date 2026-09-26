@@ -7,39 +7,69 @@ import (
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/tun"
 )
 
-const rxQueueDepth = 256
+const (
+	rxQueueDepth = 256
+	rxBufLen     = 2048
+)
+
+var rxBufs = sync.Pool{New: func() any {
+	b := make([]byte, rxBufLen)
+	return &b
+}}
+
+func getRxBuf() *[]byte { return rxBufs.Get().(*[]byte) }
+
+func putRxBuf(b *[]byte) {
+	if b != nil {
+		rxBufs.Put(b)
+	}
+}
+
+type rxPkt struct {
+	b   []byte
+	own *[]byte
+}
 
 type tunWriters struct {
 	devs []*tun.Device
-	ch   []chan []byte
+	ch   []chan rxPkt
 	done chan struct{}
 	once sync.Once
 }
 
 func newTunWriters(devs []*tun.Device) *tunWriters {
-	w := &tunWriters{devs: devs, done: make(chan struct{}), ch: make([]chan []byte, len(devs))}
+	w := &tunWriters{devs: devs, done: make(chan struct{}), ch: make([]chan rxPkt, len(devs))}
 	for i := range devs {
-		w.ch[i] = make(chan []byte, rxQueueDepth)
+		w.ch[i] = make(chan rxPkt, rxQueueDepth)
 		go w.run(i)
 	}
 	return w
 }
 
 func (w *tunWriters) run(i int) {
-	pend := make([][]byte, 0, rxQueueDepth)
+	pend := make([]rxPkt, 0, rxQueueDepth)
+	pkts := make([][]byte, 0, rxQueueDepth)
 	for {
 		select {
-		case pkt := <-w.ch[i]:
-			pend = w.drain(i, append(pend[:0], pkt))
-			w.put(i, pend)
+		case p := <-w.ch[i]:
+			pend = w.drain(i, append(pend[:0], p))
+			pkts = pkts[:0]
+			for _, q := range pend {
+				pkts = append(pkts, q.b)
+			}
+			w.put(i, pkts)
+			for _, q := range pend {
+				putRxBuf(q.own)
+			}
 			clear(pend)
+			clear(pkts)
 		case <-w.done:
 			return
 		}
 	}
 }
 
-func (w *tunWriters) drain(i int, pend [][]byte) [][]byte {
+func (w *tunWriters) drain(i int, pend []rxPkt) []rxPkt {
 	for len(pend) < cap(pend) {
 		select {
 		case p := <-w.ch[i]:
@@ -57,14 +87,17 @@ func (w *tunWriters) put(i int, pkts [][]byte) {
 	}
 }
 
-func (w *tunWriters) write(pkt []byte) {
+func (w *tunWriters) write(pkt []byte) { w.writeOwned(pkt, nil) }
+
+func (w *tunWriters) writeOwned(pkt []byte, own *[]byte) {
 	i := 0
 	if n := len(w.ch); n > 1 {
 		i = int(flowHash(pkt) % uint32(n))
 	}
 	select {
-	case w.ch[i] <- pkt:
+	case w.ch[i] <- rxPkt{b: pkt, own: own}:
 	case <-w.done:
+		putRxBuf(own)
 	}
 }
 

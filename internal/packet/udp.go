@@ -27,6 +27,7 @@ type Sealer interface {
 	Frame(lead, innerLen int) (buf, head, inner []byte)
 	SealInPlace(buf, inner, aad []byte) ([]byte, error)
 	Open(sealed, aad []byte) (session uint64, seq uint64, pt []byte, err error)
+	OpenTo(dst, sealed, aad []byte) (session uint64, seq uint64, pt []byte, err error)
 }
 
 type sealerBox struct{ s Sealer }
@@ -757,11 +758,12 @@ func (b *UDP) deliver(pkt []byte, addr *net.UDPAddr) {
 	if b.pp == nil {
 		b.learnPeer(addr)
 	}
-	pt := iff(pkt[1] == typeData, pkt[2:], nil)
-	if pt != nil {
-		pt = append([]byte(nil), pt...)
+	own := getRxBuf()
+	var pt []byte
+	if pkt[1] == typeData {
+		pt = append((*own)[:0], pkt[2:]...)
 	}
-	b.dispatch(pkt[1], pt, addr)
+	b.dispatch(pkt[1], pt, own, addr)
 }
 
 var typeAAD = [...][]byte{{typeData}, {typePing}, {typePong}}
@@ -789,38 +791,39 @@ func sealBody(s Sealer, obfs bool, lead int, typ byte, payload []byte, padMax in
 	return out, nil
 }
 
-func openFrame(s Sealer, data []byte, obfs bool) (typ byte, session, seq uint64, payload []byte, oerr error) {
+func openFrame(s Sealer, dst, data []byte, obfs bool) (typ byte, session, seq uint64, payload []byte, oerr error) {
 	if obfs {
-		return obfsOpen(s, data)
+		return obfsOpen(s, dst, data)
 	}
 	if len(data) >= 2 && data[0] == magic {
 		typ = data[1]
-		session, seq, payload, oerr = s.Open(data[2:], aadFor(typ))
+		session, seq, payload, oerr = s.OpenTo(dst, data[2:], aadFor(typ))
 		return
 	}
 	return 0, 0, 0, nil, errBadFrame
 }
 
-func (b *UDP) openWith(s Sealer, pkt []byte) (typ byte, session, seq uint64, payload []byte, oerr error) {
-	return openFrame(s, pkt, b.obfs)
+func (b *UDP) openWith(s Sealer, dst, pkt []byte) (typ byte, session, seq uint64, payload []byte, oerr error) {
+	return openFrame(s, dst, pkt, b.obfs)
 }
 
 func (b *UDP) handleCrypto(pkt []byte, addr *net.UDPAddr) {
+	own := getRxBuf()
 	if s := b.sealer(); s != nil {
-		if typ, session, seq, payload, oerr := b.openWith(s, pkt); oerr == nil && b.rp.ok(session, seq) {
+		if typ, session, seq, payload, oerr := b.openWith(s, *own, pkt); oerr == nil && b.rp.ok(session, seq) {
 			settleHandshake(&b.ci)
 			b.provenFrom(addr.IP)
 
 			if b.pp == nil {
 				b.learnPeer(addr)
 			}
-			b.dispatch(typ, payload, addr)
+			b.dispatch(typ, payload, own, addr)
 			return
 		}
 	}
 
 	for i, st := range b.staged {
-		if typ, session, seq, payload, oerr := b.openWith(st.box.s, pkt); oerr == nil && st.rp.ok(session, seq) {
+		if typ, session, seq, payload, oerr := b.openWith(st.box.s, *own, pkt); oerr == nil && st.rp.ok(session, seq) {
 			b.session.Store(st.box)
 			b.fecDec.reset()
 			b.rp = st.rp
@@ -828,10 +831,11 @@ func (b *UDP) handleCrypto(pkt []byte, addr *net.UDPAddr) {
 			if b.pp == nil {
 				b.learnPeer(addr)
 			}
-			b.dispatch(typ, payload, addr)
+			b.dispatch(typ, payload, own, addr)
 			return
 		}
 	}
+	putRxBuf(own)
 	b.tryHandshake(pkt, addr)
 }
 
@@ -897,14 +901,16 @@ func (b *UDP) writeCtrl(pkt []byte, to *net.UDPAddr) {
 	}
 }
 
-func (b *UDP) dispatch(typ byte, payload []byte, addr *net.UDPAddr) {
+func (b *UDP) dispatch(typ byte, payload []byte, own *[]byte, addr *net.UDPAddr) {
 	switch typ {
 	case typePing:
 		b.send(typePong, nil, addr)
 	case typePong:
 	case typeData:
-		b.tw.write(payload)
+		b.tw.writeOwned(payload, own)
+		return
 	}
+	putRxBuf(own)
 }
 
 func (b *UDP) newController() *rotationController {
@@ -983,13 +989,6 @@ func (b *UDP) send(typ byte, payload []byte, to *net.UDPAddr) {
 		return
 	}
 	b.writeCtrl(frame, to)
-}
-
-func iff(cond bool, a, b []byte) []byte {
-	if cond {
-		return a
-	}
-	return b
 }
 
 var errBadFrame = errors.New("core: bad frame")

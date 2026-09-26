@@ -195,7 +195,7 @@ func (cf *connFramer) readFrame() (typ byte, session uint64, seq uint64, payload
 		if _, err := io.ReadFull(cf.r, buf); err != nil {
 			return 0, 0, 0, nil, err
 		}
-		return obfsOpen(cf.sealer, buf)
+		return obfsOpen(cf.sealer, nil, buf)
 	}
 
 	n := int(binary.BigEndian.Uint16(hdr[:]))
