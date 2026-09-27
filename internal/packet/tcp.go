@@ -38,6 +38,7 @@ const (
 
 	tunBatchFrames = 32
 	frameSlack     = 128
+	deadlineRearm  = time.Second
 
 	handshakeTimeout = 10 * time.Second
 
@@ -989,7 +990,7 @@ func (b *TCP) handleServerConn(conn net.Conn) {
 	log.Printf("core/tcp: peer connected from %s", conn.RemoteAddr())
 	b.publishServerConn(cf)
 	release()
-	b.handleFrame(cf, typ, payload, nil)
+	b.handleFrame(cf, typ, payload, nil, time.Now().UnixNano())
 	if b.obfs {
 		_ = cf.flushSalt()
 	}
@@ -1549,14 +1550,14 @@ func (b *TCP) selectedTCP(kind, key string) {
 	}
 }
 
-func (b *TCP) handleFrame(cf *connFramer, typ byte, payload []byte, own *[]byte) {
+func (b *TCP) handleFrame(cf *connFramer, typ byte, payload []byte, own *[]byte, now int64) {
 	switch typ {
 	case typePing:
 		b.noteLane(cf, payload)
 		_ = cf.writeFrame(typePong, nil)
 	case typePong:
 	case typeData:
-		b.lastRxData.Store(time.Now().UnixNano())
+		b.lastRxData.Store(now)
 
 		if !b.isClient {
 			b.downFrom(cf)
@@ -1585,8 +1586,9 @@ func (b *TCP) adoptRx(cf *connFramer) {
 }
 
 func (b *TCP) readLoop(cf *connFramer) error {
+	armed := time.Now()
+	cf.conn.SetReadDeadline(armed.Add(b.idle + deadlineRearm))
 	for {
-		cf.conn.SetReadDeadline(time.Now().Add(b.idle))
 		own := getRxBuf()
 		typ, session, seq, payload, err := cf.readFrame(*own)
 		if err != nil {
@@ -1596,17 +1598,22 @@ func (b *TCP) readLoop(cf *connFramer) error {
 			}
 			return err
 		}
+		t := time.Now()
+		if t.Sub(armed) >= deadlineRearm {
+			cf.conn.SetReadDeadline(t.Add(b.idle + deadlineRearm))
+			armed = t
+		}
 		if cf.sealer != nil && !cf.rp.ok(session, seq) {
 			putRxBuf(own)
 			continue
 		}
-		now := time.Now().UnixNano()
+		now := t.UnixNano()
 		cf.rxAt.Store(now)
 
 		if cf == b.cur.Load() {
 			b.lastRx.Store(now)
 		}
-		b.handleFrame(cf, typ, payload, own)
+		b.handleFrame(cf, typ, payload, own, now)
 	}
 }
 
