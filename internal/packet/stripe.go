@@ -298,22 +298,18 @@ func (q *reseq) deliver(seq uint64, data []byte, own *[]byte) bool {
 		putChunk(own)
 		return false
 	}
-	if seq > q.next && own != nil {
-		data = append(make([]byte, 0, len(data)), data...)
-		putChunk(own)
-		own = nil
-	}
 	if old, ok := q.pend[seq]; ok {
 		q.n -= len(old)
 	}
 	q.pend[seq] = data
 	q.n += len(data)
 	for {
-		d, ok := q.pend[q.next]
+		cur := q.next
+		d, ok := q.pend[cur]
 		if !ok {
 			return true
 		}
-		delete(q.pend, q.next)
+		delete(q.pend, cur)
 		q.n -= len(d)
 		q.next++
 		q.nextDue.Store(q.next)
@@ -321,8 +317,9 @@ func (q *reseq) deliver(seq uint64, data []byte, own *[]byte) bool {
 		if len(d) > 0 {
 			_, err = q.pw.Write(d)
 		}
-		putChunk(own)
-		own = nil
+		if cur == seq {
+			putChunk(own)
+		}
 		if err != nil {
 			return false
 		}
