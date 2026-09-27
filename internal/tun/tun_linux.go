@@ -46,7 +46,7 @@ type Device struct {
 	gso  bool
 	uso  bool
 	rbuf []byte
-	q    [][]byte
+	cur  segCursor
 
 	nSuper, nSeg atomic.Uint64
 	nUnsplit     atomic.Uint64
@@ -294,12 +294,10 @@ func (d *Device) Read(buf []byte) (int, error) {
 		return d.rd(buf)
 	}
 	for {
-		for len(d.q) == 0 {
-			segs, err := d.readGSO()
-			if err != nil {
+		for d.cur.empty() {
+			if err := d.readGSO(); err != nil {
 				return 0, err
 			}
-			d.q = segs
 		}
 		if n, ok := d.serve(buf); ok {
 			return n, nil
@@ -312,12 +310,11 @@ func (d *Device) TryRead(buf []byte) (int, bool, error) {
 		return d.tryRd(buf)
 	}
 	for {
-		for len(d.q) == 0 {
-			segs, ok, err := d.tryReadGSO()
+		for d.cur.empty() {
+			ok, err := d.tryReadGSO()
 			if err != nil || !ok {
 				return 0, false, err
 			}
-			d.q = segs
 		}
 		if n, ok := d.serve(buf); ok {
 			return n, true, nil
@@ -326,43 +323,40 @@ func (d *Device) TryRead(buf []byte) (int, bool, error) {
 }
 
 func (d *Device) serve(buf []byte) (int, bool) {
-	seg := d.q[0]
-	d.q = d.q[1:]
-	if len(seg) > len(buf) {
+	n, ok := d.cur.next(buf)
+	if !ok {
 		d.nOversize.Add(1)
-		return 0, false
 	}
-	return copy(buf, seg), true
+	return n, ok
 }
 
-func (d *Device) readGSO() ([][]byte, error) {
+func (d *Device) readGSO() error {
 	n, err := d.rd(d.rbuf)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return d.segsFrom(n), nil
+	d.load(n)
+	return nil
 }
 
-func (d *Device) tryReadGSO() ([][]byte, bool, error) {
+func (d *Device) tryReadGSO() (bool, error) {
 	n, ok, err := d.tryRd(d.rbuf)
 	if err != nil || !ok {
-		return nil, false, err
+		return false, err
 	}
-	return d.segsFrom(n), true, nil
+	d.load(n)
+	return true, nil
 }
 
-func (d *Device) segsFrom(n int) [][]byte {
+func (d *Device) load(n int) {
 	if n <= vnetHdrLen {
-		return nil
+		return
 	}
 	flags := d.rbuf[0]
 	gsoType := int(d.rbuf[1])
 	gsoSize := int(binary.LittleEndian.Uint16(d.rbuf[4:6]))
 	pkt := d.rbuf[vnetHdrLen:n]
-	segs, split := [][]byte{pkt}, false
-	if gsoType&^gsoECN != gsoNone {
-		segs, split = splitGSO(pkt, gsoSize, gsoType)
-	}
+	split, segs := d.cur.load(pkt, gsoSize, gsoType)
 	if !split {
 		if flags&vnetNeedsCsum != 0 {
 			finalizeCsum(pkt)
@@ -371,12 +365,11 @@ func (d *Device) segsFrom(n int) [][]byte {
 			d.nUnsplit.Add(1)
 		}
 		d.reportGSO()
-		return segs
+		return
 	}
 	d.nSuper.Add(1)
-	d.nSeg.Add(uint64(len(segs)))
+	d.nSeg.Add(uint64(segs))
 	d.reportGSO()
-	return segs
 }
 
 var zeroVnetHdr [vnetHdrLen]byte

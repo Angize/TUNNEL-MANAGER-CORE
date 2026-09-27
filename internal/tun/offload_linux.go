@@ -25,97 +25,135 @@ const (
 	vnetNeedsCsum = 0x01
 )
 
-func splitGSO(pkt []byte, gsoSize, gsoType int) (segs [][]byte, split bool) {
-	switch gsoType &^ gsoECN {
-	case gsoTCPv4, gsoTCPv6:
-		return segment(pkt, gsoSize, true)
-	case gsoUDPL4:
-		return segment(pkt, gsoSize, false)
-	default:
-		return [][]byte{pkt}, false
-	}
+type segCursor struct {
+	pkt      []byte
+	split    bool
+	v6       bool
+	isTCP    bool
+	ipHdrLen int
+	l4Hdr    int
+	hdrLen   int
+	gsoSize  int
+	baseSeq  uint32
+	flags    byte
+	baseID   uint16
+	off      int
+	i        int
 }
 
-func segment(pkt []byte, gsoSize int, isTCP bool) (segs [][]byte, split bool) {
-	v6 := pkt[0]>>4 == 6
-	var ipHdrLen int
-	if v6 {
+func (c *segCursor) empty() bool { return c.pkt == nil }
+
+func (c *segCursor) load(pkt []byte, gsoSize, gsoType int) (split bool, segs int) {
+	*c = segCursor{pkt: pkt}
+	switch gsoType &^ gsoECN {
+	case gsoTCPv4, gsoTCPv6:
+		c.isTCP = true
+	case gsoUDPL4:
+	default:
+		return false, 1
+	}
+	if !c.plan(gsoSize) {
+		*c = segCursor{pkt: pkt}
+		return false, 1
+	}
+	c.split = true
+	return true, (len(pkt) - c.hdrLen + gsoSize - 1) / gsoSize
+}
+
+func (c *segCursor) plan(gsoSize int) bool {
+	pkt := c.pkt
+	c.v6 = pkt[0]>>4 == 6
+	if c.v6 {
 		l4Off, proto, ok := ipv6L4Offset(pkt)
-		if !ok || (isTCP && proto != 6) || (!isTCP && proto != 17) {
-			return [][]byte{pkt}, false
+		if !ok || (c.isTCP && proto != 6) || (!c.isTCP && proto != 17) {
+			return false
 		}
-		ipHdrLen = l4Off
+		c.ipHdrLen = l4Off
 	} else {
-		ipHdrLen = int(pkt[0]&0x0f) * 4
+		c.ipHdrLen = int(pkt[0]&0x0f) * 4
 	}
 	minL4 := 8
-	if isTCP {
+	if c.isTCP {
 		minL4 = 20
 	}
-	if len(pkt) < ipHdrLen+minL4 {
-		return [][]byte{pkt}, false
+	if len(pkt) < c.ipHdrLen+minL4 {
+		return false
 	}
-	l4Hdr := 8
-	if isTCP {
-		l4Hdr = int(pkt[ipHdrLen+12]>>4) * 4
-		if l4Hdr < 20 {
-			return [][]byte{pkt}, false
+	c.l4Hdr = 8
+	if c.isTCP {
+		c.l4Hdr = int(pkt[c.ipHdrLen+12]>>4) * 4
+		if c.l4Hdr < 20 {
+			return false
 		}
 	}
-	hdrLen := ipHdrLen + l4Hdr
-	if len(pkt) <= hdrLen || gsoSize <= 0 {
-		return [][]byte{pkt}, false
+	c.hdrLen = c.ipHdrLen + c.l4Hdr
+	if len(pkt) <= c.hdrLen || gsoSize <= 0 {
+		return false
 	}
-	payload := pkt[hdrLen:]
+	c.gsoSize = gsoSize
+	if c.isTCP {
+		c.baseSeq = binary.BigEndian.Uint32(pkt[c.ipHdrLen+4 : c.ipHdrLen+8])
+		c.flags = pkt[c.ipHdrLen+13]
+	}
+	if !c.v6 {
+		c.baseID = binary.BigEndian.Uint16(pkt[4:6])
+	}
+	return true
+}
 
-	var baseSeq uint32
-	var flags byte
-	if isTCP {
-		baseSeq = binary.BigEndian.Uint32(pkt[ipHdrLen+4 : ipHdrLen+8])
-		flags = pkt[ipHdrLen+13]
-	}
-	var baseID uint16
-	if !v6 {
-		baseID = binary.BigEndian.Uint16(pkt[4:6])
-	}
-
-	var out [][]byte
-	for off, i := 0, 0; off < len(payload); off, i = off+gsoSize, i+1 {
-		end := off + gsoSize
-		if end > len(payload) {
-			end = len(payload)
+func (c *segCursor) next(buf []byte) (n int, fits bool) {
+	pkt := c.pkt
+	if !c.split {
+		c.pkt = nil
+		if len(pkt) > len(buf) {
+			return 0, false
 		}
-		chunk := payload[off:end]
-		last := end == len(payload)
-
-		seg := make([]byte, hdrLen+len(chunk))
-		copy(seg, pkt[:hdrLen])
-		copy(seg[hdrLen:], chunk)
-
-		if v6 {
-			binary.BigEndian.PutUint16(seg[4:6], uint16((ipHdrLen-40)+l4Hdr+len(chunk)))
-		} else {
-			binary.BigEndian.PutUint16(seg[2:4], uint16(len(seg)))
-			binary.BigEndian.PutUint16(seg[4:6], baseID+uint16(i))
-			seg[10], seg[11] = 0, 0
-			binary.BigEndian.PutUint16(seg[10:12], ipChecksum(seg[:ipHdrLen]))
-		}
-
-		if isTCP {
-			binary.BigEndian.PutUint32(seg[ipHdrLen+4:ipHdrLen+8], baseSeq+uint32(off))
-			f := flags
-			if !last {
-				f &^= 0x09
-			}
-			seg[ipHdrLen+13] = f
-			writeL4Csum(seg, ipHdrLen, v6, 6)
-		} else {
-			binary.BigEndian.PutUint16(seg[ipHdrLen+4:ipHdrLen+6], uint16(8+len(chunk)))
-			writeL4Csum(seg, ipHdrLen, v6, 17)
-		}
-		out = append(out, seg)
+		return copy(buf, pkt), true
 	}
-	return out, true
+	payload := pkt[c.hdrLen:]
+	off, i := c.off, c.i
+	end := off + c.gsoSize
+	if end > len(payload) {
+		end = len(payload)
+	}
+	chunk := payload[off:end]
+	last := end == len(payload)
+	c.off, c.i = end, i+1
+	if last {
+		c.pkt = nil
+	}
+
+	ipHdrLen := c.ipHdrLen
+	size := c.hdrLen + len(chunk)
+	if size > len(buf) {
+		return 0, false
+	}
+	seg := buf[:size]
+	copy(seg, pkt[:c.hdrLen])
+	copy(seg[c.hdrLen:], chunk)
+
+	if c.v6 {
+		binary.BigEndian.PutUint16(seg[4:6], uint16((ipHdrLen-40)+c.l4Hdr+len(chunk)))
+	} else {
+		binary.BigEndian.PutUint16(seg[2:4], uint16(len(seg)))
+		binary.BigEndian.PutUint16(seg[4:6], c.baseID+uint16(i))
+		seg[10], seg[11] = 0, 0
+		binary.BigEndian.PutUint16(seg[10:12], ipChecksum(seg[:ipHdrLen]))
+	}
+
+	if c.isTCP {
+		binary.BigEndian.PutUint32(seg[ipHdrLen+4:ipHdrLen+8], c.baseSeq+uint32(off))
+		f := c.flags
+		if !last {
+			f &^= 0x09
+		}
+		seg[ipHdrLen+13] = f
+		writeL4Csum(seg, ipHdrLen, c.v6, 6)
+	} else {
+		binary.BigEndian.PutUint16(seg[ipHdrLen+4:ipHdrLen+6], uint16(8+len(chunk)))
+		writeL4Csum(seg, ipHdrLen, c.v6, 17)
+	}
+	return size, true
 }
 
 func writeL4Csum(pkt []byte, ipHdrLen int, v6 bool, proto byte) {
