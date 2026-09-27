@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -31,22 +32,29 @@ func SetHTTPStreams(workers int) {
 	}
 }
 
-var chunkClasses = [...]int{4 << 10, 16 << 10, 64 << 10, 128 << 10, 256 << 10, 384 << 10, 512 << 10, 768 << 10, maxRecord + recHdr}
-
-var chunkPools [len(chunkClasses)]sync.Pool
-
-func getChunk(n int) *[]byte {
-	for i, c := range chunkClasses {
-		if n <= c {
-			if p, _ := chunkPools[i].Get().(*[]byte); p != nil {
-				*p = (*p)[:n]
-				return p
-			}
-			b := make([]byte, n, c)
-			return &b
+var chunkClasses = func() []int {
+	c := []int{4 << 10}
+	for base := 4 << 10; base < maxRecord; base <<= 1 {
+		for _, q := range []int{5, 6, 7, 8} {
+			c = append(c, base*q/4)
 		}
 	}
-	b := make([]byte, n)
+	return append(c, maxRecord+recHdr)
+}()
+
+var chunkPools = make([]sync.Pool, len(chunkClasses))
+
+func getChunk(n int) *[]byte {
+	i := sort.SearchInts(chunkClasses, n)
+	if i == len(chunkClasses) {
+		b := make([]byte, n)
+		return &b
+	}
+	if p, _ := chunkPools[i].Get().(*[]byte); p != nil {
+		*p = (*p)[:n]
+		return p
+	}
+	b := make([]byte, n, chunkClasses[i])
 	return &b
 }
 
@@ -54,11 +62,9 @@ func putChunk(p *[]byte) {
 	if p == nil {
 		return
 	}
-	for i, c := range chunkClasses {
-		if cap(*p) == c {
-			chunkPools[i].Put(p)
-			return
-		}
+	c := cap(*p)
+	if i := sort.SearchInts(chunkClasses, c); i < len(chunkClasses) && chunkClasses[i] == c {
+		chunkPools[i].Put(p)
 	}
 }
 
@@ -141,15 +147,12 @@ func (d *stripeTx) serve(ctx context.Context, w io.Writer, flush func(), setWD f
 			return
 		case rec := <-d.work:
 			run, single := d.gather(buf, rec)
-			ok := writeRecord(w, flush, setWD, run)
-			if !ok {
+			if !writeRecord(w, flush, setWD, run) {
 				d.requeue(run)
+				return
 			}
 			if single {
 				putChunk(rec)
-			}
-			if !ok {
-				return
 			}
 			last = time.Now()
 		case now := <-tk.C:
@@ -234,18 +237,6 @@ func readStripe(body io.ReadCloser, q *reseq, fail func()) {
 	}
 }
 
-type pendChunk struct {
-	b   []byte
-	own *[]byte
-}
-
-func (c pendChunk) cost() int {
-	if c.own != nil {
-		return cap(*c.own)
-	}
-	return len(c.b)
-}
-
 type reseq struct {
 	pw      *io.PipeWriter
 	floor   int
@@ -254,12 +245,12 @@ type reseq struct {
 	streams int
 	mu      sync.Mutex
 	next    uint64
-	pend    map[uint64]pendChunk
+	pend    map[uint64][]byte
 	n       int
 }
 
 func newReseq(pw *io.PipeWriter, max int) *reseq {
-	q := &reseq{pw: pw, floor: max, pend: map[uint64]pendChunk{}}
+	q := &reseq{pw: pw, floor: max, pend: map[uint64][]byte{}}
 	q.setMax(max)
 	return q
 }
@@ -292,30 +283,34 @@ func (q *reseq) deliver(seq uint64, data []byte, own *[]byte) bool {
 		putChunk(own)
 		return true
 	}
-	in := pendChunk{data, own}
-	if len(q.pend) >= q.maxN || q.n+in.cost() > q.max {
+	if len(q.pend) >= q.maxN || q.n+len(data) > q.max {
 		putChunk(own)
 		return false
 	}
-	if old, ok := q.pend[seq]; ok {
-		q.n -= old.cost()
-		putChunk(old.own)
+	if seq > q.next && own != nil {
+		data = append(make([]byte, 0, len(data)), data...)
+		putChunk(own)
+		own = nil
 	}
-	q.pend[seq] = in
-	q.n += in.cost()
+	if old, ok := q.pend[seq]; ok {
+		q.n -= len(old)
+	}
+	q.pend[seq] = data
+	q.n += len(data)
 	for {
-		c, ok := q.pend[q.next]
+		d, ok := q.pend[q.next]
 		if !ok {
 			return true
 		}
 		delete(q.pend, q.next)
-		q.n -= c.cost()
+		q.n -= len(d)
 		q.next++
 		var err error
-		if len(c.b) > 0 {
-			_, err = q.pw.Write(c.b)
+		if len(d) > 0 {
+			_, err = q.pw.Write(d)
 		}
-		putChunk(c.own)
+		putChunk(own)
+		own = nil
 		if err != nil {
 			return false
 		}

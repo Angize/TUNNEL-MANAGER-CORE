@@ -606,27 +606,27 @@ func grpcUnhunk(msg []byte) []byte {
 	return msg
 }
 
-type grpcFramingWriter struct {
-	w   io.Writer
-	buf []byte
-}
+type grpcFramingWriter struct{ w io.Writer }
 
 func (g *grpcFramingWriter) Write(p []byte) (int, error) {
-	g.buf = grpcAppendFrame(g.buf[:0], p)
-	if _, err := g.w.Write(g.buf); err != nil {
+	own := getChunk(5 + 1 + binary.MaxVarintLen64 + len(p))
+	if _, err := g.w.Write(grpcAppendFrame((*own)[:0], p)); err != nil {
 		return 0, err
 	}
+	putChunk(own)
 	return len(p), nil
 }
 
 type grpcDeframingReader struct {
 	r   io.Reader
 	buf []byte
-	msg []byte
+	own *[]byte
 }
 
 func (g *grpcDeframingReader) Read(p []byte) (int, error) {
 	for len(g.buf) == 0 {
+		putChunk(g.own)
+		g.own = nil
 		var hdr [5]byte
 		if _, err := io.ReadFull(g.r, hdr[:]); err != nil {
 			return 0, err
@@ -643,17 +643,20 @@ func (g *grpcDeframingReader) Read(p []byte) (int, error) {
 		if msgLen == 0 {
 			continue
 		}
-		if cap(g.msg) < int(msgLen) {
-			g.msg = make([]byte, msgLen)
-		}
-		msg := g.msg[:msgLen]
-		if _, err := io.ReadFull(g.r, msg); err != nil {
+		own := getChunk(int(msgLen))
+		if _, err := io.ReadFull(g.r, *own); err != nil {
+			putChunk(own)
 			return 0, err
 		}
-		g.buf = grpcUnhunk(msg)
+		g.own = own
+		g.buf = grpcUnhunk(*own)
 	}
 	n := copy(p, g.buf)
 	g.buf = g.buf[n:]
+	if len(g.buf) == 0 {
+		putChunk(g.own)
+		g.own = nil
+	}
 	return n, nil
 }
 
