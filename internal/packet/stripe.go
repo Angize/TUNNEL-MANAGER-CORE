@@ -33,8 +33,8 @@ func SetHTTPStreams(workers int) {
 }
 
 var chunkClasses = func() []int {
-	c := []int{4 << 10}
-	for base := 4 << 10; base < maxRecord; base <<= 1 {
+	c := []int{1 << 10}
+	for base := 1 << 10; base < maxRecord; base <<= 1 {
 		for _, q := range []int{5, 6, 7, 8} {
 			c = append(c, base*q/4)
 		}
@@ -225,12 +225,19 @@ func readStripe(body io.ReadCloser, q *reseq, fail func()) {
 			fail()
 			return
 		}
-		own := getChunk(int(n))
-		if _, err := io.ReadFull(body, *own); err != nil {
+		var own *[]byte
+		var buf []byte
+		if q.due(seq) {
+			own = getChunk(int(n))
+			buf = *own
+		} else {
+			buf = make([]byte, n)
+		}
+		if _, err := io.ReadFull(body, buf); err != nil {
 			putChunk(own)
 			return
 		}
-		if !q.deliver(seq, *own, own) {
+		if !q.deliver(seq, buf, own) {
 			fail()
 			return
 		}
@@ -274,6 +281,12 @@ func (q *reseq) setMax(max int) {
 	if q.maxN = max / (8 << 10); q.maxN < 1024 {
 		q.maxN = 1024
 	}
+}
+
+func (q *reseq) due(seq uint64) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return seq == q.next
 }
 
 func (q *reseq) deliver(seq uint64, data []byte, own *[]byte) bool {
