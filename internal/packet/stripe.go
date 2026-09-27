@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,40 +33,88 @@ func SetHTTPStreams(workers int) {
 	}
 }
 
+var chunkClasses = func() []int {
+	c := []int{1 << 10}
+	for base := 1 << 10; base < maxRecord; base <<= 1 {
+		for _, q := range []int{5, 6, 7, 8} {
+			c = append(c, base*q/4)
+		}
+	}
+	return append(c, maxRecord+recHdr)
+}()
+
+var chunkPools = make([]sync.Pool, len(chunkClasses))
+
+func getChunk(n int) *[]byte {
+	i := sort.SearchInts(chunkClasses, n)
+	if i == len(chunkClasses) {
+		b := make([]byte, n)
+		return &b
+	}
+	if p, _ := chunkPools[i].Get().(*[]byte); p != nil {
+		*p = (*p)[:n]
+		return p
+	}
+	b := make([]byte, n, chunkClasses[i])
+	return &b
+}
+
+func putChunk(p *[]byte) {
+	if p == nil {
+		return
+	}
+	c := cap(*p)
+	if i := sort.SearchInts(chunkClasses, c); i < len(chunkClasses) && chunkClasses[i] == c {
+		chunkPools[i].Put(p)
+	}
+}
+
 type asyncWriter interface {
 	write(p []byte, deadline int64) (int, error)
 }
 
 type stripeTx struct {
-	work chan []byte
+	work chan *[]byte
 	done <-chan struct{}
 	mu   sync.Mutex
 	seq  uint64
 }
 
 func newStripeTx(done <-chan struct{}) *stripeTx {
-	return &stripeTx{work: make(chan []byte, stripeQueue), done: done}
+	return &stripeTx{work: make(chan *[]byte, stripeQueue), done: done}
 }
 
 func (d *stripeTx) write(p []byte, deadline int64) (int, error) {
-	rec := make([]byte, recHdr+len(p))
+	own := getChunk(recHdr + len(p))
+	rec := *own
 	binary.BigEndian.PutUint32(rec[8:12], uint32(len(p)))
 	copy(rec[recHdr:], p)
 
 	d.mu.Lock()
 	binary.BigEndian.PutUint64(rec[0:8], d.seq)
-	err := d.offer(rec, deadline)
+	err := d.offer(own, deadline)
 	if err == nil {
 		d.seq++
 	}
 	d.mu.Unlock()
 	if err != nil {
+		putChunk(own)
 		return 0, err
 	}
 	return len(p), nil
 }
 
-func (d *stripeTx) offer(rec []byte, deadline int64) error {
+func (d *stripeTx) offer(rec *[]byte, deadline int64) error {
+	select {
+	case <-d.done:
+		return io.ErrClosedPipe
+	default:
+	}
+	select {
+	case d.work <- rec:
+		return nil
+	default:
+	}
 	if deadline == 0 {
 		select {
 		case d.work <- rec:
@@ -97,10 +147,13 @@ func (d *stripeTx) serve(ctx context.Context, w io.Writer, flush func(), setWD f
 		case <-d.done:
 			return
 		case rec := <-d.work:
-			run := d.gather(buf, rec)
+			run, single := d.gather(buf, rec)
 			if !writeRecord(w, flush, setWD, run) {
 				d.requeue(run)
 				return
+			}
+			if single {
+				putChunk(rec)
 			}
 			last = time.Now()
 		case now := <-tk.C:
@@ -115,30 +168,34 @@ func (d *stripeTx) serve(ctx context.Context, w io.Writer, flush func(), setWD f
 	}
 }
 
-func (d *stripeTx) gather(buf, first []byte) []byte {
+func (d *stripeTx) gather(buf []byte, first *[]byte) ([]byte, bool) {
 	select {
 	case more := <-d.work:
-		out := append(append(buf[:0], first...), more...)
+		out := append(append(buf[:0], *first...), *more...)
+		putChunk(first)
+		putChunk(more)
 		for len(out) < stripeWriteBytes {
 			select {
 			case more := <-d.work:
-				out = append(out, more...)
+				out = append(out, *more...)
+				putChunk(more)
 			default:
-				return out
+				return out, false
 			}
 		}
-		return out
+		return out, false
 	default:
-		return first
+		return *first, true
 	}
 }
 
 func (d *stripeTx) requeue(run []byte) {
-	rec := make([]byte, len(run))
-	copy(rec, run)
+	rec := getChunk(len(run))
+	copy(*rec, run)
 	select {
 	case d.work <- rec:
 	case <-d.done:
+		putChunk(rec)
 	}
 }
 
@@ -169,11 +226,19 @@ func readStripe(body io.ReadCloser, q *reseq, fail func()) {
 			fail()
 			return
 		}
-		buf := make([]byte, n)
+		var own *[]byte
+		var buf []byte
+		if q.due(seq) {
+			own = getChunk(int(n))
+			buf = *own
+		} else {
+			buf = make([]byte, n)
+		}
 		if _, err := io.ReadFull(body, buf); err != nil {
+			putChunk(own)
 			return
 		}
-		if !q.deliver(seq, buf) {
+		if !q.deliver(seq, buf, own) {
 			fail()
 			return
 		}
@@ -188,6 +253,7 @@ type reseq struct {
 	streams int
 	mu      sync.Mutex
 	next    uint64
+	nextDue atomic.Uint64
 	pend    map[uint64][]byte
 	n       int
 }
@@ -219,13 +285,17 @@ func (q *reseq) setMax(max int) {
 	}
 }
 
-func (q *reseq) deliver(seq uint64, data []byte) bool {
+func (q *reseq) due(seq uint64) bool { return seq == q.nextDue.Load() }
+
+func (q *reseq) deliver(seq uint64, data []byte, own *[]byte) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if seq < q.next {
+		putChunk(own)
 		return true
 	}
 	if len(q.pend) >= q.maxN || q.n+len(data) > q.max {
+		putChunk(own)
 		return false
 	}
 	if old, ok := q.pend[seq]; ok {
@@ -234,17 +304,24 @@ func (q *reseq) deliver(seq uint64, data []byte) bool {
 	q.pend[seq] = data
 	q.n += len(data)
 	for {
-		d, ok := q.pend[q.next]
+		cur := q.next
+		d, ok := q.pend[cur]
 		if !ok {
 			return true
 		}
-		delete(q.pend, q.next)
+		delete(q.pend, cur)
 		q.n -= len(d)
 		q.next++
+		q.nextDue.Store(q.next)
+		var err error
 		if len(d) > 0 {
-			if _, err := q.pw.Write(d); err != nil {
-				return false
-			}
+			_, err = q.pw.Write(d)
+		}
+		if cur == seq {
+			putChunk(own)
+		}
+		if err != nil {
+			return false
 		}
 	}
 }

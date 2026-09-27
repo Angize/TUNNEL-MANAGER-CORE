@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"strconv"
 	"strings"
@@ -221,6 +222,7 @@ func httpcPath(p string) string {
 type seqChunk struct {
 	seq  uint64
 	data []byte
+	own  *[]byte
 }
 
 const (
@@ -259,11 +261,12 @@ type httpcUp struct {
 	ctx    context.Context
 	urlFor func(seq uint64) string
 	setHdr func(*http.Request)
-	ch     chan []byte
+	ch     chan *[]byte
 
 	mu       sync.Mutex
 	seq      uint64
-	carry    []byte
+	carry    *[]byte
+	parts    []*[]byte
 	lastSend time.Time
 
 	minGap   time.Duration
@@ -275,7 +278,7 @@ type httpcUp struct {
 
 func newHTTPCUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string, setHdr func(*http.Request), fail func()) *httpcUp {
 	u := &httpcUp{hc: hc, ctx: ctx, urlFor: urlFor, setHdr: setHdr, fail: fail,
-		ch:     make(chan []byte, upChanCap),
+		ch:     make(chan *[]byte, upChanCap),
 		minGap: upMinGap, maxBatch: maxUpBatch, postTO: upPostTimeout}
 	for i := 0; i < upWorkers; i++ {
 		go u.worker()
@@ -284,24 +287,37 @@ func newHTTPCUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string
 }
 
 func (u *httpcUp) write(p []byte, deadline int64) (int, error) {
-	b := make([]byte, len(p))
-	copy(b, p)
+	select {
+	case <-u.ctx.Done():
+		return 0, io.ErrClosedPipe
+	default:
+	}
+	own := getChunk(len(p))
+	copy(*own, p)
+	select {
+	case u.ch <- own:
+		return len(p), nil
+	default:
+	}
 	if deadline == 0 {
 		select {
-		case u.ch <- b:
+		case u.ch <- own:
 			return len(p), nil
 		case <-u.ctx.Done():
+			putChunk(own)
 			return 0, io.ErrClosedPipe
 		}
 	}
 	t := time.NewTimer(time.Until(time.Unix(0, deadline)))
 	defer t.Stop()
 	select {
-	case u.ch <- b:
+	case u.ch <- own:
 		return len(p), nil
 	case <-u.ctx.Done():
+		putChunk(own)
 		return 0, io.ErrClosedPipe
 	case <-t.C:
+		putChunk(own)
 		return 0, os.ErrDeadlineExceeded
 	}
 }
@@ -309,11 +325,11 @@ func (u *httpcUp) write(p []byte, deadline int64) (int, error) {
 func (u *httpcUp) next() (seqChunk, bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	buf := u.carry
+	own := u.carry
 	u.carry = nil
-	if buf == nil {
+	if own == nil {
 		select {
-		case buf = <-u.ch:
+		case own = <-u.ch:
 		case <-u.ctx.Done():
 			return seqChunk{}, false
 		}
@@ -329,21 +345,33 @@ func (u *httpcUp) next() (seqChunk, bool) {
 			}
 		}
 	}
+	total := len(*own)
+	u.parts = append(u.parts[:0], own)
 drain:
-	for len(buf) < u.maxBatch {
+	for total < u.maxBatch {
 		select {
 		case more := <-u.ch:
-			if len(buf)+len(more) > u.maxBatch {
+			if total+len(*more) > u.maxBatch {
 				u.carry = more
 				break drain
 			}
-			buf = append(buf, more...)
+			u.parts = append(u.parts, more)
+			total += len(*more)
 		default:
 			break drain
 		}
 	}
+	if len(u.parts) > 1 {
+		own = getChunk(total)
+		buf := (*own)[:0]
+		for _, p := range u.parts {
+			buf = append(buf, *p...)
+			putChunk(p)
+		}
+	}
+	clear(u.parts)
 	u.lastSend = time.Now()
-	sc := seqChunk{u.seq, buf}
+	sc := seqChunk{u.seq, *own, own}
 	u.seq++
 	return sc, true
 }
@@ -366,6 +394,11 @@ const upPostTimeout = writeTimeout
 func (u *httpcUp) post(sc seqChunk) error {
 	ctx, cancel := context.WithTimeout(u.ctx, u.postTO)
 	defer cancel()
+	var writing atomic.Int32
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn:      func(httptrace.GotConnInfo) { writing.Add(1) },
+		WroteRequest: func(httptrace.WroteRequestInfo) { writing.Add(-1) },
+	})
 	req, err := http.NewRequestWithContext(ctx, "POST", u.urlFor(sc.seq), bytes.NewReader(sc.data))
 	if err != nil {
 		return err
@@ -380,6 +413,9 @@ func (u *httpcUp) post(sc seqChunk) error {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("httpc: up seq %d got HTTP %d", sc.seq, resp.StatusCode)
+	}
+	if writing.Load() == 0 {
+		putChunk(sc.own)
 	}
 	return nil
 }
@@ -562,17 +598,14 @@ func doWithHeaderTimeout(hc *http.Client, req *http.Request, d time.Duration) (*
 
 const grpcMaxMsg = 1 << 20
 
-func grpcFrame(p []byte) []byte {
-	hunk := make([]byte, 0, 1+binary.MaxVarintLen64)
-	hunk = append(hunk, 0x0a)
-	hunk = binary.AppendUvarint(hunk, uint64(len(p)))
-	msgLen := len(hunk) + len(p)
-	buf := make([]byte, 5+msgLen)
-	buf[0] = 0
-	binary.BigEndian.PutUint32(buf[1:5], uint32(msgLen))
-	n := copy(buf[5:], hunk)
-	copy(buf[5+n:], p)
-	return buf
+func grpcAppendFrame(dst, p []byte) []byte {
+	var hunk [1 + binary.MaxVarintLen64]byte
+	hunk[0] = 0x0a
+	h := 1 + binary.PutUvarint(hunk[1:], uint64(len(p)))
+	dst = append(dst, 0, 0, 0, 0, 0)
+	binary.BigEndian.PutUint32(dst[len(dst)-4:], uint32(h+len(p)))
+	dst = append(dst, hunk[:h]...)
+	return append(dst, p...)
 }
 
 func grpcUnhunk(msg []byte) []byte {
@@ -589,19 +622,24 @@ func grpcUnhunk(msg []byte) []byte {
 type grpcFramingWriter struct{ w io.Writer }
 
 func (g *grpcFramingWriter) Write(p []byte) (int, error) {
-	if _, err := g.w.Write(grpcFrame(p)); err != nil {
+	own := getChunk(5 + 1 + binary.MaxVarintLen64 + len(p))
+	if _, err := g.w.Write(grpcAppendFrame((*own)[:0], p)); err != nil {
 		return 0, err
 	}
+	putChunk(own)
 	return len(p), nil
 }
 
 type grpcDeframingReader struct {
 	r   io.Reader
 	buf []byte
+	own *[]byte
 }
 
 func (g *grpcDeframingReader) Read(p []byte) (int, error) {
 	for len(g.buf) == 0 {
+		putChunk(g.own)
+		g.own = nil
 		var hdr [5]byte
 		if _, err := io.ReadFull(g.r, hdr[:]); err != nil {
 			return 0, err
@@ -618,14 +656,20 @@ func (g *grpcDeframingReader) Read(p []byte) (int, error) {
 		if msgLen == 0 {
 			continue
 		}
-		msg := make([]byte, msgLen)
-		if _, err := io.ReadFull(g.r, msg); err != nil {
+		own := getChunk(int(msgLen))
+		if _, err := io.ReadFull(g.r, *own); err != nil {
+			putChunk(own)
 			return 0, err
 		}
-		g.buf = grpcUnhunk(msg)
+		g.own = own
+		g.buf = grpcUnhunk(*own)
 	}
 	n := copy(p, g.buf)
 	g.buf = g.buf[n:]
+	if len(g.buf) == 0 {
+		putChunk(g.own)
+		g.own = nil
+	}
 	return n, nil
 }
 
@@ -879,6 +923,41 @@ func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request, sid string)
 	w.Header().Set("grpc-status", "0")
 }
 
+func readPostBody(r *http.Request, pool bool) ([]byte, *[]byte, error) {
+	cl := r.ContentLength
+	if cl < 0 || cl >= maxPostBody {
+		data, err := io.ReadAll(io.LimitReader(r.Body, maxPostBody))
+		return data, nil, err
+	}
+	var own *[]byte
+	var buf []byte
+	if pool {
+		own = getChunk(int(cl))
+		buf = *own
+	} else {
+		buf = make([]byte, cl)
+	}
+	m := 0
+	var tail [1]byte
+	for {
+		dst := buf[m:]
+		if m == len(buf) {
+			dst = tail[:]
+		}
+		k, err := r.Body.Read(dst)
+		if m == len(buf) && k > 0 {
+			return buf, own, io.ErrUnexpectedEOF
+		}
+		m += k
+		if err == io.EOF {
+			return buf[:m], own, nil
+		}
+		if err != nil {
+			return buf[:m], own, err
+		}
+	}
+}
+
 func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 	sid := r.URL.Query().Get("s")
 	if len(sid) != 32 || strings.Trim(sid, "0123456789abcdef") != "" {
@@ -901,13 +980,14 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad Request", http.StatusBadRequest)
 			return
 		}
-		data, rerr := io.ReadAll(io.LimitReader(r.Body, maxPostBody))
+		data, own, rerr := readPostBody(r, s.up.due(seq))
 		if rerr != nil {
 			log.Printf("core/http: truncated upstream chunk seq=%d (%d bytes read): %v — dropping so the client re-dials", seq, len(data), rerr)
+			putChunk(own)
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}
-		if !s.up.deliver(seq, data) {
+		if !s.up.deliver(seq, data, own) {
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}
