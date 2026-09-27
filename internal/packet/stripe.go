@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -252,6 +253,7 @@ type reseq struct {
 	streams int
 	mu      sync.Mutex
 	next    uint64
+	nextDue atomic.Uint64
 	pend    map[uint64][]byte
 	n       int
 }
@@ -283,11 +285,7 @@ func (q *reseq) setMax(max int) {
 	}
 }
 
-func (q *reseq) due(seq uint64) bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return seq == q.next
-}
+func (q *reseq) due(seq uint64) bool { return seq == q.nextDue.Load() }
 
 func (q *reseq) deliver(seq uint64, data []byte, own *[]byte) bool {
 	q.mu.Lock()
@@ -318,6 +316,7 @@ func (q *reseq) deliver(seq uint64, data []byte, own *[]byte) bool {
 		delete(q.pend, q.next)
 		q.n -= len(d)
 		q.next++
+		q.nextDue.Store(q.next)
 		var err error
 		if len(d) > 0 {
 			_, err = q.pw.Write(d)

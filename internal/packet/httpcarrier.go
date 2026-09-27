@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"strconv"
 	"strings"
@@ -265,6 +266,7 @@ type httpcUp struct {
 	mu       sync.Mutex
 	seq      uint64
 	carry    *[]byte
+	parts    []*[]byte
 	lastSend time.Time
 
 	minGap   time.Duration
@@ -343,29 +345,33 @@ func (u *httpcUp) next() (seqChunk, bool) {
 			}
 		}
 	}
-	buf := *own
+	total := len(*own)
+	u.parts = append(u.parts[:0], own)
 drain:
-	for len(buf) < u.maxBatch {
+	for total < u.maxBatch {
 		select {
 		case more := <-u.ch:
-			if len(buf)+len(*more) > u.maxBatch {
+			if total+len(*more) > u.maxBatch {
 				u.carry = more
 				break drain
 			}
-			if len(buf)+len(*more) > cap(buf) {
-				big := getChunk(u.maxBatch)
-				buf = append((*big)[:0], buf...)
-				putChunk(own)
-				own = big
-			}
-			buf = append(buf, *more...)
-			putChunk(more)
+			u.parts = append(u.parts, more)
+			total += len(*more)
 		default:
 			break drain
 		}
 	}
+	if len(u.parts) > 1 {
+		own = getChunk(total)
+		buf := (*own)[:0]
+		for _, p := range u.parts {
+			buf = append(buf, *p...)
+			putChunk(p)
+		}
+	}
+	clear(u.parts)
 	u.lastSend = time.Now()
-	sc := seqChunk{u.seq, buf, own}
+	sc := seqChunk{u.seq, *own, own}
 	u.seq++
 	return sc, true
 }
@@ -385,39 +391,18 @@ func (u *httpcUp) worker() {
 
 const upPostTimeout = writeTimeout
 
-type upBody struct {
-	r    bytes.Reader
-	left *atomic.Int32
-	done bool
-}
-
-func (b *upBody) Read(p []byte) (int, error) {
-	n, err := b.r.Read(p)
-	if !b.done && b.r.Len() == 0 {
-		b.done = true
-		b.left.Add(-1)
-	}
-	return n, err
-}
-
-func (b *upBody) Close() error { return nil }
-
 func (u *httpcUp) post(sc seqChunk) error {
 	ctx, cancel := context.WithTimeout(u.ctx, u.postTO)
 	defer cancel()
-	var left atomic.Int32
-	open := func() io.ReadCloser {
-		left.Add(1)
-		b := &upBody{left: &left}
-		b.r.Reset(sc.data)
-		return b
-	}
-	req, err := http.NewRequestWithContext(ctx, "POST", u.urlFor(sc.seq), open())
+	var writing atomic.Int32
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		GotConn:      func(httptrace.GotConnInfo) { writing.Add(1) },
+		WroteRequest: func(httptrace.WroteRequestInfo) { writing.Add(-1) },
+	})
+	req, err := http.NewRequestWithContext(ctx, "POST", u.urlFor(sc.seq), bytes.NewReader(sc.data))
 	if err != nil {
 		return err
 	}
-	req.ContentLength = int64(len(sc.data))
-	req.GetBody = func() (io.ReadCloser, error) { return open(), nil }
 	u.setHdr(req)
 	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := u.hc.Do(req)
@@ -429,7 +414,7 @@ func (u *httpcUp) post(sc seqChunk) error {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("httpc: up seq %d got HTTP %d", sc.seq, resp.StatusCode)
 	}
-	if left.Load() == 0 {
+	if writing.Load() == 0 {
 		putChunk(sc.own)
 	}
 	return nil
