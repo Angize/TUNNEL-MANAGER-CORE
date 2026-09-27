@@ -909,7 +909,7 @@ func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request, sid string)
 
 func readPostBody(r *http.Request) ([]byte, *[]byte, error) {
 	cl := r.ContentLength
-	if cl < 0 || cl > maxPostBody {
+	if cl < 0 || cl >= maxPostBody {
 		data, err := io.ReadAll(io.LimitReader(r.Body, maxPostBody))
 		return data, nil, err
 	}
