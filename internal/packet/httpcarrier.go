@@ -285,6 +285,11 @@ func newHTTPCUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string
 }
 
 func (u *httpcUp) write(p []byte, deadline int64) (int, error) {
+	select {
+	case <-u.ctx.Done():
+		return 0, io.ErrClosedPipe
+	default:
+	}
 	own := getChunk(len(p))
 	copy(*own, p)
 	select {
@@ -903,24 +908,32 @@ func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request, sid string)
 }
 
 func readPostBody(r *http.Request) ([]byte, *[]byte, error) {
-	n := maxPostBody
-	if cl := r.ContentLength; cl >= 0 && cl < int64(n) {
-		n = int(cl)
+	cl := r.ContentLength
+	if cl < 0 || cl > maxPostBody {
+		data, err := io.ReadAll(io.LimitReader(r.Body, maxPostBody))
+		return data, nil, err
 	}
-	own := getChunk(n)
+	own := getChunk(int(cl))
 	buf := *own
 	m := 0
-	for m < len(buf) {
-		k, err := r.Body.Read(buf[m:])
+	var tail [1]byte
+	for {
+		dst := buf[m:]
+		if m == len(buf) {
+			dst = tail[:]
+		}
+		k, err := r.Body.Read(dst)
+		if m == len(buf) && k > 0 {
+			return buf, own, io.ErrUnexpectedEOF
+		}
 		m += k
 		if err == io.EOF {
-			break
+			return buf[:m], own, nil
 		}
 		if err != nil {
 			return buf[:m], own, err
 		}
 	}
-	return buf[:m], own, nil
 }
 
 func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {

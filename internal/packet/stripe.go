@@ -31,7 +31,7 @@ func SetHTTPStreams(workers int) {
 	}
 }
 
-var chunkClasses = [...]int{4 << 10, 16 << 10, 64 << 10, 256 << 10, maxRecord + recHdr}
+var chunkClasses = [...]int{4 << 10, 16 << 10, 64 << 10, 128 << 10, 256 << 10, 384 << 10, 512 << 10, 768 << 10, maxRecord + recHdr}
 
 var chunkPools [len(chunkClasses)]sync.Pool
 
@@ -98,6 +98,11 @@ func (d *stripeTx) write(p []byte, deadline int64) (int, error) {
 }
 
 func (d *stripeTx) offer(rec *[]byte, deadline int64) error {
+	select {
+	case <-d.done:
+		return io.ErrClosedPipe
+	default:
+	}
 	select {
 	case d.work <- rec:
 		return nil
@@ -234,6 +239,13 @@ type pendChunk struct {
 	own *[]byte
 }
 
+func (c pendChunk) cost() int {
+	if c.own != nil {
+		return cap(*c.own)
+	}
+	return len(c.b)
+}
+
 type reseq struct {
 	pw      *io.PipeWriter
 	floor   int
@@ -280,23 +292,24 @@ func (q *reseq) deliver(seq uint64, data []byte, own *[]byte) bool {
 		putChunk(own)
 		return true
 	}
-	if len(q.pend) >= q.maxN || q.n+len(data) > q.max {
+	in := pendChunk{data, own}
+	if len(q.pend) >= q.maxN || q.n+in.cost() > q.max {
 		putChunk(own)
 		return false
 	}
 	if old, ok := q.pend[seq]; ok {
-		q.n -= len(old.b)
+		q.n -= old.cost()
 		putChunk(old.own)
 	}
-	q.pend[seq] = pendChunk{data, own}
-	q.n += len(data)
+	q.pend[seq] = in
+	q.n += in.cost()
 	for {
 		c, ok := q.pend[q.next]
 		if !ok {
 			return true
 		}
 		delete(q.pend, q.next)
-		q.n -= len(c.b)
+		q.n -= c.cost()
 		q.next++
 		var err error
 		if len(c.b) > 0 {
