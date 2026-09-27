@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"sort"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/csum"
 )
 
 const (
@@ -501,29 +503,7 @@ func skip(pkt []byte, n int) ([]byte, bool) {
 	return pkt[n:], true
 }
 
-func sumBytes(b []byte) uint32 {
-	var sum uint64
-	for len(b) >= 8 {
-		v := binary.BigEndian.Uint64(b)
-		sum += v >> 48
-		sum += (v >> 32) & 0xffff
-		sum += (v >> 16) & 0xffff
-		sum += v & 0xffff
-		b = b[8:]
-	}
-	for len(b) >= 2 {
-		sum += uint64(binary.BigEndian.Uint16(b))
-		b = b[2:]
-	}
-	if len(b) == 1 {
-		sum += uint64(b[0]) << 8
-	}
-
-	for sum>>32 != 0 {
-		sum = (sum & 0xffffffff) + (sum >> 32)
-	}
-	return uint32(sum)
-}
+func sumBytes(b []byte) uint32 { return uint32(csum.Fold(csum.Add(b, 0))) }
 
 func foldComplement(sum uint32) uint16 {
 	for sum>>16 != 0 {

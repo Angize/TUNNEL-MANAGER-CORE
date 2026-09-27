@@ -2,7 +2,11 @@
 
 package tun
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/csum"
+)
 
 const (
 	iffVnetHdr    = 0x4000
@@ -225,35 +229,7 @@ func ipv6L4Offset(pkt []byte) (l4Off int, proto byte, ok bool) {
 }
 
 func sumBytes(b []byte, init uint32) uint32 {
-	sum := uint64(init)
-	for len(b) >= 32 {
-		v0 := binary.BigEndian.Uint64(b)
-		v1 := binary.BigEndian.Uint64(b[8:])
-		v2 := binary.BigEndian.Uint64(b[16:])
-		v3 := binary.BigEndian.Uint64(b[24:])
-		sum += v0>>32 + v0&0xffffffff
-		sum += v1>>32 + v1&0xffffffff
-		sum += v2>>32 + v2&0xffffffff
-		sum += v3>>32 + v3&0xffffffff
-		b = b[32:]
-	}
-	for len(b) >= 8 {
-		v := binary.BigEndian.Uint64(b)
-		sum += v>>32 + v&0xffffffff
-		b = b[8:]
-	}
-	for len(b) >= 2 {
-		sum += uint64(binary.BigEndian.Uint16(b))
-		b = b[2:]
-	}
-	if len(b) == 1 {
-		sum += uint64(b[0]) << 8
-	}
-
-	for sum>>32 != 0 {
-		sum = (sum & 0xffffffff) + (sum >> 32)
-	}
-	return uint32(sum)
+	return uint32(csum.Fold(csum.Add(b, uint64(init))))
 }
 
 func fold(s uint32) uint16 {
