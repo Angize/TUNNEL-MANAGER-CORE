@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,6 +37,7 @@ const (
 	readBufSize = 65536
 
 	tunBatchFrames = 32
+	frameSlack     = 128
 
 	handshakeTimeout = 10 * time.Second
 
@@ -129,7 +131,11 @@ func (cf *connFramer) ensureReadKS() error {
 }
 
 func (cf *connFramer) frame(typ byte, payload []byte) ([]byte, error) {
-	out, err := sealBody(nil, cf.sealer, cf.obfs, 2, typ, payload, padMaxFor(typ))
+	return cf.frameIn(nil, typ, payload)
+}
+
+func (cf *connFramer) frameIn(dst []byte, typ byte, payload []byte) ([]byte, error) {
+	out, err := sealBody(dst, cf.sealer, cf.obfs, 2, typ, payload, padMaxFor(typ))
 	if err != nil {
 		return nil, err
 	}
@@ -161,6 +167,48 @@ func (cf *connFramer) writeAll(frames [][]byte) error {
 		out = append(out, f...)
 	}
 	cf.wbuf = out
+	cf.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	_, err := cf.conn.Write(out)
+	return err
+}
+
+type frameBatch struct {
+	buf  []byte
+	offs []int
+}
+
+func (fb *frameBatch) reset() {
+	fb.buf = fb.buf[:0]
+	fb.offs = fb.offs[:0]
+}
+
+func (fb *frameBatch) add(f []byte, start int) {
+	if len(f) > 0 && cap(fb.buf) > start && &f[0] == &fb.buf[start:cap(fb.buf)][0] {
+		fb.buf = fb.buf[:start+len(f)]
+	} else {
+		fb.buf = append(fb.buf[:start], f...)
+	}
+	fb.offs = append(fb.offs, start)
+}
+
+func (cf *connFramer) writeBatch(fb *frameBatch) error {
+	if len(fb.offs) == 0 {
+		return nil
+	}
+	cf.mu.Lock()
+	defer cf.mu.Unlock()
+	if cf.obfs {
+		var lb [2]byte
+		for _, o := range fb.offs {
+			copy(lb[:], fb.buf[o:o+2])
+			cf.writeKS.XORKeyStream(fb.buf[o:o+2], lb[:])
+		}
+	}
+	out := fb.buf
+	if len(cf.saltPend) > 0 {
+		out = append(cf.saltPend, fb.buf...)
+		cf.saltPend = nil
+	}
 	cf.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	_, err := cf.conn.Write(out)
 	return err
@@ -1580,7 +1628,7 @@ func (b *TCP) onConnErr(cf *connFramer, err error) {
 
 func (b *TCP) tunLoop(dev *tun.Device, q int) error {
 	buf := make([]byte, maxDatagram)
-	frames := make([][]byte, 0, tunBatchFrames)
+	var fb frameBatch
 	for {
 		n, err := dev.Read(buf)
 		if err != nil {
@@ -1595,17 +1643,16 @@ func (b *TCP) tunLoop(dev *tun.Device, q int) error {
 		if cf == nil {
 			continue
 		}
-		frames = frames[:0]
-		frames = b.appendFrame(cf, frames, buf[:n])
-		for len(frames) < cap(frames) && b.sendConn(q) == cf {
+		fb.reset()
+		b.appendFrame(cf, &fb, buf[:n])
+		for len(fb.offs) < tunBatchFrames && b.sendConn(q) == cf {
 			m, ok, err := dev.TryRead(buf)
 			if err != nil || !ok {
 				break
 			}
-			frames = b.appendFrame(cf, frames, buf[:m])
+			b.appendFrame(cf, &fb, buf[:m])
 		}
-		err = cf.writeAll(frames)
-		clear(frames)
+		err = cf.writeBatch(&fb)
 		if err != nil {
 			b.onConnErr(cf, err)
 			continue
@@ -1614,17 +1661,19 @@ func (b *TCP) tunLoop(dev *tun.Device, q int) error {
 	}
 }
 
-func (b *TCP) appendFrame(cf *connFramer, frames [][]byte, pkt []byte) [][]byte {
-	f, err := cf.frame(typeData, pkt)
+func (b *TCP) appendFrame(cf *connFramer, fb *frameBatch, pkt []byte) {
+	start := len(fb.buf)
+	fb.buf = slices.Grow(fb.buf, len(pkt)+frameSlack)
+	f, err := cf.frameIn(fb.buf[start:cap(fb.buf)], typeData, pkt)
 	if err != nil {
 		if errors.Is(err, errFrameTooBig) {
 			log.Printf("core/tcp: dropping oversize packet (%d bytes) — too large to frame", len(pkt))
-			return frames
+			return
 		}
 		log.Printf("core/tcp: frame error: %v", err)
-		return frames
+		return
 	}
-	return append(frames, f)
+	fb.add(f, start)
 }
 
 func (b *TCP) diagLoop() {
