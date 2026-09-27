@@ -87,8 +87,6 @@ func (w *tunWriters) put(i int, pkts [][]byte) {
 	}
 }
 
-func (w *tunWriters) write(pkt []byte) { w.writeOwned(pkt, nil) }
-
 func (w *tunWriters) writeOwned(pkt []byte, own *[]byte) {
 	i := 0
 	if n := len(w.ch); n > 1 {

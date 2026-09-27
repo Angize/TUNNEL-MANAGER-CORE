@@ -70,6 +70,7 @@ type connFramer struct {
 
 	saltPend []byte
 	wbuf     []byte
+	rbuf     []byte
 
 	rp replayGuard
 
@@ -173,7 +174,7 @@ func (cf *connFramer) writeFrame(typ byte, payload []byte) error {
 	return cf.writeAll([][]byte{f})
 }
 
-func (cf *connFramer) readFrame() (typ byte, session uint64, seq uint64, payload []byte, err error) {
+func (cf *connFramer) readFrame(dst []byte) (typ byte, session uint64, seq uint64, payload []byte, err error) {
 	if cf.obfs {
 		if err := cf.ensureReadKS(); err != nil {
 			return 0, 0, 0, nil, err
@@ -191,36 +192,63 @@ func (cf *connFramer) readFrame() (typ byte, session uint64, seq uint64, payload
 		if n < 1 {
 			return 0, 0, 0, nil, errDesync
 		}
-		buf := make([]byte, n)
-		if _, err := io.ReadFull(cf.r, buf); err != nil {
+		body, peeked, err := cf.body(n)
+		if err != nil {
 			return 0, 0, 0, nil, err
 		}
-		return obfsOpen(cf.sealer, nil, buf)
+		typ, session, seq, payload, err = obfsOpen(cf.sealer, dst, body)
+		cf.consumed(n, peeked)
+		return typ, session, seq, payload, err
 	}
 
 	n := int(binary.BigEndian.Uint16(hdr[:]))
 	if n < 2 {
 		return 0, 0, 0, nil, errDesync
 	}
-	buf := make([]byte, n)
-	if _, err := io.ReadFull(cf.r, buf); err != nil {
+	body, peeked, err := cf.body(n)
+	if err != nil {
 		return 0, 0, 0, nil, err
 	}
-	if buf[0] != magic {
+	if body[0] != magic {
+		cf.consumed(n, peeked)
 		return 0, 0, 0, nil, errDesync
 	}
-	typ = buf[1]
-	if cf.sealer != nil {
-		session, seq, payload, err = cf.sealer.Open(buf[2:n], []byte{typ})
-		if err != nil {
-			return 0, 0, 0, nil, err
-		}
-		return typ, session, seq, payload, nil
+	typ = body[1]
+	switch {
+	case cf.sealer != nil:
+		session, seq, payload, err = cf.sealer.OpenTo(dst, body[2:], aadFor(typ))
+	case typ == typeData:
+		payload = append(dst[:0], body[2:]...)
 	}
-	if typ == typeData {
-		return typ, 0, 0, buf[2:n], nil
+	cf.consumed(n, peeked)
+	if err != nil {
+		return 0, 0, 0, nil, err
 	}
-	return typ, 0, 0, nil, nil
+	return typ, session, seq, payload, nil
+}
+
+func (cf *connFramer) body(n int) ([]byte, bool, error) {
+	b, err := cf.r.Peek(n)
+	if err == nil {
+		return b, true, nil
+	}
+	if !errors.Is(err, bufio.ErrBufferFull) {
+		return nil, false, err
+	}
+	if cap(cf.rbuf) < n {
+		cf.rbuf = make([]byte, n)
+	}
+	b = cf.rbuf[:n]
+	if _, err := io.ReadFull(cf.r, b); err != nil {
+		return nil, false, err
+	}
+	return b, false, nil
+}
+
+func (cf *connFramer) consumed(n int, peeked bool) {
+	if peeked {
+		_, _ = cf.r.Discard(n)
+	}
 }
 
 type TCP struct {
@@ -899,7 +927,7 @@ func (b *TCP) handleServerConn(conn net.Conn) {
 		conn.Close()
 		return
 	}
-	typ, session, seq, payload, err := cf.readFrame()
+	typ, session, seq, payload, err := cf.readFrame(nil)
 	if err != nil || !cf.rp.ok(session, seq) {
 		conn.Close()
 		return
@@ -913,7 +941,7 @@ func (b *TCP) handleServerConn(conn net.Conn) {
 	log.Printf("core/tcp: peer connected from %s", conn.RemoteAddr())
 	b.publishServerConn(cf)
 	release()
-	b.handleFrame(cf, typ, payload)
+	b.handleFrame(cf, typ, payload, nil)
 	if b.obfs {
 		_ = cf.flushSalt()
 	}
@@ -1473,7 +1501,7 @@ func (b *TCP) selectedTCP(kind, key string) {
 	}
 }
 
-func (b *TCP) handleFrame(cf *connFramer, typ byte, payload []byte) {
+func (b *TCP) handleFrame(cf *connFramer, typ byte, payload []byte, own *[]byte) {
 	switch typ {
 	case typePing:
 		b.noteLane(cf, payload)
@@ -1485,8 +1513,10 @@ func (b *TCP) handleFrame(cf *connFramer, typ byte, payload []byte) {
 		if !b.isClient {
 			b.downFrom(cf)
 		}
-		b.writers().write(payload)
+		b.writers().writeOwned(payload, own)
+		return
 	}
+	putRxBuf(own)
 }
 
 func (b *TCP) serve(cf *connFramer) {
@@ -1509,14 +1539,17 @@ func (b *TCP) adoptRx(cf *connFramer) {
 func (b *TCP) readLoop(cf *connFramer) error {
 	for {
 		cf.conn.SetReadDeadline(time.Now().Add(b.idle))
-		typ, session, seq, payload, err := cf.readFrame()
-		if errors.Is(err, os.ErrDeadlineExceeded) {
-			return fmt.Errorf("%w: %w", errIdle, err)
-		}
+		own := getRxBuf()
+		typ, session, seq, payload, err := cf.readFrame(*own)
 		if err != nil {
+			putRxBuf(own)
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				return fmt.Errorf("%w: %w", errIdle, err)
+			}
 			return err
 		}
 		if cf.sealer != nil && !cf.rp.ok(session, seq) {
+			putRxBuf(own)
 			continue
 		}
 		now := time.Now().UnixNano()
@@ -1525,7 +1558,7 @@ func (b *TCP) readLoop(cf *connFramer) error {
 		if cf == b.cur.Load() {
 			b.lastRx.Store(now)
 		}
-		b.handleFrame(cf, typ, payload)
+		b.handleFrame(cf, typ, payload, own)
 	}
 }
 
