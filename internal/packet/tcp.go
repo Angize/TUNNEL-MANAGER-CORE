@@ -33,7 +33,7 @@ import (
 const (
 	maxFrame = 65535
 
-	readBufSize = 4096
+	readBufSize = 65536
 
 	tunBatchFrames = 32
 
