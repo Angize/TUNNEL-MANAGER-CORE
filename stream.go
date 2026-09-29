@@ -18,12 +18,14 @@ func dialStream(cfg *Config, dev *tun.Device, cryptoOn, lead bool) (*packet.TCP,
 	}
 	carrier := "ws"
 	if cfg.cdnIsHTTP() {
-		carrier = "http"
+		carrier = "http:" + cfg.cdnMode()
 	}
 	if len(cfg.WSEdgeIPs) > 0 {
 		snis := make([]packet.EdgeSNI, len(cfg.WSEdgeSNIs))
+		ech := false
 		for i, s := range cfg.WSEdgeSNIs {
 			snis[i] = packet.EdgeSNI{Host: s.Host, ECH: s.ECH, Path: s.Path}
+			ech = ech || s.ECH != ""
 		}
 		rotate := time.Duration(cfg.WSRotateSecs) * time.Second
 		if !lead {
@@ -31,28 +33,25 @@ func dialStream(cfg *Config, dev *tun.Device, cryptoOn, lead bool) (*packet.TCP,
 		}
 		b, err := packet.DialEdgePool(dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher,
 			cfg.WSEdgeIPs, snis, rotate, cfg.cdnIsHTTP(), cfg.cdnMode(), cfg.WSPortRoll)
-		return b, fmt.Sprintf("dialing (core/%s%s wss ech pool: %dIP×%dSNI rotate=%ds port_roll=%t)",
-			carrier, obfsTag, len(cfg.WSEdgeIPs), len(cfg.WSEdgeSNIs), cfg.WSRotateSecs, cfg.WSPortRoll), err
+		return b, fmt.Sprintf("dialing (core/%s%s%s pool: %dIP×%dSNI rotate=%ds port_roll=%t)",
+			carrier, obfsTag, wsTLSTag(cfg.WSTLS, ech), len(cfg.WSEdgeIPs), len(cfg.WSEdgeSNIs), cfg.WSRotateSecs,
+			cfg.WSPortRoll), err
 	}
 	var echList []byte
 	if cfg.WSECH != "" {
 		echList, _ = base64.StdEncoding.DecodeString(cfg.WSECH)
 	}
-	tlsTag := ""
-	if cfg.WSTLS {
-		tlsTag = " wss"
-	}
-	if len(echList) > 0 {
-		tlsTag += " ech"
-	}
+	var b *packet.TCP
+	var err error
 	if cfg.cdnIsHTTP() {
-		b, err := packet.DialHTTPC(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath,
+		b, err = packet.DialHTTPC(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath,
 			cfg.WSTLS, echList, cfg.cdnMode(), cfg.WSPortRoll)
-		return b, fmt.Sprintf("dialing (core/http:%s%s%s port_roll=%t) %s", cfg.cdnMode(), obfsTag, tlsTag, cfg.WSPortRoll, cfg.Peer), err
+	} else {
+		b, err = packet.DialWS(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath,
+			cfg.WSTLS, echList, cfg.WSPortRoll)
 	}
-	b, err := packet.DialWS(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath, cfg.WSTLS,
-		echList, cfg.WSPortRoll)
-	return b, fmt.Sprintf("dialing (core/ws%s%s port_roll=%t) %s", obfsTag, tlsTag, cfg.WSPortRoll, cfg.Peer), err
+	return b, fmt.Sprintf("dialing (core/%s%s%s port_roll=%t) %s", carrier, obfsTag, wsTLSTag(cfg.WSTLS, len(echList) > 0),
+		cfg.WSPortRoll, cfg.Peer), err
 }
 
 func setupClient(b any, cfg *Config, lead bool) {

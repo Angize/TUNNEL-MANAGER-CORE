@@ -273,6 +273,17 @@ func coverTag(cover bool) string {
 	return ""
 }
 
+func wsTLSTag(tls, ech bool) string {
+	tag := ""
+	if tls {
+		tag = " wss"
+	}
+	if ech {
+		tag += " ech"
+	}
+	return tag
+}
+
 const (
 	srcNone     = ""
 	srcByBind   = "bind"
