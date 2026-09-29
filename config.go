@@ -435,9 +435,9 @@ func (c *Config) validate() error {
 			return errors.New("ws_rotate_secs must be >= 0 (0 = rotate only on a failed edge)")
 		}
 
-		if c.WSPortRoll && len(c.WSEdgeIPs) == 0 {
-			return errors.New("ws_port_roll belongs to the ws edge pool (ws_edge_ips on a client); " +
-				"a single-edge ws carrier always re-dials on the port rung")
+		if c.WSPortRoll && c.Role != "client" {
+			return errors.New("ws_port_roll re-dials the client's connection on a fresh source port " +
+				"(a server listens, it does not dial)")
 		}
 
 		if len(c.WSEdgeIPs) > 0 || len(c.WSEdgeSNIs) > 0 {

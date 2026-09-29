@@ -38,15 +38,6 @@ func dialStream(cfg *Config, dev *tun.Device, cryptoOn, lead bool) (*packet.TCP,
 	if cfg.WSECH != "" {
 		echList, _ = base64.StdEncoding.DecodeString(cfg.WSECH)
 	}
-	if cfg.cdnIsHTTP() {
-		b, err := packet.DialHTTPC(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath, cfg.WSTLS, echList, cfg.cdnMode())
-		mode := cfg.cdnMode()
-		if mode == "" {
-			mode = "post"
-		}
-		return b, fmt.Sprintf("dialing (core/http:%s%s wss) %s", mode, obfsTag, cfg.Peer), err
-	}
-	b, err := packet.DialWS(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath, cfg.WSTLS, echList)
 	tlsTag := ""
 	if cfg.WSTLS {
 		tlsTag = " wss"
@@ -54,7 +45,14 @@ func dialStream(cfg *Config, dev *tun.Device, cryptoOn, lead bool) (*packet.TCP,
 	if len(echList) > 0 {
 		tlsTag += " ech"
 	}
-	return b, fmt.Sprintf("dialing (core/ws%s%s) %s", obfsTag, tlsTag, cfg.Peer), err
+	if cfg.cdnIsHTTP() {
+		b, err := packet.DialHTTPC(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath,
+			cfg.WSTLS, echList, cfg.cdnMode(), cfg.WSPortRoll)
+		return b, fmt.Sprintf("dialing (core/http:%s%s%s port_roll=%t) %s", cfg.cdnMode(), obfsTag, tlsTag, cfg.WSPortRoll, cfg.Peer), err
+	}
+	b, err := packet.DialWS(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath, cfg.WSTLS,
+		echList, cfg.WSPortRoll)
+	return b, fmt.Sprintf("dialing (core/ws%s%s port_roll=%t) %s", obfsTag, tlsTag, cfg.WSPortRoll, cfg.Peer), err
 }
 
 func setupClient(b any, cfg *Config, lead bool) {
