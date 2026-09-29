@@ -81,7 +81,7 @@ func main() {
 	if note := workersNote(cfg); note != "" {
 		log.Print(note)
 	}
-	if note := portTriesNote(cfg.Transport, cfg.RawSportRandom, len(cfg.WSEdgeIPs) > 0 && !cfg.WSPortRoll,
+	if note := portTriesNote(cfg.Transport, cfg.RawSportRandom, cfg.Transport == "ws" && cfg.Role == "client" && !cfg.WSPortRoll,
 		cfg.PortTries); note != "" {
 		log.Print(note)
 	}
@@ -273,6 +273,17 @@ func coverTag(cover bool) string {
 	return ""
 }
 
+func wsTLSTag(tls, ech bool) string {
+	tag := ""
+	if tls {
+		tag = " wss"
+	}
+	if ech {
+		tag += " ech"
+	}
+	return tag
+}
+
 const (
 	srcNone     = ""
 	srcByBind   = "bind"
@@ -290,13 +301,13 @@ func drawsSourcePort(cfg *Config) bool {
 	return cfg.Role == "client"
 }
 
-func portTriesNote(transport string, sportRandom, edgeNoRoll bool, n int) string {
+func portTriesNote(transport string, sportRandom, wsNoRoll bool, n int) string {
 	if n <= 0 {
 		return ""
 	}
-	if edgeNoRoll {
-		return fmt.Sprintf("core: WARNING port_tries=%d is ignored on this ws edge pool because ws_port_roll "+
-			"is off: a failed verdict burns the edge at once and no fresh connection is spent first", n)
+	if wsNoRoll {
+		return fmt.Sprintf("core: WARNING port_tries=%d is ignored because ws_port_roll is off: a failed verdict "+
+			"never re-dials this ws client on a fresh source port", n)
 	}
 	if transport != "raw" || sportRandom {
 		return ""
