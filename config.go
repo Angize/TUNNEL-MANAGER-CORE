@@ -22,7 +22,6 @@ type CryptoCfg struct {
 type WSSNI struct {
 	Host string `json:"host"`
 	ECH  string `json:"ech"`
-	Path string `json:"path"`
 }
 
 func (c *Config) cdnIsHTTP() bool { return c.CDNCarrier == "http" || c.CDNCarrier == "grpc" }

@@ -641,20 +641,18 @@ func DialWS(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, 
 type EdgeSNI struct {
 	Host string
 	ECH  string
-	Path string
 }
 
 type wsSNIEntry struct {
 	host string
 	ech  []byte
-	path string
 }
 
 const activeSep = " · "
 
 func activeLabel(ip, host string) string { return ip + activeSep + host }
 
-func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips []string, snis []EdgeSNI, rotate time.Duration, httpc bool, httpcMode string, portRoll bool) (*TCP, error) {
+func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, ips []string, snis []EdgeSNI, rotate time.Duration, httpc bool, httpcMode string, portRoll bool) (*TCP, error) {
 	if len(ips) == 0 || len(snis) == 0 {
 		return nil, errors.New("ws pool: need at least one IP and one SNI")
 	}
@@ -666,10 +664,10 @@ func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, ips 
 			ech, _ = base64.StdEncoding.DecodeString(s.ECH)
 		}
 		hosts = append(hosts, s.Host)
-		meta[s.Host] = wsSNIEntry{host: s.Host, ech: ech, path: s.Path}
+		meta[s.Host] = wsSNIEntry{host: s.Host, ech: ech}
 	}
 	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
-		ws: true, wsTLS: true, httpc: httpc, httpcMode: httpcMode, sniMeta: meta,
+		ws: true, wsPath: wsPath, wsTLS: true, httpc: httpc, httpcMode: httpcMode, sniMeta: meta,
 		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 		portRollOff: !portRoll}
 	b.pp = NewPeerPool(ips, rotate)
@@ -1233,7 +1231,7 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 		if !ok {
 			return nil, "", "", errors.New("ws: edge pool is empty")
 		}
-		dialAddr, host, ech, path = ip, sni.host, sni.ech, sni.path
+		dialAddr, host, ech = ip, sni.host, sni.ech
 	}
 	if host == "" {
 		host = dialAddr
