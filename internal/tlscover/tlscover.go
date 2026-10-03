@@ -17,6 +17,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -111,6 +112,7 @@ func ClientConn(raw net.Conn, sni, psk string, deadline time.Time) (net.Conn, er
 type Server struct {
 	cert  *tls.Certificate
 	psk   string
+	host  string
 	dest  string
 	relay chan struct{}
 	queue chan struct{}
@@ -121,18 +123,38 @@ type Server struct {
 
 	dialFail atomic.Int64
 	dialN    atomic.Int64
+	downAt   atomic.Int64
+	onDown   func(why string)
 }
 
-const dialFailEvery = 60 * time.Second
+const (
+	dialFailEvery = 60 * time.Second
+	downEvery     = 6 * time.Hour
+)
 
-func (sv *Server) noteDialFail(err error) {
+func due(at *atomic.Int64, now int64, every time.Duration) bool {
+	prev := at.Load()
+	return (prev == 0 || now-prev >= int64(every)) && at.CompareAndSwap(prev, now)
+}
+
+func dialReason(err error) string {
+	var dns *net.DNSError
+	switch {
+	case errors.As(err, &dns):
+		return "dns"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "refused"
+	}
+	return "timeout"
+}
+
+func (sv *Server) noteDialFail(why string, err error) {
 	sv.dialN.Add(1)
 	now := time.Now().UnixNano()
-	prev := sv.dialFail.Load()
-	if prev != 0 && now-prev < int64(dialFailEvery) {
-		return
+	if due(&sv.downAt, now, downEvery) {
+		sv.onDown(why)
 	}
-	if !sv.dialFail.CompareAndSwap(prev, now) {
+	if !due(&sv.dialFail, now, dialFailEvery) {
 		return
 	}
 	n := sv.dialN.Swap(0)
@@ -144,27 +166,28 @@ func (sv *Server) noteDialFail(err error) {
 		"bare close instead of that site's real answer, so the cover proves nothing", sv.dest, err, more)
 }
 
-func NewServer(psk, destHost string) (*Server, error) {
+func NewServer(psk, destHost string, onDown func(why string)) (*Server, error) {
 	cert, err := SelfSignedCert(destHost)
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cert: cert, psk: psk, dest: net.JoinHostPort(destHost, "443"),
+	return &Server{cert: cert, psk: psk, host: destHost, dest: net.JoinHostPort(destHost, "443"),
 		relay: make(chan struct{}, maxRelays), queue: make(chan struct{}, maxWaiting),
-		idle: relayIdle, seen: map[[32]byte]int64{}}, nil
+		idle: relayIdle, seen: map[[32]byte]int64{}, onDown: onDown}, nil
 }
 
 func (sv *Server) WarnIfDestUnreachable() {
-	dest := sv.dest
 	go func() {
-		c, err := net.DialTimeout("tcp", dest, 8*time.Second)
+		c, err := net.DialTimeout("tcp", sv.dest, 8*time.Second)
 		if err != nil {
-			log.Printf("core/cover: cover site %s did not answer at startup (%v) — while it stays "+
-				"unreachable a prober gets a bare close, not that site's real TLS answer. Pick a cover "+
-				"domain this server can actually reach.", dest, err)
+			sv.noteDialFail(dialReason(err), err)
 			return
 		}
-		_ = c.Close()
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(8 * time.Second))
+		if err := tls.Client(c, &tls.Config{ServerName: sv.host, InsecureSkipVerify: true}).Handshake(); err != nil {
+			sv.noteDialFail("tls", err)
+		}
 	}()
 }
 
@@ -241,7 +264,7 @@ func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 		defer func() { <-sv.relay }()
 		dst, err := net.DialTimeout("tcp", sv.dest, 8*time.Second)
 		if err != nil {
-			sv.noteDialFail(err)
+			sv.noteDialFail(dialReason(err), err)
 			raw.Close()
 			return
 		}
