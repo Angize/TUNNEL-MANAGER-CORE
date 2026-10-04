@@ -427,7 +427,7 @@ func (b *TCP) httpcEdge() (dialAddr, host string, ech []byte, path string, err e
 		if !ok {
 			return "", "", nil, "", fmt.Errorf("httpc: edge pool is empty")
 		}
-		dialAddr, host, ech, path = ip, sni.host, sni.ech, sni.path
+		dialAddr, host, ech = ip, sni.host, sni.ech
 	}
 	if host == "" {
 		host = dialAddr
