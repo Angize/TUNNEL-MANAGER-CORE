@@ -791,7 +791,9 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, 
 		idle: connIdle, ping: pingEvery, addr: listenAddrs[0], ln: lns[0], lns: lns, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns), extra: extra}
 	if cover {
-		cs, err := tlscover.NewServer(psk, coverSNI)
+		cs, err := tlscover.NewServer(psk, coverSNI, func(why string) {
+			noteCfgWarn("cover-unreachable", coverSNI+" "+why)
+		})
 		if err != nil {
 			for _, l := range lns {
 				l.Close()
