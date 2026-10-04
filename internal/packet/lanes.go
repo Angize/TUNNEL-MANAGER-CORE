@@ -8,6 +8,23 @@ const followEvery = 250 * time.Millisecond
 
 func (b *TCP) Follow(lead *TCP, lane int) {
 	b.lead, b.lane = lead, lane
+	lead.followers = append(lead.followers, b)
+}
+
+func (b *TCP) home() *TCP {
+	if b.lead != nil {
+		return b.lead
+	}
+	return b
+}
+
+func (b *TCP) wakeLanes() {
+	h := b.home()
+	for _, l := range append([]*TCP{h}, h.followers...) {
+		if l != b && l.cur.Load() == nil {
+			wakeLoop(l.wake)
+		}
+	}
 }
 
 func (b *TCP) laneHello() []byte {

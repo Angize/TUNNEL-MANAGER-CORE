@@ -314,6 +314,8 @@ type TCP struct {
 	idle     time.Duration
 	ping     time.Duration
 
+	followers []*TCP
+
 	cover     bool
 	coverSNI  string
 	coverHint sync.Once
@@ -485,22 +487,27 @@ func (b *TCP) rollSourcePort() bool {
 	if b.dropCarrier(dropPortRoll) {
 		b.st.portRedrawn()
 	}
+	for _, f := range b.followers {
+		f.dropCarrier(dropPortRoll)
+	}
 	return true
 }
 
 func (b *TCP) ech() []byte {
-	b.echMu.Lock()
-	defer b.echMu.Unlock()
-	return b.wsECH
+	h := b.home()
+	h.echMu.Lock()
+	defer h.echMu.Unlock()
+	return h.wsECH
 }
 
 func (b *TCP) setECH(ech []byte) bool {
-	b.echMu.Lock()
-	defer b.echMu.Unlock()
-	if bytes.Equal(b.wsECH, ech) {
+	h := b.home()
+	h.echMu.Lock()
+	defer h.echMu.Unlock()
+	if bytes.Equal(h.wsECH, ech) {
 		return false
 	}
-	b.wsECH = ech
+	h.wsECH = ech
 	return true
 }
 
@@ -690,23 +697,25 @@ func (b *TCP) axes() (low, high axisNames) {
 }
 
 func (b *TCP) sniEntry(host string) wsSNIEntry {
-	b.sniMu.Lock()
-	defer b.sniMu.Unlock()
-	if e, ok := b.sniMeta[host]; ok {
+	h := b.home()
+	h.sniMu.Lock()
+	defer h.sniMu.Unlock()
+	if e, ok := h.sniMeta[host]; ok {
 		return e
 	}
 	return wsSNIEntry{host: host}
 }
 
 func (b *TCP) setSNIECH(host string, ech []byte) bool {
-	b.sniMu.Lock()
-	defer b.sniMu.Unlock()
-	e, ok := b.sniMeta[host]
+	h := b.home()
+	h.sniMu.Lock()
+	defer h.sniMu.Unlock()
+	e, ok := h.sniMeta[host]
 	if !ok || bytes.Equal(e.ech, ech) {
 		return false
 	}
 	e.ech = ech
-	b.sniMeta[host] = e
+	h.sniMeta[host] = e
 	return true
 }
 
@@ -1056,13 +1065,13 @@ func (b *TCP) noteECHSelfHeal(host string, ech []byte) {
 	detail := host + " " + base64.StdEncoding.EncodeToString(ech)
 	if b.edgePool() {
 		if b.setSNIECH(host, ech) {
-			b.st.event("ech", "self_heal", detail)
+			b.home().st.event("ech", "self_heal", detail)
 		}
 		return
 	}
 
 	if b.setECH(ech) {
-		b.st.event("ech", "self_heal", detail)
+		b.home().st.event("ech", "self_heal", detail)
 	}
 }
 
@@ -1386,6 +1395,7 @@ func (b *TCP) dialLoop() {
 
 		b.dropWhy.Store(dropNone)
 		b.cur.Store(cf)
+		b.wakeLanes()
 		b.adoptRx(cf)
 		cc := conn
 		b.curConn.Store(&cc)
