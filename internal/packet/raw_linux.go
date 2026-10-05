@@ -698,8 +698,6 @@ func rawDropMatches(l rawLeak) [][]string {
 			"-m", "mark", "!", "--mark", fmt.Sprintf("%#x", rawSendMark)}}
 	case "udp":
 		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "port-unreachable"}}
-	case "sctp":
-		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "protocol-unreachable"}}
 	case "tcp":
 		side, specs := "--dport", l.heardFrom()
 		if !l.isClient {

@@ -298,6 +298,7 @@ func (c *Config) validate() error {
 		if c.RawProfile != "" && !packet.RawProfileValid(c.RawProfile) {
 			return errors.New("raw_profile must be one of " + strings.Join(packet.RawProfileNames(), "|"))
 		}
+		ported := strings.Join(packet.RawPortedProfiles(), "|")
 
 		if c.RawProto != 0 {
 			if c.RawProfile != "" && c.RawProfile != "bare" {
@@ -313,7 +314,7 @@ func (c *Config) validate() error {
 
 		if c.RawPort != 0 {
 			if !packet.RawProfileHasPorts(c.RawProfile) {
-				return errors.New("raw_port sets the forged server port of the \"udp\", \"tcp\" and \"sctp\" profiles only" +
+				return errors.New("raw_port sets the forged server port of the " + ported + " profiles only" +
 					" (raw_profile \"" + c.RawProfile + "\" forges no ports)")
 			}
 			if c.RawPort < 1 || c.RawPort > 65535 {
@@ -322,12 +323,12 @@ func (c *Config) validate() error {
 		}
 
 		if c.RawSportRandom && !packet.RawProfileHasPorts(c.RawProfile) {
-			return errors.New("raw_sport_random rolls the forged SOURCE port of the \"udp\", \"tcp\" and \"sctp\"" +
+			return errors.New("raw_sport_random rolls the forged SOURCE port of the " + ported +
 				" profiles only (raw_profile \"" + c.RawProfile + "\" forges no ports)")
 		}
 		if c.RawSport != 0 {
 			if !packet.RawProfileHasPorts(c.RawProfile) {
-				return errors.New("raw_sport sets the forged client source port of the \"udp\", \"tcp\" and \"sctp\"" +
+				return errors.New("raw_sport sets the forged client source port of the " + ported +
 					" profiles only (raw_profile \"" + c.RawProfile + "\" forges no ports)")
 			}
 			if c.RawSport < 1 || c.RawSport > 65535 {
@@ -342,7 +343,7 @@ func (c *Config) validate() error {
 		if c.RawSportRotate != 0 {
 			if !packet.RawProfileHasPorts(c.RawProfile) {
 				return errors.New("raw_sport_rotate cycles the forged source port, so it needs a profile that forges one" +
-					" (raw_profile \"" + c.RawProfile + "\" builds no L4 header; use \"udp\", \"tcp\" or \"sctp\")")
+					" (raw_profile \"" + c.RawProfile + "\" builds no L4 header; use one of " + ported + ")")
 			}
 			if c.RawSportRotate < 1 || c.RawSportRotate > maxSportEvery {
 				return fmt.Errorf("raw_sport_rotate must be in 1..%d (0 = off; a new forged source port every N packets, N under the middlebox per-tuple budget)", maxSportEvery)
