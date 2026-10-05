@@ -617,6 +617,8 @@ func spoilL4Sum(l4 []byte, proto int) {
 		off = 16
 	case protoUDP:
 		off = 6
+	case protoSCTP:
+		off = 8
 	}
 	if off < 0 || len(l4) < off+2 {
 		return
@@ -696,6 +698,8 @@ func rawDropMatches(l rawLeak) [][]string {
 			"-m", "mark", "!", "--mark", fmt.Sprintf("%#x", rawSendMark)}}
 	case "udp":
 		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "port-unreachable"}}
+	case "sctp":
+		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "protocol-unreachable"}}
 	case "tcp":
 		side, specs := "--dport", l.heardFrom()
 		if !l.isClient {

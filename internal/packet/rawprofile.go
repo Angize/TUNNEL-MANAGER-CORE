@@ -4,12 +4,15 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"hash/crc32"
 	"io"
 	"net"
 	"sort"
 
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/csum"
 )
+
+var sctpCastagnoli = crc32.MakeTable(crc32.Castagnoli)
 
 const (
 	protoICMP    = 1
@@ -22,6 +25,7 @@ const (
 	protoEtherIP = 97
 	protoIPComp  = 108
 	protoL2TPv3  = 115
+	protoSCTP    = 132
 	protoBare    = 253
 )
 
@@ -47,6 +51,7 @@ var rawProfiles = map[string]int{
 	"etherip": protoEtherIP,
 	"ipcomp":  protoIPComp,
 	"l2tpv3":  protoL2TPv3,
+	"sctp":    protoSCTP,
 }
 
 var rawHeaderLens = map[string]int{
@@ -61,6 +66,7 @@ var rawHeaderLens = map[string]int{
 	"l2tpv3":  8,
 	"tcp":     32,
 	"ah":      24,
+	"sctp":    12,
 }
 
 func rawHeaderLen(profile string) int { return rawHeaderLens[profile] }
@@ -254,7 +260,7 @@ func randPort(lo, span uint32) uint16 { return uint16(lo + randBelow(span)) }
 
 func RawProfileHasPorts(profile string) bool {
 	switch rawProfiles[profile] {
-	case protoUDP, protoTCP:
+	case protoUDP, protoTCP, protoSCTP:
 		return true
 	}
 	return false
@@ -398,6 +404,13 @@ func rawFill(framing int, h []byte, hl int, src, dst net.IP, isClient bool, id, 
 		}
 		binary.BigEndian.PutUint16(h[6:8], cs)
 
+	case protoSCTP:
+		sp, dp := rawPorts(isClient, port, cport)
+		binary.BigEndian.PutUint16(h[0:2], sp)
+		binary.BigEndian.PutUint16(h[2:4], dp)
+		binary.BigEndian.PutUint32(h[4:8], spi)
+		binary.LittleEndian.PutUint32(h[8:12], crc32.Checksum(h, sctpCastagnoli))
+
 	case protoTCP:
 		sp, dp := rawPorts(isClient, port, cport)
 		if flags&tcpSyn != 0 {
@@ -484,6 +497,12 @@ func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16,
 		b, ok := skip(pkt, off)
 		return b, binary.BigEndian.Uint16(pkt[0:2]), peerTSVal(pkt), ok
 	case protoUDP:
+		if len(pkt) < rawHeaderLen(profile) {
+			return nil, 0, 0, false
+		}
+		b, ok := skip(pkt, rawHeaderLen(profile))
+		return b, binary.BigEndian.Uint16(pkt[0:2]), 0, ok
+	case protoSCTP:
 		if len(pkt) < rawHeaderLen(profile) {
 			return nil, 0, 0, false
 		}
