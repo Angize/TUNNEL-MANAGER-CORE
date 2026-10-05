@@ -242,7 +242,9 @@ func (a *antiLeaker) teardown() {
 		a.dropLingeringLocked(0)
 	}
 	for k, fn := range a.static {
-		fn()
+		if fn != nil {
+			fn()
+		}
 		delete(a.static, k)
 	}
 	a.known = nil

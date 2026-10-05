@@ -266,6 +266,16 @@ func RawProfileHasPorts(profile string) bool {
 	return false
 }
 
+func RawPortedProfiles() []string {
+	var out []string
+	for _, name := range RawProfileNames() {
+		if RawProfileHasPorts(name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 func RawProfileNames() []string {
 	out := make([]string, 0, len(rawProfiles))
 	for name := range rawProfiles {
@@ -496,13 +506,7 @@ func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16,
 		off := int(pkt[12]>>4) * 4
 		b, ok := skip(pkt, off)
 		return b, binary.BigEndian.Uint16(pkt[0:2]), peerTSVal(pkt), ok
-	case protoUDP:
-		if len(pkt) < rawHeaderLen(profile) {
-			return nil, 0, 0, false
-		}
-		b, ok := skip(pkt, rawHeaderLen(profile))
-		return b, binary.BigEndian.Uint16(pkt[0:2]), 0, ok
-	case protoSCTP:
+	case protoUDP, protoSCTP:
 		if len(pkt) < rawHeaderLen(profile) {
 			return nil, 0, 0, false
 		}
