@@ -20,8 +20,9 @@ type CryptoCfg struct {
 }
 
 type WSSNI struct {
-	Host string `json:"host"`
-	ECH  string `json:"ech"`
+	Host  string `json:"host"`
+	ECH   string `json:"ech"`
+	Group string `json:"group"`
 }
 
 func (c *Config) cdnIsHTTP() bool { return c.CDNCarrier == "http" || c.CDNCarrier == "grpc" }
@@ -127,10 +128,11 @@ type Config struct {
 
 	WSECH string `json:"ws_ech"`
 
-	WSEdgeIPs    []string `json:"ws_edge_ips"`
-	WSEdgeSNIs   []WSSNI  `json:"ws_edge_snis"`
-	WSRotateSecs int      `json:"ws_rotate_secs"`
-	WSPortRoll   bool     `json:"ws_port_roll"`
+	WSEdgeIPs      []string          `json:"ws_edge_ips"`
+	WSEdgeIPGroups map[string]string `json:"ws_edge_ip_groups"`
+	WSEdgeSNIs     []WSSNI           `json:"ws_edge_snis"`
+	WSRotateSecs   int               `json:"ws_rotate_secs"`
+	WSPortRoll     bool              `json:"ws_port_roll"`
 
 	StatusPath string `json:"status_path"`
 
@@ -230,6 +232,46 @@ func (c *Config) applyDefaults() {
 			c.FakeMode = "ttl"
 		}
 	}
+}
+
+func (c *Config) validateEdgeGroups() error {
+	grouped := len(c.WSEdgeIPGroups) > 0
+	for _, s := range c.WSEdgeSNIs {
+		grouped = grouped || s.Group != ""
+	}
+	if !grouped {
+		return nil
+	}
+	ips, listed := map[string]int{}, map[string]bool{}
+	for _, e := range c.WSEdgeIPs {
+		g := c.WSEdgeIPGroups[e]
+		if g == "" {
+			return fmt.Errorf("ws_edge_ip_groups: edge IP %s has no group", e)
+		}
+		ips[g]++
+		listed[e] = true
+	}
+	for e := range c.WSEdgeIPGroups {
+		if !listed[e] {
+			return fmt.Errorf("ws_edge_ip_groups names %s, which is not in ws_edge_ips", e)
+		}
+	}
+	snis := map[string]int{}
+	for _, s := range c.WSEdgeSNIs {
+		if s.Group == "" {
+			return fmt.Errorf("ws edge pool: SNI %s has no group while the edge IPs are grouped", s.Host)
+		}
+		if ips[s.Group] == 0 {
+			return fmt.Errorf("ws edge pool: SNI %s is in group %q, which has no edge IP", s.Host, s.Group)
+		}
+		snis[s.Group]++
+	}
+	for g := range ips {
+		if snis[g] == 0 {
+			return fmt.Errorf("ws_edge_ip_groups: group %q has edge IPs but no SNI", g)
+		}
+	}
+	return nil
 }
 
 func validatePoolEndpoint(field, e string, needPort bool) error {
@@ -463,6 +505,9 @@ func (c *Config) validate() error {
 					}
 				}
 			}
+			if err := c.validateEdgeGroups(); err != nil {
+				return err
+			}
 		}
 	default:
 		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", or \"ws\"")
@@ -479,6 +524,7 @@ func (c *Config) validate() error {
 			{"http_up_batch_kb", c.HTTPUpBatchKB != 0},
 			{"http_up_rate", c.HTTPUpRate != 0},
 			{"ws_edge_ips", len(c.WSEdgeIPs) > 0},
+			{"ws_edge_ip_groups", len(c.WSEdgeIPGroups) > 0},
 			{"ws_edge_snis", len(c.WSEdgeSNIs) > 0},
 			{"ws_rotate_secs", c.WSRotateSecs != 0},
 			{"ws_port_roll", c.WSPortRoll},

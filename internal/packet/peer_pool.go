@@ -30,14 +30,26 @@ func newPoolAddr(s string) poolAddr {
 	return a
 }
 
+type poolView struct {
+	addrs []string
+	forms []poolAddr
+}
+
 type PeerPool struct {
 	burns  atomic.Uint64
 	mu     sync.Mutex
 	addrs  []string
 	forms  []poolAddr
+	every  []string
 	health healthSet
 	cur    int
 	rotate time.Duration
+
+	group   map[string]string
+	views   map[string]poolView
+	curs    map[string]int
+	want    string
+	viewing bool
 
 	live   atomic.Pointer[poolAddr]
 	chosen string
@@ -71,13 +83,87 @@ func NewPeerPool(addrs []string, rotate time.Duration) *PeerPool {
 	for i, a := range cp {
 		forms[i] = newPoolAddr(a)
 	}
-	p := &PeerPool{addrs: cp, forms: forms, rotate: rotate,
+	p := &PeerPool{addrs: cp, forms: forms, every: cp, rotate: rotate,
 		now: func() int64 { return time.Now().Unix() }}
 	p.health = newHealthSet(&p.now)
 	if len(forms) > 0 {
 		p.live.Store(&p.forms[0])
 	}
 	return p
+}
+
+func (p *PeerPool) groupBy(group map[string]string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.group, p.views, p.curs = group, map[string]poolView{}, map[string]int{}
+	for i, a := range p.every {
+		v := p.views[group[a]]
+		v.addrs = append(v.addrs, a)
+		v.forms = append(v.forms, p.forms[i])
+		p.views[group[a]] = v
+	}
+}
+
+func (p *PeerPool) groupOf(addr string) string { return p.group[addr] }
+
+func (p *PeerPool) setView(g string) bool {
+	p.mu.Lock()
+	moved := p.enterLocked(g)
+	p.mu.Unlock()
+	if moved {
+		p.publish()
+	}
+	return moved
+}
+
+func (p *PeerPool) enterLocked(g string) bool {
+	v, ok := p.views[g]
+	if !ok || (p.viewing && p.want == g) {
+		return false
+	}
+	if p.viewing {
+		p.curs[p.want] = p.cur
+	}
+	p.viewing, p.want = true, g
+	p.addrs, p.forms = v.addrs, v.forms
+	p.cur, p.chosen = p.curs[g], ""
+	p.currentLocked()
+	return true
+}
+
+func (p *PeerPool) indexLocked(addr string) int {
+	for i, a := range p.addrs {
+		if a == addr {
+			return i
+		}
+	}
+	if g, ok := p.group[addr]; ok && p.enterLocked(g) {
+		return p.indexLocked(addr)
+	}
+	return -1
+}
+
+func (p *PeerPool) pickWhere(ok func(string) bool) {
+	p.mu.Lock()
+	idx := -1
+	for _, fit := range []func(string) bool{p.health.healthy, p.health.due, func(string) bool { return true }} {
+		for k := 0; k < len(p.addrs) && idx < 0; k++ {
+			if i := (p.cur + k) % len(p.addrs); ok(p.addrs[i]) && fit(p.addrs[i]) {
+				idx = i
+			}
+		}
+		if idx >= 0 {
+			break
+		}
+	}
+	moved := idx >= 0 && idx != p.cur
+	if moved {
+		p.commitLocked(idx)
+	}
+	p.mu.Unlock()
+	if moved {
+		p.publish()
+	}
 }
 
 func (p *PeerPool) liveAddr() *poolAddr {
@@ -146,8 +232,8 @@ func (p *PeerPool) activeIdx() int {
 }
 
 func (p *PeerPool) all() []string {
-	out := make([]string, len(p.addrs))
-	copy(out, p.addrs)
+	out := make([]string, len(p.every))
+	copy(out, p.every)
 	return out
 }
 
@@ -276,12 +362,9 @@ func (p *PeerPool) keepCursorOn(addr string) {
 	p.mu.Lock()
 	moved := false
 	if p.addrs[p.cur] != addr {
-		for idx, a := range p.addrs {
-			if a == addr {
-				p.commitLocked(idx)
-				moved = true
-				break
-			}
+		if idx := p.indexLocked(addr); idx >= 0 {
+			p.commitLocked(idx)
+			moved = true
 		}
 	}
 	p.mu.Unlock()
@@ -375,19 +458,13 @@ func (p *PeerPool) markSuspect(addr, reason string) {
 
 func (p *PeerPool) selectEntry(key string) bool {
 	p.mu.Lock()
-	idx := -1
-	for i, a := range p.addrs {
-		if a == key {
-			idx = i
-			break
-		}
-	}
+	moved := p.addrs[p.cur] != key
+	idx := p.indexLocked(key)
 	if idx < 0 {
 		p.mu.Unlock()
 		return false
 	}
 
-	moved := p.cur != idx
 	p.health.clear(key)
 	p.commitLocked(idx)
 	p.mu.Unlock()
@@ -870,8 +947,8 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 func (p *PeerPool) healthRows() []healthStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	rows := make([]healthStatus, 0, len(p.addrs))
-	for _, a := range p.addrs {
+	rows := make([]healthStatus, 0, len(p.every))
+	for _, a := range p.every {
 		hs := healthStatus{Key: a, Kind: p.axis, State: "healthy"}
 		if r := p.health.rec(a); r != nil {
 			hs.State, hs.Fails, hs.NextRetest, hs.RetestSecs = r.state, r.fails, r.nextRetest, r.step
