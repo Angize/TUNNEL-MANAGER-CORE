@@ -471,7 +471,11 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 		if d > connectTimeout {
 			d = connectTimeout
 		}
-		return dialFromBand(ctx, func() *net.Dialer { return b.dialer(d) }, dialAddr)
+		c, err := dialFromBand(ctx, func() *net.Dialer { return b.dialer(d) }, dialAddr)
+		if err != nil {
+			return nil, stageErr{stageConnect, err}
+		}
+		return c, nil
 	}
 
 	var dialedMu sync.Mutex
@@ -512,7 +516,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 			uc, err := uEdgeHandshake(b.fragWrap(c, host, ech), host, ech, alpn, h2, budget)
 			if err != nil {
 				c.Close()
-				return nil, err
+				return nil, stageErr{stageTLS, err}
 			}
 			_ = c.SetDeadline(time.Time{})
 			track(c)

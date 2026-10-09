@@ -354,6 +354,9 @@ type TCP struct {
 
 	lastErr atomic.Value
 
+	everUp   bool
+	dialSeen map[string]bool
+
 	httpc         bool
 	httpcMode     string
 	httpSrv       atomic.Pointer[http.Server]
@@ -1250,23 +1253,81 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 	b.noteAttempt(dialAddr, host)
 	conn, err := b.dialBand(connectTimeout, dialAddr)
 	if err != nil {
-		return nil, dialAddr, "", err
+		return nil, dialAddr, "", stageErr{stageConnect, err}
 	}
 
 	b.sendTCPFakes(conn)
 	if b.wsTLS {
 		tc, terr := b.tlsToEdge(conn, dialAddr, host, ech, true, handshakeTimeout)
 		if terr != nil {
-			return nil, dialAddr, "", terr
+			return nil, dialAddr, "", stageErr{stageTLS, terr}
 		}
 		conn = tc
 	}
 	r, werr := wsClientHandshake(conn, host, path, time.Now().Add(handshakeTimeout))
 	if werr != nil {
 		conn.Close()
-		return nil, dialAddr, "", werr
+		return nil, dialAddr, "", stageErr{stageEdge, werr}
 	}
 	return &wsConn{Conn: conn, r: r, client: true}, dialAddr, activeLabel(dialAddr, host), nil
+}
+
+const (
+	stageConnect = "connect"
+	stageTLS     = "tls"
+	stageEdge    = "edge"
+	stageAuth    = "auth"
+)
+
+type stageErr struct {
+	stage string
+	err   error
+}
+
+func (e stageErr) Error() string { return e.err.Error() }
+
+func (e stageErr) Unwrap() error { return e.err }
+
+func dialCause(err error) string {
+	var se stageErr
+	errors.As(err, &se)
+	var echErr *utls.ECHRejectionError
+	s := strings.ToLower(err.Error())
+	switch {
+	case errors.As(err, &echErr) || strings.Contains(s, "ech-reject"):
+		return "ech"
+	case se.stage == stageTLS:
+		return "tls"
+	case errors.Is(err, errNotWS) || strings.Contains(s, "got http ") || strings.Contains(s, "permessage-deflate") ||
+		strings.Contains(s, "came back"):
+		return "edge_http"
+	case se.stage == stageAuth && classifyErr(err.Error()) != "reset":
+		return "auth"
+	}
+	switch c := classifyErr(err.Error()); c {
+	case "refused", "timeout", "reset", "eof", "tls":
+		return c
+	}
+	return "dropped"
+}
+
+func (b *TCP) dialFailed(at string, err error) {
+	if !b.everUp || b.closed.Load() {
+		return
+	}
+	cause := dialCause(err)
+	if b.dialSeen[cause] {
+		return
+	}
+	if b.dialSeen == nil {
+		b.dialSeen = map[string]bool{}
+	}
+	b.dialSeen[cause] = true
+	why := err.Error()
+	if len(why) > 160 {
+		why = why[:160]
+	}
+	b.st.event("dial", cause, at+" "+why)
 }
 
 func (b *TCP) setLastErr(err error) {
@@ -1375,6 +1436,7 @@ func (b *TCP) dialLoop() {
 
 		conn, label, combo, err := b.dialCarrier()
 		if err != nil {
+			b.dialFailed(label, err)
 			backoff = nextReconnectDelay(backoff)
 			var stop bool
 			if backoff, stop = b.waitToRedial(backoff); stop {
@@ -1385,6 +1447,7 @@ func (b *TCP) dialLoop() {
 		cf, err := b.handshakeAndPrime(conn)
 		if err != nil {
 			conn.Close()
+			b.dialFailed(label, err)
 			backoff = nextReconnectDelay(backoff)
 			var stop bool
 			if backoff, stop = b.waitToRedial(backoff); stop {
@@ -1394,6 +1457,7 @@ func (b *TCP) dialLoop() {
 		}
 		log.Printf("core/tcp: connected to %s", label)
 		backoff = 0
+		b.everUp, b.dialSeen = true, nil
 
 		b.dropWhy.Store(dropNone)
 		b.cur.Store(cf)
@@ -1466,7 +1530,7 @@ func (b *TCP) dialCarrier() (net.Conn, string, string, error) {
 	c, err := b.dialBand(connectTimeout, target)
 	if err != nil {
 		log.Printf("core/tcp: dial %s failed: %v", target, err)
-		return nil, target, "", err
+		return nil, target, "", stageErr{stageConnect, err}
 	}
 
 	b.sendTCPFakes(c)
@@ -1475,7 +1539,7 @@ func (b *TCP) dialCarrier() (net.Conn, string, string, error) {
 		if cerr != nil {
 			c.Close()
 			log.Printf("core/tcp: tls cover to %s failed: %v", target, cerr)
-			return nil, target, "", cerr
+			return nil, target, "", stageErr{stageTLS, cerr}
 		}
 		c = tconn
 	}
@@ -1501,6 +1565,9 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 	if b.cryptoOn {
 		if err := b.clientHandshake(cf); err != nil {
 			b.coverProbeHint()
+			if b.ws || b.cover {
+				return nil, stageErr{stageAuth, err}
+			}
 			return nil, err
 		}
 
