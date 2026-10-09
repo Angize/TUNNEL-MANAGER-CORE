@@ -24,7 +24,7 @@ func dialStream(cfg *Config, dev *tun.Device, cryptoOn, lead bool) (*packet.TCP,
 		snis := make([]packet.EdgeSNI, len(cfg.WSEdgeSNIs))
 		ech := false
 		for i, s := range cfg.WSEdgeSNIs {
-			snis[i] = packet.EdgeSNI{Host: s.Host, ECH: s.ECH}
+			snis[i] = packet.EdgeSNI{Host: s.Host, ECH: s.ECH, Group: s.Group}
 			ech = ech || s.ECH != ""
 		}
 		rotate := time.Duration(cfg.WSRotateSecs) * time.Second
@@ -32,7 +32,7 @@ func dialStream(cfg *Config, dev *tun.Device, cryptoOn, lead bool) (*packet.TCP,
 			rotate = 0
 		}
 		b, err := packet.DialEdgePool(dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath,
-			cfg.WSEdgeIPs, snis, rotate, cfg.cdnIsHTTP(), cfg.cdnMode(), cfg.WSPortRoll)
+			cfg.WSEdgeIPs, cfg.WSEdgeIPGroups, snis, rotate, cfg.cdnIsHTTP(), cfg.cdnMode(), cfg.WSPortRoll)
 		return b, fmt.Sprintf("dialing (core/%s%s%s pool: %dIP×%dSNI rotate=%ds port_roll=%t)",
 			carrier, obfsTag, wsTLSTag(cfg.WSTLS, ech), len(cfg.WSEdgeIPs), len(cfg.WSEdgeSNIs), cfg.WSRotateSecs,
 			cfg.WSPortRoll), err

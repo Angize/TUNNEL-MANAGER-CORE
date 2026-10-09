@@ -538,6 +538,9 @@ func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
 		return addr, false
 	}
 
+	if b.edgePool() {
+		b.followSNIGroup()
+	}
 	_, high := b.axes()
 	log.Printf("core/%s: rotated %s to %s", b.stTag, high.tag, addr)
 	b.st.rotated(high.tag, high.detail(addr), proactive)
@@ -646,20 +649,22 @@ func DialWS(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, 
 }
 
 type EdgeSNI struct {
-	Host string
-	ECH  string
+	Host  string
+	ECH   string
+	Group string
 }
 
 type wsSNIEntry struct {
-	host string
-	ech  []byte
+	host  string
+	ech   []byte
+	group string
 }
 
 const activeSep = " · "
 
 func activeLabel(ip, host string) string { return ip + activeSep + host }
 
-func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, ips []string, snis []EdgeSNI, rotate time.Duration, httpc bool, httpcMode string, portRoll bool) (*TCP, error) {
+func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, ips []string, ipGroups map[string]string, snis []EdgeSNI, rotate time.Duration, httpc bool, httpcMode string, portRoll bool) (*TCP, error) {
 	if len(ips) == 0 || len(snis) == 0 {
 		return nil, errors.New("ws pool: need at least one IP and one SNI")
 	}
@@ -671,13 +676,16 @@ func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath stri
 			ech, _ = base64.StdEncoding.DecodeString(s.ECH)
 		}
 		hosts = append(hosts, s.Host)
-		meta[s.Host] = wsSNIEntry{host: s.Host, ech: ech}
+		meta[s.Host] = wsSNIEntry{host: s.Host, ech: ech, group: s.Group}
 	}
 	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, wsPath: wsPath, wsTLS: true, httpc: httpc, httpcMode: httpcMode, sniMeta: meta,
 		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 		portRollOff: !portRoll}
 	b.pp = NewPeerPool(ips, rotate)
+	if len(ipGroups) > 0 {
+		b.pp.groupBy(ipGroups)
+	}
 	b.sp = NewPeerPool(hosts, rotate)
 	b.rc.bind(b.pp, b.sp, axisIP, axisSNI)
 	return b, nil
@@ -737,11 +745,36 @@ func (b *TCP) edgeCombo() (string, wsSNIEntry, bool) {
 	if !b.edgePool() {
 		return "", wsSNIEntry{}, false
 	}
-	ip, host := b.pp.current(), b.sp.current()
-	if ip == "" || host == "" {
+	host := b.followSNIGroup()
+	if host == "" {
+		return "", wsSNIEntry{}, false
+	}
+	ip := b.pp.current()
+	if ip == "" {
 		return "", wsSNIEntry{}, false
 	}
 	return ip, b.sniEntry(host), true
+}
+
+func (b *TCP) followSNIGroup() string {
+	host := b.sp.current()
+	if g := b.sniEntry(host).group; b.pp.setView(g) {
+		log.Printf("core/%s: %s is in edge group %s — destination now %s", b.stTag, host, g, b.pp.current())
+	}
+	return host
+}
+
+func (b *TCP) sniGroupHosts(g string) map[string]bool {
+	h := b.home()
+	h.sniMu.Lock()
+	defer h.sniMu.Unlock()
+	out := map[string]bool{}
+	for host, e := range h.sniMeta {
+		if e.group == g {
+			out[host] = true
+		}
+	}
+	return out
 }
 
 func DialHTTPC(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte, httpcMode string, portRoll bool) (*TCP, error) {
@@ -1557,8 +1590,18 @@ func (b *TCP) rotateHighTCP(proactive bool) {
 }
 
 func (b *TCP) selectedTCP(kind, key string) {
-	if !b.edgePool() && kind == axisDst {
-		b.st.setActive(b.stTag + activeSep + key)
+	switch {
+	case !b.edgePool():
+		if kind == axisDst {
+			b.st.setActive(b.stTag + activeSep + key)
+		}
+	case kind == axisIP:
+		if g := b.pp.groupOf(key); b.sniEntry(b.sp.current()).group != g {
+			in := b.sniGroupHosts(g)
+			b.sp.pickWhere(func(h string) bool { return in[h] })
+		}
+	case kind == axisSNI:
+		b.followSNIGroup()
 	}
 }
 
