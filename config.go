@@ -127,6 +127,12 @@ type Config struct {
 	HTTPStreams   int `json:"http_streams"`
 
 	WSECH string `json:"ws_ech"`
+	WSCA  string `json:"ws_ca"`
+
+	SrvCert    string `json:"srv_cert"`
+	SrvKey     string `json:"srv_key"`
+	SrvECHKey  string `json:"srv_ech_key"`
+	SrvECHConf string `json:"srv_ech_conf"`
 
 	WSEdgeIPs      []string          `json:"ws_edge_ips"`
 	WSEdgeIPGroups map[string]string `json:"ws_edge_ip_groups"`
@@ -416,6 +422,22 @@ func (c *Config) validate() error {
 			}
 			if _, err := base64.StdEncoding.DecodeString(c.WSECH); err != nil {
 				return errors.New("ws_ech is not valid base64")
+			}
+		}
+
+		if c.WSCA != "" && c.Role != "client" {
+			return errors.New("ws_ca is a client-side trusted CA for the server certificate")
+		}
+
+		if c.SrvCert != "" || c.SrvKey != "" || c.SrvECHKey != "" || c.SrvECHConf != "" {
+			if c.Role != "server" {
+				return errors.New("srv_cert/srv_key/srv_ech_* configure server-side TLS/ECH termination and belong to the server role")
+			}
+			if c.SrvCert == "" || c.SrvKey == "" {
+				return errors.New("server TLS termination needs both srv_cert and srv_key")
+			}
+			if (c.SrvECHKey == "") != (c.SrvECHConf == "") {
+				return errors.New("srv_ech_key and srv_ech_conf must be set together")
 			}
 		}
 
