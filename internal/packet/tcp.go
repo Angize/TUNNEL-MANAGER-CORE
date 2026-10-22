@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
@@ -326,8 +327,9 @@ type TCP struct {
 	wsPath string
 	wsTLS  bool
 
-	echMu sync.Mutex
-	wsECH []byte
+	echMu   sync.Mutex
+	wsECH   []byte
+	wsRoots *x509.CertPool
 
 	sniMu   sync.Mutex
 	sniMeta map[string]wsSNIEntry
@@ -644,9 +646,24 @@ func DialTCP(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher 
 		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
 }
 
-func DialWS(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte, portRoll bool) (*TCP, error) {
+func caPool(pemBytes []byte) (*x509.CertPool, error) {
+	if len(pemBytes) == 0 {
+		return nil, nil
+	}
+	p := x509.NewCertPool()
+	if !p.AppendCertsFromPEM(pemBytes) {
+		return nil, errors.New("ws_ca has no valid certificate")
+	}
+	return p, nil
+}
+
+func DialWS(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH, wsCA []byte, portRoll bool) (*TCP, error) {
+	roots, err := caPool(wsCA)
+	if err != nil {
+		return nil, err
+	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
-		ws: true, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH,
+		ws: true, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH, wsRoots: roots,
 		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 		portRollOff: !portRoll}, nil
 }
@@ -780,15 +797,19 @@ func (b *TCP) sniGroupHosts(g string) map[string]bool {
 	return out
 }
 
-func DialHTTPC(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH []byte, httpcMode string, portRoll bool) (*TCP, error) {
+func DialHTTPC(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH, wsCA []byte, httpcMode string, portRoll bool) (*TCP, error) {
+	roots, err := caPool(wsCA)
+	if err != nil {
+		return nil, err
+	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
-		ws: true, httpc: true, httpcMode: httpcMode, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH,
+		ws: true, httpc: true, httpcMode: httpcMode, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH, wsRoots: roots,
 		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 		portRollOff: !portRoll}, nil
 }
 
-func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, extra ...*tun.Device) (*TCP, error) {
-	ln, err := listenTCP(listenAddr)
+func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, tlsCfg *tls.Config, extra ...*tun.Device) (*TCP, error) {
+	ln, err := serverListen(listenAddr, tlsCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -797,8 +818,8 @@ func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, c
 		preAuth: make(chan struct{}, maxPreAuthConns), httpcSessions: make(map[string]*httpcSession), extra: extra}, nil
 }
 
-func ListenWS(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, extra ...*tun.Device) (*TCP, error) {
-	ln, err := listenTCP(listenAddr)
+func ListenWS(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, tlsCfg *tls.Config, extra ...*tun.Device) (*TCP, error) {
+	ln, err := serverListen(listenAddr, tlsCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1119,7 +1140,7 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 	for attempt := 0; attempt < 2; attempt++ {
 		var uc net.Conn
 
-		uc, err = uEdgeHandshake(b.fragWrap(conn, host, ech), host, ech, []string{"http/1.1"}, false, budget)
+		uc, err = uEdgeHandshake(b.fragWrap(conn, host, ech), host, ech, b.wsRoots, []string{"http/1.1"}, false, budget)
 		if err == nil {
 			if healed && live {
 				b.noteECHSelfHeal(host, ech)
@@ -1145,8 +1166,11 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 	return nil, err
 }
 
-func uEdgeHandshake(conn net.Conn, host string, ech []byte, alpn []string, goFingerprint bool, budget time.Duration) (net.Conn, error) {
+func uEdgeHandshake(conn net.Conn, host string, ech []byte, roots *x509.CertPool, alpn []string, goFingerprint bool, budget time.Duration) (net.Conn, error) {
 	cfg := &utls.Config{ServerName: host}
+	if roots != nil {
+		cfg.RootCAs = roots
+	}
 	var echPub []string
 
 	echRejected := false

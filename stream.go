@@ -45,10 +45,10 @@ func dialStream(cfg *Config, dev *tun.Device, cryptoOn, lead bool) (*packet.TCP,
 	var err error
 	if cfg.cdnIsHTTP() {
 		b, err = packet.DialHTTPC(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath,
-			cfg.WSTLS, echList, cfg.cdnMode(), cfg.WSPortRoll)
+			cfg.WSTLS, echList, []byte(cfg.WSCA), cfg.cdnMode(), cfg.WSPortRoll)
 	} else {
 		b, err = packet.DialWS(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath,
-			cfg.WSTLS, echList, cfg.WSPortRoll)
+			cfg.WSTLS, echList, []byte(cfg.WSCA), cfg.WSPortRoll)
 	}
 	return b, fmt.Sprintf("dialing (core/%s%s%s port_roll=%t) %s", carrier, obfsTag, wsTLSTag(cfg.WSTLS, len(echList) > 0),
 		cfg.WSPortRoll, cfg.Peer), err

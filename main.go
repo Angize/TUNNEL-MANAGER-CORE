@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -166,16 +167,27 @@ func main() {
 	case "ws":
 		switch cfg.Role {
 		case "server":
+			var srvTLS *tls.Config
+			if srvTLS, err = packet.ServerTLS(cfg.SrvCert, cfg.SrvKey, cfg.SrvECHKey, cfg.SrvECHConf); err != nil {
+				break
+			}
+			tlsTag := ""
+			if srvTLS != nil {
+				tlsTag = " +tls"
+				if len(srvTLS.EncryptedClientHelloKeys) > 0 {
+					tlsTag = " +tls+ech"
+				}
+			}
 			if cfg.cdnIsHTTP() {
-				b, err = packet.ListenHTTPC(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath, devs[1:]...)
+				b, err = packet.ListenHTTPC(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath, srvTLS, devs[1:]...)
 				if err == nil {
-					log.Printf("tnl-core: listening (core/http%s) on %s", obfsTag, cfg.Listen)
+					log.Printf("tnl-core: listening (core/http%s%s) on %s", obfsTag, tlsTag, cfg.Listen)
 				}
 				break
 			}
-			b, err = packet.ListenWS(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath, devs[1:]...)
+			b, err = packet.ListenWS(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath, srvTLS, devs[1:]...)
 			if err == nil {
-				log.Printf("tnl-core: listening (core/ws%s) on %s", obfsTag, cfg.Listen)
+				log.Printf("tnl-core: listening (core/ws%s%s) on %s", obfsTag, tlsTag, cfg.Listen)
 			}
 		case "client":
 			var desc string

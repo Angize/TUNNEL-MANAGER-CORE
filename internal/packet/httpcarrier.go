@@ -513,7 +513,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 				return nil, err
 			}
 
-			uc, err := uEdgeHandshake(b.fragWrap(c, host, ech), host, ech, alpn, h2, budget)
+			uc, err := uEdgeHandshake(b.fragWrap(c, host, ech), host, ech, b.wsRoots, alpn, h2, budget)
 			if err != nil {
 				c.Close()
 				return nil, stageErr{stageTLS, err}
