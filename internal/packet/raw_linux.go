@@ -139,7 +139,7 @@ func (r *Raw) SetDesync(on bool, ttl, count int, mode string) {
 	}
 
 	if d.usesLowTTL() {
-		fd, err := openHdrincl(r.proto)
+		fd, err := openHdrincl(r.proto, r.needsSendMark())
 		if err != nil {
 			if d.mode == "both" {
 				log.Printf("raw: low-TTL decoys disabled (cannot open raw socket: %v) — the bad-checksum decoys still fire", err)
@@ -632,7 +632,7 @@ func spoilL4Sum(l4 []byte, proto int) {
 
 const ethPIP = 0x0800
 
-func openHdrincl(proto int) (int, error) {
+func openHdrincl(proto int, mark bool) (int, error) {
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, proto)
 	if err != nil {
 		return -1, err
@@ -640,6 +640,11 @@ func openHdrincl(proto int) (int, error) {
 	if err := syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1); err != nil {
 		syscall.Close(fd)
 		return -1, err
+	}
+	if mark {
+		if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_MARK, rawSendMark); err != nil {
+			log.Printf("raw: SO_MARK could not be set on the low-TTL decoy socket (%v) — the anti-leak rule drops unmarked frames, so those decoys will not reach the peer", err)
+		}
 	}
 	applyFdSndBuf(fd, wantSockBuf(), "sock_buf")
 	return fd, nil
@@ -698,6 +703,12 @@ func rawDropMatches(l rawLeak) [][]string {
 			"-m", "mark", "!", "--mark", fmt.Sprintf("%#x", rawSendMark)}}
 	case "udp":
 		return [][]string{{"-d", d, "-p", "icmp", "--icmp-type", "port-unreachable"}}
+	case "sctp":
+		if !l.marked {
+			return nil
+		}
+		return [][]string{{"-d", d, "-p", "sctp",
+			"-m", "mark", "!", "--mark", fmt.Sprintf("%#x", rawSendMark)}}
 	case "tcp":
 		side, specs := "--dport", l.heardFrom()
 		if !l.isClient {
@@ -909,7 +920,7 @@ func (r *Raw) tunName() string {
 
 func (r *Raw) markSendPath() bool {
 	if err := setSendMark(r.conn); err != nil {
-		log.Printf("raw: SO_MARK could not be set (%v) — the icmp anti-leak rule is OFF, so the kernel will keep mirroring our frames back to the peer", err)
+		log.Printf("raw: SO_MARK could not be set (%v) — the %s anti-leak rule is OFF, so the kernel will keep answering our frames to the peer", err, r.profile)
 		return false
 	}
 	for i, q := range r.txq[1:] {
@@ -917,15 +928,25 @@ func (r *Raw) markSendPath() bool {
 			continue
 		}
 		if err := setSendMark(q.own); err != nil {
-			log.Printf("raw: SO_MARK could not be set on send queue %d (%v) — the icmp anti-leak rule is OFF, so the kernel will keep mirroring our frames back to the peer", i+1, err)
+			log.Printf("raw: SO_MARK could not be set on send queue %d (%v) — the %s anti-leak rule is OFF, so the kernel will keep answering our frames to the peer", i+1, err, r.profile)
 			return false
 		}
 	}
 	return true
 }
 
+func (r *Raw) needsSendMark() bool {
+	switch r.profile {
+	case "icmp":
+		return !r.isClient
+	case "sctp":
+		return true
+	}
+	return false
+}
+
 func (r *Raw) wireAntiLeak() {
-	marked := r.profile == "icmp" && !r.isClient && r.markSendPath()
+	marked := r.needsSendMark() && r.markSendPath()
 	r.leak.init(r.closeCh, func(peer net.IP) (func(), bool) {
 		return addRawDrop(rawLeak{peer: peer, profile: r.profile, port: r.port, dports: r.dports,
 			bandLo: r.rotPerm.lo, bandSpan: r.rotPerm.span,
