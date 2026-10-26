@@ -25,6 +25,13 @@ type WSSNI struct {
 	Group string `json:"group"`
 }
 
+type Route struct {
+	Inner   string `json:"inner"`
+	Backend string `json:"backend"`
+	Cert    string `json:"cert"`
+	Key     string `json:"key"`
+}
+
 func (c *Config) cdnIsHTTP() bool { return c.CDNCarrier == "http" || c.CDNCarrier == "grpc" }
 
 func (c *Config) laneCarrier() bool {
@@ -133,6 +140,8 @@ type Config struct {
 	SrvKey     string `json:"srv_key"`
 	SrvECHKey  string `json:"srv_ech_key"`
 	SrvECHConf string `json:"srv_ech_conf"`
+
+	Routes []Route `json:"routes"`
 
 	WSEdgeIPs      []string          `json:"ws_edge_ips"`
 	WSEdgeIPGroups map[string]string `json:"ws_edge_ip_groups"`
@@ -334,8 +343,35 @@ func (c *Config) validate() error {
 		if c.Peer == "" && len(c.PeerIPs) == 0 {
 			return errors.New("client role requires \"peer\" (or a peer_ips rotation pool)")
 		}
+	case "front":
+		if c.Listen == "" {
+			return errors.New("front role requires \"listen\"")
+		}
+		if len(c.Routes) == 0 {
+			return errors.New("front role requires at least one route")
+		}
+		if (c.SrvECHKey == "") != (c.SrvECHConf == "") {
+			return errors.New("srv_ech_key and srv_ech_conf must be set together")
+		}
+		seen := map[string]bool{}
+		for i, r := range c.Routes {
+			if r.Inner == "" {
+				return fmt.Errorf("route %d requires \"inner\" (the hidden name the client sends)", i)
+			}
+			if seen[r.Inner] {
+				return fmt.Errorf("route %d: duplicate inner name %q", i, r.Inner)
+			}
+			seen[r.Inner] = true
+			if err := validatePoolEndpoint("backend", r.Backend, true); err != nil {
+				return fmt.Errorf("route %q: %w", r.Inner, err)
+			}
+			if r.Cert == "" || r.Key == "" {
+				return fmt.Errorf("route %q needs both cert and key", r.Inner)
+			}
+		}
+		return nil
 	default:
-		return errors.New("role must be \"server\" or \"client\"")
+		return errors.New("role must be \"server\", \"client\" or \"front\"")
 	}
 	if c.BindIP != "" && net.ParseIP(c.BindIP) == nil {
 		return errors.New("bind_ip must be a valid IP address")

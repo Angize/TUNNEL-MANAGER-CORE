@@ -87,6 +87,11 @@ func main() {
 		log.Print(note)
 	}
 
+	if cfg.Role == "front" {
+		runFront(cfg)
+		return
+	}
+
 	devs, gsoOn, err := openTUN(tun.OpenN, cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO, cfg.tunQueues())
 	if err != nil {
 		log.Fatalf("tnl-core: tun: %v", err)
@@ -382,4 +387,31 @@ func applySNISplit(b any, transport, mode string, pos, ttl int, logf func(string
 		return
 	}
 	logf("core: WARNING carrier %s ignores sni_split — it sends no TLS ClientHello of its own, so nothing is fragmented", transport)
+}
+
+func runFront(cfg *Config) {
+	routes := make([]packet.FrontRoute, len(cfg.Routes))
+	for i, r := range cfg.Routes {
+		routes[i] = packet.FrontRoute{Inner: r.Inner, Backend: r.Backend, Cert: r.Cert, Key: r.Key}
+	}
+	tlsCfg, backend, err := packet.FrontTLS(routes, cfg.SrvECHKey, cfg.SrvECHConf)
+	if err != nil {
+		log.Fatalf("tnl-core: front: %v", err)
+	}
+	ln, err := tls.Listen("tcp", cfg.Listen, tlsCfg)
+	if err != nil {
+		log.Fatalf("tnl-core: front: listen: %v", err)
+	}
+	defer ln.Close()
+	echTag := ""
+	if len(tlsCfg.EncryptedClientHelloKeys) > 0 {
+		echTag = "+ech"
+	}
+	log.Printf("tnl-core %s: front (tls%s) on %s, %d route(s)", version, echTag, cfg.Listen, len(routes))
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go packet.RunFront(ln, backend)
+	<-sig
+	log.Print("tnl-core: shutting down")
 }
