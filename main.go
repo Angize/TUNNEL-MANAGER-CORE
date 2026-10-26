@@ -398,6 +398,11 @@ func frontRoutes(cfg *Config) []packet.FrontRoute {
 }
 
 func runFront(cfg *Config, cfgPath string) {
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
 	front, tlsCfg, err := packet.NewFront(frontRoutes(cfg), cfg.SrvECHKey, cfg.SrvECHConf)
 	if err != nil {
 		log.Fatalf("tnl-core: front: %v", err)
@@ -415,10 +420,6 @@ func runFront(cfg *Config, cfgPath string) {
 
 	go front.Run(ln)
 
-	hup := make(chan os.Signal, 1)
-	signal.Notify(hup, syscall.SIGHUP)
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	for {
 		select {
 		case <-hup:
@@ -426,6 +427,10 @@ func runFront(cfg *Config, cfgPath string) {
 			if err != nil {
 				log.Printf("tnl-core: front: reload failed, keeping current routes: %v", err)
 				continue
+			}
+			if nc.Listen != cfg.Listen || nc.SrvECHKey != cfg.SrvECHKey || nc.SrvECHConf != cfg.SrvECHConf {
+				log.Printf("tnl-core: front: listen or ECH key changed, restarting to apply it")
+				os.Exit(1)
 			}
 			if err := front.Reload(frontRoutes(nc)); err != nil {
 				log.Printf("tnl-core: front: reload rejected, keeping current routes: %v", err)
