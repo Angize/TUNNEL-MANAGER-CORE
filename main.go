@@ -88,7 +88,7 @@ func main() {
 	}
 
 	if cfg.Role == "front" {
-		runFront(cfg)
+		runFront(cfg, *cfgPath)
 		return
 	}
 
@@ -389,12 +389,16 @@ func applySNISplit(b any, transport, mode string, pos, ttl int, logf func(string
 	logf("core: WARNING carrier %s ignores sni_split — it sends no TLS ClientHello of its own, so nothing is fragmented", transport)
 }
 
-func runFront(cfg *Config) {
+func frontRoutes(cfg *Config) []packet.FrontRoute {
 	routes := make([]packet.FrontRoute, len(cfg.Routes))
 	for i, r := range cfg.Routes {
 		routes[i] = packet.FrontRoute{Inner: r.Inner, Backend: r.Backend, Cert: r.Cert, Key: r.Key}
 	}
-	tlsCfg, backend, err := packet.FrontTLS(routes, cfg.SrvECHKey, cfg.SrvECHConf)
+	return routes
+}
+
+func runFront(cfg *Config, cfgPath string) {
+	front, tlsCfg, err := packet.NewFront(frontRoutes(cfg), cfg.SrvECHKey, cfg.SrvECHConf)
 	if err != nil {
 		log.Fatalf("tnl-core: front: %v", err)
 	}
@@ -407,11 +411,30 @@ func runFront(cfg *Config) {
 	if len(tlsCfg.EncryptedClientHelloKeys) > 0 {
 		echTag = "+ech"
 	}
-	log.Printf("tnl-core %s: front (tls%s) on %s, %d route(s)", version, echTag, cfg.Listen, len(routes))
+	log.Printf("tnl-core %s: front (tls%s) on %s, %d route(s)", version, echTag, cfg.Listen, front.Routes())
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go packet.RunFront(ln, backend)
-	<-sig
-	log.Print("tnl-core: shutting down")
+	go front.Run(ln)
+
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	for {
+		select {
+		case <-hup:
+			nc, err := loadConfig(cfgPath)
+			if err != nil {
+				log.Printf("tnl-core: front: reload failed, keeping current routes: %v", err)
+				continue
+			}
+			if err := front.Reload(frontRoutes(nc)); err != nil {
+				log.Printf("tnl-core: front: reload rejected, keeping current routes: %v", err)
+				continue
+			}
+			log.Printf("tnl-core: front: routes reloaded, now %d route(s)", front.Routes())
+		case <-stop:
+			log.Print("tnl-core: shutting down")
+			return
+		}
+	}
 }

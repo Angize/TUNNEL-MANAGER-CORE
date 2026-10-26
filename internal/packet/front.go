@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,35 +20,44 @@ type FrontRoute struct {
 	Key     string
 }
 
-func FrontTLS(routes []FrontRoute, echKeyHex, echConfB64 string) (*tls.Config, map[string]string, error) {
+type frontTable struct {
+	certByName map[string]*tls.Certificate
+	backend    map[string]string
+	first      *tls.Certificate
+}
+
+type Front struct {
+	table atomic.Pointer[frontTable]
+	ech   []tls.EncryptedClientHelloKey
+}
+
+func buildTable(routes []FrontRoute) (*frontTable, error) {
 	if len(routes) == 0 {
-		return nil, nil, errors.New("front: no routes")
+		return nil, errors.New("front: no routes")
 	}
-	certByName := map[string]*tls.Certificate{}
-	backend := map[string]string{}
-	var first *tls.Certificate
+	t := &frontTable{certByName: map[string]*tls.Certificate{}, backend: map[string]string{}}
 	for _, r := range routes {
 		cert, err := tls.X509KeyPair([]byte(r.Cert), []byte(r.Key))
 		if err != nil {
-			return nil, nil, errors.New("front: bad cert/key for " + r.Inner + ": " + err.Error())
+			return nil, errors.New("front: bad cert/key for " + r.Inner + ": " + err.Error())
 		}
 		c := cert
-		certByName[r.Inner] = &c
-		backend[r.Inner] = r.Backend
-		if first == nil {
-			first = &c
+		t.certByName[r.Inner] = &c
+		t.backend[r.Inner] = r.Backend
+		if t.first == nil {
+			t.first = &c
 		}
 	}
-	cfg := &tls.Config{
-		MinVersion: tls.VersionTLS13,
-		NextProtos: []string{"http/1.1"},
-		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			if c := certByName[chi.ServerName]; c != nil {
-				return c, nil
-			}
-			return first, nil
-		},
+	return t, nil
+}
+
+func NewFront(routes []FrontRoute, echKeyHex, echConfB64 string) (*Front, *tls.Config, error) {
+	t, err := buildTable(routes)
+	if err != nil {
+		return nil, nil, err
 	}
+	f := &Front{}
+	f.table.Store(t)
 	if echKeyHex != "" {
 		key, err := hex.DecodeString(echKeyHex)
 		if err != nil {
@@ -57,26 +67,47 @@ func FrontTLS(routes []FrontRoute, echKeyHex, echConfB64 string) (*tls.Config, m
 		if err != nil {
 			return nil, nil, err
 		}
-		cfg.EncryptedClientHelloKeys = []tls.EncryptedClientHelloKey{{
-			Config:      conf,
-			PrivateKey:  key,
-			SendAsRetry: true,
-		}}
+		f.ech = []tls.EncryptedClientHelloKey{{Config: conf, PrivateKey: key, SendAsRetry: true}}
 	}
-	return cfg, backend, nil
+	cfg := &tls.Config{
+		MinVersion:               tls.VersionTLS13,
+		NextProtos:               []string{"http/1.1"},
+		EncryptedClientHelloKeys: f.ech,
+		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			tb := f.table.Load()
+			if c := tb.certByName[chi.ServerName]; c != nil {
+				return c, nil
+			}
+			return tb.first, nil
+		},
+	}
+	return f, cfg, nil
 }
 
-func RunFront(ln net.Listener, backend map[string]string) {
+func (f *Front) Reload(routes []FrontRoute) error {
+	t, err := buildTable(routes)
+	if err != nil {
+		return err
+	}
+	f.table.Store(t)
+	return nil
+}
+
+func (f *Front) Routes() int {
+	return len(f.table.Load().backend)
+}
+
+func (f *Front) Run(ln net.Listener) {
 	for {
 		raw, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		go frontConn(raw, backend)
+		go f.conn(raw)
 	}
 }
 
-func frontConn(raw net.Conn, backend map[string]string) {
+func (f *Front) conn(raw net.Conn) {
 	defer raw.Close()
 	tc, ok := raw.(*tls.Conn)
 	if !ok {
@@ -87,7 +118,7 @@ func frontConn(raw net.Conn, backend map[string]string) {
 		return
 	}
 	name := tc.ConnectionState().ServerName
-	dst, ok := backend[name]
+	dst, ok := f.table.Load().backend[name]
 	if !ok {
 		return
 	}
