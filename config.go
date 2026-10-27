@@ -351,8 +351,7 @@ func (c *Config) validate() error {
 			return errors.New("front role requires at least one route")
 		}
 		if c.SrvECHKey == "" || c.SrvECHConf == "" {
-			return errors.New("front role requires srv_ech_key and srv_ech_conf: without ECH every inner " +
-				"name travels in the clear and the edge answers probes with a route certificate")
+			return errors.New("front role requires srv_ech_key and srv_ech_conf: without ECH every inner name travels in the clear")
 		}
 		seen := map[string]bool{}
 		for i, r := range c.Routes {

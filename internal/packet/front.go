@@ -20,83 +20,81 @@ type FrontRoute struct {
 	Key     string
 }
 
-type frontTable struct {
-	certByName map[string]*tls.Certificate
-	backend    map[string]string
+type frontRoute struct {
+	cert    tls.Certificate
+	backend string
 }
 
 type Front struct {
-	table atomic.Pointer[frontTable]
-	ech   []tls.EncryptedClientHelloKey
-	gate  chan struct{}
+	routes atomic.Pointer[map[string]*frontRoute]
+	tls    *tls.Config
+	gate   chan struct{}
 }
 
 const (
 	maxFrontHandshakes = 256
-	frontHandshakeWait = 15 * time.Second
 	frontBackendWait   = 8 * time.Second
 )
 
-func buildTable(routes []FrontRoute) (*frontTable, error) {
+func buildRoutes(routes []FrontRoute) (map[string]*frontRoute, error) {
 	if len(routes) == 0 {
 		return nil, errors.New("front: no routes")
 	}
-	t := &frontTable{certByName: map[string]*tls.Certificate{}, backend: map[string]string{}}
+	m := make(map[string]*frontRoute, len(routes))
 	for _, r := range routes {
 		cert, err := tls.X509KeyPair([]byte(r.Cert), []byte(r.Key))
 		if err != nil {
 			return nil, errors.New("front: bad cert/key for " + r.Inner + ": " + err.Error())
 		}
-		c := cert
-		t.certByName[r.Inner] = &c
-		t.backend[r.Inner] = r.Backend
+		m[r.Inner] = &frontRoute{cert: cert, backend: r.Backend}
 	}
-	return t, nil
+	return m, nil
 }
 
-func NewFront(routes []FrontRoute, echKeyHex, echConfB64 string) (*Front, *tls.Config, error) {
-	t, err := buildTable(routes)
+func NewFront(routes []FrontRoute, echKeyHex, echConfB64 string) (*Front, error) {
+	m, err := buildRoutes(routes)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
+	}
+	key, err := hex.DecodeString(echKeyHex)
+	if err != nil {
+		return nil, err
+	}
+	conf, err := base64.StdEncoding.DecodeString(echConfB64)
+	if err != nil {
+		return nil, err
 	}
 	f := &Front{gate: make(chan struct{}, maxFrontHandshakes)}
-	f.table.Store(t)
-	if echKeyHex != "" {
-		key, err := hex.DecodeString(echKeyHex)
-		if err != nil {
-			return nil, nil, err
-		}
-		conf, err := base64.StdEncoding.DecodeString(echConfB64)
-		if err != nil {
-			return nil, nil, err
-		}
-		f.ech = []tls.EncryptedClientHelloKey{{Config: conf, PrivateKey: key}}
-	}
-	cfg := &tls.Config{
+	f.routes.Store(&m)
+	f.tls = &tls.Config{
 		MinVersion:               tls.VersionTLS13,
 		NextProtos:               []string{"http/1.1"},
-		EncryptedClientHelloKeys: f.ech,
+		EncryptedClientHelloKeys: []tls.EncryptedClientHelloKey{{Config: conf, PrivateKey: key}},
 		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
-			if c := f.table.Load().certByName[chi.ServerName]; c != nil {
-				return c, nil
+			if r := f.route(chi.ServerName); r != nil {
+				return &r.cert, nil
 			}
 			return nil, errors.New("front: no route for " + chi.ServerName)
 		},
 	}
-	return f, cfg, nil
+	return f, nil
+}
+
+func (f *Front) route(name string) *frontRoute {
+	return (*f.routes.Load())[name]
 }
 
 func (f *Front) Reload(routes []FrontRoute) error {
-	t, err := buildTable(routes)
+	m, err := buildRoutes(routes)
 	if err != nil {
 		return err
 	}
-	f.table.Store(t)
+	f.routes.Store(&m)
 	return nil
 }
 
 func (f *Front) Routes() int {
-	return len(f.table.Load().backend)
+	return len(*f.routes.Load())
 }
 
 func (f *Front) Run(ln net.Listener) {
@@ -128,37 +126,23 @@ func (f *Front) Run(ln net.Listener) {
 
 func (f *Front) conn(raw net.Conn) {
 	defer raw.Close()
-	done := false
-	release := func() {
-		if !done {
-			done = true
-			<-f.gate
-		}
-	}
-	defer release()
-	tc, ok := raw.(*tls.Conn)
-	if !ok {
-		return
-	}
-	tc.SetDeadline(time.Now().Add(frontHandshakeWait))
-	if err := tc.Handshake(); err != nil {
+	tc := tls.Server(raw, f.tls)
+	tc.SetDeadline(time.Now().Add(handshakeTimeout))
+	err := tc.Handshake()
+	<-f.gate
+	if err != nil {
 		return
 	}
 	st := tc.ConnectionState()
-	if len(f.ech) > 0 && !st.ECHAccepted {
+	r := f.route(st.ServerName)
+	if !st.ECHAccepted || r == nil {
 		return
 	}
-	name := st.ServerName
-	dst, ok := f.table.Load().backend[name]
-	if !ok {
-		return
-	}
-	up, err := net.DialTimeout("tcp", dst, frontBackendWait)
+	up, err := net.DialTimeout("tcp", r.backend, frontBackendWait)
 	if err != nil {
-		log.Printf("core/front: %s -> %s dial failed: %v", name, dst, err)
+		log.Printf("core/front: %s -> %s dial failed: %v", st.ServerName, r.backend, err)
 		return
 	}
-	release()
 	defer up.Close()
 	tc.SetDeadline(time.Time{})
 	pipe(tc, up)

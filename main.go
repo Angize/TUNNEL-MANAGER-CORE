@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -60,6 +61,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("tnl-core: config: %v", err)
 	}
+	if cfg.Role == "front" {
+		runFront(cfg, *cfgPath)
+		return
+	}
 
 	if t := cfg.Tuning; t != nil {
 		packet.ApplyTuning(tuningFrom(t))
@@ -85,11 +90,6 @@ func main() {
 	if note := portTriesNote(cfg.Transport, cfg.RawSportRandom, cfg.Transport == "ws" && cfg.Role == "client" && !cfg.WSPortRoll,
 		cfg.PortTries); note != "" {
 		log.Print(note)
-	}
-
-	if cfg.Role == "front" {
-		runFront(cfg, *cfgPath)
-		return
 	}
 
 	devs, gsoOn, err := openTUN(tun.OpenN, cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO, cfg.tunQueues())
@@ -403,20 +403,16 @@ func runFront(cfg *Config, cfgPath string) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
-	front, tlsCfg, err := packet.NewFront(frontRoutes(cfg), cfg.SrvECHKey, cfg.SrvECHConf)
+	front, err := packet.NewFront(frontRoutes(cfg), cfg.SrvECHKey, cfg.SrvECHConf)
 	if err != nil {
 		log.Fatalf("tnl-core: front: %v", err)
 	}
-	ln, err := tls.Listen("tcp", cfg.Listen, tlsCfg)
+	ln, err := net.Listen("tcp", cfg.Listen)
 	if err != nil {
 		log.Fatalf("tnl-core: front: listen: %v", err)
 	}
 	defer ln.Close()
-	echTag := ""
-	if len(tlsCfg.EncryptedClientHelloKeys) > 0 {
-		echTag = "+ech"
-	}
-	log.Printf("tnl-core %s: front (tls%s) on %s, %d route(s)", version, echTag, cfg.Listen, front.Routes())
+	log.Printf("tnl-core %s: front (tls+ech) on %s, %d route(s)", version, cfg.Listen, front.Routes())
 
 	go front.Run(ln)
 
@@ -424,15 +420,13 @@ func runFront(cfg *Config, cfgPath string) {
 		select {
 		case <-hup:
 			nc, err := loadConfig(cfgPath)
+			if err == nil && (nc.Listen != cfg.Listen || nc.SrvECHKey != cfg.SrvECHKey || nc.SrvECHConf != cfg.SrvECHConf) {
+				err = errors.New("listen or ECH key changed, which only a restart applies")
+			}
+			if err == nil {
+				err = front.Reload(frontRoutes(nc))
+			}
 			if err != nil {
-				log.Printf("tnl-core: front: reload failed, keeping current routes: %v", err)
-				continue
-			}
-			if nc.Listen != cfg.Listen || nc.SrvECHKey != cfg.SrvECHKey || nc.SrvECHConf != cfg.SrvECHConf {
-				log.Printf("tnl-core: front: listen or ECH key changed, restarting to apply it")
-				os.Exit(1)
-			}
-			if err := front.Reload(frontRoutes(nc)); err != nil {
 				log.Printf("tnl-core: front: reload rejected, keeping current routes: %v", err)
 				continue
 			}
