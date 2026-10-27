@@ -32,7 +32,7 @@ func dialStream(cfg *Config, dev *tun.Device, cryptoOn, lead bool) (*packet.TCP,
 			rotate = 0
 		}
 		b, err := packet.DialEdgePool(dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath,
-			cfg.WSEdgeIPs, cfg.WSEdgeIPGroups, snis, rotate, cfg.cdnIsHTTP(), cfg.cdnMode(), cfg.WSPortRoll)
+			cfg.WSEdgeIPs, cfg.WSEdgeIPGroups, snis, rotate, cfg.cdnIsHTTP(), cfg.cdnMode(), cfg.WSPortRoll, []byte(cfg.WSCA))
 		return b, fmt.Sprintf("dialing (core/%s%s%s pool: %dIP×%dSNI rotate=%ds port_roll=%t)",
 			carrier, obfsTag, wsTLSTag(cfg.WSTLS, ech), len(cfg.WSEdgeIPs), len(cfg.WSEdgeSNIs), cfg.WSRotateSecs,
 			cfg.WSPortRoll), err
