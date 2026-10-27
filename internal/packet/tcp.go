@@ -684,9 +684,13 @@ const activeSep = " · "
 
 func activeLabel(ip, host string) string { return ip + activeSep + host }
 
-func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, ips []string, ipGroups map[string]string, snis []EdgeSNI, rotate time.Duration, httpc bool, httpcMode string, portRoll bool) (*TCP, error) {
+func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, ips []string, ipGroups map[string]string, snis []EdgeSNI, rotate time.Duration, httpc bool, httpcMode string, portRoll bool, wsCA []byte) (*TCP, error) {
 	if len(ips) == 0 || len(snis) == 0 {
 		return nil, errors.New("ws pool: need at least one IP and one SNI")
+	}
+	roots, err := caPool(wsCA)
+	if err != nil {
+		return nil, err
 	}
 	hosts := make([]string, 0, len(snis))
 	meta := make(map[string]wsSNIEntry, len(snis))
@@ -699,7 +703,7 @@ func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath stri
 		meta[s.Host] = wsSNIEntry{host: s.Host, ech: ech, group: s.Group}
 	}
 	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
-		ws: true, wsPath: wsPath, wsTLS: true, httpc: httpc, httpcMode: httpcMode, sniMeta: meta,
+		ws: true, wsPath: wsPath, wsTLS: true, wsRoots: roots, httpc: httpc, httpcMode: httpcMode, sniMeta: meta,
 		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 		portRollOff: !portRoll}
 	b.pp = NewPeerPool(ips, rotate)
