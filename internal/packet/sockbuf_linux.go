@@ -7,6 +7,9 @@ import (
 	"log"
 	"sync"
 	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -21,6 +24,12 @@ func applyRawConnBuf(rc syscall.RawConn, n int, knob string) {
 		return
 	}
 	_ = rc.Control(func(fd uintptr) { applyFdBuf(int(fd), n, knob) })
+}
+
+func applyUserTimeout(rc syscall.RawConn, d time.Duration) {
+	_ = rc.Control(func(fd uintptr) {
+		_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT, int(d.Milliseconds()))
+	})
 }
 
 func applyFdBuf(fd, n int, knob string) {

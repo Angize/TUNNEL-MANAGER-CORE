@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -403,11 +402,12 @@ func runFront(cfg *Config, cfgPath string) {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
+	packet.SetTCPBuf(cfg.TCPBuf)
 	front, err := packet.NewFront(frontRoutes(cfg), cfg.SrvECHKey, cfg.SrvECHConf)
 	if err != nil {
 		log.Fatalf("tnl-core: front: %v", err)
 	}
-	ln, err := net.Listen("tcp", cfg.Listen)
+	ln, err := packet.ListenFront(cfg.Listen)
 	if err != nil {
 		log.Fatalf("tnl-core: front: listen: %v", err)
 	}

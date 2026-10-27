@@ -1,15 +1,15 @@
 package packet
 
 import (
+	"context"
 	"crypto/tls"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"io"
 	"log"
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -56,11 +56,7 @@ func NewFront(routes []FrontRoute, echKeyHex, echConfB64 string) (*Front, error)
 	if err != nil {
 		return nil, err
 	}
-	key, err := hex.DecodeString(echKeyHex)
-	if err != nil {
-		return nil, err
-	}
-	conf, err := base64.StdEncoding.DecodeString(echConfB64)
+	ech, err := echKey(echKeyHex, echConfB64)
 	if err != nil {
 		return nil, err
 	}
@@ -68,8 +64,8 @@ func NewFront(routes []FrontRoute, echKeyHex, echConfB64 string) (*Front, error)
 	f.routes.Store(&m)
 	f.tls = &tls.Config{
 		MinVersion:               tls.VersionTLS13,
-		NextProtos:               []string{"http/1.1"},
-		EncryptedClientHelloKeys: []tls.EncryptedClientHelloKey{{Config: conf, PrivateKey: key}},
+		NextProtos:               []string{"h2", "http/1.1"},
+		EncryptedClientHelloKeys: []tls.EncryptedClientHelloKey{ech},
 		GetCertificate: func(chi *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			if r := f.route(chi.ServerName); r != nil {
 				return &r.cert, nil
@@ -78,6 +74,17 @@ func NewFront(routes []FrontRoute, echKeyHex, echConfB64 string) (*Front, error)
 		},
 	}
 	return f, nil
+}
+
+func frontControl(network, address string, rc syscall.RawConn) error {
+	applyUserTimeout(rc, connIdle)
+	return tcpBufControl(network, address, rc)
+}
+
+func ListenFront(addr string) (net.Listener, error) {
+	lc := net.ListenConfig{Control: frontControl}
+	lc.SetMultipathTCP(false)
+	return lc.Listen(context.Background(), "tcp", addr)
 }
 
 func (f *Front) route(name string) *frontRoute {
@@ -138,7 +145,7 @@ func (f *Front) conn(raw net.Conn) {
 	if !st.ECHAccepted || r == nil {
 		return
 	}
-	up, err := net.DialTimeout("tcp", r.backend, frontBackendWait)
+	up, err := (&net.Dialer{Timeout: frontBackendWait, Control: frontControl}).Dial("tcp", r.backend)
 	if err != nil {
 		log.Printf("core/front: %s -> %s dial failed: %v", st.ServerName, r.backend, err)
 		return

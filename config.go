@@ -211,7 +211,7 @@ func (c *Config) applyDefaults() {
 		c.Workers = maxWorkers
 	}
 	c.SockBuf = sizedBuf(c.SockBuf, sockBufCarrier(c.Transport))
-	c.TCPBuf = sizedBuf(c.TCPBuf, tcpBufCarrier(c.Transport))
+	c.TCPBuf = sizedBuf(c.TCPBuf, tcpBufCarrier(c.Transport) || c.Role == "front")
 	if c.Crypto.Cipher == "" {
 		c.Crypto.Cipher = "aes-256-gcm"
 	}
