@@ -7,6 +7,9 @@ import (
 	"log"
 	"sync"
 	"syscall"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -21,6 +24,19 @@ func applyRawConnBuf(rc syscall.RawConn, n int, knob string) {
 		return
 	}
 	_ = rc.Control(func(fd uintptr) { applyFdBuf(int(fd), n, knob) })
+}
+
+var userTimeoutWarned sync.Once
+
+func applyUserTimeout(rc syscall.RawConn, d time.Duration) {
+	_ = rc.Control(func(fd uintptr) {
+		if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT, int(d.Milliseconds())); err != nil {
+			userTimeoutWarned.Do(func() {
+				log.Printf("core: WARNING TCP_USER_TIMEOUT was refused (%v): a peer that vanishes mid-transfer "+
+					"keeps its socket until tcp_retries2 gives up", err)
+			})
+		}
+	})
 }
 
 func applyFdBuf(fd, n int, knob string) {

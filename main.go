@@ -60,6 +60,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("tnl-core: config: %v", err)
 	}
+	if cfg.Role == "front" {
+		runFront(cfg, *cfgPath)
+		return
+	}
 
 	if t := cfg.Tuning; t != nil {
 		packet.ApplyTuning(tuningFrom(t))
@@ -382,4 +386,54 @@ func applySNISplit(b any, transport, mode string, pos, ttl int, logf func(string
 		return
 	}
 	logf("core: WARNING carrier %s ignores sni_split — it sends no TLS ClientHello of its own, so nothing is fragmented", transport)
+}
+
+func frontRoutes(cfg *Config) []packet.FrontRoute {
+	routes := make([]packet.FrontRoute, len(cfg.Routes))
+	for i, r := range cfg.Routes {
+		routes[i] = packet.FrontRoute{Inner: r.Inner, Backend: r.Backend, Cert: r.Cert, Key: r.Key}
+	}
+	return routes
+}
+
+func runFront(cfg *Config, cfgPath string) {
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	packet.SetTCPBuf(cfg.TCPBuf)
+	front, err := packet.NewFront(frontRoutes(cfg), cfg.SrvECHKey, cfg.SrvECHConf)
+	if err != nil {
+		log.Fatalf("tnl-core: front: %v", err)
+	}
+	ln, err := packet.ListenFront(cfg.Listen)
+	if err != nil {
+		log.Fatalf("tnl-core: front: listen: %v", err)
+	}
+	defer ln.Close()
+	log.Printf("tnl-core %s: front (tls+ech) on %s, %d route(s)", version, cfg.Listen, front.Routes())
+
+	go front.Run(ln)
+
+	for {
+		select {
+		case <-hup:
+			nc, err := loadConfig(cfgPath)
+			if err == nil && (nc.Listen != cfg.Listen || nc.SrvECHKey != cfg.SrvECHKey || nc.SrvECHConf != cfg.SrvECHConf) {
+				err = errors.New("listen or ECH key changed, which only a restart applies")
+			}
+			if err == nil {
+				err = front.Reload(frontRoutes(nc))
+			}
+			if err != nil {
+				log.Printf("tnl-core: front: reload rejected, keeping current routes: %v", err)
+				continue
+			}
+			log.Printf("tnl-core: front: routes reloaded, now %d route(s)", front.Routes())
+		case <-stop:
+			log.Print("tnl-core: shutting down")
+			return
+		}
+	}
 }

@@ -32,19 +32,24 @@ func ServerTLS(certPEM, keyPEM, echKeyHex, echConfB64 string) (*tls.Config, erro
 		NextProtos:   []string{"http/1.1"},
 	}
 	if echKeyHex != "" {
-		key, err := hex.DecodeString(echKeyHex)
+		k, err := echKey(echKeyHex, echConfB64)
 		if err != nil {
 			return nil, err
 		}
-		conf, err := base64.StdEncoding.DecodeString(echConfB64)
-		if err != nil {
-			return nil, err
-		}
-		cfg.EncryptedClientHelloKeys = []tls.EncryptedClientHelloKey{{
-			Config:      conf,
-			PrivateKey:  key,
-			SendAsRetry: true,
-		}}
+		k.SendAsRetry = true
+		cfg.EncryptedClientHelloKeys = []tls.EncryptedClientHelloKey{k}
 	}
 	return cfg, nil
+}
+
+func echKey(keyHex, confB64 string) (tls.EncryptedClientHelloKey, error) {
+	key, err := hex.DecodeString(keyHex)
+	if err != nil {
+		return tls.EncryptedClientHelloKey{}, err
+	}
+	conf, err := base64.StdEncoding.DecodeString(confB64)
+	if err != nil {
+		return tls.EncryptedClientHelloKey{}, err
+	}
+	return tls.EncryptedClientHelloKey{Config: conf, PrivateKey: key}, nil
 }
