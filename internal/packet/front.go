@@ -37,9 +37,6 @@ const (
 )
 
 func buildRoutes(routes []FrontRoute) (map[string]*frontRoute, error) {
-	if len(routes) == 0 {
-		return nil, errors.New("front: no routes")
-	}
 	m := make(map[string]*frontRoute, len(routes))
 	for _, r := range routes {
 		cert, err := tls.X509KeyPair([]byte(r.Cert), []byte(r.Key))
