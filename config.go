@@ -417,8 +417,11 @@ func (c *Config) validate() error {
 		}
 		up, down := c.rawPair()
 		ported := strings.Join(packet.RawPortedProfiles(), "|")
-		forgesPorts := packet.RawProfileHasPorts(up) || packet.RawProfileHasPorts(down)
+		upPorts := packet.RawProfileHasPorts(up)
+		forgesPorts := upPorts || packet.RawProfileHasPorts(down)
 		noPorts := " (raw_profile \"" + up + "\" and raw_profile_down \"" + down + "\" forge no ports)"
+		noUpPorts := ", so raw_profile (what the client sends) must be one of " + ported +
+			" (raw_profile \"" + up + "\" forges no ports)"
 
 		if c.RawProto != 0 {
 			if up != "bare" && down != "bare" {
@@ -441,8 +444,8 @@ func (c *Config) validate() error {
 			}
 		}
 
-		if c.RawSportRandom && !forgesPorts {
-			return errors.New("raw_sport_random rolls the forged SOURCE port of the " + ported + " profiles only" + noPorts)
+		if c.RawSportRandom && !upPorts {
+			return errors.New("raw_sport_random re-draws the client's forged source port" + noUpPorts)
 		}
 		if c.RawSport != 0 {
 			if !forgesPorts {
@@ -472,6 +475,9 @@ func (c *Config) validate() error {
 		if c.RawDports != 0 {
 			if c.RawSportRotate == 0 {
 				return errors.New("raw_dports spreads the forged DESTINATION port so each source port is worth that many flow-table buckets, which only means something while raw_sport_rotate is cycling the source; set raw_sport_rotate too")
+			}
+			if !upPorts {
+				return errors.New("raw_dports spreads the client's forged destination port" + noUpPorts)
 			}
 			if c.RawDports < 1 || c.RawDports > packet.MaxDports {
 				return fmt.Errorf("raw_dports must be in 1..%d (1 = the single configured raw_port; N = that port plus N-1 more drawn from the service-port pool)", packet.MaxDports)

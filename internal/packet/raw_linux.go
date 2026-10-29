@@ -262,7 +262,6 @@ func (r *Raw) openSendSocket() error {
 		return fmt.Errorf("raw: send socket for %s: %w", r.profile, err)
 	}
 	r.out, r.outBatch = c, batchConn(c)
-	r.txq[0].batch = r.outBatch
 	return nil
 }
 
@@ -385,7 +384,7 @@ func (r *Raw) tsNow() uint32 {
 }
 
 func (r *Raw) echoTS() uint32 {
-	if r.rxProto == protoTCP {
+	if r.proto != protoTCP || r.rxProto == protoTCP {
 		return r.tsEcr.Load()
 	}
 	return r.tsPeer.Load() + uint32(time.Since(time.Unix(0, r.tsStart.Load()))/time.Millisecond)
@@ -917,30 +916,28 @@ func (r *Raw) armWalk() {
 }
 
 func (r *Raw) setSportRotate(rot SportRotation) {
-	tx, rx := RawProfileHasPorts(r.profile), RawProfileHasPorts(r.rxProfile)
-	if rot.Every <= 0 || !(tx || rx) {
+	if rot.Every <= 0 {
 		return
 	}
-	if tx {
+	if RawProfileHasPorts(r.profile) {
 		r.sportEvery = rot.Every
 	}
-	r.rxMove = r.rxMove || rx
+	r.rxMove = r.rxMove || RawProfileHasPorts(r.rxProfile)
 	r.armWalk()
 	r.dports = dportSet(r.port, rot.Dports, r.psk)
 }
 
 func (r *Raw) setSportMode(on bool, fix int) {
-	tx, rx := RawProfileHasPorts(r.profile), RawProfileHasPorts(r.rxProfile)
-	r.sportRandom = on && tx
-	r.rxMove = r.rxMove || (on && rx)
-	if (tx || rx) && fix > 0 && fix <= 65535 && !on {
+	r.sportRandom = on && RawProfileHasPorts(r.profile)
+	r.rxMove = r.rxMove || (on && RawProfileHasPorts(r.rxProfile))
+	if fix > 0 {
 		r.cliPort.Store(uint32(fix))
 	}
-	if !on || !(tx || rx) {
+	if !on {
 		return
 	}
 	r.armWalk()
-	if r.isClient && r.sportRandom {
+	if r.isClient {
 		r.cliPort.Store(uint32(r.rotPerm.at(r.portStepNow())))
 	}
 }
