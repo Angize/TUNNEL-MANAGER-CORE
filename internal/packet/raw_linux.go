@@ -91,6 +91,7 @@ type Raw struct {
 
 	sportEvery int
 	idRot      bool
+	mirrors    bool
 	rotIdx     uint32
 	rotPerm    rotPerm
 	cfgBandLo  int
@@ -227,7 +228,7 @@ func newRaw(conn *net.IPConn, dev *tun.Device, obfs bool, psk, cipher, profile s
 	r := &Raw{
 		conn: conn, batch: batchConn(conn), dev: dev, obfs: obfs, ping: pingEvery,
 		psk: psk, cipher: cipher, profile: profile, isClient: isClient, fakeFd: -1,
-		framing: rawProfiles[profile], hdr: rawHeaderLen(profile),
+		framing: rawProfiles[profile], hdr: rawHeaderLen(profile), mirrors: RawProfileHasPorts(profile),
 		icmpID: icmpID, closeCh: make(chan struct{}), wake: make(chan struct{}, 1), spi: spi,
 	}
 
@@ -872,6 +873,7 @@ func (r *Raw) setSportRotate(rot SportRotation) {
 	}
 	r.sportEvery = rot.Every
 	r.idRot = idRot
+	r.mirrors = r.mirrors || idRot
 	r.armWalk()
 	r.dports = dportSet(r.port, rot.Dports, r.psk)
 }
@@ -891,7 +893,7 @@ func (r *Raw) setSportMode(on bool, fix int) {
 }
 
 func (r *Raw) learnClientPort(sport uint16) {
-	if r.isClient || sport == 0 || !(r.idRot || RawProfileHasPorts(r.profile)) {
+	if r.isClient || sport == 0 || !r.mirrors {
 		return
 	}
 	if prev := uint16(r.cliPort.Swap(uint32(sport))); prev != 0 && prev != sport && r.sportRandom {
@@ -900,7 +902,7 @@ func (r *Raw) learnClientPort(sport uint16) {
 }
 
 func (r *Raw) replyPort(sport uint16) uint16 {
-	if r.isClient || sport == 0 || !(r.idRot || RawProfileHasPorts(r.profile)) {
+	if r.isClient || sport == 0 || !r.mirrors {
 		return r.cport()
 	}
 	return sport
