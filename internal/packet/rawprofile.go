@@ -70,11 +70,10 @@ var rawHeaderLens = map[string]int{
 }
 
 func rawHeaderLen(profile string, flowRot bool) int {
-	n := rawHeaderLens[profile]
 	if flowRot && rawProfiles[profile] == protoGRE {
-		n += greKeyLen
+		return greKeyedHdrLen
 	}
-	return n
+	return rawHeaderLens[profile]
 }
 
 const (
@@ -86,14 +85,17 @@ const (
 	greProtoIP4  = 0x0800
 	greProtoPPP  = 0x880B
 	greFlagKey   = 0x2000
+	greFlagSeq   = 0x1000
 	greVerPPTP   = 1
-
-	greBaseHdrLen  = 32
-	greKeyLen      = 4
-	greKeyedHdrLen = greBaseHdrLen + greKeyLen
+	pptpHdrLen   = greHeaderLen + 8
+	pppIP4       = 0xFF030021
+	pppHdrLen    = 4
 
 	innerIP4Len  = 20
 	espHeaderLen = 8
+
+	greBaseHdrLen  = greHeaderLen + innerIP4Len + espHeaderLen
+	greKeyedHdrLen = pptpHdrLen + pppHdrLen + innerIP4Len + espHeaderLen
 )
 
 func ipipInnerAddr(spi, which uint32) [4]byte {
@@ -395,12 +397,10 @@ func peerTSVal(tcp []byte) uint32 {
 	return 0
 }
 
-func rawEncap(profile string, hdr int, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte) []byte {
-	framing := rawProfiles[profile]
+func rawEncap(framing, hl int, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte) []byte {
 	if framing == protoBare {
 		return payload
 	}
-	hl := hdr
 	if framing == protoTCP && flags&tcpSyn != 0 {
 		hl = 20 + len(tcpSynOptions(tsval, tsecr))
 	}
@@ -419,11 +419,13 @@ func rawFill(framing int, h []byte, hl int, src, dst net.IP, isClient bool, id, 
 	case protoGRE:
 		off := greHeaderLen
 		if hl == greKeyedHdrLen {
-			binary.BigEndian.PutUint16(h[0:2], greFlagKey|greVerPPTP)
+			binary.BigEndian.PutUint16(h[0:2], greFlagKey|greFlagSeq|greVerPPTP)
 			binary.BigEndian.PutUint16(h[2:4], greProtoPPP)
-			binary.BigEndian.PutUint16(h[greHeaderLen:greHeaderLen+2], uint16(len(h)-hl))
-			binary.BigEndian.PutUint16(h[greHeaderLen+2:greKeyedHdrLen], id)
-			off = greHeaderLen + greKeyLen
+			binary.BigEndian.PutUint16(h[4:6], uint16(len(h)-pptpHdrLen))
+			binary.BigEndian.PutUint16(h[6:8], id)
+			binary.BigEndian.PutUint32(h[8:pptpHdrLen], seq)
+			binary.BigEndian.PutUint32(h[pptpHdrLen:pptpHdrLen+pppHdrLen], pppIP4)
+			off = pptpHdrLen + pppHdrLen
 		} else {
 			binary.BigEndian.PutUint16(h[2:4], greProtoIP4)
 		}
@@ -517,8 +519,7 @@ func tcpOf(pkt []byte, proto int) []byte {
 	return tcp
 }
 
-func rawDecap(profile string, proto, hdr int, pkt []byte) (body []byte, sport uint16, tsval uint32, ok bool) {
-	framing := rawProfiles[profile]
+func rawDecap(framing, proto, hdr int, pkt []byte) (body []byte, sport uint16, tsval uint32, ok bool) {
 	if len(pkt) >= 20 && pkt[0]>>4 == 4 {
 		ihl := int(pkt[0]&0x0f) * 4
 		total := int(binary.BigEndian.Uint16(pkt[2:4]))
@@ -560,7 +561,7 @@ func rawDecap(profile string, proto, hdr int, pkt []byte) (body []byte, sport ui
 		if hdr != greKeyedHdrLen {
 			return b, 0, 0, ok
 		}
-		return b, binary.BigEndian.Uint16(pkt[greHeaderLen+2 : greKeyedHdrLen]), 0, ok
+		return b, binary.BigEndian.Uint16(pkt[6:8]), 0, ok
 	case protoESP, protoAH, protoEtherIP, protoIPComp, protoL2TPv3:
 		b, ok := skip(pkt, hdr)
 		return b, 0, 0, ok

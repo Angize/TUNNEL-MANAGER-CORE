@@ -188,7 +188,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 			dack = r.tcpAck.Load()
 		}
 		fid, fsrv, fcli := r.wireFlow(r.cport())
-		body := rawEncap(r.profile, r.hdr, fakePayload(), src, dst, r.isClient, fid, fsrv, fcli,
+		body := rawEncap(r.framing, r.hdr, fakePayload(), src, dst, r.isClient, fid, fsrv, fcli,
 			dseq, dack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
 		if out == nil {
@@ -274,7 +274,7 @@ func (r *Raw) sendTCPFlags(flags byte, to *net.IPAddr, cport uint16) {
 		seq = r.tcpSeqBase() + r.tcpBytes.Load()
 	}
 	id, srv, cli := r.wireFlow(cport)
-	seg := rawEncap(r.profile, r.hdr, nil, r.srcIP(), to.IP, r.isClient, id, srv, cli,
+	seg := rawEncap(r.framing, r.hdr, nil, r.srcIP(), to.IP, r.isClient, id, srv, cli,
 		seq, r.tcpAck.Load(), r.spi, r.tsNow(), r.tsEcr.Load(), flags)
 	r.writeOut(seg, to)
 }
@@ -542,7 +542,7 @@ func (r *Raw) nextSeq(n int) (seq, ack uint32) {
 func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
 	seq, ack := r.nextSeq(len(body))
 	id, srv, cli := r.wireFlow(cport)
-	return rawEncap(r.profile, r.hdr, body, r.srcIP(), dst, r.isClient, id, srv, cli,
+	return rawEncap(r.framing, r.hdr, body, r.srcIP(), dst, r.isClient, id, srv, cli,
 		seq, ack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 }
 
@@ -1099,7 +1099,7 @@ func (r *Raw) handleRaw(raw []byte, addr *net.IPAddr) {
 	if r.tcpFlow(raw, addr) {
 		return
 	}
-	body, sport, pts, ok := rawDecap(r.profile, r.proto, r.hdr, raw)
+	body, sport, pts, ok := rawDecap(r.framing, r.proto, r.hdr, raw)
 	if !ok {
 		return
 	}
