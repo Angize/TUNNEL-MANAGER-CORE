@@ -90,6 +90,7 @@ type Raw struct {
 	sportRandom bool
 
 	sportEvery int
+	idRot      bool
 	rotIdx     uint32
 	rotPerm    rotPerm
 	cfgBandLo  int
@@ -809,28 +810,26 @@ func (r *Raw) portsAt(w uint64, cport uint16) (uint16, uint16) {
 	return r.dportAt(w), cport
 }
 
-func (r *Raw) flowIDMoves() bool { return r.rotActive() && RawProfileHasFlowID(r.profile) }
-
 func (r *Raw) flowIDAt(w uint64, mirror uint16) uint16 {
-	if !r.flowIDMoves() {
-		return r.icmpID
+	if r.isClient {
+		return r.rotPerm.at(w)
 	}
-	if !r.isClient {
-		if mirror != 0 {
-			return mirror
-		}
-		return r.icmpID
+	if mirror != 0 {
+		return mirror
 	}
-	return r.rotPerm.at(w)
+	return r.icmpID
 }
 
 func (r *Raw) wireFlow(cport uint16) (id, srv, cli uint16) {
 	if !r.portsMove() {
-		return r.flowIDAt(0, cport), r.port, cport
+		return r.icmpID, r.port, cport
 	}
 	w := r.portStep()
+	if r.idRot {
+		return r.flowIDAt(w, cport), r.port, cport
+	}
 	srv, cli = r.portsAt(w, cport)
-	return r.flowIDAt(w, cport), srv, cli
+	return r.icmpID, srv, cli
 }
 
 func (r *Raw) wirePortsNow() (uint16, uint16) {
@@ -845,15 +844,14 @@ func (r *Raw) rotSnapshot() rotStatus {
 		return rotStatus{}
 	}
 	w := r.portStepNow()
-	srv, cli := r.portsAt(w, r.cport())
-	sport, dport := rawPorts(r.isClient, srv, cli)
 	st := rotStatus{Dports: len(r.dports), Every: r.sportEvery,
 		Lo: uint16(r.rotPerm.lo), Hi: uint16(r.rotPerm.lo + r.rotPerm.span - 1), Drawn: w - uint64(r.rotIdx) + 1}
-	if r.flowIDMoves() {
+	if r.idRot {
 		st.ID = r.flowIDAt(w, r.cport())
 		return st
 	}
-	st.Sport, st.Dport = sport, dport
+	srv, cli := r.portsAt(w, r.cport())
+	st.Sport, st.Dport = rawPorts(r.isClient, srv, cli)
 	return st
 }
 
@@ -868,10 +866,12 @@ func (r *Raw) armWalk() {
 }
 
 func (r *Raw) setSportRotate(rot SportRotation) {
-	if rot.Every <= 0 || !(RawProfileHasPorts(r.profile) || RawProfileHasFlowID(r.profile)) {
+	idRot := RawProfileHasFlowID(r.profile)
+	if rot.Every <= 0 || !(idRot || RawProfileHasPorts(r.profile)) {
 		return
 	}
 	r.sportEvery = rot.Every
+	r.idRot = idRot
 	r.armWalk()
 	r.dports = dportSet(r.port, rot.Dports, r.psk)
 }
@@ -891,7 +891,7 @@ func (r *Raw) setSportMode(on bool, fix int) {
 }
 
 func (r *Raw) learnClientPort(sport uint16) {
-	if r.isClient || sport == 0 || !(RawProfileHasPorts(r.profile) || r.flowIDMoves()) {
+	if r.isClient || sport == 0 || !(r.idRot || RawProfileHasPorts(r.profile)) {
 		return
 	}
 	if prev := uint16(r.cliPort.Swap(uint32(sport))); prev != 0 && prev != sport && r.sportRandom {
@@ -900,7 +900,7 @@ func (r *Raw) learnClientPort(sport uint16) {
 }
 
 func (r *Raw) replyPort(sport uint16) uint16 {
-	if r.isClient || sport == 0 || !(RawProfileHasPorts(r.profile) || r.flowIDMoves()) {
+	if r.isClient || sport == 0 || !(r.idRot || RawProfileHasPorts(r.profile)) {
 		return r.cport()
 	}
 	return sport
