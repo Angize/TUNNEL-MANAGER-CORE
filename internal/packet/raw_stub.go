@@ -15,10 +15,10 @@ var errRawUnsupported = errors.New("raw transport requires Linux (raw IPv4 socke
 func (r *Raw) Run() error   { return errRawUnsupported }
 func (r *Raw) Close() error { return nil }
 
-func DialRaw(string, *tun.Device, bool, string, string, string, bool, int, int, int, int, int, bool, SportRotation, ...*tun.Device) (*Raw, error) {
+func DialRaw(string, *tun.Device, bool, string, string, string, string, bool, int, int, int, int, int, bool, SportRotation, ...*tun.Device) (*Raw, error) {
 	return nil, errRawUnsupported
 }
 
-func ListenRaw(string, *tun.Device, bool, string, string, string, bool, int, int, int, int, int, bool, SportRotation, ...*tun.Device) (*Raw, error) {
+func ListenRaw(string, *tun.Device, bool, string, string, string, string, bool, int, int, int, int, int, bool, SportRotation, ...*tun.Device) (*Raw, error) {
 	return nil, errRawUnsupported
 }

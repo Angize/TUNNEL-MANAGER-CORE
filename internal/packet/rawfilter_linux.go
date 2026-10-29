@@ -41,7 +41,7 @@ func srcFilter(set map[string]struct{}, portOff uint32, port uint16) []unix.Sock
 }
 
 func (r *Raw) portMatch() (uint32, uint16) {
-	if !RawProfileHasPorts(r.profile) || r.portsMove() {
+	if !RawProfileHasPorts(r.rxProfile) || r.rxMove {
 		return 0, 0
 	}
 	if r.isClient {
