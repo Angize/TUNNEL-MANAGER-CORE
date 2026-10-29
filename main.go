@@ -156,14 +156,20 @@ func main() {
 			}
 		}
 	case "raw":
+		rawEvery := cfg.RawSportRotate
+		if cfg.RawIDRotate != 0 {
+			rawEvery = cfg.RawIDRotate
+		}
+		rawRot := packet.SportRotation{Every: rawEvery,
+			Dports: cfg.RawDports, Lo: cfg.SportLo, Hi: cfg.SportHi}
 		switch cfg.Role {
 		case "server":
-			b, err = packet.ListenRaw(cfg.Listen, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports, Lo: cfg.SportLo, Hi: cfg.SportHi}, devs[1:]...)
+			b, err = packet.ListenRaw(cfg.Listen, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, rawRot, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/raw:%s%s%s) on %s", cfg.RawProfile, obfsTag, fecTag, cfg.Listen)
 			}
 		case "client":
-			b, err = packet.DialRaw(cfg.Peer, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports, Lo: cfg.SportLo, Hi: cfg.SportHi}, devs[1:]...)
+			b, err = packet.DialRaw(cfg.Peer, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, rawRot, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/raw:%s%s%s) %s", cfg.RawProfile, obfsTag, fecTag, cfg.Peer)
 			}

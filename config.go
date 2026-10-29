@@ -78,6 +78,8 @@ type Config struct {
 
 	RawSportRotate int `json:"raw_sport_rotate"`
 
+	RawIDRotate int `json:"raw_id_rotate"`
+
 	RawDports int `json:"raw_dports"`
 
 	SportLo int `json:"sport_lo"`
@@ -434,6 +436,16 @@ func (c *Config) validate() error {
 			}
 			if c.RawSport != 0 || c.RawSportRandom {
 				return errors.New("raw_sport_rotate continuously re-picks the forged source port, so it cannot combine with raw_sport (fixed) or raw_sport_random (rolls once)")
+			}
+		}
+		if c.RawIDRotate != 0 {
+			if !packet.RawProfileHasFlowID(c.RawProfile) {
+				return errors.New("raw_id_rotate cycles the forged flow identity inside the carrier header, so it needs a profile that carries one" +
+					" (raw_profile \"" + c.RawProfile + "\" has no identity field a middlebox keys on; use one of " +
+					strings.Join(packet.RawFlowIDProfiles(), "|") + ")")
+			}
+			if c.RawIDRotate < 1 || c.RawIDRotate > maxSportEvery {
+				return fmt.Errorf("raw_id_rotate must be in 1..%d (0 = off; a new forged flow identity every N packets, N under the middlebox per-tuple budget)", maxSportEvery)
 			}
 		}
 		if c.RawDports != 0 {

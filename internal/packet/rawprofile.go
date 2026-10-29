@@ -266,6 +266,20 @@ func RawProfileHasPorts(profile string) bool {
 	return false
 }
 
+func RawProfileHasFlowID(profile string) bool {
+	return rawProfiles[profile] == protoICMP
+}
+
+func RawFlowIDProfiles() []string {
+	var out []string
+	for _, name := range RawProfileNames() {
+		if RawProfileHasFlowID(name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 func RawPortedProfiles() []string {
 	var out []string
 	for _, name := range RawProfileNames() {
@@ -512,7 +526,13 @@ func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16,
 		}
 		b, ok := skip(pkt, rawHeaderLen(profile))
 		return b, binary.BigEndian.Uint16(pkt[0:2]), 0, ok
-	case protoGRE, protoICMP, protoESP, protoAH, protoEtherIP, protoIPComp, protoL2TPv3:
+	case protoICMP:
+		if len(pkt) < rawHeaderLen(profile) {
+			return nil, 0, 0, false
+		}
+		b, ok := skip(pkt, rawHeaderLen(profile))
+		return b, binary.BigEndian.Uint16(pkt[4:6]), 0, ok
+	case protoGRE, protoESP, protoAH, protoEtherIP, protoIPComp, protoL2TPv3:
 		b, ok := skip(pkt, rawHeaderLen(profile))
 		return b, 0, 0, ok
 	}

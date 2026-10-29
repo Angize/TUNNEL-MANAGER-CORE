@@ -10,6 +10,7 @@ import (
 type rotStatus struct {
 	Sport  uint16 `json:"sport"`
 	Dport  uint16 `json:"dport"`
+	ID     uint16 `json:"id"`
 	Dports int    `json:"dports"`
 	Every  int    `json:"every"`
 	Lo     uint16 `json:"lo"`

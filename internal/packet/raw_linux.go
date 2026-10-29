@@ -186,8 +186,8 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 		if r.proto == protoTCP {
 			dack = r.tcpAck.Load()
 		}
-		fsrv, fcli := r.wirePorts(r.cport())
-		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, fsrv, fcli,
+		fid, fsrv, fcli := r.wireFlow(r.cport())
+		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, fid, fsrv, fcli,
 			dseq, dack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
 		if out == nil {
@@ -272,8 +272,8 @@ func (r *Raw) sendTCPFlags(flags byte, to *net.IPAddr, cport uint16) {
 	if flags&tcpSyn == 0 {
 		seq = r.tcpSeqBase() + r.tcpBytes.Load()
 	}
-	srv, cli := r.wirePorts(cport)
-	seg := rawEncap(r.profile, nil, r.srcIP(), to.IP, r.isClient, r.icmpID, srv, cli,
+	id, srv, cli := r.wireFlow(cport)
+	seg := rawEncap(r.profile, nil, r.srcIP(), to.IP, r.isClient, id, srv, cli,
 		seq, r.tcpAck.Load(), r.spi, r.tsNow(), r.tsEcr.Load(), flags)
 	r.writeOut(seg, to)
 }
@@ -522,8 +522,8 @@ func (r *Raw) dataOut(dst, payload []byte, to net.IP) ([]byte, error) {
 		return nil, err
 	}
 	seq, ack := r.nextSeq(len(pkt) - r.hdr)
-	srv, cli := r.wirePorts(r.cport())
-	rawFill(r.framing, pkt, r.hdr, r.srcIP(), to, r.isClient, r.icmpID, srv, cli,
+	id, srv, cli := r.wireFlow(r.cport())
+	rawFill(r.framing, pkt, r.hdr, r.srcIP(), to, r.isClient, id, srv, cli,
 		seq, ack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 	return pkt, nil
 }
@@ -540,8 +540,8 @@ func (r *Raw) nextSeq(n int) (seq, ack uint32) {
 
 func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
 	seq, ack := r.nextSeq(len(body))
-	srv, cli := r.wirePorts(cport)
-	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, srv, cli,
+	id, srv, cli := r.wireFlow(cport)
+	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, id, srv, cli,
 		seq, ack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 }
 
@@ -809,11 +809,28 @@ func (r *Raw) portsAt(w uint64, cport uint16) (uint16, uint16) {
 	return r.dportAt(w), cport
 }
 
-func (r *Raw) wirePorts(cport uint16) (uint16, uint16) {
-	if !r.portsMove() {
-		return r.port, cport
+func (r *Raw) flowIDMoves() bool { return r.rotActive() && RawProfileHasFlowID(r.profile) }
+
+func (r *Raw) flowIDAt(w uint64, mirror uint16) uint16 {
+	if !r.flowIDMoves() {
+		return r.icmpID
 	}
-	return r.portsAt(r.portStep(), cport)
+	if !r.isClient {
+		if mirror != 0 {
+			return mirror
+		}
+		return r.icmpID
+	}
+	return r.rotPerm.at(w)
+}
+
+func (r *Raw) wireFlow(cport uint16) (id, srv, cli uint16) {
+	if !r.portsMove() {
+		return r.flowIDAt(0, cport), r.port, cport
+	}
+	w := r.portStep()
+	srv, cli = r.portsAt(w, cport)
+	return r.flowIDAt(w, cport), srv, cli
 }
 
 func (r *Raw) wirePortsNow() (uint16, uint16) {
@@ -830,8 +847,14 @@ func (r *Raw) rotSnapshot() rotStatus {
 	w := r.portStepNow()
 	srv, cli := r.portsAt(w, r.cport())
 	sport, dport := rawPorts(r.isClient, srv, cli)
-	return rotStatus{Sport: sport, Dport: dport, Dports: len(r.dports), Every: r.sportEvery,
+	st := rotStatus{Dports: len(r.dports), Every: r.sportEvery,
 		Lo: uint16(r.rotPerm.lo), Hi: uint16(r.rotPerm.lo + r.rotPerm.span - 1), Drawn: w - uint64(r.rotIdx) + 1}
+	if r.flowIDMoves() {
+		st.ID = r.flowIDAt(w, r.cport())
+		return st
+	}
+	st.Sport, st.Dport = sport, dport
+	return st
 }
 
 func (r *Raw) setBand(lo, hi int) {
@@ -845,7 +868,7 @@ func (r *Raw) armWalk() {
 }
 
 func (r *Raw) setSportRotate(rot SportRotation) {
-	if rot.Every <= 0 || !RawProfileHasPorts(r.profile) {
+	if rot.Every <= 0 || !(RawProfileHasPorts(r.profile) || RawProfileHasFlowID(r.profile)) {
 		return
 	}
 	r.sportEvery = rot.Every
@@ -868,7 +891,7 @@ func (r *Raw) setSportMode(on bool, fix int) {
 }
 
 func (r *Raw) learnClientPort(sport uint16) {
-	if r.isClient || sport == 0 || !RawProfileHasPorts(r.profile) {
+	if r.isClient || sport == 0 || !(RawProfileHasPorts(r.profile) || r.flowIDMoves()) {
 		return
 	}
 	if prev := uint16(r.cliPort.Swap(uint32(sport))); prev != 0 && prev != sport && r.sportRandom {
@@ -877,7 +900,7 @@ func (r *Raw) learnClientPort(sport uint16) {
 }
 
 func (r *Raw) replyPort(sport uint16) uint16 {
-	if r.isClient || sport == 0 || !RawProfileHasPorts(r.profile) {
+	if r.isClient || sport == 0 || !(RawProfileHasPorts(r.profile) || r.flowIDMoves()) {
 		return r.cport()
 	}
 	return sport
