@@ -287,25 +287,19 @@ func RawProfileHasFlowID(profile string) bool {
 	return false
 }
 
-func RawFlowIDProfiles() []string {
+func rawProfilesWhere(keep func(string) bool) []string {
 	var out []string
 	for _, name := range RawProfileNames() {
-		if RawProfileHasFlowID(name) {
+		if keep(name) {
 			out = append(out, name)
 		}
 	}
 	return out
 }
 
-func RawPortedProfiles() []string {
-	var out []string
-	for _, name := range RawProfileNames() {
-		if RawProfileHasPorts(name) {
-			out = append(out, name)
-		}
-	}
-	return out
-}
+func RawFlowIDProfiles() []string { return rawProfilesWhere(RawProfileHasFlowID) }
+
+func RawPortedProfiles() []string { return rawProfilesWhere(RawProfileHasPorts) }
 
 func RawProfileNames() []string {
 	out := make([]string, 0, len(rawProfiles))
