@@ -34,6 +34,34 @@ type Route struct {
 
 func (c *Config) cdnIsHTTP() bool { return c.CDNCarrier == "http" || c.CDNCarrier == "grpc" }
 
+func (c *Config) rawPair() (string, string) {
+	up := c.RawProfile
+	if up == "" {
+		up = "bare"
+	}
+	down := c.RawProfileDown
+	if down == "" {
+		down = up
+	}
+	return up, down
+}
+
+func (c *Config) rawLabel() string {
+	up, down := c.rawPair()
+	if up == down {
+		return up
+	}
+	return up + "/" + down
+}
+
+func (c *Config) rawSendProfile() string {
+	up, down := c.rawPair()
+	if c.Role == "server" {
+		return down
+	}
+	return up
+}
+
 func (c *Config) laneCarrier() bool {
 	return c.Transport == "tcp" || c.Transport == "ws"
 }
@@ -67,6 +95,8 @@ type Config struct {
 	Transport string `json:"transport"`
 
 	RawProfile string `json:"raw_profile"`
+
+	RawProfileDown string `json:"raw_profile_down"`
 
 	RawProto int `json:"raw_proto"`
 
@@ -222,8 +252,8 @@ func (c *Config) applyDefaults() {
 	if len(c.PeerIPs) > 0 {
 		c.Peer = c.PeerIPs[0]
 	}
-	if c.Transport == "raw" && c.RawProfile == "" {
-		c.RawProfile = "bare"
+	if c.Transport == "raw" {
+		c.RawProfile, c.RawProfileDown = c.rawPair()
 	}
 	if c.Fec {
 		if c.FecData == 0 {
@@ -382,11 +412,20 @@ func (c *Config) validate() error {
 		if c.RawProfile != "" && !packet.RawProfileValid(c.RawProfile) {
 			return errors.New("raw_profile must be one of " + strings.Join(packet.RawProfileNames(), "|"))
 		}
+		if c.RawProfileDown != "" && !packet.RawProfileValid(c.RawProfileDown) {
+			return errors.New("raw_profile_down must be one of " + strings.Join(packet.RawProfileNames(), "|"))
+		}
+		up, down := c.rawPair()
 		ported := strings.Join(packet.RawPortedProfiles(), "|")
+		upPorts := packet.RawProfileHasPorts(up)
+		forgesPorts := upPorts || packet.RawProfileHasPorts(down)
+		noPorts := " (raw_profile \"" + up + "\" and raw_profile_down \"" + down + "\" forge no ports)"
+		noUpPorts := ", so raw_profile (what the client sends) must be one of " + ported +
+			" (raw_profile \"" + up + "\" forges no ports)"
 
 		if c.RawProto != 0 {
-			if c.RawProfile != "" && c.RawProfile != "bare" {
-				return errors.New("raw_proto overrides the outer protocol number for the \"bare\" profile only (raw_profile \"" + c.RawProfile + "\" is tied to its forged header)")
+			if up != "bare" && down != "bare" {
+				return errors.New("raw_proto overrides the outer protocol number for the \"bare\" profile only (raw_profile \"" + up + "\" and raw_profile_down \"" + down + "\" are tied to their forged headers)")
 			}
 			if c.RawProto < 1 || c.RawProto > 255 {
 				return errors.New("raw_proto must be in 1..255 (0 = the profile's native protocol number)")
@@ -397,23 +436,20 @@ func (c *Config) validate() error {
 		}
 
 		if c.RawPort != 0 {
-			if !packet.RawProfileHasPorts(c.RawProfile) {
-				return errors.New("raw_port sets the forged server port of the " + ported + " profiles only" +
-					" (raw_profile \"" + c.RawProfile + "\" forges no ports)")
+			if !forgesPorts {
+				return errors.New("raw_port sets the forged server port of the " + ported + " profiles only" + noPorts)
 			}
 			if c.RawPort < 1 || c.RawPort > 65535 {
 				return errors.New("raw_port must be in 1..65535 (0 = the profile default 443)")
 			}
 		}
 
-		if c.RawSportRandom && !packet.RawProfileHasPorts(c.RawProfile) {
-			return errors.New("raw_sport_random rolls the forged SOURCE port of the " + ported +
-				" profiles only (raw_profile \"" + c.RawProfile + "\" forges no ports)")
+		if c.RawSportRandom && !upPorts {
+			return errors.New("raw_sport_random re-draws the client's forged source port" + noUpPorts)
 		}
 		if c.RawSport != 0 {
-			if !packet.RawProfileHasPorts(c.RawProfile) {
-				return errors.New("raw_sport sets the forged client source port of the " + ported +
-					" profiles only (raw_profile \"" + c.RawProfile + "\" forges no ports)")
+			if !forgesPorts {
+				return errors.New("raw_sport sets the forged client port of the " + ported + " profiles only" + noPorts)
 			}
 			if c.RawSport < 1 || c.RawSport > 65535 {
 				return errors.New("raw_sport must be in 1..65535 (0 = the profile default 51820)")
@@ -425,9 +461,9 @@ func (c *Config) validate() error {
 			}
 		}
 		if c.RawSportRotate != 0 {
-			if !packet.RawProfileHasPorts(c.RawProfile) {
+			if !forgesPorts {
 				return errors.New("raw_sport_rotate cycles the forged source port, so it needs a profile that forges one" +
-					" (raw_profile \"" + c.RawProfile + "\" builds no L4 header; use one of " + ported + ")")
+					" (raw_profile \"" + up + "\" and raw_profile_down \"" + down + "\" build no L4 header; use one of " + ported + ")")
 			}
 			if c.RawSportRotate < 1 || c.RawSportRotate > maxSportEvery {
 				return fmt.Errorf("raw_sport_rotate must be in 1..%d (0 = off; a new forged source port every N packets, N under the middlebox per-tuple budget)", maxSportEvery)
@@ -439,6 +475,9 @@ func (c *Config) validate() error {
 		if c.RawDports != 0 {
 			if c.RawSportRotate == 0 {
 				return errors.New("raw_dports spreads the forged DESTINATION port so each source port is worth that many flow-table buckets, which only means something while raw_sport_rotate is cycling the source; set raw_sport_rotate too")
+			}
+			if !upPorts {
+				return errors.New("raw_dports spreads the client's forged destination port" + noUpPorts)
 			}
 			if c.RawDports < 1 || c.RawDports > packet.MaxDports {
 				return fmt.Errorf("raw_dports must be in 1..%d (1 = the single configured raw_port; N = that port plus N-1 more drawn from the service-port pool)", packet.MaxDports)
@@ -569,6 +608,11 @@ func (c *Config) validate() error {
 		}
 	default:
 		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", or \"ws\"")
+	}
+
+	if c.RawProfileDown != "" && c.Transport != "raw" {
+		return errors.New("raw_profile_down belongs to the raw transport; transport \"" + c.Transport +
+			"\" would carry it no further than this file")
 	}
 
 	if c.Transport != "ws" {

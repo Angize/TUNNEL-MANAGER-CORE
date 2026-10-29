@@ -52,7 +52,7 @@ func firstErr(a, b error) error {
 }
 
 func (r *Raw) buildTxQueues(extra []*tun.Device, proto int) error {
-	r.txq = []txQueue{{dev: r.dev, batch: r.batch}}
+	r.txq = []txQueue{{dev: r.dev, batch: r.outBatch}}
 	for i, d := range extra {
 		c, err := txSocket(proto)
 		if err != nil {
