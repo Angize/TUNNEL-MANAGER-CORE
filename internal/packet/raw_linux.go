@@ -90,6 +90,8 @@ type Raw struct {
 	sportRandom bool
 
 	sportEvery int
+	idRot      bool
+	mirrors    bool
 	rotIdx     uint32
 	rotPerm    rotPerm
 	cfgBandLo  int
@@ -186,8 +188,8 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 		if r.proto == protoTCP {
 			dack = r.tcpAck.Load()
 		}
-		fsrv, fcli := r.wirePorts(r.cport())
-		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, fsrv, fcli,
+		fid, fsrv, fcli := r.wireFlow(r.cport())
+		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, fid, fsrv, fcli,
 			dseq, dack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
 		if out == nil {
@@ -226,7 +228,7 @@ func newRaw(conn *net.IPConn, dev *tun.Device, obfs bool, psk, cipher, profile s
 	r := &Raw{
 		conn: conn, batch: batchConn(conn), dev: dev, obfs: obfs, ping: pingEvery,
 		psk: psk, cipher: cipher, profile: profile, isClient: isClient, fakeFd: -1,
-		framing: rawProfiles[profile], hdr: rawHeaderLen(profile),
+		framing: rawProfiles[profile], hdr: rawHeaderLen(profile), mirrors: RawProfileHasPorts(profile),
 		icmpID: icmpID, closeCh: make(chan struct{}), wake: make(chan struct{}, 1), spi: spi,
 	}
 
@@ -272,8 +274,8 @@ func (r *Raw) sendTCPFlags(flags byte, to *net.IPAddr, cport uint16) {
 	if flags&tcpSyn == 0 {
 		seq = r.tcpSeqBase() + r.tcpBytes.Load()
 	}
-	srv, cli := r.wirePorts(cport)
-	seg := rawEncap(r.profile, nil, r.srcIP(), to.IP, r.isClient, r.icmpID, srv, cli,
+	id, srv, cli := r.wireFlow(cport)
+	seg := rawEncap(r.profile, nil, r.srcIP(), to.IP, r.isClient, id, srv, cli,
 		seq, r.tcpAck.Load(), r.spi, r.tsNow(), r.tsEcr.Load(), flags)
 	r.writeOut(seg, to)
 }
@@ -522,8 +524,8 @@ func (r *Raw) dataOut(dst, payload []byte, to net.IP) ([]byte, error) {
 		return nil, err
 	}
 	seq, ack := r.nextSeq(len(pkt) - r.hdr)
-	srv, cli := r.wirePorts(r.cport())
-	rawFill(r.framing, pkt, r.hdr, r.srcIP(), to, r.isClient, r.icmpID, srv, cli,
+	id, srv, cli := r.wireFlow(r.cport())
+	rawFill(r.framing, pkt, r.hdr, r.srcIP(), to, r.isClient, id, srv, cli,
 		seq, ack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 	return pkt, nil
 }
@@ -540,8 +542,8 @@ func (r *Raw) nextSeq(n int) (seq, ack uint32) {
 
 func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
 	seq, ack := r.nextSeq(len(body))
-	srv, cli := r.wirePorts(cport)
-	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, srv, cli,
+	id, srv, cli := r.wireFlow(cport)
+	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, id, srv, cli,
 		seq, ack, r.spi, r.tsNow(), r.tsEcr.Load(), tcpPshAck)
 }
 
@@ -809,11 +811,26 @@ func (r *Raw) portsAt(w uint64, cport uint16) (uint16, uint16) {
 	return r.dportAt(w), cport
 }
 
-func (r *Raw) wirePorts(cport uint16) (uint16, uint16) {
-	if !r.portsMove() {
-		return r.port, cport
+func (r *Raw) flowIDAt(w uint64, mirror uint16) uint16 {
+	if r.isClient {
+		return r.rotPerm.at(w)
 	}
-	return r.portsAt(r.portStep(), cport)
+	if mirror != 0 {
+		return mirror
+	}
+	return r.icmpID
+}
+
+func (r *Raw) wireFlow(cport uint16) (id, srv, cli uint16) {
+	if !r.portsMove() {
+		return r.icmpID, r.port, cport
+	}
+	w := r.portStep()
+	if r.idRot {
+		return r.flowIDAt(w, cport), r.port, cport
+	}
+	srv, cli = r.portsAt(w, cport)
+	return r.icmpID, srv, cli
 }
 
 func (r *Raw) wirePortsNow() (uint16, uint16) {
@@ -828,10 +845,15 @@ func (r *Raw) rotSnapshot() rotStatus {
 		return rotStatus{}
 	}
 	w := r.portStepNow()
-	srv, cli := r.portsAt(w, r.cport())
-	sport, dport := rawPorts(r.isClient, srv, cli)
-	return rotStatus{Sport: sport, Dport: dport, Dports: len(r.dports), Every: r.sportEvery,
+	st := rotStatus{Dports: len(r.dports), Every: r.sportEvery,
 		Lo: uint16(r.rotPerm.lo), Hi: uint16(r.rotPerm.lo + r.rotPerm.span - 1), Drawn: w - uint64(r.rotIdx) + 1}
+	if r.idRot {
+		st.ID = r.flowIDAt(w, r.cport())
+		return st
+	}
+	srv, cli := r.portsAt(w, r.cport())
+	st.Sport, st.Dport = rawPorts(r.isClient, srv, cli)
+	return st
 }
 
 func (r *Raw) setBand(lo, hi int) {
@@ -845,10 +867,13 @@ func (r *Raw) armWalk() {
 }
 
 func (r *Raw) setSportRotate(rot SportRotation) {
-	if rot.Every <= 0 || !RawProfileHasPorts(r.profile) {
+	idRot := RawProfileHasFlowID(r.profile)
+	if rot.Every <= 0 || !(idRot || RawProfileHasPorts(r.profile)) {
 		return
 	}
 	r.sportEvery = rot.Every
+	r.idRot = idRot
+	r.mirrors = r.mirrors || idRot
 	r.armWalk()
 	r.dports = dportSet(r.port, rot.Dports, r.psk)
 }
@@ -868,7 +893,7 @@ func (r *Raw) setSportMode(on bool, fix int) {
 }
 
 func (r *Raw) learnClientPort(sport uint16) {
-	if r.isClient || sport == 0 || !RawProfileHasPorts(r.profile) {
+	if r.isClient || sport == 0 || !r.mirrors {
 		return
 	}
 	if prev := uint16(r.cliPort.Swap(uint32(sport))); prev != 0 && prev != sport && r.sportRandom {
@@ -877,7 +902,7 @@ func (r *Raw) learnClientPort(sport uint16) {
 }
 
 func (r *Raw) replyPort(sport uint16) uint16 {
-	if r.isClient || sport == 0 || !RawProfileHasPorts(r.profile) {
+	if r.isClient || sport == 0 || !r.mirrors {
 		return r.cport()
 	}
 	return sport

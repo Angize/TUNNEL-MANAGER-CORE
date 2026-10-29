@@ -88,7 +88,7 @@ func (s *coreStatus) trackRot(live func() rotStatus, closeCh <-chan struct{}) {
 			case <-closeCh:
 				return
 			case <-tick.C:
-				if p := live(); p.Sport != last.Sport || p.Dport != last.Dport {
+				if p := live(); p.Sport != last.Sport || p.Dport != last.Dport || p.ID != last.ID {
 					last = p
 					s.write()
 				}
