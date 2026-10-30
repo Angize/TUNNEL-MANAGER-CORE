@@ -926,8 +926,9 @@ func (c *rotationController) judge(cmd poolCmd, rotLow, rotHigh func(proactive b
 			return false
 		}
 
-		if poolLow, _ := c.pair.live(); cmd.Low != "" && cmd.Low != poolLow &&
-			c.pair.condemned(lowKind, cmd.Low) {
+		poolLow, poolHigh := c.pair.live()
+		if (cmd.Low != poolLow && c.pair.condemned(lowKind, cmd.Low)) ||
+			(cmd.High != poolHigh && c.pair.condemned(highKind, cmd.High)) {
 			return false
 		}
 
