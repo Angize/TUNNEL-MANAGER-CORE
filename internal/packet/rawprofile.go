@@ -370,7 +370,14 @@ func peerTSVal(tcp []byte) uint32 {
 	return 0
 }
 
-func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte) []byte {
+func greWirePtype(ptype int) uint16 {
+	if ptype == 0 {
+		return greProtoIP4
+	}
+	return uint16(ptype)
+}
+
+func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte, grePtype uint16) []byte {
 	framing := rawProfiles[profile]
 	if framing == protoBare {
 		return payload
@@ -381,18 +388,18 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 	}
 	h := make([]byte, hl+len(payload))
 	copy(h[hl:], payload)
-	rawFill(framing, h, hl, src, dst, isClient, id, port, cport, seq, ack, spi, tsval, tsecr, flags)
+	rawFill(framing, h, hl, src, dst, isClient, id, port, cport, seq, ack, spi, tsval, tsecr, flags, grePtype)
 	return h
 }
 
-func rawFill(framing int, h []byte, hl int, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte) {
+func rawFill(framing int, h []byte, hl int, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte, grePtype uint16) {
 	clear(h[:hl])
 	switch framing {
 	case protoIPIP:
 		buildEncapESP(h[:hl], len(h)-hl, seq, spi)
 
 	case protoGRE:
-		binary.BigEndian.PutUint16(h[2:4], greProtoIP4)
+		binary.BigEndian.PutUint16(h[2:4], grePtype)
 		buildEncapESP(h[greHeaderLen:hl], len(h)-hl, seq, spi)
 
 	case protoICMP:

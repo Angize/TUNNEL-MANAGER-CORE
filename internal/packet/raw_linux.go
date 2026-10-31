@@ -42,9 +42,10 @@ type Raw struct {
 	spi      uint32
 	port     uint16
 
-	proto   int
-	framing int
-	hdr     int
+	proto    int
+	framing  int
+	hdr      int
+	grePtype uint16
 
 	rxProfile string
 	rxProto   int
@@ -205,7 +206,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 		}
 		fsrv, fcli := r.wirePorts(r.cport())
 		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, fsrv, fcli,
-			dseq, dack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck)
+			dseq, dack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck, r.grePtype)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
 		if out == nil {
 			continue
@@ -324,7 +325,7 @@ func (r *Raw) sendTCPFlags(flags byte, to *net.IPAddr, cport uint16) {
 	}
 	srv, cli := r.wirePorts(cport)
 	seg := rawEncap(r.profile, nil, r.srcIP(), to.IP, r.isClient, r.icmpID, srv, cli,
-		seq, r.tcpAck.Load(), r.spi, r.tsNow(), r.echoTS(), flags)
+		seq, r.tcpAck.Load(), r.spi, r.tsNow(), r.echoTS(), flags, r.grePtype)
 	r.writeOut(seg, to)
 }
 
@@ -445,11 +446,12 @@ func listenRawBase(listenIP string, dev *tun.Device, obfs bool, psk, cipher, pro
 	return r, nil
 }
 
-func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile, downProfile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, rot SportRotation, extraQ ...*tun.Device) (*Raw, error) {
+func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile, downProfile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, rot SportRotation, grePtype int, extraQ ...*tun.Device) (*Raw, error) {
 	r, err := dialRawBase(peerIP, dev, obfs, psk, cipher, profile, downProfile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
 	}
+	r.grePtype = greWirePtype(grePtype)
 	r.link = &directLink{r: r}
 
 	r.setBand(rot.Lo, rot.Hi)
@@ -467,11 +469,12 @@ func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile, do
 	return r, nil
 }
 
-func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile, downProfile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, rot SportRotation, extraQ ...*tun.Device) (*Raw, error) {
+func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile, downProfile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, rot SportRotation, grePtype int, extraQ ...*tun.Device) (*Raw, error) {
 	r, err := listenRawBase(listenIP, dev, obfs, psk, cipher, downProfile, profile, rawProto, rawPort)
 	if err != nil {
 		return nil, err
 	}
+	r.grePtype = greWirePtype(grePtype)
 	r.link = &directLink{r: r}
 	r.setBand(rot.Lo, rot.Hi)
 	r.setSportMode(sportRandom, rawSport)
@@ -592,7 +595,7 @@ func (r *Raw) dataOut(dst, payload []byte, to net.IP) ([]byte, error) {
 	seq, ack := r.nextSeq(len(pkt) - r.hdr)
 	srv, cli := r.wirePorts(r.cport())
 	rawFill(r.framing, pkt, r.hdr, r.srcIP(), to, r.isClient, r.icmpID, srv, cli,
-		seq, ack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck)
+		seq, ack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck, r.grePtype)
 	return pkt, nil
 }
 
@@ -610,7 +613,7 @@ func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
 	seq, ack := r.nextSeq(len(body))
 	srv, cli := r.wirePorts(cport)
 	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, srv, cli,
-		seq, ack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck)
+		seq, ack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck, r.grePtype)
 }
 
 func (r *Raw) writeOut(pkt []byte, to *net.IPAddr) {

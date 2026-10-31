@@ -62,6 +62,13 @@ func (c *Config) rawSendProfile() string {
 	return up
 }
 
+func (c *Config) rawSendPtype() int {
+	if c.Role == "server" {
+		return c.RawGrePtypeDown
+	}
+	return c.RawGrePtype
+}
+
 func (c *Config) laneCarrier() bool {
 	return c.Transport == "tcp" || c.Transport == "ws"
 }
@@ -97,6 +104,9 @@ type Config struct {
 	RawProfile string `json:"raw_profile"`
 
 	RawProfileDown string `json:"raw_profile_down"`
+
+	RawGrePtype     int `json:"raw_gre_ptype"`
+	RawGrePtypeDown int `json:"raw_gre_ptype_down"`
 
 	RawProto int `json:"raw_proto"`
 
@@ -423,6 +433,19 @@ func (c *Config) validate() error {
 		noUpPorts := ", so raw_profile (what the client sends) must be one of " + ported +
 			" (raw_profile \"" + up + "\" forges no ports)"
 
+		if c.RawGrePtype < 0 || c.RawGrePtype > 0xffff {
+			return errors.New("raw_gre_ptype must be in 0..65535 (0 = the default 0x0800, the GRE protocol-type field)")
+		}
+		if c.RawGrePtypeDown < 0 || c.RawGrePtypeDown > 0xffff {
+			return errors.New("raw_gre_ptype_down must be in 0..65535 (0 = the default 0x0800, the GRE protocol-type field)")
+		}
+		if c.RawGrePtype != 0 && up != "gre" {
+			return errors.New("raw_gre_ptype sets the GRE protocol-type field the client sends, so raw_profile must be \"gre\" (raw_profile \"" + up + "\" builds no GRE header)")
+		}
+		if c.RawGrePtypeDown != 0 && down != "gre" {
+			return errors.New("raw_gre_ptype_down sets the GRE protocol-type field the server sends, so raw_profile_down must be \"gre\" (raw_profile_down \"" + down + "\" builds no GRE header)")
+		}
+
 		if c.RawProto != 0 {
 			if up != "bare" && down != "bare" {
 				return errors.New("raw_proto overrides the outer protocol number for the \"bare\" profile only (raw_profile \"" + up + "\" and raw_profile_down \"" + down + "\" are tied to their forged headers)")
@@ -613,6 +636,11 @@ func (c *Config) validate() error {
 	if c.RawProfileDown != "" && c.Transport != "raw" {
 		return errors.New("raw_profile_down belongs to the raw transport; transport \"" + c.Transport +
 			"\" would carry it no further than this file")
+	}
+
+	if (c.RawGrePtype != 0 || c.RawGrePtypeDown != 0) && c.Transport != "raw" {
+		return errors.New("raw_gre_ptype and raw_gre_ptype_down belong to the raw transport; transport \"" + c.Transport +
+			"\" would carry them no further than this file")
 	}
 
 	if c.Transport != "ws" {
