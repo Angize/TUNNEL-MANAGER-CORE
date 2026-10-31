@@ -370,6 +370,13 @@ func peerTSVal(tcp []byte) uint32 {
 	return 0
 }
 
+func greWirePtype(ptype int) uint16 {
+	if ptype == 0 {
+		return greProtoIP4
+	}
+	return uint16(ptype)
+}
+
 func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte, grePtype uint16) []byte {
 	framing := rawProfiles[profile]
 	if framing == protoBare {
@@ -392,11 +399,7 @@ func rawFill(framing int, h []byte, hl int, src, dst net.IP, isClient bool, id, 
 		buildEncapESP(h[:hl], len(h)-hl, seq, spi)
 
 	case protoGRE:
-		pt := grePtype
-		if pt == 0 {
-			pt = greProtoIP4
-		}
-		binary.BigEndian.PutUint16(h[2:4], pt)
+		binary.BigEndian.PutUint16(h[2:4], grePtype)
 		buildEncapESP(h[greHeaderLen:hl], len(h)-hl, seq, spi)
 
 	case protoICMP:

@@ -63,12 +63,8 @@ func (c *Config) rawSendProfile() string {
 }
 
 func (c *Config) rawSendPtype() int {
-	down := c.RawGrePtypeDown
-	if down == 0 {
-		down = c.RawGrePtype
-	}
 	if c.Role == "server" {
-		return down
+		return c.RawGrePtypeDown
 	}
 	return c.RawGrePtype
 }
@@ -437,19 +433,17 @@ func (c *Config) validate() error {
 		noUpPorts := ", so raw_profile (what the client sends) must be one of " + ported +
 			" (raw_profile \"" + up + "\" forges no ports)"
 
-		if c.RawGrePtype != 0 || c.RawGrePtypeDown != 0 {
-			if c.RawGrePtype < 0 || c.RawGrePtype > 0xffff {
-				return errors.New("raw_gre_ptype must be in 0..65535 (0 = the default 0x0800, the GRE protocol-type field)")
-			}
-			if c.RawGrePtypeDown < 0 || c.RawGrePtypeDown > 0xffff {
-				return errors.New("raw_gre_ptype_down must be in 0..65535 (0 = same as raw_gre_ptype)")
-			}
-			if c.RawGrePtype != 0 && up != "gre" {
-				return errors.New("raw_gre_ptype sets the GRE protocol-type field the client sends, so raw_profile must be \"gre\" (raw_profile \"" + up + "\" builds no GRE header)")
-			}
-			if c.RawGrePtypeDown != 0 && down != "gre" {
-				return errors.New("raw_gre_ptype_down sets the GRE protocol-type field the server sends, so raw_profile_down must be \"gre\" (raw_profile_down \"" + down + "\" builds no GRE header)")
-			}
+		if c.RawGrePtype < 0 || c.RawGrePtype > 0xffff {
+			return errors.New("raw_gre_ptype must be in 0..65535 (0 = the default 0x0800, the GRE protocol-type field)")
+		}
+		if c.RawGrePtypeDown < 0 || c.RawGrePtypeDown > 0xffff {
+			return errors.New("raw_gre_ptype_down must be in 0..65535 (0 = the default 0x0800, the GRE protocol-type field)")
+		}
+		if c.RawGrePtype != 0 && up != "gre" {
+			return errors.New("raw_gre_ptype sets the GRE protocol-type field the client sends, so raw_profile must be \"gre\" (raw_profile \"" + up + "\" builds no GRE header)")
+		}
+		if c.RawGrePtypeDown != 0 && down != "gre" {
+			return errors.New("raw_gre_ptype_down sets the GRE protocol-type field the server sends, so raw_profile_down must be \"gre\" (raw_profile_down \"" + down + "\" builds no GRE header)")
 		}
 
 		if c.RawProto != 0 {
@@ -645,8 +639,8 @@ func (c *Config) validate() error {
 	}
 
 	if (c.RawGrePtype != 0 || c.RawGrePtypeDown != 0) && c.Transport != "raw" {
-		return errors.New("raw_gre_ptype belongs to the raw transport; transport \"" + c.Transport +
-			"\" would carry it no further than this file")
+		return errors.New("raw_gre_ptype and raw_gre_ptype_down belong to the raw transport; transport \"" + c.Transport +
+			"\" would carry them no further than this file")
 	}
 
 	if c.Transport != "ws" {

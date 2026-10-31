@@ -451,7 +451,7 @@ func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile, do
 	if err != nil {
 		return nil, err
 	}
-	r.grePtype = uint16(grePtype)
+	r.grePtype = greWirePtype(grePtype)
 	r.link = &directLink{r: r}
 
 	r.setBand(rot.Lo, rot.Hi)
@@ -474,7 +474,7 @@ func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 	if err != nil {
 		return nil, err
 	}
-	r.grePtype = uint16(grePtype)
+	r.grePtype = greWirePtype(grePtype)
 	r.link = &directLink{r: r}
 	r.setBand(rot.Lo, rot.Hi)
 	r.setSportMode(sportRandom, rawSport)
