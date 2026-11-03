@@ -105,6 +105,8 @@ const (
 	fecKeepBlocks = 64
 	fecMaxBytes   = 64 << 20
 
+	MaxFecData = 64
+
 	fecMaxShardLen = 16 << 10
 )
 

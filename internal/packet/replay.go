@@ -11,8 +11,6 @@ const replayWindow = 32768
 
 const replayWords = replayWindow / 64
 
-const MaxFecData = 64
-
 type replayGuard struct {
 	haveSession bool
 	session     uint64

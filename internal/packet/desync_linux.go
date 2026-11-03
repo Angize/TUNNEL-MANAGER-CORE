@@ -42,14 +42,10 @@ func (d desyncCfg) specs() []fakeSpec {
 	if !d.on {
 		return nil
 	}
-	lowTTL := d.ttl
-	if lowTTL > injectMaxTTL {
-		lowTTL = injectMaxTTL
-	}
 	out := make([]fakeSpec, 0, d.count)
 	for i := 0; i < d.count; i++ {
 		bad := d.mode == "badsum" || (d.mode == "both" && i%2 == 1)
-		ttl := lowTTL
+		ttl := d.ttl
 		if bad {
 			ttl = 64
 		}
@@ -62,14 +58,10 @@ func (d desyncCfg) specsTCP() []fakeSpec {
 	if !d.on {
 		return nil
 	}
-	ttl := d.ttl
-	if ttl > injectMaxTTL {
-		ttl = injectMaxTTL
-	}
 	out := make([]fakeSpec, 0, d.count)
 	for i := 0; i < d.count; i++ {
 		bad := d.mode == "badsum" || (d.mode == "both" && i%2 == 1)
-		out = append(out, fakeSpec{ttl: ttl, badSum: bad})
+		out = append(out, fakeSpec{ttl: d.ttl, badSum: bad})
 	}
 	return out
 }

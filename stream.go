@@ -104,7 +104,7 @@ func dialLanes(lead any, cfg *Config, devs []*tun.Device, cryptoOn bool) []*pack
 	for i, d := range devs[1:] {
 		b, _, err := dialStream(cfg, d, cryptoOn, false)
 		if err != nil {
-			log.Fatalf("tnl-core: lane %d: %v", i+1, err)
+			log.Fatalf("tnl-core: fatal: lane %d: %v", i+1, err)
 		}
 		setupClient(b, cfg, false)
 		b.Follow(head, i+1)

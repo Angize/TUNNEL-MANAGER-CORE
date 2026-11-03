@@ -6,9 +6,7 @@ import (
 	"time"
 )
 
-const injectMaxTTL = 8
-
-const MaxHopBudget = injectMaxTTL
+const MaxHopBudget = 8
 
 const desyncReportEvery = 5 * time.Minute
 

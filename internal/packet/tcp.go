@@ -267,7 +267,7 @@ func (cf *connFramer) readFrame(dst []byte) (typ byte, session uint64, seq uint6
 	switch {
 	case cf.sealer != nil:
 		session, seq, payload, err = cf.sealer.OpenTo(dst, body[2:], aadFor(typ))
-	case typ == typeData:
+	default:
 		payload = append(dst[:0], body[2:]...)
 	}
 	cf.consumed(n, peeked)
@@ -556,10 +556,6 @@ func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
 func (b *TCP) SetDesync(on bool, ttl, count int, mode string) {
 	if !b.isClient || !on {
 		return
-	}
-
-	if ttl > injectMaxTTL {
-		log.Printf("core/tcp: fake_ttl=%d is capped to %d on this carrier — its decoys ride the real connection's 4-tuple, so one that reached the server would draw an RST", ttl, injectMaxTTL)
 	}
 	b.dsOn, b.dsTTL, b.dsCount, b.dsMode = true, ttl, count, mode
 }
@@ -1314,7 +1310,7 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 	b.noteAttempt(dialAddr, host)
 	conn, err := b.dialBand(connectTimeout, dialAddr)
 	if err != nil {
-		return nil, dialAddr, "", stageErr{stageConnect, err}
+		return nil, dialAddr, "", err
 	}
 
 	b.sendTCPFakes(conn)
@@ -1328,16 +1324,14 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 	r, werr := wsClientHandshake(conn, host, path, time.Now().Add(handshakeTimeout))
 	if werr != nil {
 		conn.Close()
-		return nil, dialAddr, "", stageErr{stageEdge, werr}
+		return nil, dialAddr, "", werr
 	}
 	return &wsConn{Conn: conn, r: r, client: true}, dialAddr, activeLabel(dialAddr, host), nil
 }
 
 const (
-	stageConnect = "connect"
-	stageTLS     = "tls"
-	stageEdge    = "edge"
-	stageAuth    = "auth"
+	stageTLS  = "tls"
+	stageAuth = "auth"
 )
 
 type stageErr struct {
@@ -1349,18 +1343,22 @@ func (e stageErr) Error() string { return e.err.Error() }
 
 func (e stageErr) Unwrap() error { return e.err }
 
+type edgeHTTPErr struct{ error }
+
+func (e edgeHTTPErr) Unwrap() error { return e.error }
+
 func dialCause(err error) string {
 	var se stageErr
 	errors.As(err, &se)
 	var echErr *utls.ECHRejectionError
+	var eh edgeHTTPErr
 	s := strings.ToLower(err.Error())
 	switch {
 	case errors.As(err, &echErr) || strings.Contains(s, "ech-reject"):
 		return "ech"
 	case se.stage == stageTLS:
 		return "tls"
-	case errors.Is(err, errNotWS) || strings.Contains(s, "got http ") || strings.Contains(s, "permessage-deflate") ||
-		strings.Contains(s, "came back"):
+	case errors.Is(err, errNotWS) || errors.As(err, &eh):
 		return "edge_http"
 	case se.stage == stageAuth && classifyErr(err.Error()) != "reset":
 		return "auth"
@@ -1591,7 +1589,7 @@ func (b *TCP) dialCarrier() (net.Conn, string, string, error) {
 	c, err := b.dialBand(connectTimeout, target)
 	if err != nil {
 		log.Printf("core/tcp: dial %s failed: %v", target, err)
-		return nil, target, "", stageErr{stageConnect, err}
+		return nil, target, "", err
 	}
 
 	b.sendTCPFakes(c)

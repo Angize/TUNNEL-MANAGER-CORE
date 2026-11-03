@@ -134,12 +134,9 @@ func (t *udpTx) flush(errs *sendErrLog) int {
 		}
 	}
 	if sent < t.n {
-		if n := sendBatch(t.pc, t.ms[sent:t.n]); n != t.n-sent {
-			errs.note("udp/batch", errShortBatch)
-			sent += n
-		} else {
-			sent = t.n
-		}
+		n, err := sendBatch(t.pc, t.ms[sent:t.n])
+		errs.note("udp/batch", err)
+		sent += n
 	}
 	return sent
 }

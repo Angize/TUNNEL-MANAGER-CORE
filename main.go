@@ -53,12 +53,12 @@ func main() {
 		return
 	}
 	if *cfgPath == "" {
-		log.Fatal("tnl-core: --config is required")
+		log.Fatal("tnl-core: fatal: --config is required")
 	}
 
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
-		log.Fatalf("tnl-core: config: %v", err)
+		log.Fatalf("tnl-core: fatal: config: %v", err)
 	}
 	if cfg.Role == "front" {
 		runFront(cfg, *cfgPath)
@@ -93,7 +93,7 @@ func main() {
 
 	devs, gsoOn, err := openTUN(tun.OpenN, cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO, cfg.tunQueues())
 	if err != nil {
-		log.Fatalf("tnl-core: tun: %v", err)
+		log.Fatalf("tnl-core: fatal: tun: %v", err)
 	}
 	dev := devs[0]
 	defer func() {
@@ -106,12 +106,12 @@ func main() {
 	if cfg.Crypto.Enabled {
 		s, err := crypto.NewSealer(cfg.Crypto.Cipher, cfg.Crypto.PSK, cfg.Role == "client")
 		if err != nil {
-			log.Fatalf("tnl-core: crypto: %v", err)
+			log.Fatalf("tnl-core: fatal: crypto: %v", err)
 		}
 		cipherName = s.Name
 	} else {
 		if cfg.Obfs {
-			log.Fatalf("tnl-core: obfs requires crypto (there is no key to obfuscate with) — enable crypto or disable obfs")
+			log.Fatalf("tnl-core: fatal: obfs requires crypto (there is no key to obfuscate with) — enable crypto or disable obfs")
 		}
 
 		log.Printf("tnl-core: WARNING crypto is DISABLED — the tunnel is unauthenticated " +
@@ -219,7 +219,7 @@ func main() {
 		}
 	}
 	if err != nil {
-		log.Fatalf("tnl-core: transport: %v", err)
+		log.Fatalf("tnl-core: fatal: transport: %v", err)
 	}
 	if cfg.StatusPath != "" {
 		if s, ok := b.(interface{ SetStatusPath(string) }); ok {
@@ -263,7 +263,7 @@ func main() {
 
 	runLanes(lanes)
 	if err := b.Run(); err != nil {
-		log.Printf("tnl-core: stopped: %v", err)
+		log.Printf("tnl-core: fatal: stopped: %v", err)
 	}
 }
 
@@ -381,7 +381,7 @@ func applySNISplit(b any, transport, mode string, pos, ttl int, logf func(string
 		if mode == "disorder" {
 			logf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d ttl=%d)", mode, pos, ttl)
 		} else {
-			logf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d; split_ttl only applies to disorder)", mode, pos)
+			logf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d; split_ttl applies to disorder, and to fake only when it falls back to disorder)", mode, pos)
 		}
 		return
 	}
@@ -405,11 +405,11 @@ func runFront(cfg *Config, cfgPath string) {
 	packet.SetTCPBuf(cfg.TCPBuf)
 	front, err := packet.NewFront(frontRoutes(cfg), cfg.SrvECHKey, cfg.SrvECHConf)
 	if err != nil {
-		log.Fatalf("tnl-core: front: %v", err)
+		log.Fatalf("tnl-core: fatal: front: %v", err)
 	}
 	ln, err := packet.ListenFront(cfg.Listen)
 	if err != nil {
-		log.Fatalf("tnl-core: front: listen: %v", err)
+		log.Fatalf("tnl-core: fatal: front: listen: %v", err)
 	}
 	defer ln.Close()
 	log.Printf("tnl-core %s: front (tls+ech) on %s, %d route(s)", version, cfg.Listen, front.Routes())
@@ -420,8 +420,9 @@ func runFront(cfg *Config, cfgPath string) {
 		select {
 		case <-hup:
 			nc, err := loadConfig(cfgPath)
-			if err == nil && (nc.Listen != cfg.Listen || nc.SrvECHKey != cfg.SrvECHKey || nc.SrvECHConf != cfg.SrvECHConf) {
-				err = errors.New("listen or ECH key changed, which only a restart applies")
+			if err == nil && (nc.Listen != cfg.Listen || nc.SrvECHKey != cfg.SrvECHKey || nc.SrvECHConf != cfg.SrvECHConf ||
+				nc.TCPBuf != cfg.TCPBuf) {
+				err = errors.New("listen, ECH key or tcp_buf changed, which only a restart applies")
 			}
 			if err == nil {
 				err = front.Reload(frontRoutes(nc))

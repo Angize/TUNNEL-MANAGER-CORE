@@ -40,13 +40,16 @@ func batchConn(c *net.IPConn) *ipv4.PacketConn {
 	return ipv4.NewPacketConn(c)
 }
 
-func sendBatch(pc *ipv4.PacketConn, ms []ipv4.Message) int {
+func sendBatch(pc *ipv4.PacketConn, ms []ipv4.Message) (int, error) {
 	if pc == nil || len(ms) == 0 {
-		return 0
+		return 0, nil
 	}
 	n, err := pc.WriteBatch(ms, 0)
-	if err != nil || n < 0 {
-		return 0
+	if err != nil {
+		return 0, err
 	}
-	return n
+	if n < len(ms) {
+		return max(n, 0), errShortBatch
+	}
+	return n, nil
 }

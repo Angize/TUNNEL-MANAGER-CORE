@@ -471,11 +471,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 		if d > connectTimeout {
 			d = connectTimeout
 		}
-		c, err := dialFromBand(ctx, func() *net.Dialer { return b.dialer(d) }, dialAddr)
-		if err != nil {
-			return nil, stageErr{stageConnect, err}
-		}
-		return c, nil
+		return dialFromBand(ctx, func() *net.Dialer { return b.dialer(d) }, dialAddr)
 	}
 
 	var dialedMu sync.Mutex
@@ -684,7 +680,7 @@ func (g *grpcDeframingReader) Close() error {
 	return nil
 }
 
-func (b *TCP) openGrpcStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration, dialAddr string) (*http.Response, *io.PipeWriter, error) {
+func (b *TCP) openGrpcStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration) (*http.Response, *io.PipeWriter, error) {
 	pr, pw := io.Pipe()
 	req, err := http.NewRequestWithContext(ctx, "POST", base+"?s="+sid+"&d="+strconv.Itoa(i), pr)
 	if err != nil {
@@ -704,22 +700,20 @@ func (b *TCP) openGrpcStream(hc *http.Client, ctx context.Context, base, sid str
 		resp.Body.Close()
 		pw.Close()
 		if resp.StatusCode == http.StatusForbidden {
-			return nil, nil, fmt.Errorf("http/grpc: the CDN edge refused the gRPC request with HTTP 403 — "+
-				"measured on a live edge, this is the Content-Type: application/grpc header alone, and "+
-				"Cloudflare needs gRPC enabled on the zone (Network -> gRPC) before it will proxy it. "+
-				"Turn it on for %s, or use the plain ws / http carrier shape instead", dialAddr)
+			return nil, nil, edgeHTTPErr{errors.New("http/grpc: got HTTP 403 — enable gRPC on the zone (Cloudflare: Network -> gRPC) " +
+				"or use ws / http; the application/grpc content-type alone triggers it")}
 		}
-		return nil, nil, fmt.Errorf("http/grpc: got HTTP %d (want 200)", resp.StatusCode)
+		return nil, nil, edgeHTTPErr{fmt.Errorf("http/grpc: got HTTP %d (want 200)", resp.StatusCode)}
 	}
 	return resp, pw, nil
 }
 
-func (b *TCP) runGrpcStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration, dialAddr string, tx *stripeTx, q *reseq, fail func(), first *http.Response, firstPW *io.PipeWriter) {
+func (b *TCP) runGrpcStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration, tx *stripeTx, q *reseq, fail func(), first *http.Response, firstPW *io.PipeWriter) {
 	resp, pw := first, firstPW
 	for {
 		if resp == nil {
 			var err error
-			if resp, pw, err = b.openGrpcStream(hc, ctx, base, sid, i, setHdr, budget, dialAddr); err != nil {
+			if resp, pw, err = b.openGrpcStream(hc, ctx, base, sid, i, setHdr, budget); err != nil {
 				resp = nil
 				select {
 				case <-ctx.Done():
@@ -754,7 +748,7 @@ func (b *TCP) runGrpcStream(hc *http.Client, ctx context.Context, base, sid stri
 }
 
 func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request), budget time.Duration) (net.Conn, error) {
-	first, firstPW, err := b.openGrpcStream(hc, ctx, base, sid, 0, setHdr, budget, dialAddr)
+	first, firstPW, err := b.openGrpcStream(hc, ctx, base, sid, 0, setHdr, budget)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -768,9 +762,9 @@ func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Conte
 	conn.closeFn = func() { cancel(); pw.Close(); closeIdle() }
 	fail := func() { conn.Close() }
 	q := newReseq(pw, maxStripePend(1))
-	go b.runGrpcStream(hc, ctx, base, sid, 0, setHdr, budget, dialAddr, tx, q, fail, first, firstPW)
+	go b.runGrpcStream(hc, ctx, base, sid, 0, setHdr, budget, tx, q, fail, first, firstPW)
 	for i := 1; i < carrierStreams; i++ {
-		go b.runGrpcStream(hc, ctx, base, sid, i, setHdr, budget, dialAddr, tx, q, fail, nil, nil)
+		go b.runGrpcStream(hc, ctx, base, sid, i, setHdr, budget, tx, q, fail, nil, nil)
 	}
 	return conn, nil
 }
@@ -787,12 +781,12 @@ func (b *TCP) openDownStream(hc *http.Client, ctx context.Context, base, sid str
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, fmt.Errorf("httpc: down got HTTP %d (want 200)", resp.StatusCode)
+		return nil, edgeHTTPErr{fmt.Errorf("httpc: down got HTTP %d (want 200)", resp.StatusCode)}
 	}
 	if enc := resp.Header.Get("Content-Encoding"); downstreamUnusable(enc) {
 		resp.Body.Close()
-		return nil, fmt.Errorf("httpc: down came back %s-encoded — this edge compresses the downstream, "+
-			"which the carrier cannot decode; turn compression off for this path at the CDN", enc)
+		return nil, edgeHTTPErr{fmt.Errorf("httpc: down came back %s-encoded — this edge compresses the downstream, "+
+			"which the carrier cannot decode; turn compression off for this path at the CDN", enc)}
 	}
 	return resp, nil
 }
