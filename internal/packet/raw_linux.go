@@ -515,12 +515,12 @@ func (r *Raw) sendFecBlock(shards [][]byte) {
 			ms[i].Buffers = [][]byte{wired[i]}
 			ms[i].Addr, ms[i].OOB = p, oob
 		}
-		sent := sendBatch(r.outBatch, ms)
-		if sent == len(ms) {
+		sent, err := sendBatch(r.outBatch, ms)
+		if err == nil {
 			return
 		}
 		if sent > 0 {
-			r.sendErr.note("raw/fec-batch", errShortBatch)
+			r.sendErr.note("raw/fec-batch", err)
 			wired = wired[sent:]
 		}
 	}
@@ -1093,8 +1093,8 @@ func (r *Raw) tunToNet(q *txQueue) error {
 				n++
 			}
 			if n > 1 {
-				if sent := sendBatch(q.batch, ms[:n]); sent != n {
-					r.sendErr.note("raw/batch", errShortBatch)
+				if _, err := sendBatch(q.batch, ms[:n]); err != nil {
+					r.sendErr.note("raw/batch", err)
 				}
 				continue
 			}

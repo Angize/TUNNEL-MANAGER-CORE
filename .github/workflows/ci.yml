@@ -1,7 +1,7 @@
 name: ci
 
-# The core builds and ships for linux only, and every one of its 82 carrier files says so with a
-# //go:build linux tag. Six files exist to keep the other GOOS compiling anyway. Nothing ever built
+# The core builds and ships for linux only, and its linux-only files say so with a //go:build linux
+# tag or a _linux.go name. A few !linux stubs keep the other GOOS compiling anyway. Nothing ever built
 # them, so they rotted: DialRaw and ListenRaw in the stub had drifted a whole parameter out of step
 # with the real ones, ListenSpoof and DialSpoof still carried a time.Duration nobody passes any more,
 # and the tun device was missing WriteBatch entirely. None of it was visible, because the release

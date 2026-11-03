@@ -336,7 +336,7 @@ func validatePoolEndpoint(field, e string, needPort bool) error {
 			return errors.New(field + " entry " + strconv.Quote(e) + " must be \"ip:port\"")
 		}
 		if ip := net.ParseIP(host); ip == nil || ip.To4() == nil {
-			return errors.New(field + " entry " + strconv.Quote(e) + " must be \"ipv4:port\" (the pool dials IPs directly, no DNS, and the carriers build IPv4 headers)")
+			return errors.New(field + " entry " + strconv.Quote(e) + " must be \"ipv4:port\"")
 		}
 		if p, err := strconv.Atoi(port); err != nil || p < 1 || p > 65535 {
 			return errors.New(field + " entry " + strconv.Quote(e) + " has an invalid port")
@@ -537,6 +537,10 @@ func (c *Config) validate() error {
 			if (c.SrvECHKey == "") != (c.SrvECHConf == "") {
 				return errors.New("srv_ech_key and srv_ech_conf must be set together")
 			}
+			if c.CDNCarrier == "grpc" {
+				return errors.New("server TLS termination covers the ws and http carriers only: it offers http/1.1, " +
+					"and a grpc client speaks HTTP/2 alone")
+			}
 		}
 
 		if c.HTTPStreams != 0 {
@@ -633,40 +637,47 @@ func (c *Config) validate() error {
 		return errors.New("transport must be \"udp\", \"tcp\", \"raw\", or \"ws\"")
 	}
 
-	if c.RawProfileDown != "" && c.Transport != "raw" {
-		return errors.New("raw_profile_down belongs to the raw transport; transport \"" + c.Transport +
-			"\" would carry it no further than this file")
-	}
-
-	if (c.RawGrePtype != 0 || c.RawGrePtypeDown != 0) && c.Transport != "raw" {
-		return errors.New("raw_gre_ptype and raw_gre_ptype_down belong to the raw transport; transport \"" + c.Transport +
-			"\" would carry them no further than this file")
-	}
-
-	if c.Transport != "ws" {
-		for _, k := range []struct {
-			name string
-			set  bool
-		}{
-			{"cdn_carrier", c.CDNCarrier != ""},
-			{"http_streams", c.HTTPStreams != 0},
-			{"http_up_workers", c.HTTPUpWorkers != 0},
-			{"http_up_batch_kb", c.HTTPUpBatchKB != 0},
-			{"http_up_rate", c.HTTPUpRate != 0},
-			{"ws_edge_ips", len(c.WSEdgeIPs) > 0},
-			{"ws_edge_ip_groups", len(c.WSEdgeIPGroups) > 0},
-			{"ws_edge_snis", len(c.WSEdgeSNIs) > 0},
-			{"ws_rotate_secs", c.WSRotateSecs != 0},
-			{"ws_port_roll", c.WSPortRoll},
-			{"ws_host", c.WSHost != ""},
-			{"ws_path", c.WSPath != ""},
-			{"ws_tls", c.WSTLS},
-			{"ws_ech", c.WSECH != ""},
-		} {
-			if k.set {
-				return errors.New(k.name + " belongs to the ws transport; transport \"" + c.Transport +
-					"\" would carry it no further than this file")
-			}
+	for _, k := range []struct {
+		name, transport string
+		set             bool
+	}{
+		{"raw_profile", "raw", c.RawProfile != ""},
+		{"raw_profile_down", "raw", c.RawProfileDown != ""},
+		{"raw_gre_ptype", "raw", c.RawGrePtype != 0},
+		{"raw_gre_ptype_down", "raw", c.RawGrePtypeDown != 0},
+		{"raw_proto", "raw", c.RawProto != 0},
+		{"raw_port", "raw", c.RawPort != 0},
+		{"raw_sport", "raw", c.RawSport != 0},
+		{"raw_sport_random", "raw", c.RawSportRandom},
+		{"raw_sport_rotate", "raw", c.RawSportRotate != 0},
+		{"raw_dports", "raw", c.RawDports != 0},
+		{"cdn_carrier", "ws", c.CDNCarrier != ""},
+		{"http_streams", "ws", c.HTTPStreams != 0},
+		{"http_up_workers", "ws", c.HTTPUpWorkers != 0},
+		{"http_up_batch_kb", "ws", c.HTTPUpBatchKB != 0},
+		{"http_up_rate", "ws", c.HTTPUpRate != 0},
+		{"ws_edge_ips", "ws", len(c.WSEdgeIPs) > 0},
+		{"ws_edge_ip_groups", "ws", len(c.WSEdgeIPGroups) > 0},
+		{"ws_edge_snis", "ws", len(c.WSEdgeSNIs) > 0},
+		{"ws_rotate_secs", "ws", c.WSRotateSecs != 0},
+		{"ws_port_roll", "ws", c.WSPortRoll},
+		{"ws_host", "ws", c.WSHost != ""},
+		{"ws_path", "ws", c.WSPath != ""},
+		{"ws_tls", "ws", c.WSTLS},
+		{"ws_ech", "ws", c.WSECH != ""},
+		{"ws_ca", "ws", c.WSCA != ""},
+		{"srv_cert", "ws", c.SrvCert != ""},
+		{"srv_key", "ws", c.SrvKey != ""},
+		{"srv_ech_key", "ws", c.SrvECHKey != ""},
+		{"srv_ech_conf", "ws", c.SrvECHConf != ""},
+		{"sni_split", "ws", c.SNISplit},
+		{"split_pos", "ws", c.SplitPos != 0},
+		{"sni_mode", "ws", c.SNIMode != ""},
+		{"split_ttl", "ws", c.SplitTTL != 0},
+	} {
+		if k.set && c.Transport != k.transport {
+			return errors.New(k.name + " belongs to the " + k.transport + " transport; transport \"" + c.Transport +
+				"\" would carry it no further than this file")
 		}
 	}
 
@@ -788,8 +799,9 @@ func (c *Config) validate() error {
 		if c.cdnIsHTTP() {
 			return errors.New("fake_desync does not work on the HTTP carrier (its conn has no real TCP 4-tuple to mirror) — use the plain ws mode, or turn desync off")
 		}
-		if c.FakeTTL < 0 || c.FakeTTL > 255 {
-			return errors.New("fake_ttl must be between 0 and 255 (0 defaults to 4)")
+		if c.FakeTTL < 0 || c.FakeTTL > packet.MaxHopBudget {
+			return fmt.Errorf("fake_ttl must be between 0 and %d (0 defaults to 4); above that the "+
+				"decoy reaches the server", packet.MaxHopBudget)
 		}
 		if c.FakeCount < 0 || c.FakeCount > 64 {
 			return errors.New("fake_count must be between 0 and 64 (0 defaults to 2)")

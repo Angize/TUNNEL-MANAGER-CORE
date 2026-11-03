@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/crypto"
@@ -227,6 +228,9 @@ func listenBand(ip net.IP) (*net.UDPConn, error) {
 		if c, err = net.ListenUDP("udp", &net.UDPAddr{IP: ip, Port: int(drawSport())}); err == nil {
 			applyConnSockBuf(c)
 			return c, nil
+		}
+		if !errors.Is(err, syscall.EADDRINUSE) {
+			return nil, err
 		}
 	}
 	return nil, err

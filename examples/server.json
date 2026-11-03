@@ -1,7 +1,5 @@
 {
   "role": "server",
-  "mode": "packet",
-  "profile": "core",
   "transport": "udp",
   "listen": "0.0.0.0:9000",
   "tun_name": "tnl0",

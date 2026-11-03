@@ -214,7 +214,7 @@ func wsClientHandshake(conn net.Conn, host, path string, deadline time.Time) (*b
 	resp.Body.Close()
 
 	if resp.StatusCode != http.StatusSwitchingProtocols {
-		return nil, fmt.Errorf("ws: upgrade got HTTP %d (want 101 Switching Protocols)", resp.StatusCode)
+		return nil, edgeHTTPErr{fmt.Errorf("ws: upgrade got HTTP %d (want 101 Switching Protocols)", resp.StatusCode)}
 	}
 	if !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket") ||
 		resp.Header.Get("Sec-WebSocket-Accept") != wsAccept(key) {
@@ -222,7 +222,7 @@ func wsClientHandshake(conn net.Conn, host, path string, deadline time.Time) (*b
 	}
 
 	if exts := resp.Header.Get("Sec-WebSocket-Extensions"); strings.Contains(strings.ToLower(exts), "permessage-deflate") {
-		return nil, fmt.Errorf("ws: server negotiated permessage-deflate (unsupported); refusing to read compressed frames")
+		return nil, edgeHTTPErr{fmt.Errorf("ws: server negotiated permessage-deflate (unsupported); refusing to read compressed frames")}
 	}
 	var zero time.Time
 	conn.SetDeadline(zero)

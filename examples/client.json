@@ -1,7 +1,5 @@
 {
   "role": "client",
-  "mode": "packet",
-  "profile": "core",
   "transport": "udp",
   "peer": "PUBLIC_SERVER_IP:9000",
   "tun_name": "tnl0",
