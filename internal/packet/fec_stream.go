@@ -5,22 +5,17 @@ import (
 	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/binary"
-	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-func newFecPair(fec bool, data, parity int, psk, name string, emit func([][]byte), deliver func([]byte)) (*fecEncoder, *fecDecoder) {
+func newFecPair(fec bool, data, parity int, psk string, emit func([][]byte), deliver func([]byte)) (*fecEncoder, *fecDecoder) {
 	if !fec {
 		return nil, nil
 	}
 	key := newFecHdrMask(psk)
-	enc, err := newFecEncoder(data, parity, key, emit)
-	if err != nil {
-		log.Printf("%s: FEC disabled (bad geometry %d+%d): %v", name, data, parity, err)
-		return nil, nil
-	}
+	enc := newFecEncoder(data, parity, key, emit)
 	return enc, newFecDecoder(enc.codec, key, deliver)
 }
 
@@ -112,7 +107,6 @@ const (
 
 type fecEncoder struct {
 	codec *fecCodec
-	n, k  int
 	key   fecHdrMask
 	emit  func([][]byte)
 
@@ -123,12 +117,8 @@ type fecEncoder struct {
 	closed bool
 }
 
-func newFecEncoder(n, k int, key fecHdrMask, emit func([][]byte)) (*fecEncoder, error) {
-	c, err := newFECCodec(n, k)
-	if err != nil {
-		return nil, err
-	}
-	return &fecEncoder{codec: c, n: n, k: k, key: key, emit: emit}, nil
+func newFecEncoder(n, k int, key fecHdrMask, emit func([][]byte)) *fecEncoder {
+	return &fecEncoder{codec: newFECCodec(n, k), key: key, emit: emit}
 }
 
 func (e *fecEncoder) Close() {
@@ -151,7 +141,7 @@ func (e *fecEncoder) addData(sealed []byte) {
 		return
 	}
 	e.shards = append(e.shards, sp)
-	if len(e.shards) >= e.n {
+	if len(e.shards) >= e.codec.n {
 		e.flushLocked()
 	} else if e.timer == nil {
 		e.timer = time.AfterFunc(fecFlushDelay, func() { e.mu.Lock(); e.flushLocked(); e.mu.Unlock() })
@@ -177,26 +167,23 @@ func (e *fecEncoder) flushLocked() {
 			shardLen = len(s)
 		}
 	}
-	data := make([][]byte, e.n)
-	for i := 0; i < e.n; i++ {
+	data := make([][]byte, e.codec.n)
+	for i := 0; i < e.codec.n; i++ {
 		data[i] = make([]byte, shardLen)
 		if i < count {
 			copy(data[i], e.shards[i])
 		}
 	}
-	parity, err := e.codec.Encode(data)
+	parity := e.codec.Encode(data)
 	blk := e.block
 	e.block++
 	queued := e.shards
 	e.shards = nil
-	if err != nil {
-		return
-	}
 	hdr := func(typ byte, idx int) fecHeader {
-		return fecHeader{typ: typ, blk: blk, idx: idx, n: e.n, k: e.k, count: count, shardLen: shardLen}
+		return fecHeader{typ: typ, blk: blk, idx: idx, n: e.codec.n, k: e.codec.k, count: count, shardLen: shardLen}
 	}
 
-	kEff := (e.k*count + e.n - 1) / e.n
+	kEff := (e.codec.k*count + e.codec.n - 1) / e.codec.n
 	out := make([][]byte, 0, count+kEff)
 	for i := 0; i < count; i++ {
 		out = append(out, fecPutHdr(e.key, hdr(fecTypeData, i), queued[i]))
@@ -219,22 +206,19 @@ type fecBlock struct {
 }
 
 type fecDecoder struct {
-	mu       sync.Mutex
-	blocks   map[uint32]*fecBlock
-	seq      uint64
-	bytes    int
-	maxBytes int
-	n, k     int
-	key      fecHdrMask
-	codec    *fecCodec
-	deliver  func([]byte)
+	mu      sync.Mutex
+	blocks  map[uint32]*fecBlock
+	seq     uint64
+	bytes   int
+	key     fecHdrMask
+	codec   *fecCodec
+	deliver func([]byte)
 
 	resetPending atomic.Bool
 }
 
 func newFecDecoder(c *fecCodec, key fecHdrMask, deliver func([]byte)) *fecDecoder {
-	return &fecDecoder{blocks: map[uint32]*fecBlock{}, maxBytes: fecMaxBytes,
-		n: c.n, k: c.k, key: key, codec: c, deliver: deliver}
+	return &fecDecoder{blocks: map[uint32]*fecBlock{}, key: key, codec: c, deliver: deliver}
 }
 
 func (d *fecDecoder) reset() {
@@ -268,7 +252,7 @@ func (d *fecDecoder) input(pkt []byte) {
 	typ, blk, idx := h.typ, h.blk, h.idx
 	n, k, count := h.n, h.k, h.count
 	shardLen := h.shardLen
-	if n != d.n || k != d.k || count < 1 || count > n || shardLen < 2 || shardLen > fecMaxShardLen {
+	if n != d.codec.n || k != d.codec.k || count < 1 || count > n || shardLen < 2 || shardLen > fecMaxShardLen {
 		return
 	}
 
@@ -283,7 +267,7 @@ func (d *fecDecoder) input(pkt []byte) {
 	if typ == fecTypeParity {
 		slot = n + idx
 	}
-	if slot < 0 || slot >= n+k {
+	if slot >= n+k {
 		return
 	}
 	if typ == fecTypeData && idx >= count {
@@ -302,12 +286,12 @@ func (d *fecDecoder) input(pkt []byte) {
 			padBytes = shardLen
 		}
 
-		for d.bytes+padBytes+shardLen > d.maxBytes && len(d.blocks) > 0 {
+		for d.bytes+padBytes+shardLen > fecMaxBytes && len(d.blocks) > 0 {
 			if !d.evictOldestLocked() {
 				break
 			}
 		}
-		if d.bytes+padBytes+shardLen > d.maxBytes {
+		if d.bytes+padBytes+shardLen > fecMaxBytes {
 			return
 		}
 		b = &fecBlock{count: count, shardLen: shardLen, shards: make([][]byte, n+k)}
@@ -334,7 +318,7 @@ func (d *fecDecoder) input(pkt []byte) {
 	if b.done || b.shards[slot] != nil {
 		return
 	}
-	if d.bytes+shardLen > d.maxBytes {
+	if d.bytes+shardLen > fecMaxBytes {
 		if typ == fecTypeData {
 			if b.gaveOut == nil {
 				b.gaveOut = make([]bool, b.count)
@@ -403,9 +387,6 @@ func (d *fecDecoder) evictOldestLocked() bool {
 		return false
 	}
 	d.bytes -= oldB.bytes
-	if d.bytes < 0 {
-		d.bytes = 0
-	}
 	delete(d.blocks, oldID)
 	return true
 }

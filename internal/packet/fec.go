@@ -42,11 +42,7 @@ type fecCodec struct {
 	parity [][]byte
 }
 
-func newFECCodec(n, k int) (*fecCodec, error) {
-	if n < 1 || k < 1 || n+k > 256 {
-		return nil, errors.New("fec: bad (n,k)")
-	}
-
+func newFECCodec(n, k int) *fecCodec {
 	p := make([][]byte, k)
 	for i := 0; i < k; i++ {
 		p[i] = make([]byte, n)
@@ -55,19 +51,11 @@ func newFECCodec(n, k int) (*fecCodec, error) {
 			p[i][j] = gdiv(1, xi^byte(j))
 		}
 	}
-	return &fecCodec{n: n, k: k, parity: p}, nil
+	return &fecCodec{n: n, k: k, parity: p}
 }
 
-func (c *fecCodec) Encode(data [][]byte) ([][]byte, error) {
-	if len(data) != c.n {
-		return nil, errors.New("fec: need exactly n data shards")
-	}
+func (c *fecCodec) Encode(data [][]byte) [][]byte {
 	sz := len(data[0])
-	for _, d := range data {
-		if len(d) != sz {
-			return nil, errors.New("fec: data shards must be equal length")
-		}
-	}
 	out := make([][]byte, c.k)
 	for i := 0; i < c.k; i++ {
 		row := make([]byte, sz)
@@ -80,21 +68,14 @@ func (c *fecCodec) Encode(data [][]byte) ([][]byte, error) {
 		}
 		out[i] = row
 	}
-	return out, nil
+	return out
 }
 
 func (c *fecCodec) Reconstruct(shards [][]byte) ([][]byte, error) {
-	if len(shards) != c.n+c.k {
-		return nil, errors.New("fec: shards must be length n+k")
-	}
-
 	haveAllData := true
 	sz := 0
 	for i := 0; i < c.n+c.k; i++ {
 		if shards[i] != nil {
-			if sz != 0 && len(shards[i]) != sz {
-				return nil, errors.New("fec: mixed shard lengths")
-			}
 			sz = len(shards[i])
 		}
 		if i < c.n && shards[i] == nil {
@@ -119,9 +100,6 @@ func (c *fecCodec) Reconstruct(shards [][]byte) ([][]byte, error) {
 		}
 		rows = append(rows, row)
 		vals = append(vals, shards[i])
-	}
-	if len(rows) < c.n {
-		return nil, errors.New("fec: not enough shards to reconstruct")
 	}
 	inv, err := gfInvert(rows)
 	if err != nil {
@@ -148,9 +126,6 @@ func (c *fecCodec) Reconstruct(shards [][]byte) ([][]byte, error) {
 }
 
 func gfMulAddRow(dst, src []byte, coef byte) {
-	if coef == 0 {
-		return
-	}
 	row := &gfMul[coef]
 	for i, v := range src[:len(dst)] {
 		dst[i] ^= row[v]

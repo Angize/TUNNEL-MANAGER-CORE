@@ -18,36 +18,36 @@ func SetPortTries(n int) {
 	portTries = n
 }
 
-type portRung struct {
+type rung struct {
 	mu sync.Mutex
 
-	roll  func() bool
+	act   func() bool
 	spent int
 }
 
-func (p *portRung) setRoll(roll func() bool) {
+func (p *rung) set(act func() bool) {
 	p.mu.Lock()
-	p.roll = roll
+	p.act = act
 	p.mu.Unlock()
 }
 
-func (p *portRung) armed() bool {
+func (p *rung) armed() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.roll != nil
+	return p.act != nil
 }
 
-func (p *portRung) try() bool {
+func (p *rung) try(budget int) bool {
 	p.mu.Lock()
-	roll := p.roll
-	if roll == nil || p.spent >= portTries {
+	act := p.act
+	if act == nil || p.spent >= budget {
 		p.mu.Unlock()
 		return false
 	}
 	p.spent++
 	p.mu.Unlock()
 
-	if roll() {
+	if act() {
 		return true
 	}
 	p.mu.Lock()
@@ -56,7 +56,7 @@ func (p *portRung) try() bool {
 	return false
 }
 
-func (p *portRung) restart() {
+func (p *rung) restart() {
 	p.mu.Lock()
 	p.spent = 0
 	p.mu.Unlock()

@@ -41,15 +41,8 @@ func dialStream(cfg *Config, dev *tun.Device, cryptoOn, lead bool) (*packet.TCP,
 	if cfg.WSECH != "" {
 		echList, _ = base64.StdEncoding.DecodeString(cfg.WSECH)
 	}
-	var b *packet.TCP
-	var err error
-	if cfg.cdnIsHTTP() {
-		b, err = packet.DialHTTPC(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath,
-			cfg.WSTLS, echList, []byte(cfg.WSCA), cfg.cdnMode(), cfg.WSPortRoll)
-	} else {
-		b, err = packet.DialWS(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath,
-			cfg.WSTLS, echList, []byte(cfg.WSCA), cfg.WSPortRoll)
-	}
+	b, err := packet.DialWS(cfg.Peer, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSHost, cfg.WSPath,
+		cfg.WSTLS, echList, []byte(cfg.WSCA), cfg.cdnIsHTTP(), cfg.cdnMode(), cfg.WSPortRoll)
 	return b, fmt.Sprintf("dialing (core/%s%s%s port_roll=%t) %s", carrier, obfsTag, wsTLSTag(cfg.WSTLS, len(echList) > 0),
 		cfg.WSPortRoll, cfg.Peer), err
 }
@@ -59,14 +52,14 @@ func setupClient(b any, cfg *Config, lead bool) {
 	if !lead {
 		logf = func(string, ...any) {}
 	}
-	if sourceMode(b, cfg) == srcByBind {
+	if applyBindIP(b, cfg) {
 		logf("tnl-core: binding outbound source IP to %s", cfg.BindIP)
 	}
 	if cfg.FakeDesync {
 		if s, ok := b.(interface {
-			SetDesync(bool, int, int, string)
+			SetDesync(int, int, string)
 		}); ok {
-			s.SetDesync(true, cfg.FakeTTL, cfg.FakeCount, cfg.FakeMode)
+			s.SetDesync(cfg.FakeTTL, cfg.FakeCount, cfg.FakeMode)
 			if usesFakeTTL(cfg) {
 				logf("tnl-core: fake-desync on (%d decoys, ttl=%d, mode=%s)", cfg.FakeCount, cfg.FakeTTL, cfg.FakeMode)
 			} else {

@@ -142,7 +142,7 @@ func (c *segCursor) next(buf []byte) (n int, fits bool) {
 		binary.BigEndian.PutUint16(seg[2:4], uint16(len(seg)))
 		binary.BigEndian.PutUint16(seg[4:6], c.baseID+uint16(i))
 		seg[10], seg[11] = 0, 0
-		binary.BigEndian.PutUint16(seg[10:12], ipChecksum(seg[:ipHdrLen]))
+		binary.BigEndian.PutUint16(seg[10:12], csum.Checksum(seg[:ipHdrLen]))
 	}
 
 	if c.isTCP {
@@ -228,30 +228,17 @@ func ipv6L4Offset(pkt []byte) (l4Off int, proto byte, ok bool) {
 	}
 }
 
-func sumBytes(b []byte, init uint32) uint32 {
-	return uint32(csum.Fold(csum.Add(b, uint64(init))))
-}
-
-func fold(s uint32) uint16 {
-	for s>>16 != 0 {
-		s = (s & 0xffff) + (s >> 16)
+func pseudoSum(pkt []byte, v6 bool, proto byte, l4Len int) uint16 {
+	addrs := pkt[12:20]
+	if v6 {
+		addrs = pkt[8:40]
 	}
-	return uint16(s)
+	return csum.Fold(csum.Add(addrs, uint64(proto)+uint64(l4Len)))
 }
-
-func ipChecksum(hdr []byte) uint16 { return ^fold(sumBytes(hdr, 0)) }
 
 func l4Checksum(pkt []byte, ipHdrLen int, v6 bool, proto byte) uint16 {
 	l4 := pkt[ipHdrLen:]
-	var s uint32
-	if v6 {
-		s = sumBytes(pkt[8:40], 0)
-	} else {
-		s = sumBytes(pkt[12:20], 0)
-	}
-	s += uint32(proto)
-	s += uint32(len(l4))
-	c := ^fold(sumBytes(l4, s))
+	c := ^csum.Fold(csum.Add(l4, uint64(pseudoSum(pkt, v6, proto, len(l4)))))
 	if proto == 17 && c == 0 {
 		c = 0xffff
 	}

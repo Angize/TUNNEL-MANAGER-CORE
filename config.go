@@ -73,6 +73,13 @@ func (c *Config) laneCarrier() bool {
 	return c.Transport == "tcp" || c.Transport == "ws"
 }
 
+func (c *Config) listenAddrs() []string {
+	if len(c.ListenIPs) > 0 {
+		return c.ListenIPs
+	}
+	return []string{c.Listen}
+}
+
 func (c *Config) tunQueues() int {
 	if c.Fec {
 		return 1
@@ -203,13 +210,7 @@ type Config struct {
 
 	GSO bool `json:"gso"`
 
-	Tuning *TuningCfg `json:"tuning"`
-}
-
-type TuningCfg struct {
-	SuspectBackoff []int64 `json:"suspect_backoff"`
-	DeadRetestSecs int64   `json:"dead_retest_secs"`
-	LadderRevive   []int64 `json:"ladder_revive"`
+	Tuning *packet.TuningInput `json:"tuning"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -252,9 +253,6 @@ func (c *Config) applyDefaults() {
 	}
 	c.SockBuf = sizedBuf(c.SockBuf, sockBufCarrier(c.Transport))
 	c.TCPBuf = sizedBuf(c.TCPBuf, tcpBufCarrier(c.Transport) || c.Role == "front")
-	if c.Crypto.Cipher == "" {
-		c.Crypto.Cipher = "aes-256-gcm"
-	}
 	if c.Transport == "" {
 		c.Transport = "udp"
 	}
@@ -547,8 +545,8 @@ func (c *Config) validate() error {
 			if c.Role != "client" || (c.CDNCarrier != "http" && c.CDNCarrier != "grpc") {
 				return errors.New("http_streams applies to an http- or grpc-carrier CLIENT only")
 			}
-			if c.HTTPStreams < 0 || c.HTTPStreams > 16 {
-				return errors.New("http_streams must be between 1 and 16 (0 = default)")
+			if c.HTTPStreams < 0 || c.HTTPStreams > packet.MaxHTTPStreams {
+				return fmt.Errorf("http_streams must be between 1 and %d (0 = default)", packet.MaxHTTPStreams)
 			}
 		}
 		if c.HTTPUpRate != 0 && (c.Role != "client" || c.CDNCarrier != "http") {
@@ -558,15 +556,15 @@ func (c *Config) validate() error {
 			if c.CDNCarrier != "http" {
 				return errors.New("http_up_workers/http_up_batch_kb/http_up_rate apply to the http carrier only")
 			}
-			if c.HTTPUpWorkers < 0 || c.HTTPUpWorkers > 16 {
-				return errors.New("http_up_workers must be between 1 and 16 (0 = default)")
+			if c.HTTPUpWorkers < 0 || c.HTTPUpWorkers > packet.MaxHTTPUpWorkers {
+				return fmt.Errorf("http_up_workers must be between 1 and %d (0 = default)", packet.MaxHTTPUpWorkers)
 			}
 
-			if c.HTTPUpBatchKB < 0 || c.HTTPUpBatchKB > 512 {
-				return errors.New("http_up_batch_kb must be between 0 and 512 (0 = default; a value below 8 is raised to 8)")
+			if c.HTTPUpBatchKB < 0 || c.HTTPUpBatchKB > packet.MaxHTTPUpBatchKB {
+				return fmt.Errorf("http_up_batch_kb must be between 0 and %d (0 = default; a value below 8 is raised to 8)", packet.MaxHTTPUpBatchKB)
 			}
-			if c.HTTPUpRate < 0 || c.HTTPUpRate > 1000 {
-				return errors.New("http_up_rate must be between 1 and 1000 POSTs/sec (0 = unpaced)")
+			if c.HTTPUpRate < 0 || c.HTTPUpRate > packet.MaxHTTPUpRate {
+				return fmt.Errorf("http_up_rate must be between 1 and %d POSTs/sec (0 = unpaced)", packet.MaxHTTPUpRate)
 			}
 		}
 		if c.SNISplit {
@@ -781,7 +779,7 @@ func (c *Config) validate() error {
 		if ep == 0 {
 			ep = defaultFecParity
 		}
-		if ed < 1 || ep < 1 || ed+ep > 255 {
+		if ed+ep > 255 {
 			return fmt.Errorf("effective fec_data (default %d) + fec_parity (default %d) must satisfy fec_data>=1, fec_parity>=1, fec_data+fec_parity<=255", defaultFecData, defaultFecParity)
 		}
 

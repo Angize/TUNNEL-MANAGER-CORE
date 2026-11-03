@@ -24,8 +24,6 @@ import (
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
-
-	utls "github.com/refraction-networking/utls"
 )
 
 const chromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
@@ -38,7 +36,7 @@ const grpcAcceptEncoding = "gzip"
 
 const maxPostBody = 1 << 20
 
-func httpcHeaderWait(budget time.Duration) time.Duration { return 3 * budget }
+const httpcHeaderWait = 3 * handshakeTimeout
 
 type strAddr string
 
@@ -46,14 +44,10 @@ func (a strAddr) Network() string { return "http" }
 func (a strAddr) String() string  { return string(a) }
 
 type httpcConn struct {
-	r     io.Reader
-	w     io.Writer
-	flush func()
-	aw    asyncWriter
+	r  io.Reader
+	aw asyncWriter
 
-	wmu     sync.Mutex
 	wdl     atomic.Int64
-	setWD   func(time.Time) error
 	mu      sync.Mutex
 	closed  bool
 	closeFn func()
@@ -70,45 +64,8 @@ func (c *httpcConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (c *httpcConn) armWrite() func() {
-	dl := c.wdl.Load()
-	if dl == 0 {
-		return func() {}
-	}
-	t := time.AfterFunc(time.Until(time.Unix(0, dl)), func() {
-		if c.setWD != nil {
-			_ = c.setWD(time.Unix(0, 1))
-			return
-		}
-		c.Close()
-	})
-	return func() { t.Stop() }
-}
-
 func (c *httpcConn) Write(p []byte) (int, error) {
-	if c.aw != nil {
-		return c.aw.write(p, c.wdl.Load())
-	}
-
-	c.mu.Lock()
-	closed := c.closed
-	c.mu.Unlock()
-	if closed {
-		return 0, net.ErrClosed
-	}
-	if dl := c.wdl.Load(); dl != 0 && time.Now().UnixNano() > dl {
-		return 0, os.ErrDeadlineExceeded
-	}
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
-
-	disarm := c.armWrite()
-	n, err := c.w.Write(p)
-	if err == nil && c.flush != nil {
-		c.flush()
-	}
-	disarm()
-	return n, err
+	return c.aw.write(p, c.wdl.Load())
 }
 
 func (c *httpcConn) Close() error {
@@ -190,7 +147,7 @@ func browserHeaders(r *http.Request) {
 		r.Header.Set(h[0], h[1])
 	}
 
-	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.URL != nil && r.URL.Host != "" {
+	if r.Method == http.MethodPost {
 		r.Header.Set("Origin", "https://"+r.URL.Host)
 	}
 }
@@ -226,8 +183,9 @@ type seqChunk struct {
 }
 
 const (
-	upMaxWorkers = 16
-	upMaxBatch   = 512 << 10
+	MaxHTTPUpWorkers = 16
+	MaxHTTPUpBatchKB = 512
+	MaxHTTPUpRate    = 1000
 )
 
 var (
@@ -235,24 +193,18 @@ var (
 
 	upWorkers = 8
 
-	upChanCap = maxUpBatch/1400 + 2
-
-	upIdleConns = upWorkers * 2
-
 	upMinGap time.Duration
 )
 
 func SetHTTPUpstream(workers, batchKB, ratePerSec int) {
 	if workers > 0 {
-		upWorkers = tclamp(workers, 1, upMaxWorkers)
-		upIdleConns = upWorkers * 2
+		upWorkers = workers
 	}
 	if batchKB > 0 {
-		maxUpBatch = tclamp(batchKB, 8, upMaxBatch>>10) << 10
-		upChanCap = maxUpBatch/1400 + 2
+		maxUpBatch = max(batchKB, 8) << 10
 	}
 	if ratePerSec > 0 {
-		upMinGap = time.Second / time.Duration(tclamp(ratePerSec, 1, 1000))
+		upMinGap = time.Second / time.Duration(ratePerSec)
 	}
 }
 
@@ -271,15 +223,14 @@ type httpcUp struct {
 
 	minGap   time.Duration
 	maxBatch int
-	postTO   time.Duration
 	fail     func()
 	once     sync.Once
 }
 
 func newHTTPCUp(ctx context.Context, hc *http.Client, urlFor func(uint64) string, setHdr func(*http.Request), fail func()) *httpcUp {
 	u := &httpcUp{hc: hc, ctx: ctx, urlFor: urlFor, setHdr: setHdr, fail: fail,
-		ch:     make(chan *[]byte, upChanCap),
-		minGap: upMinGap, maxBatch: maxUpBatch, postTO: upPostTimeout}
+		ch:     make(chan *[]byte, maxUpBatch/1400+2),
+		minGap: upMinGap, maxBatch: maxUpBatch}
 	for i := 0; i < upWorkers; i++ {
 		go u.worker()
 	}
@@ -389,10 +340,8 @@ func (u *httpcUp) worker() {
 	}
 }
 
-const upPostTimeout = writeTimeout
-
 func (u *httpcUp) post(sc seqChunk) error {
-	ctx, cancel := context.WithTimeout(u.ctx, u.postTO)
+	ctx, cancel := context.WithTimeout(u.ctx, writeTimeout)
 	defer cancel()
 	var writing atomic.Int32
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
@@ -420,36 +369,19 @@ func (u *httpcUp) post(sc seqChunk) error {
 	return nil
 }
 
-func (b *TCP) httpcEdge() (dialAddr, host string, ech []byte, path string, err error) {
-	dialAddr, host, ech, path = b.addr, b.wsHost, b.ech(), b.wsPath
-	if b.edgePool() {
-		ip, sni, ok := b.edgeCombo()
-		if !ok {
-			return "", "", nil, "", fmt.Errorf("httpc: edge pool is empty")
-		}
-		dialAddr, host, ech = ip, sni.host, sni.ech
-	}
-	if host == "" {
-		host = dialAddr
-	}
-	b.noteAttempt(dialAddr, host)
-	return dialAddr, host, ech, path, nil
-}
-
 func (b *TCP) establishHTTPC() (net.Conn, string, string, error) {
-	dialAddr, host, ech, path, err := b.httpcEdge()
+	dialAddr, host, ech, err := b.edgeTarget("httpc")
 	if err != nil {
 		return nil, "", "", err
 	}
-	conn, err := b.dialHTTPCOnce(dialAddr, host, ech, path, handshakeTimeout)
+	conn, err := b.dialHTTPCOnce(dialAddr, host, ech)
 
 	if err != nil && b.wsTLS && len(ech) > 0 {
-		var echErr *utls.ECHRejectionError
-		if errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
-			ech = echErr.RetryConfigList
+		if retry, ok := echRetry(err); ok {
+			ech = retry
 			log.Printf("core/http: ECH self-heal for %s (%s) — stale key rejected, retrying with fresh key %s",
 				host, dialAddr, base64.StdEncoding.EncodeToString(ech))
-			conn, err = b.dialHTTPCOnce(dialAddr, host, ech, path, handshakeTimeout)
+			conn, err = b.dialHTTPCOnce(dialAddr, host, ech)
 			if err == nil {
 				b.noteECHSelfHeal(host, ech)
 			}
@@ -462,16 +394,11 @@ func (b *TCP) establishHTTPC() (net.Conn, string, string, error) {
 	return conn, dialAddr, activeLabel(dialAddr, host), nil
 }
 
-func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budget time.Duration) (net.Conn, error) {
-	single := b.httpcMode == "grpc"
-	h2 := single && b.wsTLS
+func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte) (net.Conn, error) {
+	h2 := b.httpcMode == "grpc" && b.wsTLS
 
 	rawDial := func(ctx context.Context) (net.Conn, error) {
-		d := budget
-		if d > connectTimeout {
-			d = connectTimeout
-		}
-		return dialFromBand(ctx, func() *net.Dialer { return b.dialer(d) }, dialAddr)
+		return dialFromBand(ctx, func() *net.Dialer { return b.dialer(connectTimeout) }, dialAddr)
 	}
 
 	var dialedMu sync.Mutex
@@ -509,7 +436,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 				return nil, err
 			}
 
-			uc, err := uEdgeHandshake(b.fragWrap(c, host, ech), host, ech, b.wsRoots, alpn, h2, budget)
+			uc, err := uEdgeHandshake(b.fragWrap(c, host, ech), host, ech, b.wsRoots, alpn, h2, handshakeTimeout)
 			if err != nil {
 				c.Close()
 				return nil, stageErr{stageTLS, err}
@@ -530,8 +457,8 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 		} else {
 			tr := &http.Transport{
 				DialTLSContext:      func(ctx context.Context, _, _ string) (net.Conn, error) { return dialTLS(ctx) },
-				MaxIdleConns:        upIdleConns * 2,
-				MaxIdleConnsPerHost: upIdleConns,
+				MaxIdleConns:        upWorkers * 4,
+				MaxIdleConnsPerHost: upWorkers * 2,
 				IdleConnTimeout:     90 * time.Second,
 			}
 			rt, closeIdle = tr, func() { tr.CloseIdleConnections(); forceClose() }
@@ -545,10 +472,8 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 				}
 				return track(c), nil
 			},
-			ForceAttemptHTTP2:   h2,
-			DisableCompression:  h2,
-			MaxIdleConns:        upIdleConns * 2,
-			MaxIdleConnsPerHost: upIdleConns,
+			MaxIdleConns:        upWorkers * 4,
+			MaxIdleConnsPerHost: upWorkers * 2,
 			IdleConnTimeout:     90 * time.Second,
 		}
 		rt, closeIdle = tr, func() { tr.CloseIdleConnections(); forceClose() }
@@ -559,7 +484,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 		scheme = "https"
 	}
 	sid := randSID()
-	base := scheme + "://" + host + httpcPath(path)
+	base := scheme + "://" + host + httpcPath(b.wsPath)
 	hc := &http.Client{Transport: rt}
 	ctx, cancel := context.WithCancel(context.Background())
 	setHdr := browserHeaders
@@ -571,9 +496,9 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte, path string, budg
 	var err error
 	switch b.httpcMode {
 	case "grpc":
-		conn, err = b.dialHTTPCGrpc(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr, budget)
+		conn, err = b.dialHTTPCGrpc(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)
 	default:
-		conn, err = b.dialHTTPCPost(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr, budget)
+		conn, err = b.dialHTTPCPost(hc, closeIdle, ctx, cancel, base, sid, dialAddr, setHdr)
 	}
 	if err != nil {
 		closeIdle()
@@ -680,7 +605,7 @@ func (g *grpcDeframingReader) Close() error {
 	return nil
 }
 
-func (b *TCP) openGrpcStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration) (*http.Response, *io.PipeWriter, error) {
+func (b *TCP) openGrpcStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request)) (*http.Response, *io.PipeWriter, error) {
 	pr, pw := io.Pipe()
 	req, err := http.NewRequestWithContext(ctx, "POST", base+"?s="+sid+"&d="+strconv.Itoa(i), pr)
 	if err != nil {
@@ -691,7 +616,7 @@ func (b *TCP) openGrpcStream(hc *http.Client, ctx context.Context, base, sid str
 	req.Header.Set("Content-Type", "application/grpc")
 	req.Header.Set("TE", "trailers")
 	req.ContentLength = -1
-	resp, err := doWithHeaderTimeout(hc, req, httpcHeaderWait(budget))
+	resp, err := doWithHeaderTimeout(hc, req, httpcHeaderWait)
 	if err != nil {
 		pw.Close()
 		return nil, nil, err
@@ -708,12 +633,12 @@ func (b *TCP) openGrpcStream(hc *http.Client, ctx context.Context, base, sid str
 	return resp, pw, nil
 }
 
-func (b *TCP) runGrpcStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration, tx *stripeTx, q *reseq, fail func(), first *http.Response, firstPW *io.PipeWriter) {
+func (b *TCP) runGrpcStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), tx *stripeTx, q *reseq, fail func(), first *http.Response, firstPW *io.PipeWriter) {
 	resp, pw := first, firstPW
 	for {
 		if resp == nil {
 			var err error
-			if resp, pw, err = b.openGrpcStream(hc, ctx, base, sid, i, setHdr, budget); err != nil {
+			if resp, pw, err = b.openGrpcStream(hc, ctx, base, sid, i, setHdr); err != nil {
 				resp = nil
 				select {
 				case <-ctx.Done():
@@ -747,35 +672,37 @@ func (b *TCP) runGrpcStream(hc *http.Client, ctx context.Context, base, sid stri
 	}
 }
 
-func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request), budget time.Duration) (net.Conn, error) {
-	first, firstPW, err := b.openGrpcStream(hc, ctx, base, sid, 0, setHdr, budget)
+func newHTTPCClientConn(dialAddr string, cancel, closeIdle func()) (*httpcConn, *io.PipeWriter, func()) {
+	pr, pw := io.Pipe()
+	conn := &httpcConn{r: pr, ra: strAddr(dialAddr), la: strAddr("http-client")}
+	conn.closeFn = func() { cancel(); pw.Close(); closeIdle() }
+	return conn, pw, func() { conn.Close() }
+}
+
+func (b *TCP) dialHTTPCGrpc(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request)) (net.Conn, error) {
+	first, firstPW, err := b.openGrpcStream(hc, ctx, base, sid, 0, setHdr)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	pr, pw := io.Pipe()
+	conn, pw, fail := newHTTPCClientConn(dialAddr, cancel, closeIdle)
 	tx := newStripeTx(ctx.Done())
-	conn := &httpcConn{
-		r: pr, aw: tx,
-		ra: strAddr(dialAddr), la: strAddr("http-client"),
-	}
-	conn.closeFn = func() { cancel(); pw.Close(); closeIdle() }
-	fail := func() { conn.Close() }
+	conn.aw = tx
 	q := newReseq(pw, maxStripePend(1))
-	go b.runGrpcStream(hc, ctx, base, sid, 0, setHdr, budget, tx, q, fail, first, firstPW)
+	go b.runGrpcStream(hc, ctx, base, sid, 0, setHdr, tx, q, fail, first, firstPW)
 	for i := 1; i < carrierStreams; i++ {
-		go b.runGrpcStream(hc, ctx, base, sid, i, setHdr, budget, tx, q, fail, nil, nil)
+		go b.runGrpcStream(hc, ctx, base, sid, i, setHdr, tx, q, fail, nil, nil)
 	}
 	return conn, nil
 }
 
-func (b *TCP) openDownStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration) (*http.Response, error) {
+func (b *TCP) openDownStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request)) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", base+"?s="+sid+"&d="+strconv.Itoa(i), nil)
 	if err != nil {
 		return nil, err
 	}
 	setHdr(req)
-	resp, err := doWithHeaderTimeout(hc, req, httpcHeaderWait(budget))
+	resp, err := doWithHeaderTimeout(hc, req, httpcHeaderWait)
 	if err != nil {
 		return nil, err
 	}
@@ -791,9 +718,9 @@ func (b *TCP) openDownStream(hc *http.Client, ctx context.Context, base, sid str
 	return resp, nil
 }
 
-func (b *TCP) runDownStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), budget time.Duration, q *reseq, fail func()) {
+func (b *TCP) runDownStream(hc *http.Client, ctx context.Context, base, sid string, i int, setHdr func(*http.Request), q *reseq, fail func()) {
 	for {
-		if resp, err := b.openDownStream(hc, ctx, base, sid, i, setHdr, budget); err == nil {
+		if resp, err := b.openDownStream(hc, ctx, base, sid, i, setHdr); err == nil {
 			readStripe(resp.Body, q, fail)
 		}
 		select {
@@ -804,8 +731,8 @@ func (b *TCP) runDownStream(hc *http.Client, ctx context.Context, base, sid stri
 	}
 }
 
-func (b *TCP) dialHTTPCPost(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request), budget time.Duration) (net.Conn, error) {
-	first, err := b.openDownStream(hc, ctx, base, sid, 0, setHdr, budget)
+func (b *TCP) dialHTTPCPost(hc *http.Client, closeIdle func(), ctx context.Context, cancel func(), base, sid, dialAddr string, setHdr func(*http.Request)) (net.Conn, error) {
+	first, err := b.openDownStream(hc, ctx, base, sid, 0, setHdr)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -813,20 +740,14 @@ func (b *TCP) dialHTTPCPost(hc *http.Client, closeIdle func(), ctx context.Conte
 	urlFor := func(seq uint64) string {
 		return base + "?s=" + sid + "&seq=" + strconv.FormatUint(seq, 10)
 	}
-	pr, pw := io.Pipe()
-	conn := &httpcConn{
-		r:  pr,
-		ra: strAddr(dialAddr), la: strAddr("http-client"),
-	}
-	conn.closeFn = func() { cancel(); pw.Close(); closeIdle() }
-	fail := func() { conn.Close() }
+	conn, pw, fail := newHTTPCClientConn(dialAddr, cancel, closeIdle)
 	q := newReseq(pw, maxStripePend(carrierStreams))
 	go func() {
 		readStripe(first.Body, q, fail)
-		b.runDownStream(hc, ctx, base, sid, 0, setHdr, budget, q, fail)
+		b.runDownStream(hc, ctx, base, sid, 0, setHdr, q, fail)
 	}()
 	for i := 1; i < carrierStreams; i++ {
-		go b.runDownStream(hc, ctx, base, sid, i, setHdr, budget, q, fail)
+		go b.runDownStream(hc, ctx, base, sid, i, setHdr, q, fail)
 	}
 	conn.aw = newHTTPCUp(ctx, hc, urlFor, setHdr, fail)
 	return conn, nil
@@ -883,6 +804,18 @@ func (s *httpcSession) close(b *TCP, sid string) {
 	})
 }
 
+func (s *httpcSession) startConn(b *TCP, sid, remote string) {
+	s.start.Do(func() {
+		go b.handleServerConn(&httpcConn{
+			r:       s.upR,
+			aw:      s.down,
+			ra:      strAddr(remote),
+			la:      strAddr("http-server"),
+			closeFn: func() { s.close(b, sid) },
+		})
+	})
+}
+
 func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request, sid string) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -896,15 +829,7 @@ func (b *TCP) serveHTTPCGrpc(w http.ResponseWriter, r *http.Request, sid string)
 	fl.Flush()
 
 	s := b.httpcGetOrCreate(sid)
-	s.start.Do(func() {
-		go b.handleServerConn(&httpcConn{
-			r:       s.upR,
-			aw:      s.down,
-			ra:      strAddr(r.RemoteAddr),
-			la:      strAddr("http-server"),
-			closeFn: func() { s.close(b, sid) },
-		})
-	})
+	s.startConn(b, sid, r.RemoteAddr)
 	s.up.attach(1)
 	defer func() {
 		if s.up.attach(-1) == 0 {
@@ -1009,15 +934,7 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fl.Flush()
 
-	s.start.Do(func() {
-		go b.handleServerConn(&httpcConn{
-			r:       s.upR,
-			aw:      s.down,
-			ra:      strAddr(r.RemoteAddr),
-			la:      strAddr("http-server"),
-			closeFn: func() { s.close(b, sid) },
-		})
-	})
+	s.startConn(b, sid, r.RemoteAddr)
 	s.down.serve(r.Context(), w, fl.Flush, http.NewResponseController(w).SetWriteDeadline)
 }
 
@@ -1032,7 +949,7 @@ func (b *TCP) runHTTPCServer() {
 	}
 	srv := &http.Server{Handler: h2c.NewHandler(mux, h2s)}
 	b.httpSrv.Store(srv)
-	if err := srv.Serve(b.ln); err != nil && !b.closed.Load() {
+	if err := srv.Serve(b.lns[0]); err != nil && !b.closed.Load() {
 		log.Printf("core/http: server: %v", err)
 	}
 }

@@ -15,9 +15,6 @@ type udpBatch struct {
 }
 
 func newUDPBatch(c *net.UDPConn) *udpBatch {
-	if c == nil {
-		return nil
-	}
 	return &udpBatch{
 		pc: ipv4.NewPacketConn(c),
 		rb: newRecvBatcher(maxRecvBatch),
@@ -58,9 +55,6 @@ type udpTx struct {
 }
 
 func newUDPTx(c *net.UDPConn) *udpTx {
-	if c == nil {
-		return nil
-	}
 	t := &udpTx{pc: ipv4.NewPacketConn(c), ms: make([]ipv4.Message, maxBatch)}
 	for i := range t.ms {
 		t.ms[i].Buffers = make([][]byte, 1)
@@ -121,7 +115,7 @@ func (t *udpTx) add(pkt []byte, to *net.UDPAddr) {
 	t.n++
 }
 
-func (t *udpTx) flush(errs *sendErrLog) int {
+func (t *udpTx) flush(errs *sendErrLog) {
 	sent := 0
 	if !t.noGSO {
 		if segs, size := t.gsoRun(); segs > 0 {
@@ -134,9 +128,7 @@ func (t *udpTx) flush(errs *sendErrLog) int {
 		}
 	}
 	if sent < t.n {
-		n, err := sendBatch(t.pc, t.ms[sent:t.n])
+		_, err := sendBatch(t.pc, t.ms[sent:t.n])
 		errs.note("udp/batch", err)
-		sent += n
 	}
-	return sent
 }

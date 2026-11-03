@@ -180,9 +180,6 @@ func wsAccept(key string) string {
 }
 
 func wsClientHandshake(conn net.Conn, host, path string, deadline time.Time) (*bufio.Reader, error) {
-	if path == "" {
-		path = "/"
-	}
 	var kb [16]byte
 	if _, err := io.ReadFull(rand.Reader, kb[:]); err != nil {
 		return nil, err
@@ -250,9 +247,6 @@ func headerListContains(v, tok string) bool {
 }
 
 func wsUpgradeForUs(req *http.Request, wantPath string) bool {
-	if wantPath == "" {
-		wantPath = "/"
-	}
 	if req.URL == nil || req.URL.EscapedPath() != wantPath {
 		return false
 	}

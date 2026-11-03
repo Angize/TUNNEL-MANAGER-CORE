@@ -49,8 +49,8 @@ func randUint(max int) (int, error) {
 	}
 }
 
-func obfsSeal(dst []byte, s Sealer, lead int, typ byte, payload []byte, padMax int) ([]byte, error) {
-	n, err := randUint(padMax)
+func obfsSeal(dst []byte, s Sealer, lead int, typ byte, payload []byte) ([]byte, error) {
+	n, err := randUint(padMaxFor(typ))
 	if err != nil {
 		return nil, err
 	}
@@ -89,10 +89,6 @@ func frac53(b []byte) float64 {
 }
 
 func keepaliveInterval(base time.Duration, psk string) time.Duration {
-	if base <= 0 {
-		return base
-	}
-
 	h := sha256.Sum256([]byte("tnl-core|ka-phase|" + psk))
 	mean := float64(base) * (0.85 + 0.35*frac53(h[:8]))
 	var rb [16]byte
@@ -112,9 +108,6 @@ func keepaliveInterval(base time.Duration, psk string) time.Duration {
 }
 
 func jitterFrac(d time.Duration) time.Duration {
-	if d <= 0 {
-		return d
-	}
 	var rb [8]byte
 	if _, err := io.ReadFull(rand.Reader, rb[:]); err != nil {
 		return d

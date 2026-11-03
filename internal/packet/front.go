@@ -109,11 +109,7 @@ func (f *Front) Run(ln net.Listener) {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			if backoff == 0 {
-				backoff = 5 * time.Millisecond
-			} else if backoff < time.Second {
-				backoff *= 2
-			}
+			backoff = acceptBackoff(backoff)
 			log.Printf("core/front: accept error: %v (backoff %v)", err, backoff)
 			time.Sleep(backoff)
 			continue

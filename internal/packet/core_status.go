@@ -64,45 +64,16 @@ func (s *coreStatus) setPair(live func() (low, high, lowKind, highKind string)) 
 	s.write()
 }
 
-func (s *coreStatus) setRot(live func() rotStatus) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	s.rot = live
-	s.mu.Unlock()
-	s.write()
-}
-
-func (s *coreStatus) trackRot(live func() rotStatus, closeCh <-chan struct{}) {
-	if s == nil || live() == (rotStatus{}) {
-		return
-	}
-	s.setRot(live)
-	last := live()
-	go func() {
-		tick := time.NewTicker(time.Second)
-		defer tick.Stop()
-		for {
-			select {
-			case <-closeCh:
-				return
-			case <-tick.C:
-				if p := live(); p.Sport != last.Sport || p.Dport != last.Dport {
-					last = p
-					s.write()
-				}
-			}
-		}
-	}()
-}
-
 func (s *coreStatus) trackPath(live func() (pathKey, bool), closeCh <-chan struct{}) {
 	if s == nil {
 		return
 	}
 	s.tracker.setLive(live)
-	go samplePathLoop(&s.tracker, s.write, closeCh)
+	go runCmdPoll(closeCh, func() {
+		if s.tracker.sample() {
+			s.write()
+		}
+	})
 }
 
 func (s *coreStatus) newSession() {
@@ -127,7 +98,7 @@ func (s *coreStatus) selectPath() string { return s.sidecar(".select") }
 func (s *coreStatus) echCmdPath() string { return s.sidecar(".echcmd") }
 
 func (s *coreStatus) sidecar(suffix string) string {
-	if s == nil || s.path == "" {
+	if s == nil {
 		return ""
 	}
 	return s.path + suffix
@@ -169,7 +140,7 @@ func adoptCfgWarnSink(f func(code, detail string)) {
 }
 
 func (s *coreStatus) event(kind, code, detail string) {
-	if s == nil || s.path == "" {
+	if s == nil {
 		return
 	}
 	s.mu.Lock()
@@ -252,7 +223,7 @@ func (s *coreStatus) reconnected(detail string) {
 }
 
 func (s *coreStatus) setActive(a string) {
-	if s == nil || s.path == "" {
+	if s == nil {
 		return
 	}
 	s.mu.Lock()
@@ -262,7 +233,7 @@ func (s *coreStatus) setActive(a string) {
 }
 
 func (s *coreStatus) write() {
-	if s == nil || s.path == "" {
+	if s == nil {
 		return
 	}
 

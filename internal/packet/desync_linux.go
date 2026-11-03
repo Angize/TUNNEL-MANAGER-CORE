@@ -2,31 +2,46 @@
 
 package packet
 
-import "crypto/rand"
+import (
+	"crypto/rand"
+	"log"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+const desyncReportEvery = 5 * time.Minute
+
+type desyncSend struct {
+	ok       atomic.Int64
+	bad      atomic.Int64
+	last     atomic.Int64
+	failOnce sync.Once
+}
+
+func (d *desyncSend) note(tag string, err error) {
+	if err == nil {
+		d.ok.Add(1)
+		return
+	}
+	bad := d.bad.Add(1)
+	now := time.Now().UnixNano()
+	last := d.last.Load()
+	if last != 0 && now-last < int64(desyncReportEvery) {
+		return
+	}
+	if !d.last.CompareAndSwap(last, now) {
+		return
+	}
+	log.Printf("core/%s: fake-desync decoy NOT sent: %v (%d failed, %d delivered) — the camouflage is configured and logged as on, but this decoy never reached the wire",
+		tag, err, bad, d.ok.Load())
+}
 
 type desyncCfg struct {
 	on    bool
 	ttl   int
 	count int
 	mode  string
-}
-
-func newDesyncCfg(on bool, ttl, count int, mode string) desyncCfg {
-	if !on {
-		return desyncCfg{}
-	}
-	if ttl <= 0 {
-		ttl = 4
-	}
-	if count <= 0 {
-		count = 2
-	}
-	switch mode {
-	case "ttl", "badsum", "both":
-	default:
-		mode = "ttl"
-	}
-	return desyncCfg{on: true, ttl: ttl, count: count, mode: mode}
 }
 
 func (d desyncCfg) usesBadsum() bool { return d.on && (d.mode == "badsum" || d.mode == "both") }
@@ -38,7 +53,9 @@ type fakeSpec struct {
 	badSum bool
 }
 
-func (d desyncCfg) specs() []fakeSpec {
+const badSumTTL = 64
+
+func (d desyncCfg) specs(badAt64 bool) []fakeSpec {
 	if !d.on {
 		return nil
 	}
@@ -46,22 +63,10 @@ func (d desyncCfg) specs() []fakeSpec {
 	for i := 0; i < d.count; i++ {
 		bad := d.mode == "badsum" || (d.mode == "both" && i%2 == 1)
 		ttl := d.ttl
-		if bad {
-			ttl = 64
+		if bad && badAt64 {
+			ttl = badSumTTL
 		}
 		out = append(out, fakeSpec{ttl: ttl, badSum: bad})
-	}
-	return out
-}
-
-func (d desyncCfg) specsTCP() []fakeSpec {
-	if !d.on {
-		return nil
-	}
-	out := make([]fakeSpec, 0, d.count)
-	for i := 0; i < d.count; i++ {
-		bad := d.mode == "badsum" || (d.mode == "both" && i%2 == 1)
-		out = append(out, fakeSpec{ttl: d.ttl, badSum: bad})
 	}
 	return out
 }

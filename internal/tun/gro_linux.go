@@ -5,6 +5,8 @@ package tun
 import (
 	"bytes"
 	"encoding/binary"
+
+	"github.com/Angize/TUNNEL-MANAGER-CORE/internal/csum"
 )
 
 const (
@@ -207,7 +209,7 @@ func (d *Device) writeSuper(pkts [][]byte, segSize int, proto byte) error {
 	} else {
 		binary.BigEndian.PutUint16(lead[2:4], uint16(ipHdr+l4Len))
 		lead[10], lead[11] = 0, 0
-		binary.BigEndian.PutUint16(lead[10:12], ipChecksum(lead[:ipHdr]))
+		binary.BigEndian.PutUint16(lead[10:12], csum.Checksum(lead[:ipHdr]))
 	}
 
 	var vnet [vnetHdrLen]byte
@@ -281,14 +283,4 @@ func (d *Device) WriteBatch(pkts [][]byte) error {
 		i += n
 	}
 	return ferr
-}
-
-func pseudoSum(pkt []byte, v6 bool, proto byte, l4Len int) uint16 {
-	var s uint32
-	if v6 {
-		s = sumBytes(pkt[8:40], 0)
-	} else {
-		s = sumBytes(pkt[12:20], 0)
-	}
-	return fold(s + uint32(proto) + uint32(l4Len))
 }

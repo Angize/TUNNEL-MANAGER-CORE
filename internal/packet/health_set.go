@@ -1,5 +1,7 @@
 package packet
 
+import "time"
+
 const (
 	stateSuspect = "suspect"
 	stateDead    = "dead"
@@ -19,13 +21,13 @@ func (r *healthRec) waitFrom(now, step int64) {
 
 type healthSet struct {
 	recs map[string]*healthRec
-
-	now func() int64
 }
 
-func newHealthSet(clock *func() int64) healthSet {
-	return healthSet{recs: map[string]*healthRec{}, now: func() int64 { return (*clock)() }}
+func newHealthSet() healthSet {
+	return healthSet{recs: map[string]*healthRec{}}
 }
+
+func (h healthSet) now() int64 { return time.Now().Unix() }
 
 func (h healthSet) rec(key string) *healthRec { return h.recs[key] }
 

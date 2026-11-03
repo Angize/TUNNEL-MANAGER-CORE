@@ -73,12 +73,8 @@ type connFramer struct {
 	saltSent bool
 
 	saltPend []byte
-	wbuf     []byte
-	rbuf     []byte
 
 	rp replayGuard
-
-	rxAt atomic.Int64
 
 	lane atomic.Int32
 }
@@ -132,12 +128,8 @@ func (cf *connFramer) ensureReadKS() error {
 	return nil
 }
 
-func (cf *connFramer) frame(typ byte, payload []byte) ([]byte, error) {
-	return cf.frameIn(nil, typ, payload)
-}
-
 func (cf *connFramer) frameIn(dst []byte, typ byte, payload []byte) ([]byte, error) {
-	out, err := sealBody(dst, cf.sealer, cf.obfs, 2, typ, payload, padMaxFor(typ))
+	out, err := sealBody(dst, cf.sealer, cf.obfs, 2, typ, payload)
 	if err != nil {
 		return nil, err
 	}
@@ -147,31 +139,6 @@ func (cf *connFramer) frameIn(dst []byte, typ byte, payload []byte) ([]byte, err
 	}
 	binary.BigEndian.PutUint16(out[0:2], uint16(n))
 	return out, nil
-}
-
-func (cf *connFramer) writeAll(frames [][]byte) error {
-	if len(frames) == 0 {
-		return nil
-	}
-	cf.mu.Lock()
-	defer cf.mu.Unlock()
-	out := cf.wbuf[:0]
-	if len(cf.saltPend) > 0 {
-		out = append(out, cf.saltPend...)
-		cf.saltPend = nil
-	}
-	var lb [2]byte
-	for _, f := range frames {
-		if cf.obfs {
-			copy(lb[:], f[0:2])
-			cf.writeKS.XORKeyStream(f[0:2], lb[:])
-		}
-		out = append(out, f...)
-	}
-	cf.wbuf = out
-	cf.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	_, err := cf.conn.Write(out)
-	return err
 }
 
 type frameBatch struct {
@@ -217,11 +184,11 @@ func (cf *connFramer) writeBatch(fb *frameBatch) error {
 }
 
 func (cf *connFramer) writeFrame(typ byte, payload []byte) error {
-	f, err := cf.frame(typ, payload)
+	f, err := cf.frameIn(nil, typ, payload)
 	if err != nil {
 		return err
 	}
-	return cf.writeAll([][]byte{f})
+	return cf.writeBatch(&frameBatch{buf: f, offs: []int{0}})
 }
 
 func (cf *connFramer) readFrame(dst []byte) (typ byte, session uint64, seq uint64, payload []byte, err error) {
@@ -242,12 +209,12 @@ func (cf *connFramer) readFrame(dst []byte) (typ byte, session uint64, seq uint6
 		if n < 1 {
 			return 0, 0, 0, nil, errDesync
 		}
-		body, peeked, err := cf.body(n)
+		body, err := cf.r.Peek(n)
 		if err != nil {
 			return 0, 0, 0, nil, err
 		}
 		typ, session, seq, payload, err = obfsOpen(cf.sealer, dst, body)
-		cf.consumed(n, peeked)
+		cf.consumed(n)
 		return typ, session, seq, payload, err
 	}
 
@@ -255,12 +222,12 @@ func (cf *connFramer) readFrame(dst []byte) (typ byte, session uint64, seq uint6
 	if n < 2 {
 		return 0, 0, 0, nil, errDesync
 	}
-	body, peeked, err := cf.body(n)
+	body, err := cf.r.Peek(n)
 	if err != nil {
 		return 0, 0, 0, nil, err
 	}
 	if body[0] != magic {
-		cf.consumed(n, peeked)
+		cf.consumed(n)
 		return 0, 0, 0, nil, errDesync
 	}
 	typ = body[1]
@@ -270,36 +237,14 @@ func (cf *connFramer) readFrame(dst []byte) (typ byte, session uint64, seq uint6
 	default:
 		payload = append(dst[:0], body[2:]...)
 	}
-	cf.consumed(n, peeked)
+	cf.consumed(n)
 	if err != nil {
 		return 0, 0, 0, nil, err
 	}
 	return typ, session, seq, payload, nil
 }
 
-func (cf *connFramer) body(n int) ([]byte, bool, error) {
-	b, err := cf.r.Peek(n)
-	if err == nil {
-		return b, true, nil
-	}
-	if !errors.Is(err, bufio.ErrBufferFull) {
-		return nil, false, err
-	}
-	if cap(cf.rbuf) < n {
-		cf.rbuf = make([]byte, n)
-	}
-	b = cf.rbuf[:n]
-	if _, err := io.ReadFull(cf.r, b); err != nil {
-		return nil, false, err
-	}
-	return b, false, nil
-}
-
-func (cf *connFramer) consumed(n int, peeked bool) {
-	if peeked {
-		_, _ = cf.r.Discard(n)
-	}
-}
+func (cf *connFramer) consumed(n int) { _, _ = cf.r.Discard(n) }
 
 type TCP struct {
 	dev      *tun.Device
@@ -312,8 +257,6 @@ type TCP struct {
 	cipher   string
 	obfs     bool
 	psk      string
-	idle     time.Duration
-	ping     time.Duration
 
 	followers []*TCP
 
@@ -334,9 +277,8 @@ type TCP struct {
 	sniMu   sync.Mutex
 	sniMeta map[string]wsSNIEntry
 
-	st     *coreStatus
-	stTag  string
-	lastRx atomic.Int64
+	st    *coreStatus
+	stTag string
 
 	lastRxData atomic.Int64
 	lastTxData atomic.Int64
@@ -375,14 +317,12 @@ type TCP struct {
 
 	lastSrc atomic.Pointer[string]
 
-	dsOn       bool
-	dsTTL      int
-	dsCount    int
-	dsMode     string
-	dsFailOnce sync.Once
-	dsSend     desyncSend
+	dsOn    bool
+	dsTTL   int
+	dsCount int
+	dsMode  string
+	dsSend  desyncSend
 
-	ln      net.Listener
 	lns     []net.Listener
 	cur     atomic.Pointer[connFramer]
 	curConn atomic.Pointer[net.Conn]
@@ -404,12 +344,10 @@ type TCP struct {
 func (b *TCP) SetSourceIP(ip string) { b.bindIP = ip }
 
 func (b *TCP) SetPeerPool(pp *PeerPool) {
-	if b.isClient && !b.ws {
-		b.pp = pp
-		joinStatus(b.st, pp, axisDst)
-		b.rc.bind(pp, b.sp, axisDst, axisSrc)
-		b.publishPair()
-	}
+	b.pp = pp
+	joinStatus(b.st, pp, axisDst)
+	b.rc.bind(pp, b.sp, axisDst, axisSrc)
+	b.publishPair()
 }
 
 func (b *TCP) livePairNow() (low, high string) {
@@ -455,12 +393,10 @@ func (b *TCP) lastSourceUsed() string {
 }
 
 func (b *TCP) SetSourcePool(sp *PeerPool) {
-	if b.isClient && !b.ws {
-		b.sp = sp
-		joinStatus(b.st, sp, axisSrc)
-		b.rc.bind(b.pp, sp, axisDst, axisSrc)
-		b.publishPair()
-	}
+	b.sp = sp
+	joinStatus(b.st, sp, axisSrc)
+	b.rc.bind(b.pp, sp, axisDst, axisSrc)
+	b.publishPair()
 }
 
 func (b *TCP) sourceIP() string {
@@ -516,13 +452,13 @@ func (b *TCP) setECH(ech []byte) bool {
 	return true
 }
 
-func (b *TCP) rotateDestTCP(proactive bool) (addr string, moved bool) {
+func (b *TCP) rotateDestTCP(proactive bool) bool {
 	if b.pp == nil {
-		return "", false
+		return false
 	}
-	addr, moved = b.pp.nextEndpoint(proactive)
+	addr, moved := b.pp.nextEndpoint(proactive)
 	if !moved {
-		return addr, false
+		return false
 	}
 	log.Printf("core/%s: rotated destination to %s", b.stTag, addr)
 	if !b.edgePool() {
@@ -531,16 +467,16 @@ func (b *TCP) rotateDestTCP(proactive bool) (addr string, moved bool) {
 	low, _ := b.axes()
 	b.st.rotated(low.tag, low.detail(addr), proactive)
 	wakeLoop(b.wake)
-	return addr, true
+	return true
 }
 
-func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
+func (b *TCP) rotateSourceTCP(proactive bool) bool {
 	if b.sp == nil {
-		return "", false
+		return false
 	}
-	addr, moved = b.sp.nextEndpoint(proactive)
+	addr, moved := b.sp.nextEndpoint(proactive)
 	if !moved {
-		return addr, false
+		return false
 	}
 
 	if b.edgePool() {
@@ -550,18 +486,15 @@ func (b *TCP) rotateSourceTCP(proactive bool) (addr string, moved bool) {
 	log.Printf("core/%s: rotated %s to %s", b.stTag, high.tag, addr)
 	b.st.rotated(high.tag, high.detail(addr), proactive)
 	wakeLoop(b.wake)
-	return addr, true
+	return true
 }
 
-func (b *TCP) SetDesync(on bool, ttl, count int, mode string) {
-	if !b.isClient || !on {
-		return
-	}
+func (b *TCP) SetDesync(ttl, count int, mode string) {
 	b.dsOn, b.dsTTL, b.dsCount, b.dsMode = true, ttl, count, mode
 }
 
-func (b *TCP) SetSNISplit(on bool, pos int, mode string, ttl int) bool {
-	if !b.isClient || !on || !b.ws {
+func (b *TCP) SetSNISplit(pos int, mode string, ttl int) bool {
+	if !b.ws {
 		return false
 	}
 	b.sniSplit, b.splitPos, b.sniMode, b.splitTTL = true, pos, mode, ttl
@@ -576,10 +509,6 @@ func (b *TCP) fragWrap(conn net.Conn, host string, ech []byte) net.Conn {
 }
 
 func (b *TCP) SetStatusPath(path string) {
-	if path == "" {
-		return
-	}
-
 	carrier := "tcp"
 	switch {
 	case b.httpc:
@@ -639,7 +568,7 @@ func canBindSource(ip net.IP) bool {
 func DialTCP(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string) (*TCP, error) {
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		cover: cover, coverSNI: coverSNI,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
+		isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}, nil
 }
 
 func caPool(pemBytes []byte) (*x509.CertPool, error) {
@@ -653,14 +582,14 @@ func caPool(pemBytes []byte) (*x509.CertPool, error) {
 	return p, nil
 }
 
-func DialWS(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH, wsCA []byte, portRoll bool) (*TCP, error) {
+func DialWS(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH, wsCA []byte, httpc bool, httpcMode string, portRoll bool) (*TCP, error) {
 	roots, err := caPool(wsCA)
 	if err != nil {
 		return nil, err
 	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
-		ws: true, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH, wsRoots: roots,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
+		ws: true, httpc: httpc, httpcMode: httpcMode, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH, wsRoots: roots,
+		isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 		portRollOff: !portRoll}, nil
 }
 
@@ -681,9 +610,6 @@ const activeSep = " · "
 func activeLabel(ip, host string) string { return ip + activeSep + host }
 
 func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, ips []string, ipGroups map[string]string, snis []EdgeSNI, rotate time.Duration, httpc bool, httpcMode string, portRoll bool, wsCA []byte) (*TCP, error) {
-	if len(ips) == 0 || len(snis) == 0 {
-		return nil, errors.New("ws pool: need at least one IP and one SNI")
-	}
 	roots, err := caPool(wsCA)
 	if err != nil {
 		return nil, err
@@ -700,7 +626,7 @@ func DialEdgePool(dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath stri
 	}
 	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		ws: true, wsPath: wsPath, wsTLS: true, wsRoots: roots, httpc: httpc, httpcMode: httpcMode, sniMeta: meta,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: "pool", closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
+		isClient: true, addr: "pool", closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
 		portRollOff: !portRoll}
 	b.pp = NewPeerPool(ips, rotate)
 	if len(ipGroups) > 0 {
@@ -762,9 +688,6 @@ func (b *TCP) applyEdgeECH(snis map[string]string) []string {
 }
 
 func (b *TCP) edgeCombo() (string, wsSNIEntry, bool) {
-	if !b.edgePool() {
-		return "", wsSNIEntry{}, false
-	}
 	host := b.followSNIGroup()
 	if host == "" {
 		return "", wsSNIEntry{}, false
@@ -797,35 +720,14 @@ func (b *TCP) sniGroupHosts(g string) map[string]bool {
 	return out
 }
 
-func DialHTTPC(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsHost, wsPath string, wsTLS bool, wsECH, wsCA []byte, httpcMode string, portRoll bool) (*TCP, error) {
-	roots, err := caPool(wsCA)
-	if err != nil {
-		return nil, err
-	}
-	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
-		ws: true, httpc: true, httpcMode: httpcMode, wsHost: wsHost, wsPath: wsPath, wsTLS: wsTLS, wsECH: wsECH, wsRoots: roots,
-		idle: connIdle, ping: pingEvery, isClient: true, addr: peerAddr, closeCh: make(chan struct{}), wake: make(chan struct{}, 1),
-		portRollOff: !portRoll}, nil
-}
-
-func ListenHTTPC(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, tlsCfg *tls.Config, extra ...*tun.Device) (*TCP, error) {
+func ListenWS(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, tlsCfg *tls.Config, httpc bool, extra ...*tun.Device) (*TCP, error) {
 	ln, err := serverListen(listenAddr, tlsCfg)
 	if err != nil {
 		return nil, err
 	}
 	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
-		ws: true, httpc: true, wsPath: wsPath, idle: connIdle, ping: pingEvery, addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
+		ws: true, httpc: httpc, wsPath: wsPath, addr: listenAddr, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns), httpcSessions: make(map[string]*httpcSession), extra: extra}, nil
-}
-
-func ListenWS(listenAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher, wsPath string, tlsCfg *tls.Config, extra ...*tun.Device) (*TCP, error) {
-	ln, err := serverListen(listenAddr, tlsCfg)
-	if err != nil {
-		return nil, err
-	}
-	return &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
-		ws: true, wsPath: wsPath, idle: connIdle, ping: pingEvery, addr: listenAddr, ln: ln, lns: []net.Listener{ln}, closeCh: make(chan struct{}),
-		preAuth: make(chan struct{}, maxPreAuthConns), extra: extra}, nil
 }
 
 func ListenTCP(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, cover bool, coverSNI string, extra ...*tun.Device) (*TCP, error) {
@@ -845,7 +747,7 @@ func ListenTCP(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, 
 	}
 	b := &TCP{dev: dev, cryptoOn: cryptoOn, cipher: cipher, obfs: obfs, psk: psk,
 		cover: cover, coverSNI: coverSNI,
-		idle: connIdle, ping: pingEvery, addr: listenAddrs[0], ln: lns[0], lns: lns, closeCh: make(chan struct{}),
+		addr: listenAddrs[0], lns: lns, closeCh: make(chan struct{}),
 		preAuth: make(chan struct{}, maxPreAuthConns), extra: extra}
 	if cover {
 		cs, err := tlscover.NewServer(psk, coverSNI, func(why string) {
@@ -878,7 +780,7 @@ func (b *TCP) Run() error {
 			go b.followLoop()
 		}
 		if !b.portRollOff {
-			b.rc.port.setRoll(b.rollSourcePort)
+			b.rc.port.set(b.rollSourcePort)
 		}
 		b.st.trackPath(b.livePath, b.closeCh)
 		if b.rc.polls() {
@@ -981,11 +883,7 @@ func (b *TCP) acceptLoopOn(ln net.Listener) {
 			if b.closed.Load() {
 				return
 			}
-			if backoff == 0 {
-				backoff = 5 * time.Millisecond
-			} else if backoff < time.Second {
-				backoff *= 2
-			}
+			backoff = acceptBackoff(backoff)
 			log.Printf("core/tcp: accept error: %v (backoff %v)", err, backoff)
 			if b.sleep(backoff) {
 				return
@@ -1134,7 +1032,7 @@ func (b *TCP) noteECHSelfHeal(host string, ech []byte) {
 	}
 }
 
-func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live bool, budget time.Duration) (net.Conn, error) {
+func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, budget time.Duration) (net.Conn, error) {
 	var err error
 	healed := false
 	for attempt := 0; attempt < 2; attempt++ {
@@ -1142,15 +1040,14 @@ func (b *TCP) tlsToEdge(conn net.Conn, dialAddr, host string, ech []byte, live b
 
 		uc, err = uEdgeHandshake(b.fragWrap(conn, host, ech), host, ech, b.wsRoots, []string{"http/1.1"}, false, budget)
 		if err == nil {
-			if healed && live {
+			if healed {
 				b.noteECHSelfHeal(host, ech)
 			}
 			return uc, nil
 		}
 		conn.Close()
-		var echErr *utls.ECHRejectionError
-		if attempt == 0 && errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
-			ech = echErr.RetryConfigList
+		if retry, ok := echRetry(err); attempt == 0 && ok {
+			ech = retry
 			log.Printf("core/ws: ECH-SELFHEAL[reactive/in-band] for %s (%s) — stale key rejected, retrying with fresh key %s",
 				host, dialAddr, base64.StdEncoding.EncodeToString(ech))
 			healed = true
@@ -1201,8 +1098,7 @@ func uEdgeHandshake(conn net.Conn, host string, ech []byte, roots *x509.CertPool
 	}
 	conn.SetDeadline(time.Now().Add(budget))
 	if err = uc.Handshake(); err != nil {
-		var echErr *utls.ECHRejectionError
-		if len(echPub) > 0 && errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
+		if _, ok := echRetry(err); ok && len(echPub) > 0 {
 			if verr := verifyECHPublicName(uc.ConnectionState().PeerCertificates, echPub); verr != nil {
 				return nil, fmt.Errorf("ech-reject: outer cert not valid for %v: %w", echPub, verr)
 			}
@@ -1251,15 +1147,18 @@ func echPublicNames(list []byte) []string {
 	return names
 }
 
-var echVerifyRoots *x509.CertPool
+func echRetry(err error) ([]byte, bool) {
+	var echErr *utls.ECHRejectionError
+	if errors.As(err, &echErr) && len(echErr.RetryConfigList) > 0 {
+		return echErr.RetryConfigList, true
+	}
+	return nil, false
+}
 
 func verifyECHPublicName(certs []*x509.Certificate, publicNames []string) error {
-	if len(publicNames) == 0 {
-		return errors.New("ech-reject: no ECH public name to verify against")
-	}
 	var last error
 	for _, n := range publicNames {
-		if err := verifyOuterCert(certs, n, echVerifyRoots); err == nil {
+		if err := verifyOuterCert(certs, n); err == nil {
 			return nil
 		} else {
 			last = err
@@ -1268,11 +1167,11 @@ func verifyECHPublicName(certs []*x509.Certificate, publicNames []string) error 
 	return last
 }
 
-func verifyOuterCert(certs []*x509.Certificate, publicName string, roots *x509.CertPool) error {
+func verifyOuterCert(certs []*x509.Certificate, publicName string) error {
 	if len(certs) == 0 {
 		return errors.New("ech-reject: no peer certificate")
 	}
-	opts := x509.VerifyOptions{Roots: roots, DNSName: publicName, Intermediates: x509.NewCertPool()}
+	opts := x509.VerifyOptions{DNSName: publicName, Intermediates: x509.NewCertPool()}
 	for _, c := range certs[1:] {
 		opts.Intermediates.AddCert(c)
 	}
@@ -1285,22 +1184,20 @@ func chromeSpec(alpn []string) (utls.ClientHelloSpec, error) {
 	if err != nil {
 		return spec, err
 	}
-	if alpn != nil {
-		for _, ext := range spec.Extensions {
-			if a, ok := ext.(*utls.ALPNExtension); ok {
-				a.AlpnProtocols = alpn
-			}
+	for _, ext := range spec.Extensions {
+		if a, ok := ext.(*utls.ALPNExtension); ok {
+			a.AlpnProtocols = alpn
 		}
 	}
 	return spec, nil
 }
 
-func (b *TCP) establishWS() (net.Conn, string, string, error) {
-	dialAddr, host, ech, path := b.addr, b.wsHost, b.ech(), b.wsPath
+func (b *TCP) edgeTarget(tag string) (dialAddr, host string, ech []byte, err error) {
+	dialAddr, host, ech = b.addr, b.wsHost, b.ech()
 	if b.edgePool() {
 		ip, sni, ok := b.edgeCombo()
 		if !ok {
-			return nil, "", "", errors.New("ws: edge pool is empty")
+			return "", "", nil, errors.New(tag + ": edge pool is empty")
 		}
 		dialAddr, host, ech = ip, sni.host, sni.ech
 	}
@@ -1308,6 +1205,14 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 		host = dialAddr
 	}
 	b.noteAttempt(dialAddr, host)
+	return dialAddr, host, ech, nil
+}
+
+func (b *TCP) establishWS() (net.Conn, string, string, error) {
+	dialAddr, host, ech, err := b.edgeTarget("ws")
+	if err != nil {
+		return nil, "", "", err
+	}
 	conn, err := b.dialBand(connectTimeout, dialAddr)
 	if err != nil {
 		return nil, dialAddr, "", err
@@ -1315,13 +1220,13 @@ func (b *TCP) establishWS() (net.Conn, string, string, error) {
 
 	b.sendTCPFakes(conn)
 	if b.wsTLS {
-		tc, terr := b.tlsToEdge(conn, dialAddr, host, ech, true, handshakeTimeout)
+		tc, terr := b.tlsToEdge(conn, dialAddr, host, ech, handshakeTimeout)
 		if terr != nil {
 			return nil, dialAddr, "", stageErr{stageTLS, terr}
 		}
 		conn = tc
 	}
-	r, werr := wsClientHandshake(conn, host, path, time.Now().Add(handshakeTimeout))
+	r, werr := wsClientHandshake(conn, host, b.wsPath, time.Now().Add(handshakeTimeout))
 	if werr != nil {
 		conn.Close()
 		return nil, dialAddr, "", werr
@@ -1478,6 +1383,16 @@ func nextReconnectDelay(cur time.Duration) time.Duration {
 	return jitterFrac(next)
 }
 
+func acceptBackoff(cur time.Duration) time.Duration {
+	if cur == 0 {
+		return 5 * time.Millisecond
+	}
+	if cur < time.Second {
+		return cur * 2
+	}
+	return cur
+}
+
 func (b *TCP) dialLoop() {
 	backoff := time.Duration(0)
 
@@ -1521,7 +1436,6 @@ func (b *TCP) dialLoop() {
 		b.dropWhy.Store(dropNone)
 		b.cur.Store(cf)
 		b.wakeLanes()
-		b.adoptRx(cf)
 		cc := conn
 		b.curConn.Store(&cc)
 		b.st.newSession()
@@ -1554,7 +1468,7 @@ func (b *TCP) dialLoop() {
 			deliberate = why == dropPortRoll || why == dropRotation
 		}
 
-		if b.st != nil && !deliberate && !b.closed.Load() {
+		if !deliberate && !b.closed.Load() {
 			b.st.down(classifyErr(cause), label)
 		}
 
@@ -1629,8 +1543,6 @@ func (b *TCP) handshakeAndPrime(conn net.Conn) (*connFramer, error) {
 			}
 			return nil, err
 		}
-
-		cf.rxAt.Store(time.Now().UnixNano())
 	}
 	if b.obfs {
 		if err := cf.sendSalt(); err != nil {
@@ -1671,13 +1583,13 @@ func (b *TCP) pollPeerCmd() {
 }
 
 func (b *TCP) rotateLowTCP(proactive bool) {
-	if _, moved := b.rotateDestTCP(proactive); moved {
+	if b.rotateDestTCP(proactive) {
 		b.accusationAnswered()
 	}
 }
 
 func (b *TCP) rotateHighTCP(proactive bool) {
-	if _, moved := b.rotateSourceTCP(proactive); moved {
+	if b.rotateSourceTCP(proactive) {
 		b.accusationAnswered()
 	}
 }
@@ -1720,22 +1632,9 @@ func (b *TCP) serve(cf *connFramer) {
 	b.onConnErr(cf, b.readLoop(cf))
 }
 
-func (b *TCP) adoptRx(cf *connFramer) {
-	if cf == nil {
-		return
-	}
-	rx := cf.rxAt.Load()
-	for {
-		old := b.lastRx.Load()
-		if rx <= old || b.lastRx.CompareAndSwap(old, rx) {
-			return
-		}
-	}
-}
-
 func (b *TCP) readLoop(cf *connFramer) error {
 	armed := time.Now()
-	cf.conn.SetReadDeadline(armed.Add(b.idle + deadlineRearm))
+	cf.conn.SetReadDeadline(armed.Add(connIdle + deadlineRearm))
 	for {
 		own := getRxBuf()
 		typ, session, seq, payload, err := cf.readFrame(*own)
@@ -1748,20 +1647,14 @@ func (b *TCP) readLoop(cf *connFramer) error {
 		}
 		t := time.Now()
 		if t.Sub(armed) >= deadlineRearm {
-			cf.conn.SetReadDeadline(t.Add(b.idle + deadlineRearm))
+			cf.conn.SetReadDeadline(t.Add(connIdle + deadlineRearm))
 			armed = t
 		}
 		if cf.sealer != nil && !cf.rp.ok(session, seq) {
 			putRxBuf(own)
 			continue
 		}
-		now := t.UnixNano()
-		cf.rxAt.Store(now)
-
-		if cf == b.cur.Load() {
-			b.lastRx.Store(now)
-		}
-		b.handleFrame(cf, typ, payload, own, now)
+		b.handleFrame(cf, typ, payload, own, t.UnixNano())
 	}
 }
 
@@ -1849,9 +1742,9 @@ func (b *TCP) keepaliveLoop() {
 		select {
 		case <-b.closeCh:
 			return
-		case <-time.After(keepaliveInterval(b.ping, b.psk)):
+		case <-time.After(keepaliveInterval(pingEvery, b.psk)):
 			if cf := b.cur.Load(); cf != nil && !b.flowingBothWays() {
-				if err := b.pingOne(cf); err != nil {
+				if err := cf.writeFrame(typePing, nil); err != nil {
 					b.onConnErr(cf, err)
 				}
 			}
@@ -1859,10 +1752,8 @@ func (b *TCP) keepaliveLoop() {
 	}
 }
 
-func (b *TCP) pingOne(cf *connFramer) error { return cf.writeFrame(typePing, nil) }
-
 func (b *TCP) flowingBothWays() bool {
-	since := time.Now().Add(-b.ping).UnixNano()
+	since := time.Now().Add(-pingEvery).UnixNano()
 	return b.lastRxData.Load() > since && b.lastTxData.Load() > since
 }
 

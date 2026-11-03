@@ -9,9 +9,9 @@ var (
 )
 
 type TuningInput struct {
-	SuspectBackoff []int64
-	DeadRetestSecs int64
-	LadderRevive   []int64
+	SuspectBackoff []int64 `json:"suspect_backoff"`
+	DeadRetestSecs int64   `json:"dead_retest_secs"`
+	LadderRevive   []int64 `json:"ladder_revive"`
 }
 
 func ApplyTuning(t TuningInput) {
@@ -44,7 +44,7 @@ func tsteps(in []int64, lo, hi int64) []int64 {
 	return out
 }
 
-func tclamp[T int | int32 | int64](v, lo, hi T) T {
+func tclamp(v, lo, hi int64) int64 {
 	if v < lo {
 		return lo
 	}

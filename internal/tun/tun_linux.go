@@ -2,7 +2,6 @@ package tun
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -16,8 +15,6 @@ import (
 
 	"golang.org/x/sys/unix"
 )
-
-var ErrGSOUnsupported = errors.New("the gso-specific part of the tun open failed")
 
 func setIff(f *os.File, ifr *[ifReqSize]byte) syscall.Errno {
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), tunSetIff, uintptr(unsafe.Pointer(ifr)))
@@ -89,9 +86,6 @@ func (d *Device) reportGSO() {
 }
 
 func OpenN(name string, mtu int, addr string, gso bool, n int) ([]*Device, error) {
-	if n < 1 {
-		n = 1
-	}
 	var ds []*Device
 	closeAll := func() {
 		for _, d := range ds {
@@ -213,9 +207,6 @@ func rawWritev(fd int, hdr, pkt []byte) (int, error) {
 }
 
 func (d *Device) rd(p []byte) (int, error) {
-	if d.fd < 0 {
-		return d.f.Read(p)
-	}
 	for {
 		n, err := rawRead(d.fd, p)
 		if err != syscall.EAGAIN {
@@ -228,9 +219,6 @@ func (d *Device) rd(p []byte) (int, error) {
 }
 
 func (d *Device) tryRd(p []byte) (int, bool, error) {
-	if d.fd < 0 {
-		return 0, false, nil
-	}
 	n, err := rawRead(d.fd, p)
 	if err == syscall.EAGAIN {
 		return 0, false, nil
@@ -252,41 +240,24 @@ func (d *Device) waitReadable() error {
 }
 
 func (d *Device) wr(p []byte) (int, error) {
-	if d.fd >= 0 {
-		return rawWrite(d.fd, p)
-	}
-	return d.f.Write(p)
+	return rawWrite(d.fd, p)
 }
 
 func (d *Device) wrv(hdr, pkt []byte) (int, error) {
-	if d.fd >= 0 {
-		return rawWritev(d.fd, hdr, pkt)
-	}
-	joined := make([]byte, len(hdr)+len(pkt))
-	copy(joined, hdr)
-	copy(joined[len(hdr):], pkt)
-	return d.f.Write(joined)
+	return rawWritev(d.fd, hdr, pkt)
 }
 
 func (d *Device) wrvGSO(vnet, lead []byte, rest [][]byte, off int) (int, error) {
-	if d.fd >= 0 {
-		var iov [groMaxSegs + 1]unix.Iovec
-		iov[0].Base, iov[1].Base = &vnet[0], &lead[0]
-		iov[0].SetLen(len(vnet))
-		iov[1].SetLen(len(lead))
-		for i, p := range rest {
-			pay := p[off:]
-			iov[i+2].Base = &pay[0]
-			iov[i+2].SetLen(len(pay))
-		}
-		return writeIovec(d.fd, iov[:len(rest)+2])
+	var iov [groMaxSegs + 1]unix.Iovec
+	iov[0].Base, iov[1].Base = &vnet[0], &lead[0]
+	iov[0].SetLen(len(vnet))
+	iov[1].SetLen(len(lead))
+	for i, p := range rest {
+		pay := p[off:]
+		iov[i+2].Base = &pay[0]
+		iov[i+2].SetLen(len(pay))
 	}
-	joined := make([]byte, 0, len(vnet)+len(lead))
-	joined = append(append(joined, vnet...), lead...)
-	for _, p := range rest {
-		joined = append(joined, p[off:]...)
-	}
-	return d.f.Write(joined)
+	return writeIovec(d.fd, iov[:len(rest)+2])
 }
 
 func (d *Device) Read(buf []byte) (int, error) {
@@ -376,12 +347,7 @@ var zeroVnetHdr [vnetHdrLen]byte
 
 func (d *Device) Write(pkt []byte) (int, error) {
 	if !d.gso {
-		n, err := d.wr(pkt)
-		if err == nil {
-			d.nOut.Add(1)
-			d.nWrites.Add(1)
-		}
-		return n, err
+		return d.wr(pkt)
 	}
 	if len(pkt) == 0 {
 		return 0, nil

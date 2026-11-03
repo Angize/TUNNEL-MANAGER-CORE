@@ -11,8 +11,6 @@ import (
 
 var band atomic.Uint64
 
-func init() { SetSportBand(0, 0) }
-
 func SetSportBand(lo, hi int) {
 	l, span := sportBand(lo, hi)
 	band.Store(uint64(l)<<32 | uint64(span))

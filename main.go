@@ -17,30 +17,20 @@ import (
 
 var version = "dev"
 
-type tunOpener func(name string, mtu int, addr string, gso bool, n int) ([]*tun.Device, error)
-
-func openTUN(open tunOpener, name string, mtu int, addr string, gso bool, n int) ([]*tun.Device, bool, error) {
-	devs, err := open(name, mtu, addr, gso, n)
+func openTUN(name string, mtu int, addr string, gso bool, n int) ([]*tun.Device, bool, error) {
+	devs, err := tun.OpenN(name, mtu, addr, gso, n)
 	if err == nil {
 		return devs, gso, nil
 	}
 	if !errors.Is(err, tun.ErrGSOUnsupported) {
 		return nil, false, err
 	}
-	plain, plainErr := open(name, mtu, addr, false, n)
+	plain, plainErr := tun.OpenN(name, mtu, addr, false, n)
 	if plainErr != nil {
 		return nil, false, plainErr
 	}
 	log.Printf("tnl-core: tun: gso is not available here (%v) — continuing without it", err)
 	return plain, false, nil
-}
-
-func tuningFrom(t *TuningCfg) packet.TuningInput {
-	return packet.TuningInput{
-		SuspectBackoff: t.SuspectBackoff,
-		DeadRetestSecs: t.DeadRetestSecs,
-		LadderRevive:   t.LadderRevive,
-	}
 }
 
 func main() {
@@ -66,7 +56,7 @@ func main() {
 	}
 
 	if t := cfg.Tuning; t != nil {
-		packet.ApplyTuning(tuningFrom(t))
+		packet.ApplyTuning(*t)
 	}
 
 	packet.SetSockBuf(cfg.SockBuf)
@@ -91,7 +81,7 @@ func main() {
 		log.Print(note)
 	}
 
-	devs, gsoOn, err := openTUN(tun.OpenN, cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO, cfg.tunQueues())
+	devs, gsoOn, err := openTUN(cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO, cfg.tunQueues())
 	if err != nil {
 		log.Fatalf("tnl-core: fatal: tun: %v", err)
 	}
@@ -104,16 +94,12 @@ func main() {
 
 	cipherName := "off"
 	if cfg.Crypto.Enabled {
-		s, err := crypto.NewSealer(cfg.Crypto.Cipher, cfg.Crypto.PSK, cfg.Role == "client")
+		n, err := crypto.CheckCipher(cfg.Crypto.Cipher)
 		if err != nil {
 			log.Fatalf("tnl-core: fatal: crypto: %v", err)
 		}
-		cipherName = s.Name
+		cipherName = n
 	} else {
-		if cfg.Obfs {
-			log.Fatalf("tnl-core: fatal: obfs requires crypto (there is no key to obfuscate with) — enable crypto or disable obfs")
-		}
-
 		log.Printf("tnl-core: WARNING crypto is DISABLED — the tunnel is unauthenticated " +
 			"and unencrypted; anyone who can send a packet to this listener can hijack or " +
 			"inject into it. Enable crypto unless this is a trusted, isolated link.")
@@ -140,10 +126,7 @@ func main() {
 	case "tcp":
 		switch cfg.Role {
 		case "server":
-			la := cfg.ListenIPs
-			if len(la) == 0 {
-				la = []string{cfg.Listen}
-			}
+			la := cfg.listenAddrs()
 			b, err = packet.ListenTCP(la, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Cover, cfg.CoverSNI, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/tcp%s%s) on %v", obfsTag, coverTag(cfg.Cover), la)
@@ -158,12 +141,12 @@ func main() {
 	case "raw":
 		switch cfg.Role {
 		case "server":
-			b, err = packet.ListenRaw(cfg.Listen, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.RawProfileDown, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports, Lo: cfg.SportLo, Hi: cfg.SportHi}, cfg.rawSendPtype(), devs[1:]...)
+			b, err = packet.ListenRaw(cfg.Listen, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.RawProfileDown, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports}, cfg.rawSendPtype(), devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/raw:%s%s%s) on %s", cfg.rawLabel(), obfsTag, fecTag, cfg.Listen)
 			}
 		case "client":
-			b, err = packet.DialRaw(cfg.Peer, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.RawProfileDown, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports, Lo: cfg.SportLo, Hi: cfg.SportHi}, cfg.rawSendPtype(), devs[1:]...)
+			b, err = packet.DialRaw(cfg.Peer, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.RawProfileDown, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports}, cfg.rawSendPtype(), devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/raw:%s%s%s) %s", cfg.rawLabel(), obfsTag, fecTag, cfg.Peer)
 			}
@@ -182,16 +165,13 @@ func main() {
 					tlsTag = " +tls+ech"
 				}
 			}
+			carrier := "ws"
 			if cfg.cdnIsHTTP() {
-				b, err = packet.ListenHTTPC(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath, srvTLS, devs[1:]...)
-				if err == nil {
-					log.Printf("tnl-core: listening (core/http%s%s) on %s", obfsTag, tlsTag, cfg.Listen)
-				}
-				break
+				carrier = "http"
 			}
-			b, err = packet.ListenWS(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath, srvTLS, devs[1:]...)
+			b, err = packet.ListenWS(cfg.Listen, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.WSPath, srvTLS, cfg.cdnIsHTTP(), devs[1:]...)
 			if err == nil {
-				log.Printf("tnl-core: listening (core/ws%s%s) on %s", obfsTag, tlsTag, cfg.Listen)
+				log.Printf("tnl-core: listening (core/%s%s%s) on %s", carrier, obfsTag, tlsTag, cfg.Listen)
 			}
 		case "client":
 			var desc string
@@ -203,10 +183,7 @@ func main() {
 	default:
 		switch cfg.Role {
 		case "server":
-			la := cfg.ListenIPs
-			if len(la) == 0 {
-				la = []string{cfg.Listen}
-			}
+			la := cfg.listenAddrs()
 			b, err = packet.Listen(la, dev, cfg.Obfs, cryptoOn, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.Fec, cfg.FecData, cfg.FecParity, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/udp%s%s) on %v", obfsTag, fecTag, la)
@@ -222,31 +199,27 @@ func main() {
 		log.Fatalf("tnl-core: fatal: transport: %v", err)
 	}
 	if cfg.StatusPath != "" {
-		if s, ok := b.(interface{ SetStatusPath(string) }); ok {
-			s.SetStatusPath(cfg.StatusPath)
-			log.Printf("tnl-core: writing status/events to %s", cfg.StatusPath)
-		}
+		b.(interface{ SetStatusPath(string) }).SetStatusPath(cfg.StatusPath)
+		log.Printf("tnl-core: writing status/events to %s", cfg.StatusPath)
 	}
 
 	if cfg.Role == "client" {
 		setupClient(b, cfg, true)
 	}
 
-	if cfg.cdnIsHTTP() && (cfg.HTTPUpWorkers|cfg.HTTPUpBatchKB|cfg.HTTPUpRate) != 0 {
+	if (cfg.HTTPUpWorkers | cfg.HTTPUpBatchKB | cfg.HTTPUpRate) != 0 {
 		packet.SetHTTPUpstream(cfg.HTTPUpWorkers, cfg.HTTPUpBatchKB, cfg.HTTPUpRate)
 		log.Printf("tnl-core: httpc upstream: workers=%d batch=%dKB rate=%d/s (0 = default)",
 			cfg.HTTPUpWorkers, cfg.HTTPUpBatchKB, cfg.HTTPUpRate)
 	}
-	if cfg.Role == "client" && cfg.cdnIsHTTP() && cfg.HTTPStreams != 0 {
+	if cfg.HTTPStreams != 0 {
 		packet.SetHTTPStreams(cfg.HTTPStreams)
 		log.Printf("tnl-core: httpc carrier streams=%d", cfg.HTTPStreams)
 	}
 
-	if cfg.Role == "server" && len(cfg.PeerSrcIPs) > 0 {
-		if s, ok := b.(interface{ SetPeerSources([]string) }); ok {
-			s.SetPeerSources(cfg.PeerSrcIPs)
-			log.Printf("tnl-core: pooled server follows client source rotation across %d source IPs", len(cfg.PeerSrcIPs))
-		}
+	if len(cfg.PeerSrcIPs) > 0 {
+		b.(interface{ SetPeerSources([]string) }).SetPeerSources(cfg.PeerSrcIPs)
+		log.Printf("tnl-core: pooled server follows client source rotation across %d source IPs", len(cfg.PeerSrcIPs))
 	}
 	lanes := dialLanes(b, cfg, devs, cryptoOn)
 	defer closeLanes(b, lanes)
@@ -299,12 +272,6 @@ func wsTLSTag(tls, ech bool) string {
 	}
 	return tag
 }
-
-const (
-	srcNone     = ""
-	srcByBind   = "bind"
-	srcBySrcIPs = "src_ips"
-)
 
 func usesFakeTTL(cfg *Config) bool {
 	return !(cfg.Transport == "raw" && cfg.FakeMode == "badsum")
@@ -359,15 +326,12 @@ func bufNote(transport, knob, other string, n int, applies bool) string {
 	return fmt.Sprintf("core: WARNING carrier %s ignores %s; its sockets are sized by %s", transport, knob, other)
 }
 
-func sourceMode(b any, cfg *Config) string {
-	if cfg.Role != "client" || cfg.BindIP == "" {
-		return srcNone
-	}
-	if wantsSourcePool(cfg) {
-		return srcBySrcIPs
+func applyBindIP(b any, cfg *Config) bool {
+	if cfg.Role != "client" || cfg.BindIP == "" || wantsSourcePool(cfg) {
+		return false
 	}
 	b.(interface{ SetSourceIP(string) }).SetSourceIP(cfg.BindIP)
-	return srcByBind
+	return true
 }
 
 func applySNISplit(b any, transport, mode string, pos, ttl int, logf func(string, ...any)) {
@@ -375,9 +339,9 @@ func applySNISplit(b any, transport, mode string, pos, ttl int, logf func(string
 		mode = "split"
 	}
 	s, ok := b.(interface {
-		SetSNISplit(bool, int, string, int) bool
+		SetSNISplit(int, string, int) bool
 	})
-	if ok && s.SetSNISplit(true, pos, mode, ttl) {
+	if ok && s.SetSNISplit(pos, mode, ttl) {
 		if mode == "disorder" {
 			logf("tnl-core: SNI fragmentation on (mode=%s split_pos=%d ttl=%d)", mode, pos, ttl)
 		} else {
