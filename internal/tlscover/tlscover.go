@@ -76,7 +76,7 @@ func openToken(psk string, sid []byte) bool {
 	var nonce [12]byte
 	copy(nonce[:], sid[:8])
 	pt, err := a.Open(nil, nonce[:], sid[8:], nil)
-	if err != nil || len(pt) != 8 || string(pt[:4]) != authMagic {
+	if err != nil || string(pt[:4]) != authMagic {
 		return false
 	}
 	ts := int64(binary.BigEndian.Uint32(pt[4:8]))
@@ -85,9 +85,7 @@ func openToken(psk string, sid []byte) bool {
 }
 
 func ClientConn(raw net.Conn, sni, psk string, deadline time.Time) (net.Conn, error) {
-	if !deadline.IsZero() {
-		_ = raw.SetDeadline(deadline)
-	}
+	_ = raw.SetDeadline(deadline)
 	u := utls.UClient(raw, &utls.Config{ServerName: sni, InsecureSkipVerify: true}, utls.HelloChrome_Auto)
 	if err := u.BuildHandshakeState(); err != nil {
 		return nil, err
@@ -103,9 +101,7 @@ func ClientConn(raw net.Conn, sni, psk string, deadline time.Time) (net.Conn, er
 	if err := u.Handshake(); err != nil {
 		return nil, err
 	}
-	if !deadline.IsZero() {
-		_ = raw.SetDeadline(time.Time{})
-	}
+	_ = raw.SetDeadline(time.Time{})
 	return u, nil
 }
 
@@ -116,7 +112,6 @@ type Server struct {
 	dest  string
 	relay chan struct{}
 	queue chan struct{}
-	idle  time.Duration
 
 	mu   sync.Mutex
 	seen map[[32]byte]int64
@@ -173,7 +168,7 @@ func NewServer(psk, destHost string, onDown func(why string)) (*Server, error) {
 	}
 	return &Server{cert: cert, psk: psk, host: destHost, dest: net.JoinHostPort(destHost, "443"),
 		relay: make(chan struct{}, maxRelays), queue: make(chan struct{}, maxWaiting),
-		idle: relayIdle, seen: map[[32]byte]int64{}, onDown: onDown}, nil
+		seen: map[[32]byte]int64{}, onDown: onDown}, nil
 }
 
 func (sv *Server) WarnIfDestUnreachable() {
@@ -192,21 +187,15 @@ func (sv *Server) WarnIfDestUnreachable() {
 }
 
 func (sv *Server) Handle(raw net.Conn, deadline time.Time) (net.Conn, error) {
-	if !deadline.IsZero() {
-		_ = raw.SetDeadline(deadline)
-	}
+	_ = raw.SetDeadline(deadline)
 
 	hello, sid, err := readClientHello(raw)
 	if err == nil && openToken(sv.psk, sid) && sv.firstSight(sid) {
-		if !deadline.IsZero() {
-			_ = raw.SetDeadline(time.Time{})
-		}
+		_ = raw.SetDeadline(time.Time{})
 		pc := &prefixConn{Conn: raw, pre: hello}
 
 		s := tls.Server(pc, &tls.Config{Certificates: []tls.Certificate{*sv.cert}, MinVersion: tls.VersionTLS13})
-		if !deadline.IsZero() {
-			_ = s.SetDeadline(deadline)
-		}
+		_ = s.SetDeadline(deadline)
 		if err := s.Handshake(); err != nil {
 			return nil, err
 		}
@@ -269,7 +258,7 @@ func (sv *Server) proxyToDest(raw net.Conn, hello []byte) {
 			return
 		}
 
-		ri, di := &idleConn{Conn: raw, idle: sv.idle}, &idleConn{Conn: dst, idle: sv.idle}
+		ri, di := &idleConn{Conn: raw, idle: relayIdle}, &idleConn{Conn: dst, idle: relayIdle}
 		if _, err := di.Write(hello); err != nil {
 			dst.Close()
 			raw.Close()
@@ -320,7 +309,7 @@ func readClientHello(c net.Conn) (buf, sid []byte, err error) {
 		return buf, nil, err
 	}
 
-	if len(body) < 39 || body[0] != 0x01 {
+	if body[0] != 0x01 {
 		return buf, nil, errBadHello
 	}
 	sidLen := int(body[38])

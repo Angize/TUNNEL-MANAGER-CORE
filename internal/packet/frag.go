@@ -9,16 +9,12 @@ import (
 )
 
 const (
-	sniSplitMode = "split"
-
 	sniDisorderMode = "disorder"
 
 	sniFakeMode = "fake"
 )
 
 const fragGap = 1 * time.Millisecond
-
-const fakeTTL = 64
 
 type fragConn struct {
 	net.Conn
@@ -37,22 +33,7 @@ type fragConn struct {
 	dsSend *desyncSend
 }
 
-func (f *fragConn) fakeSegTTL() int { return fakeTTL }
-
-func (f *fragConn) degraded(why string) {
-	f.warn.Do(func() {
-		log.Printf("core/tls: sni_mode %q fell back to a plain split (%s) — the split still helps a stateless DPI, the desync does not apply", f.mode, why)
-	})
-}
-
-func (f *fragConn) fakeDegraded(why string) {
-	f.warnFake.Do(func() {
-		log.Printf("core/tls: sni_mode \"fake\" fell back to disorder (%s) — disorder desyncs a DPI that "+
-			"reads packets, but NOT one that reassembles the stream, which is the only thing fake buys", why)
-	})
-}
-
-func (f *fragConn) noSplit(p []byte) {
+func (f *fragConn) noSplit() {
 	f.warnNoSplit.Do(func() {
 		switch {
 		case f.host == "":
@@ -71,12 +52,6 @@ func (f *fragConn) noSplit(p []byte) {
 }
 
 func newFragConn(c net.Conn, host string, pos int, mode string, ttl int, ech bool, ds *desyncSend) *fragConn {
-	if mode == "" {
-		mode = sniSplitMode
-	}
-	if ds == nil {
-		ds = &desyncSend{}
-	}
 	return &fragConn{Conn: c, host: host, pos: pos, mode: mode, ttl: ttl, ech: ech, dsSend: ds}
 }
 
@@ -90,7 +65,7 @@ func (f *fragConn) Write(p []byte) (int, error) {
 	}
 	at := f.splitAt(p)
 	if at <= 0 || at >= len(p) {
-		f.noSplit(p)
+		f.noSplit()
 		return f.Conn.Write(p)
 	}
 	switch f.mode {
@@ -110,63 +85,6 @@ func (f *fragConn) writeSplit(p []byte, at int) (int, error) {
 	time.Sleep(fragGap)
 	n2, err := f.Conn.Write(p[at:])
 	return n1 + n2, err
-}
-
-func badTCPChecksum(seg []byte) {
-	if len(seg) < 18 {
-		return
-	}
-	seg[16] ^= 0xff
-}
-
-var decoyApexes = []string{"b-cdn.net", "fastly.net", "azureedge.net", "cloudflare.com", "cdn.jsdelivr.net"}
-
-func decoySNI(n int) []byte {
-	if n <= 0 {
-		return nil
-	}
-
-	for _, a := range decoyApexes {
-		if len(a) == n {
-			return []byte(a)
-		}
-	}
-
-	apex := ""
-	for _, a := range decoyApexes {
-		if len(a)+2 <= n && len(a) > len(apex) {
-			apex = a
-		}
-	}
-	if apex == "" {
-		return decoyLabels(n)
-	}
-	out := make([]byte, 0, n)
-	out = append(out, decoyLabels(n-len(apex)-1)...)
-	out = append(out, '.')
-	return append(out, apex...)
-}
-
-func decoyLabels(n int) []byte {
-	const fill = "assets"
-	const maxLabel = 63
-	out := make([]byte, 0, n)
-	for len(out) < n {
-		seg := n - len(out)
-		if seg > maxLabel {
-			seg = maxLabel
-			if rem := n - len(out) - seg; rem < 2 {
-				seg = n - len(out) - 2
-			}
-		}
-		for i := 0; i < seg; i++ {
-			out = append(out, fill[len(out)%len(fill)])
-		}
-		if len(out) < n {
-			out = append(out, '.')
-		}
-	}
-	return out
 }
 
 func (f *fragConn) splitAt(p []byte) int {

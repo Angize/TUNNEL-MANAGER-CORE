@@ -6,12 +6,6 @@ import (
 	"net"
 )
 
-type directLink struct{ r *Raw }
-
-func (l *directLink) send(pkt []byte, to *net.IPAddr) { sendViaConn(l.r, pkt, to) }
-func (l *directLink) recvLoop() error                 { return l.r.recvConnLoop() }
-func (l *directLink) close()                          {}
-
 func sendViaConn(r *Raw, pkt []byte, to *net.IPAddr) {
 	if src := r.boundSrc(); src != nil {
 		if _, _, err := r.out.WriteMsgIP(pkt, r.srcOOB(src), to); err == nil {

@@ -23,7 +23,7 @@ type antiLeaker struct {
 	install func(peer net.IP) (remove func(), ok bool)
 	closeCh <-chan struct{}
 
-	cur   atomic.Pointer[func()]
+	cur   func()
 	mu    sync.Mutex
 	curIP net.IP
 	want  atomic.Pointer[net.IP]
@@ -75,19 +75,26 @@ func (a *antiLeaker) applyKnownLocked() {
 		if _, done := a.static[string(v4)]; done {
 			continue
 		}
-		fn, ok := a.takeLingeringLocked(v4)
-		if fn == nil && !ok {
-			fn, ok = a.install(v4)
-		}
+		fn, ok := a.claimLocked(v4)
 		if !ok {
-			if fn != nil {
-				fn()
-			}
-			a.armRetryLocked(v4)
 			continue
 		}
 		a.static[string(v4)] = fn
 	}
+}
+
+func (a *antiLeaker) claimLocked(v4 net.IP) (func(), bool) {
+	fn, ok := a.takeLingeringLocked(v4)
+	if fn == nil && !ok {
+		fn, ok = a.install(v4)
+	}
+	if !ok {
+		if fn != nil {
+			fn()
+		}
+		a.armRetryLocked(v4)
+	}
+	return fn, ok
 }
 
 func (a *antiLeaker) coveredLocked(v4 net.IP) bool {
@@ -143,31 +150,19 @@ func (a *antiLeaker) apply() {
 		return
 	}
 
-	fn, ok := a.takeLingeringLocked(v4)
-	if fn == nil && !ok {
-		fn, ok = a.install(v4)
-	}
+	fn, ok := a.claimLocked(v4)
 	if !ok {
-		if fn != nil {
-			fn()
-		}
-		a.armRetryLocked(v4)
 		return
 	}
 	a.wait = 0
-	old := a.cur.Swap(&fn)
-	oldIP := a.curIP
-	a.curIP = append(net.IP(nil), v4...)
-	if old != nil && *old != nil {
-		a.lingerLocked(oldIP, *old)
+	old, oldIP := a.cur, a.curIP
+	a.cur, a.curIP = fn, append(net.IP(nil), v4...)
+	if old != nil {
+		a.lingerLocked(oldIP, old)
 	}
 }
 
 func (a *antiLeaker) lingerLocked(ip net.IP, remove func()) {
-	if ip == nil {
-		remove()
-		return
-	}
 	for len(a.pending) >= antiLeakMaxLinger {
 		a.dropLingeringLocked(0)
 	}
@@ -248,9 +243,8 @@ func (a *antiLeaker) teardown() {
 		delete(a.static, k)
 	}
 	a.known = nil
-	if p := a.cur.Load(); p != nil && *p != nil {
-		(*p)()
+	if a.cur != nil {
+		a.cur()
 	}
-	a.cur.Store(nil)
-	a.curIP = nil
+	a.cur, a.curIP = nil, nil
 }

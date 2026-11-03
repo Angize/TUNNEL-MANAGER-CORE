@@ -4,11 +4,82 @@ package packet
 
 import (
 	"bytes"
+	"log"
 	"net"
 	"syscall"
 )
 
 const disorderTTL = 4
+
+func (f *fragConn) degraded(why string) {
+	f.warn.Do(func() {
+		log.Printf("core/tls: sni_mode %q fell back to a plain split (%s) — the split still helps a stateless DPI, the desync does not apply", f.mode, why)
+	})
+}
+
+func (f *fragConn) fakeDegraded(why string) {
+	f.warnFake.Do(func() {
+		log.Printf("core/tls: sni_mode \"fake\" fell back to disorder (%s) — disorder desyncs a DPI that "+
+			"reads packets, but NOT one that reassembles the stream, which is the only thing fake buys", why)
+	})
+}
+
+func badTCPChecksum(seg []byte) {
+	if len(seg) < 18 {
+		return
+	}
+	seg[16] ^= 0xff
+}
+
+var decoyApexes = []string{"b-cdn.net", "fastly.net", "azureedge.net", "cloudflare.com", "cdn.jsdelivr.net"}
+
+func decoySNI(n int) []byte {
+	if n <= 0 {
+		return nil
+	}
+
+	for _, a := range decoyApexes {
+		if len(a) == n {
+			return []byte(a)
+		}
+	}
+
+	apex := ""
+	for _, a := range decoyApexes {
+		if len(a)+2 <= n && len(a) > len(apex) {
+			apex = a
+		}
+	}
+	if apex == "" {
+		return decoyLabels(n)
+	}
+	out := make([]byte, 0, n)
+	out = append(out, decoyLabels(n-len(apex)-1)...)
+	out = append(out, '.')
+	return append(out, apex...)
+}
+
+func decoyLabels(n int) []byte {
+	const fill = "assets"
+	const maxLabel = 63
+	out := make([]byte, 0, n)
+	for len(out) < n {
+		seg := n - len(out)
+		if seg > maxLabel {
+			seg = maxLabel
+			if rem := n - len(out) - seg; rem < 2 {
+				seg = n - len(out) - 2
+			}
+		}
+		for i := 0; i < seg; i++ {
+			out = append(out, fill[len(out)%len(fill)])
+		}
+		if len(out) < n {
+			out = append(out, '.')
+		}
+	}
+	return out
+}
 
 const (
 	optTCPRepair      = 19
@@ -145,8 +216,6 @@ func (f *fragConn) writeFake(p []byte, at int) (int, error) {
 	opts, window := tcpDecoyShape(f.Conn)
 	seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), snd, rcv, tcpPshAck, window, opts, fake)
 	badTCPChecksum(seg)
-	if ip := buildIP4Ext(src, dst, protoTCP, f.fakeSegTTL(), false, seg); ip != nil {
-		f.dsSend.note("tcp/sni-fake", inj.sendTo(dst, ip))
-	}
+	f.dsSend.note("tcp/sni-fake", inj.sendTo(dst, buildIP4Ext(src, dst, protoTCP, badSumTTL, false, seg)))
 	return f.Conn.Write(p)
 }

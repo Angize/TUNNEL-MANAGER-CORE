@@ -23,7 +23,7 @@ type syscallConn interface {
 
 func applyConnSockBuf(c syscallConn) {
 	n := wantSockBuf()
-	if n <= 0 || c == nil {
+	if n <= 0 {
 		return
 	}
 	if rc, err := c.SyscallConn(); err == nil {

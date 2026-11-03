@@ -18,4 +18,4 @@ func (t *udpTx) reset()                       {}
 func (t *udpTx) full() bool                   { return true }
 func (t *udpTx) count() int                   { return 0 }
 func (t *udpTx) add(_ []byte, _ *net.UDPAddr) {}
-func (t *udpTx) flush(_ *sendErrLog) int      { return 0 }
+func (t *udpTx) flush(_ *sendErrLog)          {}

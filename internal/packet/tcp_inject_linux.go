@@ -3,11 +3,27 @@
 package packet
 
 import (
-	"crypto/rand"
-	"encoding/binary"
 	"log"
 	"net"
 )
+
+const (
+	tcpPshAck = 0x18
+	tcpAckBit = 0x10
+	tcpSynAck = 0x12
+)
+
+func buildTCPSeg(src, dst net.IP, sport, dport uint16, seq, ack uint32, flags byte, window uint16, opts, payload []byte) []byte {
+	if len(opts)%4 != 0 || len(opts) > 40 {
+		opts = nil
+	}
+	hdrLen := 20 + len(opts)
+	h := make([]byte, hdrLen+len(payload))
+	copy(h[20:], opts)
+	copy(h[hdrLen:], payload)
+	fillTCPSeg(h, hdrLen, src, dst, sport, dport, seq, ack, flags, window)
+	return h
+}
 
 func (b *TCP) sendTCPFakes(conn net.Conn) {
 	if !b.dsOn || conn == nil {
@@ -19,7 +35,7 @@ func (b *TCP) sendTCPFakes(conn net.Conn) {
 	}
 	inj, err := newL2Inject()
 	if err != nil {
-		b.dsFailOnce.Do(func() {
+		b.dsSend.failOnce.Do(func() {
 			log.Printf("tcp: desync decoys disabled (AF_PACKET: %v) — the carrier needs CAP_NET_RAW", err)
 		})
 		return
@@ -41,19 +57,11 @@ func (b *TCP) tcpFakeSegs(conn net.Conn) (net.IP, [][]byte) {
 		return nil, nil
 	}
 	opts, window := tcpDecoyShape(conn)
-	d := newDesyncCfg(b.dsOn, b.dsTTL, b.dsCount, b.dsMode)
+	d := desyncCfg{on: true, ttl: b.dsTTL, count: b.dsCount, mode: b.dsMode}
 	var pkts [][]byte
-	for _, sp := range d.specsTCP() {
-		seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), randSeq32(), randSeq32(), tcpPshAck, window, opts, fakePayload())
-		if ip := buildIP4Ext(src, dst, protoTCP, sp.ttl, sp.badSum, seg); ip != nil {
-			pkts = append(pkts, ip)
-		}
+	for _, sp := range d.specs(false) {
+		seg := buildTCPSeg(src, dst, uint16(la.Port), uint16(ra.Port), randUint32(), randUint32(), tcpPshAck, window, opts, fakePayload())
+		pkts = append(pkts, buildIP4Ext(src, dst, protoTCP, sp.ttl, sp.badSum, seg))
 	}
 	return dst, pkts
-}
-
-func randSeq32() uint32 {
-	var b [4]byte
-	_, _ = rand.Read(b[:])
-	return binary.BigEndian.Uint32(b[:])
 }

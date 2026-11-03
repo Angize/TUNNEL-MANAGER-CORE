@@ -32,7 +32,6 @@ type Sealer struct {
 	recvAEAD cipher.AEAD
 	sendMask []byte
 	recvMask []byte
-	Name     string
 	prefix   []byte
 	ctr      atomic.Uint64
 }
@@ -59,24 +58,20 @@ func deriveKey(psk, label string, n int) []byte {
 	return k[:n]
 }
 
+func newGCM(k []byte) (cipher.AEAD, error) {
+	b, err := aes.NewCipher(k)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(b)
+}
+
 func aeadFactory(name string) (mk func(key []byte) (cipher.AEAD, error), keyLen int, err error) {
 	switch name {
 	case CipherAES256:
-		return func(k []byte) (cipher.AEAD, error) {
-			b, e := aes.NewCipher(k)
-			if e != nil {
-				return nil, e
-			}
-			return cipher.NewGCM(b)
-		}, 32, nil
+		return newGCM, 32, nil
 	case CipherAES128:
-		return func(k []byte) (cipher.AEAD, error) {
-			b, e := aes.NewCipher(k)
-			if e != nil {
-				return nil, e
-			}
-			return cipher.NewGCM(b)
-		}, 16, nil
+		return newGCM, 16, nil
 	case CipherChaCha:
 		return func(k []byte) (cipher.AEAD, error) { return chacha20poly1305.New(k) }, 32, nil
 	case CipherXChaCha:
@@ -86,18 +81,10 @@ func aeadFactory(name string) (mk func(key []byte) (cipher.AEAD, error), keyLen 
 	}
 }
 
-func NewSealer(cipherName, psk string, isClient bool) (*Sealer, error) {
+func CheckCipher(cipherName string) (string, error) {
 	name := ResolveCipher(cipherName)
-	_, keyLen, err := aeadFactory(name)
-	if err != nil {
-		return nil, err
-	}
-	return sealerFromKeys(name,
-		deriveKey(psk, "aead|c2s|"+name, keyLen),
-		deriveKey(psk, "aead|s2c|"+name, keyLen),
-		deriveKey(psk, "mask|c2s", maskKeyLen),
-		deriveKey(psk, "mask|s2c", maskKeyLen),
-		isClient)
+	_, _, err := aeadFactory(name)
+	return name, err
 }
 
 func sealerFromKeys(name string, c2sKey, s2cKey, c2sMask, s2cMask []byte, isClient bool) (*Sealer, error) {
@@ -105,7 +92,7 @@ func sealerFromKeys(name string, c2sKey, s2cKey, c2sMask, s2cMask []byte, isClie
 	if err != nil {
 		return nil, err
 	}
-	s := &Sealer{Name: name}
+	s := &Sealer{}
 	var sendKey, recvKey []byte
 	if isClient {
 		sendKey, recvKey = c2sKey, s2cKey
@@ -159,9 +146,6 @@ func (s *Sealer) Frame(dst []byte, lead, innerLen int) (buf, head, inner []byte)
 func (s *Sealer) SealInPlace(buf, inner, aad []byte) ([]byte, error) {
 	ns := s.sendAEAD.NonceSize()
 	off := len(buf) - len(inner)
-	if off < maskSaltLen+ns || cap(buf) < len(buf)+s.sendAEAD.Overhead() {
-		return nil, errors.New("seal: frame buffer was not built by Frame")
-	}
 	salt, nonce := buf[off-maskSaltLen-ns:off-ns], buf[off-ns:off]
 	if err := RandRead(salt); err != nil {
 		return nil, err
@@ -175,10 +159,6 @@ func (s *Sealer) SealInPlace(buf, inner, aad []byte) ([]byte, error) {
 		return nil, err
 	}
 	return buf[:off+len(out)], nil
-}
-
-func (s *Sealer) Open(wire, aad []byte) (session uint64, seq uint64, pt []byte, err error) {
-	return s.OpenTo(nil, wire, aad)
 }
 
 func (s *Sealer) OpenTo(dst, wire, aad []byte) (session uint64, seq uint64, pt []byte, err error) {

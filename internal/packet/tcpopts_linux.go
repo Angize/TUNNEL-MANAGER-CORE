@@ -16,10 +16,6 @@ const (
 
 	optTCPTimestamp = 24
 
-	tcpOptNOP       = 1
-	tcpOptTimestamp = 8
-	tcpOptTSLen     = 10
-
 	decoyWindow = 0xffff
 )
 
@@ -60,9 +56,8 @@ func tcpDecoyShape(c net.Conn) (opts []byte, window uint16) {
 		if err != nil {
 			return
 		}
-		opts = []byte{tcpOptNOP, tcpOptNOP, tcpOptTimestamp, tcpOptTSLen, 0, 0, 0, 0, 0, 0, 0, 0}
-		binary.BigEndian.PutUint32(opts[4:8], uint32(tsval))
-		binary.BigEndian.PutUint32(opts[8:12], randSeq32())
+		opts = make([]byte, 12)
+		putTSOption(opts, uint32(tsval), randUint32())
 	})
 	return
 }

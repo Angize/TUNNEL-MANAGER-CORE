@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 
-	"golang.org/x/crypto/chacha20"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
 )
@@ -53,13 +52,8 @@ func GenerateEphemeral() (*Ephemeral, error) {
 	return e, nil
 }
 
-func hsMACKey(psk string) []byte {
-	k := sha256.Sum256([]byte("tnl-core|v2|hs-mac|" + psk))
-	return k[:]
-}
-
 func hsMAC(psk, tag string, parts ...[]byte) []byte {
-	m := hmac.New(sha256.New, hsMACKey(psk))
+	m := hmac.New(sha256.New, deriveKey(psk, "hs-mac", sha256.Size))
 	m.Write([]byte(tag))
 	for _, p := range parts {
 		m.Write(p)
@@ -67,17 +61,10 @@ func hsMAC(psk, tag string, parts ...[]byte) []byte {
 	return m.Sum(nil)[:hsMACLen]
 }
 
-func hsMaskKey(psk string) []byte {
-	k := sha256.Sum256([]byte("tnl-core|v2|hs-mask|" + psk))
-	return k[:]
-}
-
 func hsMask(psk string, nonce, buf []byte) {
-	c, err := chacha20.NewUnauthenticatedCipher(hsMaskKey(psk), nonce)
-	if err != nil {
+	if err := mask(deriveKey(psk, "hs-mask", maskKeyLen), nonce, buf); err != nil {
 		panic("crypto: handshake mask cipher: " + err.Error())
 	}
-	c.XORKeyStream(buf, buf)
 }
 
 func buildMsg(psk string, e *Ephemeral, mac []byte) []byte {

@@ -27,11 +27,9 @@ var stripeKeepalive = make([]byte, recHdr)
 
 var carrierStreams = 1
 
-func SetHTTPStreams(workers int) {
-	if workers > 0 {
-		carrierStreams = tclamp(workers, 1, 16)
-	}
-}
+const MaxHTTPStreams = 16
+
+func SetHTTPStreams(workers int) { carrierStreams = workers }
 
 var chunkClasses = func() []int {
 	c := []int{1 << 10}
@@ -271,7 +269,7 @@ func (q *reseq) attach(n int) int {
 	defer q.mu.Unlock()
 	q.streams += n
 	m := q.floor + q.streams*perStreamPend
-	if lim := maxStripePend(16); m > lim {
+	if lim := maxStripePend(MaxHTTPStreams); m > lim {
 		m = lim
 	}
 	q.setMax(m)

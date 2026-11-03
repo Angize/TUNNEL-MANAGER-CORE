@@ -26,8 +26,6 @@ type l2inject struct {
 	fd   int
 	peer net.IP
 	rt   *l2route
-
-	resolve func(net.IP) (*l2route, error)
 }
 
 func newL2Inject() (*l2inject, error) {
@@ -42,11 +40,7 @@ func (l *l2inject) routeTo(peer net.IP) (*l2route, error) {
 	if l.rt != nil && l.peer.Equal(peer) {
 		return l.rt, nil
 	}
-	resolve := l.resolve
-	if resolve == nil {
-		resolve = resolveL2
-	}
-	rt, err := resolve(peer)
+	rt, err := resolveL2(peer)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +76,7 @@ func (l *l2inject) sendTo(peer net.IP, ipPkt []byte) error {
 	frame := make([]byte, 14+len(ipPkt))
 	copy(frame[0:6], rt.dst[:])
 	copy(frame[6:12], rt.src[:])
-	binary.BigEndian.PutUint16(frame[12:14], ethPIP)
+	binary.BigEndian.PutUint16(frame[12:14], etherTypeIPv4)
 	copy(frame[14:], ipPkt)
 
 	sa := &syscall.SockaddrLinklayer{Ifindex: rt.ifindex, Halen: 6}

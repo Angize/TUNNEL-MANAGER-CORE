@@ -29,7 +29,6 @@ const (
 type Sealer interface {
 	Frame(dst []byte, lead, innerLen int) (buf, head, inner []byte)
 	SealInPlace(buf, inner, aad []byte) ([]byte, error)
-	Open(sealed, aad []byte) (session uint64, seq uint64, pt []byte, err error)
 	OpenTo(dst, sealed, aad []byte) (session uint64, seq uint64, pt []byte, err error)
 }
 
@@ -50,7 +49,6 @@ func stageSession(set []*stagedBox, s Sealer) []*stagedBox {
 }
 
 type UDP struct {
-	ping      time.Duration
 	conn      atomic.Pointer[net.UDPConn]
 	rebindGen atomic.Int64
 	rebindMu  sync.Mutex
@@ -97,18 +95,14 @@ type UDP struct {
 }
 
 func (b *UDP) SetPeerPool(pp *PeerPool) {
-	if b.isClient {
-		b.pp = pp
-		if pp != nil {
-			joinStatus(b.st, pp, axisDst)
-			b.poolIPs = buildSrcAllow(pp.all())
-		}
-	}
+	b.pp = pp
+	joinStatus(b.st, pp, axisDst)
+	b.poolIPs = buildSrcAllow(pp.all())
 }
 
 var connIdle = 60 * time.Second
 
-var pingEvery = 10 * time.Second
+const pingEvery = 10 * time.Second
 
 const handshakeRetransmit = time.Second
 
@@ -132,9 +126,6 @@ func wakeLoop(ch chan struct{}) {
 }
 
 func (b *UDP) rotatePeerUDP(proactive bool) {
-	if b.pp == nil {
-		return
-	}
 	addr, moved := b.pp.nextEndpoint(proactive)
 	if !moved {
 		return
@@ -145,7 +136,7 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 	}
 	log.Printf("core/udp: rotated destination to %s", addr)
 
-	b.st.setActive("udp · " + ua.String())
+	b.st.setActive("udp" + activeSep + ua.String())
 	b.st.rotated("peer", "ip:"+addr, proactive)
 	if proactive {
 		return
@@ -154,9 +145,6 @@ func (b *UDP) rotatePeerUDP(proactive bool) {
 }
 
 func (b *UDP) SetSourceIP(ip string) {
-	if !b.isClient || ip == "" {
-		return
-	}
 	if host, ok := b.rebindSourceTo(ip); ok {
 		log.Printf("core/udp: source bound to %s", host)
 		return
@@ -165,9 +153,6 @@ func (b *UDP) SetSourceIP(ip string) {
 }
 
 func (b *UDP) SetSourcePool(sp *PeerPool) {
-	if !b.isClient || sp == nil {
-		return
-	}
 	b.sp = sp
 	joinStatus(b.st, sp, axisSrc)
 	b.landSourceUDP("bound")
@@ -187,9 +172,6 @@ func (b *UDP) landSourceUDP(verb string) {
 }
 
 func (b *UDP) rotateSourceUDP(proactive bool) {
-	if b.sp == nil {
-		return
-	}
 	prev := b.sp.current()
 	addr, moved := b.sp.nextEndpoint(proactive)
 	if !moved {
@@ -206,10 +188,7 @@ func (b *UDP) rotateSourceUDP(proactive bool) {
 }
 
 func (b *UDP) rebindSourceTo(addr string) (string, bool) {
-	host := addr
-	if h, _, e := net.SplitHostPort(addr); e == nil {
-		host = h
-	}
+	host := hostOnly(addr)
 	ip := net.ParseIP(host)
 	if ip == nil {
 		return "", false
@@ -297,23 +276,17 @@ func (b *UDP) landPeerUDP(hard bool) *net.UDPAddr {
 }
 
 func (b *UDP) adoptPeerUDP() {
-	if b.pp == nil {
-		return
-	}
 	ua := b.landPeerUDP(true)
 	if ua == nil {
 		return
 	}
 	log.Printf("core/udp: destination moved to %s (operator)", ua)
 
-	b.st.setActive("udp · " + ua.String())
+	b.st.setActive("udp" + activeSep + ua.String())
 	wakeLoop(b.wake)
 }
 
 func (b *UDP) adoptSourceUDP() {
-	if b.sp == nil {
-		return
-	}
 	b.landSourceUDP("moved (operator)")
 }
 
@@ -346,14 +319,11 @@ func (b *UDP) cmdPollLoop(rc *rotationController) {
 }
 
 func (b *UDP) SetStatusPath(path string) {
-	if path == "" {
-		return
-	}
 	peer := ""
 	if p := b.dst(); p != nil {
 		peer = p.String()
 	}
-	b.st = newCoreStatus(path, "udp · "+peer)
+	b.st = newCoreStatus(path, "udp"+activeSep+peer)
 }
 
 func (b *UDP) livePath() (pathKey, bool) {
@@ -411,7 +381,7 @@ func Dial(peerAddr string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher str
 		}
 		applyConnSockBuf(conn)
 	}
-	b := &UDP{obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, isClient: true, ping: pingEvery,
+	b := &UDP{obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, isClient: true,
 		closeCh: make(chan struct{}), wake: make(chan struct{}, 1)}
 	b.initQueues(dev, extra)
 	b.conn.Store(conn)
@@ -426,7 +396,7 @@ func (b *UDP) initQueues(dev *tun.Device, extra []*tun.Device) {
 }
 
 func Listen(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, cipher string, fec bool, fecData, fecParity int, extra ...*tun.Device) (*UDP, error) {
-	b := &UDP{obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, ping: pingEvery, closeCh: make(chan struct{})}
+	b := &UDP{obfs: obfs, cryptoOn: cryptoOn, psk: psk, cipher: cipher, closeCh: make(chan struct{})}
 	b.initQueues(dev, extra)
 	for _, listenAddr := range listenAddrs {
 		la, err := net.ResolveUDPAddr("udp", listenAddr)
@@ -444,39 +414,24 @@ func Listen(listenAddrs []string, dev *tun.Device, obfs, cryptoOn bool, psk, cip
 		}
 		return nil, err
 	}
-	if len(b.srvConns) == 0 {
-		return nil, errors.New("udp listen: no listen address")
-	}
 	b.replyConn.Store(b.srvConns[0])
 	b.initFec(fec, fecData, fecParity)
 	return b, nil
 }
 
 func (b *UDP) serverReadLoop(c *net.UDPConn) error {
-	buf := make([]byte, maxDatagram)
 	bat := newUDPBatch(c)
 	for {
-		if bat != nil {
-			ds, err := bat.recv()
-			if err != nil {
-				return err
-			}
-			for _, d := range ds {
-				b.rxMu.Lock()
-				b.rxConn.Store(c)
-				b.receive(d.pkt, d.addr)
-				b.rxMu.Unlock()
-			}
-			continue
-		}
-		n, addr, err := c.ReadFromUDP(buf)
+		ds, err := bat.recv()
 		if err != nil {
 			return err
 		}
-		b.rxMu.Lock()
-		b.rxConn.Store(c)
-		b.receive(buf[:n], addr)
-		b.rxMu.Unlock()
+		for _, d := range ds {
+			b.rxMu.Lock()
+			b.rxConn.Store(c)
+			b.receive(d.pkt, d.addr)
+			b.rxMu.Unlock()
+		}
 	}
 }
 
@@ -539,20 +494,10 @@ func buildSrcAllow(ips []string) map[string]struct{} {
 	m := make(map[string]struct{}, len(ips))
 	for _, s := range ips {
 		if ip := parseIP4(hostOnly(s)); ip != nil {
-			m[string(ip.To4())] = struct{}{}
+			m[string(ip)] = struct{}{}
 		}
 	}
 	return m
-}
-
-func parseIP4s(ips []string) []net.IP {
-	out := make([]net.IP, 0, len(ips))
-	for _, s := range ips {
-		if ip := parseIP4(hostOnly(s)); ip != nil {
-			out = append(out, ip)
-		}
-	}
-	return out
 }
 
 func (b *UDP) replySock() *net.UDPConn {
@@ -566,7 +511,7 @@ func (b *UDP) replySock() *net.UDPConn {
 }
 
 func (b *UDP) initFec(fec bool, fecData, fecParity int) {
-	b.fecEnc, b.fecDec = newFecPair(fec, fecData, fecParity, b.psk, "udp", b.sendFecBlock,
+	b.fecEnc, b.fecDec = newFecPair(fec, fecData, fecParity, b.psk, b.sendFecBlock,
 		func(frame []byte) { b.deliver(frame, b.rxAddr.Load()) })
 }
 
@@ -583,19 +528,17 @@ func (b *UDP) sendFecBlock(shards [][]byte) {
 		if b.fecTx == nil || b.fecTxOn != c {
 			b.fecTx, b.fecTxOn = newUDPTx(c), c
 		}
-		if b.fecTx != nil {
-			b.fecTx.reset()
-			for _, s := range shards {
-				if b.fecTx.full() {
-					b.fecTx.flush(&b.sendErr)
-					b.fecTx.reset()
-				}
-				b.fecTx.add(s, p)
+		b.fecTx.reset()
+		for _, s := range shards {
+			if b.fecTx.full() {
+				b.fecTx.flush(&b.sendErr)
+				b.fecTx.reset()
 			}
-			b.fecTx.flush(&b.sendErr)
-			b.fecTx.reset()
-			return
+			b.fecTx.add(s, p)
 		}
+		b.fecTx.flush(&b.sendErr)
+		b.fecTx.reset()
+		return
 	}
 	for _, s := range shards {
 		if _, err := c.WriteToUDP(s, p); err != nil {
@@ -652,7 +595,7 @@ func (b *UDP) sealer() Sealer {
 }
 
 func (b *UDP) frame(dst []byte, typ byte, payload []byte) ([]byte, error) {
-	return sealBody(dst, b.sealer(), b.obfs, 0, typ, payload, padMaxFor(typ))
+	return sealBody(dst, b.sealer(), b.obfs, 0, typ, payload)
 }
 
 func txBufs() [][]byte {
@@ -702,24 +645,22 @@ func (b *UDP) tunToNet(dev *tun.Device) error {
 		if txFor != c {
 			tx, txFor = newUDPTx(c), c
 		}
-		if tx != nil {
-			tx.reset()
-			tx.add(frame, peer)
-			for !tx.full() {
-				m, ok, err := dev.TryRead(buf)
-				if err != nil || !ok {
-					break
-				}
-				f, err := b.frame(out[tx.count()], typeData, buf[:m])
-				if err != nil {
-					continue
-				}
-				tx.add(f, peer)
+		tx.reset()
+		tx.add(frame, peer)
+		for !tx.full() {
+			m, ok, err := dev.TryRead(buf)
+			if err != nil || !ok {
+				break
 			}
-			if tx.count() > 1 {
-				tx.flush(&b.sendErr)
+			f, err := b.frame(out[tx.count()], typeData, buf[:m])
+			if err != nil {
 				continue
 			}
+			tx.add(f, peer)
+		}
+		if tx.count() > 1 {
+			tx.flush(&b.sendErr)
+			continue
 		}
 		if _, err := c.WriteToUDP(frame, peer); err != nil {
 			b.sendErr.note("udp", err)
@@ -728,8 +669,6 @@ func (b *UDP) tunToNet(dev *tun.Device) error {
 }
 
 func (b *UDP) netToTun() error {
-	buf := make([]byte, maxDatagram)
-
 	var bat *udpBatch
 	var batFor *net.UDPConn
 	for {
@@ -739,27 +678,16 @@ func (b *UDP) netToTun() error {
 			bat, batFor = newUDPBatch(c), c
 		}
 
-		if bat != nil {
-			ds, err := bat.recv()
-			if err != nil {
-				if b.rebindGen.Load() != gen {
-					continue
-				}
-				return err
-			}
-			for _, d := range ds {
-				b.receive(d.pkt, d.addr)
-			}
-			continue
-		}
-		n, addr, err := c.ReadFromUDP(buf)
+		ds, err := bat.recv()
 		if err != nil {
 			if b.rebindGen.Load() != gen {
 				continue
 			}
 			return err
 		}
-		b.receive(buf[:n], addr)
+		for _, d := range ds {
+			b.receive(d.pkt, d.addr)
+		}
 	}
 }
 
@@ -795,9 +723,9 @@ func aadFor(typ byte) []byte {
 	return []byte{typ}
 }
 
-func sealBody(dst []byte, s Sealer, obfs bool, lead int, typ byte, payload []byte, padMax int) ([]byte, error) {
+func sealBody(dst []byte, s Sealer, obfs bool, lead int, typ byte, payload []byte) ([]byte, error) {
 	if obfs {
-		return obfsSeal(dst, s, lead, typ, payload, padMax)
+		return obfsSeal(dst, s, lead, typ, payload)
 	}
 	if s != nil {
 		buf, head, inner := s.Frame(dst, lead+2, len(payload))
@@ -940,8 +868,8 @@ func (b *UDP) dispatch(typ byte, payload []byte, own *[]byte, addr *net.UDPAddr)
 
 func (b *UDP) newController() *rotationController {
 	rc := newRotationController(b.pp, b.sp)
-	rc.session.setDrop(b.rehandshake)
-	rc.port.setRoll(b.rollSourcePort)
+	rc.session.set(b.rehandshake)
+	rc.port.set(b.rollSourcePort)
 	rc.attachStatus(b.st)
 	b.st.setPair(rc.pairStatus)
 	return rc
@@ -972,7 +900,7 @@ func (b *UDP) clientLoop() {
 				continue
 			}
 		}
-		wait := keepaliveInterval(b.ping, b.psk)
+		wait := keepaliveInterval(pingEvery, b.psk)
 		if asking {
 			wait = handshakeRetransmitWait()
 		}

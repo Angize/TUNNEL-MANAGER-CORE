@@ -4,7 +4,6 @@ import (
 	"net"
 	"strconv"
 	"sync"
-	"time"
 )
 
 type rotStatus struct {
@@ -66,21 +65,6 @@ func (t *pathTracker) sample() (changed bool) {
 		return false
 	}
 	return t.observe(live())
-}
-
-func samplePathLoop(t *pathTracker, flush func(), closeCh <-chan struct{}) {
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
-	for {
-		select {
-		case <-closeCh:
-			return
-		case <-tick.C:
-			if t.sample() {
-				flush()
-			}
-		}
-	}
 }
 
 func (t *pathTracker) observe(k pathKey, ready bool) (changed bool) {

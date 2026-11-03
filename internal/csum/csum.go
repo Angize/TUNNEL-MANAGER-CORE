@@ -32,3 +32,5 @@ func Fold(acc uint64) uint16 {
 	}
 	return uint16(acc)
 }
+
+func Checksum(b []byte) uint16 { return ^Fold(Add(b, 0)) }

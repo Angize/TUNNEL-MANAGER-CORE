@@ -12,15 +12,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const (
-	soSndbufForce = 32
-	soRcvbufForce = 33
-)
-
 var sockBufWarned [2]sync.Once
 
 func applyRawConnBuf(rc syscall.RawConn, n int, knob string) {
-	if rc == nil || n <= 0 {
+	if n <= 0 {
 		return
 	}
 	_ = rc.Control(func(fd uintptr) { applyFdBuf(int(fd), n, knob) })
@@ -45,15 +40,15 @@ func applyFdBuf(fd, n int, knob string) {
 }
 
 func applyFdSndBuf(fd, n int, knob string) {
-	sizeBuf(fd, n, knob, soSndbufForce, syscall.SO_SNDBUF, 0, "send", "wmem_max")
+	sizeBuf(fd, n, knob, unix.SO_SNDBUFFORCE, syscall.SO_SNDBUF, 0, "send", "wmem_max")
 }
 
 func applyFdRcvBuf(fd, n int, knob string) {
-	sizeBuf(fd, n, knob, soRcvbufForce, syscall.SO_RCVBUF, 1, "receive", "rmem_max")
+	sizeBuf(fd, n, knob, unix.SO_RCVBUFFORCE, syscall.SO_RCVBUF, 1, "receive", "rmem_max")
 }
 
 func sizeBuf(fd, n int, knob string, forceOpt, plainOpt, warnIdx int, dir, sysctl string) {
-	if fd < 0 || n <= 0 {
+	if n <= 0 {
 		return
 	}
 	forced := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, forceOpt, n) == nil

@@ -5,24 +5,7 @@ import (
 	"net"
 )
 
-const (
-	tcpPshAck = 0x18
-	tcpSyn    = 0x02
-	tcpAckBit = 0x10
-	tcpSynAck = 0x12
-)
-
-func buildTCPSeg(src, dst net.IP, sport, dport uint16, seq, ack uint32, flags byte, window uint16, opts, payload []byte) []byte {
-	if len(opts)%4 != 0 || len(opts) > 40 {
-		opts = nil
-	}
-	hdrLen := 20 + len(opts)
-	h := make([]byte, hdrLen+len(payload))
-	copy(h[20:], opts)
-	copy(h[hdrLen:], payload)
-	fillTCPSeg(h, hdrLen, src, dst, sport, dport, seq, ack, flags, window)
-	return h
-}
+const tcpSyn = 0x02
 
 func fillTCPSeg(h []byte, hdrLen int, src, dst net.IP, sport, dport uint16, seq, ack uint32, flags byte, window uint16) {
 	binary.BigEndian.PutUint16(h[0:2], sport)

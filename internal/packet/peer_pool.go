@@ -12,13 +12,12 @@ import (
 )
 
 type poolAddr struct {
-	s  string
 	ip *net.IPAddr
 	ua *net.UDPAddr
 }
 
 func newPoolAddr(s string) poolAddr {
-	a := poolAddr{s: s}
+	var a poolAddr
 	ip := parseIP4(hostOnly(s))
 	if ip == nil {
 		return a
@@ -53,7 +52,6 @@ type PeerPool struct {
 
 	live   atomic.Pointer[poolAddr]
 	chosen string
-	now    func() int64
 
 	axis  string
 	ev    func(kind, code, detail string)
@@ -83,9 +81,7 @@ func NewPeerPool(addrs []string, rotate time.Duration) *PeerPool {
 	for i, a := range cp {
 		forms[i] = newPoolAddr(a)
 	}
-	p := &PeerPool{addrs: cp, forms: forms, every: cp, rotate: rotate,
-		now: func() int64 { return time.Now().Unix() }}
-	p.health = newHealthSet(&p.now)
+	p := &PeerPool{addrs: cp, forms: forms, every: cp, rotate: rotate, health: newHealthSet()}
 	if len(forms) > 0 {
 		p.live.Store(&p.forms[0])
 	}
@@ -166,12 +162,7 @@ func (p *PeerPool) pickWhere(ok func(string) bool) {
 	}
 }
 
-func (p *PeerPool) liveAddr() *poolAddr {
-	if p == nil {
-		return nil
-	}
-	return p.live.Load()
-}
+func (p *PeerPool) liveAddr() *poolAddr { return p.live.Load() }
 
 func (p *PeerPool) landLocked(idx int) { p.live.Store(&p.forms[idx]) }
 
@@ -237,12 +228,7 @@ func (p *PeerPool) all() []string {
 	return out
 }
 
-func (p *PeerPool) size() int {
-	if p == nil {
-		return 0
-	}
-	return len(p.addrs)
-}
+func (p *PeerPool) size() int { return len(p.addrs) }
 
 func landSource(sp *PeerPool, land func(addr string) bool) bool {
 	for left := sp.size(); left > 0; left-- {
@@ -256,14 +242,12 @@ func landSource(sp *PeerPool, land func(addr string) bool) bool {
 	return false
 }
 
-func (p *PeerPool) tierLocked(addr string) (tier int, next int64) { return p.health.tier(addr) }
-
 func (p *PeerPool) bestIdxLocked() int {
 	best := -1
 	var bt int
 	var bn int64
 	for i := range p.addrs {
-		t, n := p.tierLocked(p.addrs[i])
+		t, n := p.health.tier(p.addrs[i])
 		if best == -1 || t < bt || (t == bt && n < bn) {
 			best, bt, bn = i, t, n
 		}
@@ -271,8 +255,17 @@ func (p *PeerPool) bestIdxLocked() int {
 	return best
 }
 
-func (p *PeerPool) burnLocked(addr string) bool {
-	return p.health.burn(addr)
+func (p *PeerPool) burnLocked(addr, reason string) func() {
+	if !p.health.burn(addr) {
+		return func() {}
+	}
+	p.burns.Add(1)
+	axis, ev := p.axis, p.ev
+	return func() {
+		if ev != nil {
+			ev("burn", reason, axis+":"+addr)
+		}
+	}
 }
 
 func (p *PeerPool) burnCount() uint64 { return p.burns.Load() }
@@ -315,30 +308,18 @@ func (p *PeerPool) advanceEligibleLocked() bool {
 func (p *PeerPool) fail(reason string) (addr string, moved bool) {
 	p.mu.Lock()
 	prev := p.cur
-	burned := ""
-	if p.burnLocked(p.addrs[p.cur]) {
-		p.burns.Add(1)
-		burned = p.addrs[p.cur]
-	}
+	report := p.burnLocked(p.addrs[p.cur], reason)
 	p.advanceFailLocked()
 	a := p.addrs[p.cur]
 	moved = p.cur != prev
-	axis, ev := p.axis, p.ev
 	p.mu.Unlock()
-	if burned != "" && ev != nil {
-		ev("burn", reason, axis+":"+burned)
-	}
+	report()
 	p.publish()
 	return a, moved
 }
 
 func (p *PeerPool) rotateOnce() (addr string, moved bool) {
 	p.mu.Lock()
-	if len(p.addrs) < 2 {
-		a := p.addrs[p.cur]
-		p.mu.Unlock()
-		return a, false
-	}
 	moved = p.advanceEligibleLocked()
 	a := p.addrs[p.cur]
 	p.mu.Unlock()
@@ -375,10 +356,9 @@ func (p *PeerPool) keepCursorOn(addr string) {
 
 func (p *PeerPool) rejectCandidate(prev string) {
 	p.mu.Lock()
-	burned := ""
-	if bad := p.addrs[p.cur]; bad != prev && p.burnLocked(bad) {
-		p.burns.Add(1)
-		burned = bad
+	report := func() {}
+	if bad := p.addrs[p.cur]; bad != prev {
+		report = p.burnLocked(bad, "unbindable")
 	}
 	back := false
 	for idx, a := range p.addrs {
@@ -391,12 +371,8 @@ func (p *PeerPool) rejectCandidate(prev string) {
 	if !back {
 		p.advanceFailLocked()
 	}
-	axis, ev := p.axis, p.ev
 	p.mu.Unlock()
-
-	if burned != "" && ev != nil {
-		ev("burn", "unbindable", axis+":"+burned)
-	}
+	report()
 	p.publish()
 }
 
@@ -440,19 +416,10 @@ func (p *PeerPool) retestNow(addr string) bool {
 }
 
 func (p *PeerPool) markSuspect(addr, reason string) {
-	if addr == "" {
-		return
-	}
 	p.mu.Lock()
-	condemned := p.health.burn(addr)
-	axis, ev := p.axis, p.ev
+	report := p.burnLocked(addr, reason)
 	p.mu.Unlock()
-	if condemned {
-		p.burns.Add(1)
-		if ev != nil {
-			ev("burn", reason, axis+":"+addr)
-		}
-	}
+	report()
 	p.publish()
 }
 
@@ -501,7 +468,7 @@ func claimMailbox(path string) ([]byte, bool) {
 
 func readPoolCmd(path string) (c poolCmd, ok bool) {
 	data, ok := claimMailbox(path)
-	if !ok || json.Unmarshal(data, &c) != nil || (c.Key == "" && c.Cmd == "") {
+	if !ok || json.Unmarshal(data, &c) != nil {
 		return poolCmd{}, false
 	}
 	return c, true
@@ -516,9 +483,6 @@ func readPoolCmds(path string) []poolCmd {
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		var c poolCmd
 		if len(bytes.TrimSpace(line)) == 0 || json.Unmarshal(line, &c) != nil {
-			continue
-		}
-		if c.Key == "" && c.Cmd == "" {
 			continue
 		}
 		out = append(out, c)
@@ -619,8 +583,8 @@ type rotationController struct {
 	selbox   string
 
 	accused  atomic.Pointer[pairNow]
-	port     portRung
-	session  sessionRung
+	port     rung
+	session  rung
 	revive   reviveClock
 	rotate   time.Duration
 	rotateAt time.Time
@@ -701,12 +665,12 @@ func (p peerPair) burn(kind, key, reason string) {
 
 func (p peerPair) pick(kind, key string) bool {
 	a := p.axis(kind)
-	return a != nil && key != "" && a.selectEntry(key)
+	return a != nil && a.selectEntry(key)
 }
 
 func (p peerPair) retest(kind, key string) bool {
 	a := p.axis(kind)
-	return a != nil && key != "" && a.retestNow(key)
+	return a != nil && a.retestNow(key)
 }
 
 func (p peerPair) condemned(kind, key string) bool {
@@ -714,14 +678,11 @@ func (p peerPair) condemned(kind, key string) bool {
 	return a != nil && key != "" && a.condemned(key)
 }
 
-func (c *rotationController) active() bool { return c != nil && (c.dst != nil || c.src != nil) }
+func (c *rotationController) active() bool { return c.dst != nil || c.src != nil }
 
 func (c *rotationController) livePair() (low, high string) {
 	if c.liveFn != nil {
 		return c.liveFn()
-	}
-	if c.pair == nil {
-		return "", ""
 	}
 	return c.pair.live()
 }
@@ -749,16 +710,16 @@ func (c *rotationController) attachStatus(st *coreStatus) {
 }
 
 func (c *rotationController) polls() bool {
-	return c != nil && (c.active() || c.verdict != "" || c.selbox != "")
+	return c.active() || c.verdict != "" || c.selbox != ""
 }
 
 func (c *rotationController) spendFreeRungs() bool {
-	if c.port.try() {
+	if c.port.try(portTries) {
 		return false
 	}
 
 	c.st.portClaimLost()
-	return !c.session.try()
+	return !c.session.try(1)
 }
 
 func (c *rotationController) reviveIfDue() {
@@ -815,14 +776,11 @@ func (c *rotationController) success() {
 func (c *rotationController) proactive(rotDst, rotSrc func(proactive bool), now time.Time) (moved bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.rotate <= 0 || c.rotateAt.IsZero() || !now.After(c.rotateAt) {
+	if c.rotate <= 0 || !now.After(c.rotateAt) {
 		return false
 	}
 	c.rotateAt = now.Add(c.rotate)
 	if c.dst == nil {
-		if c.src == nil {
-			return false
-		}
 		at := c.src.activeIdx()
 		rotSrc(true)
 		return c.src.activeIdx() != at

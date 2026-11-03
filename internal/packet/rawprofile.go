@@ -76,8 +76,8 @@ const (
 	ipipInnerProto = protoESP
 	ipipInnerTTL   = 64
 
-	greHeaderLen = 4
-	greProtoIP4  = 0x0800
+	greHeaderLen  = 4
+	etherTypeIPv4 = 0x0800
 
 	innerIP4Len  = 20
 	espHeaderLen = 8
@@ -108,7 +108,7 @@ func buildInnerIP4(h []byte, payload int, seq, spi uint32) {
 	src, dst := ipipInnerAddr(spi, 0), ipipInnerAddr(spi, 1)
 	copy(h[12:16], src[:])
 	copy(h[16:20], dst[:])
-	binary.BigEndian.PutUint16(h[10:12], onesComplementSum(h))
+	binary.BigEndian.PutUint16(h[10:12], csum.Checksum(h))
 }
 
 const (
@@ -121,9 +121,6 @@ const (
 )
 
 func rawPorts(isClient bool, srv, cli uint16) (sport, dport uint16) {
-	if srv == 0 {
-		srv = rawServerPort
-	}
 	if cli == 0 {
 		cli = rawClientPort
 	}
@@ -192,7 +189,7 @@ func (p *rotPerm) at(idx uint64) uint16 {
 }
 
 func sportBand(lo, hi int) (uint32, uint32) {
-	if lo < MinSportBandLo || hi > 65535 || hi < lo || hi-lo+1 < MinSportBandSpan {
+	if lo == 0 && hi == 0 {
 		lo, hi = SportBandLoDefault, SportBandHiDefault
 	}
 	return uint32(lo), uint32(hi - lo + 1)
@@ -201,8 +198,6 @@ func sportBand(lo, hi int) (uint32, uint32) {
 type SportRotation struct {
 	Every  int
 	Dports int
-	Lo     int
-	Hi     int
 }
 
 var dportPool = [...]uint16{
@@ -211,9 +206,6 @@ var dportPool = [...]uint16{
 }
 
 func dportSet(base uint16, n int, psk string) []uint16 {
-	if n > MaxDports {
-		n = MaxDports
-	}
 	out := []uint16{base}
 	if n < 2 {
 		return out
@@ -312,7 +304,7 @@ func rawEffProto(profile string, rawProto int) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	if profile == "bare" && rawProto >= 1 && rawProto <= 255 {
+	if profile == "bare" && rawProto != 0 {
 		return rawProto, true
 	}
 	return base, true
@@ -372,7 +364,7 @@ func peerTSVal(tcp []byte) uint32 {
 
 func greWirePtype(ptype int) uint16 {
 	if ptype == 0 {
-		return greProtoIP4
+		return etherTypeIPv4
 	}
 	return uint16(ptype)
 }
@@ -408,7 +400,7 @@ func rawFill(framing int, h []byte, hl int, src, dst net.IP, isClient bool, id, 
 		}
 		binary.BigEndian.PutUint16(h[4:6], id)
 		binary.BigEndian.PutUint16(h[6:8], uint16(seq))
-		binary.BigEndian.PutUint16(h[2:4], onesComplementSum(h))
+		binary.BigEndian.PutUint16(h[2:4], csum.Checksum(h))
 
 	case protoUDP:
 		sp, dp := rawPorts(isClient, port, cport)
@@ -441,11 +433,7 @@ func rawFill(framing int, h []byte, hl int, src, dst net.IP, isClient bool, id, 
 		buildESP(h[:espHeaderLen], seq, spi)
 
 	case protoL2TPv3:
-		sess := spi
-		if sess == 0 {
-			sess = 1
-		}
-		binary.BigEndian.PutUint32(h[0:4], sess)
+		binary.BigEndian.PutUint32(h[0:4], spi)
 		binary.BigEndian.PutUint32(h[4:8], spi*0x9E3779B9+0x85EBCA6B)
 
 	case protoAH:
@@ -474,17 +462,21 @@ func splitmix64(x uint64) uint64 {
 	return x ^ (x >> 31)
 }
 
-func tcpOf(pkt []byte, proto int) []byte {
-	if proto != protoTCP || len(pkt) < 20 || pkt[0]>>4 != 4 {
-		return nil
+func ip4Body(pkt []byte, proto int) ([]byte, bool) {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 {
+		return nil, false
 	}
 	ihl := int(pkt[0]&0x0f) * 4
 	total := int(binary.BigEndian.Uint16(pkt[2:4]))
 	if ihl < 20 || total < ihl || total > len(pkt) || int(pkt[9]) != proto {
-		return nil
+		return nil, false
 	}
-	tcp := pkt[ihl:total]
-	if len(tcp) < 20 {
+	return pkt[ihl:total], true
+}
+
+func tcpOf(pkt []byte) []byte {
+	tcp, ok := ip4Body(pkt, protoTCP)
+	if !ok || len(tcp) < 20 {
 		return nil
 	}
 	return tcp
@@ -492,20 +484,12 @@ func tcpOf(pkt []byte, proto int) []byte {
 
 func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16, tsval uint32, ok bool) {
 	framing := rawProfiles[profile]
-	if len(pkt) >= 20 && pkt[0]>>4 == 4 {
-		ihl := int(pkt[0]&0x0f) * 4
-		total := int(binary.BigEndian.Uint16(pkt[2:4]))
-
-		if ihl >= 20 && total >= ihl && total <= len(pkt) && int(pkt[9]) == proto {
-			pkt = pkt[ihl:total]
-		}
+	if b, ok := ip4Body(pkt, proto); ok {
+		pkt = b
 	}
 	switch framing {
 	case protoBare:
 		return pkt, 0, 0, true
-	case protoIPIP:
-		b, ok := skip(pkt, rawHeaderLen(profile))
-		return b, 0, 0, ok
 	case protoTCP:
 		if len(pkt) < 20 {
 			return nil, 0, 0, false
@@ -519,7 +503,7 @@ func rawDecap(profile string, proto int, pkt []byte) (body []byte, sport uint16,
 		}
 		b, ok := skip(pkt, rawHeaderLen(profile))
 		return b, binary.BigEndian.Uint16(pkt[0:2]), 0, ok
-	case protoGRE, protoICMP, protoESP, protoAH, protoEtherIP, protoIPComp, protoL2TPv3:
+	case protoIPIP, protoGRE, protoICMP, protoESP, protoAH, protoEtherIP, protoIPComp, protoL2TPv3:
 		b, ok := skip(pkt, rawHeaderLen(profile))
 		return b, 0, 0, ok
 	}
@@ -533,19 +517,6 @@ func skip(pkt []byte, n int) ([]byte, bool) {
 	return pkt[n:], true
 }
 
-func sumBytes(b []byte) uint32 { return uint32(csum.Fold(csum.Add(b, 0))) }
-
-func foldComplement(sum uint32) uint16 {
-	for sum>>16 != 0 {
-		sum = (sum & 0xffff) + (sum >> 16)
-	}
-	return ^uint16(sum)
-}
-
-func onesComplementSum(b []byte) uint16 {
-	return foldComplement(sumBytes(b))
-}
-
 func l4Checksum(src, dst net.IP, proto int, l4 []byte) uint16 {
 	s, d := src.To4(), dst.To4()
 	var ph [12]byte
@@ -557,11 +528,11 @@ func l4Checksum(src, dst net.IP, proto int, l4 []byte) uint16 {
 	}
 	ph[9] = byte(proto)
 	binary.BigEndian.PutUint16(ph[10:12], uint16(len(l4)))
-	return foldComplement(sumBytes(ph[:]) + sumBytes(l4))
+	return ^csum.Fold(csum.Add(l4, csum.Add(ph[:], 0)))
 }
 
 func rawEffPort(profile string, port int) uint16 {
-	if port >= 1 && port <= 65535 {
+	if port != 0 {
 		return uint16(port)
 	}
 	if RawProfileHasPorts(profile) {
