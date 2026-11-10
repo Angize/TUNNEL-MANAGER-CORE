@@ -8,12 +8,9 @@ import (
 )
 
 func serverListen(addr string, tlsCfg *tls.Config) (net.Listener, error) {
-	if tlsCfg == nil {
-		return listenTCP(addr)
-	}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
+	ln, err := listenTCP(addr)
+	if err != nil || tlsCfg == nil {
+		return ln, err
 	}
 	return tls.NewListener(ln, tlsCfg), nil
 }
