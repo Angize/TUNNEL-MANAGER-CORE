@@ -813,6 +813,12 @@ func (c *Config) validate() error {
 		if c.FakeMode == "both" && c.FakeCount == 1 {
 			return errors.New("fake_mode \"both\" needs fake_count >= 2 (one decoy cannot be both a low-TTL and a bad-checksum packet)")
 		}
+		if c.Transport == "raw" && c.Role == "client" && (c.FakeMode == "badsum" || c.FakeMode == "both") &&
+			!packet.RawProfileHasSum(c.rawSendProfile()) {
+			return fmt.Errorf("fake_mode %q needs a raw profile with a transport checksum (udp, tcp, sctp, icmp): "+
+				"the %s header has none, so a bad-checksum decoy would be a valid packet that reaches the server — use fake_mode \"ttl\"",
+				c.FakeMode, c.rawSendProfile())
+		}
 	}
 	if c.Cover && c.Transport != "tcp" {
 		return errors.New("cover (TLS) requires transport \"tcp\"")
