@@ -667,17 +667,7 @@ func buildIP4Ext(src, dst net.IP, proto, ttl int, badSum bool, payload []byte) [
 }
 
 func spoilL4Sum(l4 []byte, proto int) {
-	off := -1
-	switch proto {
-	case protoICMP:
-		off = 2
-	case protoTCP:
-		off = 16
-	case protoUDP:
-		off = 6
-	case protoSCTP:
-		off = 8
-	}
+	off := l4SumOffset(proto)
 	if off < 0 || len(l4) < off+2 {
 		return
 	}

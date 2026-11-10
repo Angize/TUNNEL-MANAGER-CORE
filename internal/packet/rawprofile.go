@@ -71,6 +71,25 @@ var rawHeaderLens = map[string]int{
 
 func rawHeaderLen(profile string) int { return rawHeaderLens[profile] }
 
+func l4SumOffset(proto int) int {
+	switch proto {
+	case protoICMP:
+		return 2
+	case protoTCP:
+		return 16
+	case protoUDP:
+		return 6
+	case protoSCTP:
+		return 8
+	}
+	return -1
+}
+
+func RawProfileHasSum(profile string) bool {
+	p, ok := rawProfiles[profile]
+	return ok && l4SumOffset(p) >= 0
+}
+
 const (
 	ipFlagDF       = 1 << 14
 	ipipInnerProto = protoESP
