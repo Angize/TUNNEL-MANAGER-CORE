@@ -17,10 +17,10 @@ type rotStatus struct {
 }
 
 type pathKey struct {
-	Src   string `json:"src"`
+	Src   string `json:"-"`
 	Sport uint16 `json:"sport"`
-	Dst   string `json:"dst"`
-	Dport uint16 `json:"dport"`
+	Dst   string `json:"-"`
+	Dport uint16 `json:"-"`
 }
 
 func addrParts(a net.Addr) (host string, port uint16) {
