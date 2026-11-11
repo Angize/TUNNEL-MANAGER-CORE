@@ -752,6 +752,31 @@ func (c *Config) validate() error {
 				c.SportHi-c.SportLo+1, packet.MinSportBandSpan)
 		}
 	}
+	if c.PortTries < 0 || c.PortTries > packet.MaxPortTries {
+		return fmt.Errorf("port_tries must be between 1 and %d (0 = default): how many source ports one rung may spend",
+			packet.MaxPortTries)
+	}
+	if t := c.Tuning; t != nil {
+		for _, s := range []struct {
+			name   string
+			steps  []int64
+			lo, hi int64
+		}{
+			{"suspect_backoff", t.SuspectBackoff, packet.BackoffStepMin, packet.BackoffStepMax},
+			{"ladder_revive", t.LadderRevive, packet.ReviveStepMin, packet.ReviveStepMax},
+		} {
+			for i, v := range s.steps {
+				if v < s.lo || v > s.hi {
+					return fmt.Errorf("tuning.%s[%d] is %d; every step must be in %d..%d seconds (an empty list = default)",
+						s.name, i, v, s.lo, s.hi)
+				}
+			}
+		}
+		if t.DeadRetestSecs != 0 && (t.DeadRetestSecs < packet.DeadRetestMin || t.DeadRetestSecs > packet.DeadRetestMax) {
+			return fmt.Errorf("tuning.dead_retest_secs must be in %d..%d seconds (0 = default)",
+				packet.DeadRetestMin, packet.DeadRetestMax)
+		}
+	}
 	if c.TunAddr == "" {
 		return errors.New("tun_addr is required")
 	}

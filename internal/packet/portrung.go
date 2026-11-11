@@ -6,16 +6,12 @@ import (
 
 var portTries = 2
 
-const maxPortTries = 60
+const MaxPortTries = 60
 
 func SetPortTries(n int) {
-	if n <= 0 {
-		return
+	if n > 0 {
+		portTries = n
 	}
-	if n > maxPortTries {
-		n = maxPortTries
-	}
-	portTries = n
 }
 
 type rung struct {
