@@ -168,14 +168,6 @@ func randSID() string {
 	return hex.EncodeToString(b[:])
 }
 
-func httpcPath(p string) string {
-	p = strings.TrimSpace(p)
-	if p == "" || p[0] != '/' {
-		p = "/" + p
-	}
-	return p
-}
-
 type seqChunk struct {
 	seq  uint64
 	data []byte
@@ -484,7 +476,7 @@ func (b *TCP) dialHTTPCOnce(dialAddr, host string, ech []byte) (net.Conn, error)
 		scheme = "https"
 	}
 	sid := randSID()
-	base := scheme + "://" + host + httpcPath(b.wsPath)
+	base := scheme + "://" + host + b.wsPath
 	hc := &http.Client{Transport: rt}
 	ctx, cancel := context.WithCancel(context.Background())
 	setHdr := browserHeaders
@@ -940,7 +932,7 @@ func (b *TCP) httpcHandler(w http.ResponseWriter, r *http.Request) {
 
 func (b *TCP) runHTTPCServer() {
 	mux := http.NewServeMux()
-	mux.HandleFunc(httpcPath(b.wsPath), b.httpcHandler)
+	mux.HandleFunc(b.wsPath, b.httpcHandler)
 
 	h2s := &http2.Server{}
 	if n := wantTCPBuf(); n > 0 {
