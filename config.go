@@ -115,6 +115,8 @@ type Config struct {
 	RawGrePtype     int `json:"raw_gre_ptype"`
 	RawGrePtypeDown int `json:"raw_gre_ptype_down"`
 
+	RawFacade bool `json:"raw_facade"`
+
 	RawProto int `json:"raw_proto"`
 
 	RawPort int `json:"raw_port"`
@@ -262,6 +264,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Transport == "raw" {
 		c.RawProfile, c.RawProfileDown = c.rawPair()
+		if c.RawFacade {
+			up, down := c.rawPair()
+			if o := max(packet.FacadeOverhead(up), packet.FacadeOverhead(down)); o > 0 && c.MTU > o+576 {
+				c.MTU -= o
+			}
+		}
 	}
 	if c.Fec {
 		if c.FecData == 0 {
@@ -504,6 +512,17 @@ func (c *Config) validate() error {
 				return fmt.Errorf("raw_dports must be in 1..%d (1 = the single configured raw_port; N = that port plus N-1 more drawn from the service-port pool)", packet.MaxDports)
 			}
 		}
+		if c.RawFacade {
+			if !packet.FacadeSupported(up) || !packet.FacadeSupported(down) {
+				return errors.New("raw_facade dresses the payload as a real protocol (udp as DNS, tcp as HTTP), so raw_profile and raw_profile_down must both be \"udp\" or both \"tcp\" (raw_profile \"" + up + "\" and raw_profile_down \"" + down + "\" carry no facade)")
+			}
+			if packet.FacadePort(up) != packet.FacadePort(down) {
+				return errors.New("raw_facade uses one forged service port for both directions, so raw_profile and raw_profile_down must dress as the same protocol (raw_profile \"" + up + "\" and raw_profile_down \"" + down + "\" disagree)")
+			}
+			if c.RawDports != 0 {
+				return errors.New("raw_facade pins the forged destination port to the protocol it imitates, so it cannot combine with raw_dports, which spreads that port across a pool")
+			}
+		}
 		if !c.Crypto.Enabled {
 			return errors.New("raw transport requires crypto enabled (the AEAD both encrypts and authenticates each raw packet)")
 		}
@@ -649,6 +668,7 @@ func (c *Config) validate() error {
 		{"raw_sport_random", "raw", c.RawSportRandom},
 		{"raw_sport_rotate", "raw", c.RawSportRotate != 0},
 		{"raw_dports", "raw", c.RawDports != 0},
+		{"raw_facade", "raw", c.RawFacade},
 		{"cdn_carrier", "ws", c.CDNCarrier != ""},
 		{"http_streams", "ws", c.HTTPStreams != 0},
 		{"http_up_workers", "ws", c.HTTPUpWorkers != 0},
