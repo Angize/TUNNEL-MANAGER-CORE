@@ -2,6 +2,7 @@ package packet
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"sync/atomic"
 )
@@ -28,6 +29,13 @@ var (
 )
 
 var facadeIDCtr atomic.Uint32
+
+func init() {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		facadeIDCtr.Store(binary.BigEndian.Uint32(b[:]))
+	}
+}
 
 func facadeKindFor(profile string) int {
 	switch rawProfiles[profile] {

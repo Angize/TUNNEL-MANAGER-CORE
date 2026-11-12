@@ -69,6 +69,20 @@ func (c *Config) rawSendPtype() int {
 	return c.RawGrePtype
 }
 
+func (c *Config) rawPortWire() int {
+	if c.RawFacade {
+		return packet.FacadePort(c.RawProfile)
+	}
+	return c.RawPort
+}
+
+func (c *Config) tunMTU() int {
+	if !c.RawFacade {
+		return c.MTU
+	}
+	return max(c.MTU-packet.FacadeOverhead(c.RawProfile), 576)
+}
+
 func (c *Config) laneCarrier() bool {
 	return c.Transport == "tcp" || c.Transport == "ws"
 }
@@ -264,12 +278,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Transport == "raw" {
 		c.RawProfile, c.RawProfileDown = c.rawPair()
-		if c.RawFacade {
-			up, down := c.rawPair()
-			if o := max(packet.FacadeOverhead(up), packet.FacadeOverhead(down)); o > 0 && c.MTU > o+576 {
-				c.MTU -= o
-			}
-		}
 	}
 	if c.Fec {
 		if c.FecData == 0 {
@@ -513,14 +521,11 @@ func (c *Config) validate() error {
 			}
 		}
 		if c.RawFacade {
-			if !packet.FacadeSupported(up) || !packet.FacadeSupported(down) {
-				return errors.New("raw_facade dresses the payload as a real protocol (udp as DNS, tcp as HTTP), so raw_profile and raw_profile_down must both be \"udp\" or both \"tcp\" (raw_profile \"" + up + "\" and raw_profile_down \"" + down + "\" carry no facade)")
+			if up != down || !packet.FacadeSupported(up) {
+				return errors.New("raw_facade dresses udp as DNS and tcp as HTTP in both directions, so raw_profile and raw_profile_down must both be \"udp\" or both \"tcp\" (raw_profile \"" + up + "\", raw_profile_down \"" + down + "\")")
 			}
-			if packet.FacadePort(up) != packet.FacadePort(down) {
-				return errors.New("raw_facade uses one forged service port for both directions, so raw_profile and raw_profile_down must dress as the same protocol (raw_profile \"" + up + "\" and raw_profile_down \"" + down + "\" disagree)")
-			}
-			if c.RawDports != 0 {
-				return errors.New("raw_facade pins the forged destination port to the protocol it imitates, so it cannot combine with raw_dports, which spreads that port across a pool")
+			if c.RawPort != 0 || c.RawDports != 0 {
+				return errors.New("raw_facade sets the forged service port itself (53 for DNS, 80 for HTTP), so it cannot combine with raw_port or raw_dports")
 			}
 		}
 		if !c.Crypto.Enabled {

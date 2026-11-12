@@ -47,10 +47,11 @@ type Raw struct {
 	hdr      int
 	grePtype uint16
 	txFacade int
+	txShell  int
 
 	rxProfile string
 	rxProto   int
-	rxFacade  int
+	rxShell   int
 	rxMove    bool
 
 	localIP      atomic.Pointer[net.IPAddr]
@@ -210,8 +211,8 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 			dack = r.tcpAck.Load()
 		}
 		fsrv, fcli := r.wirePorts(r.cport())
-		body := rawEncap(r.profile, r.facadeTx(fakePayload()), src, dst, r.isClient, r.icmpID, fsrv, fcli,
-			dseq, dack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck, r.grePtype)
+		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, fsrv, fcli,
+			dseq, dack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck, r.grePtype, r.txFacade)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
 		if sp.badSum {
 			if r.inj != nil {
@@ -251,7 +252,8 @@ func newRaw(conn *net.IPConn, dev *tun.Device, obfs bool, psk, cipher, profile, 
 	}
 	if facade {
 		r.txFacade = facadeKindFor(profile)
-		r.rxFacade = facadeKindFor(rxProfile)
+		r.txShell = facadePrefixLen(r.txFacade, isClient)
+		r.rxShell = facadePrefixLen(facadeKindFor(rxProfile), !isClient)
 	}
 	r.out, r.outBatch = conn, r.batch
 
@@ -289,15 +291,6 @@ func rawPortFor(profile, rxProfile string, rawPort int) uint16 {
 		return p
 	}
 	return rawEffPort(rxProfile, rawPort)
-}
-
-func rawFacadePort(profile, rxProfile string, rawPort int, facade bool) uint16 {
-	if facade && rawPort == 0 {
-		if p := FacadePort(profile); p != 0 {
-			return uint16(p)
-		}
-	}
-	return rawPortFor(profile, rxProfile, rawPort)
 }
 
 func (r *Raw) newTCPFlow() {
@@ -340,7 +333,7 @@ func (r *Raw) sendTCPFlags(flags byte, to *net.IPAddr, cport uint16) {
 	}
 	srv, cli := r.wirePorts(cport)
 	seg := rawEncap(r.profile, nil, r.srcIP(), to.IP, r.isClient, r.icmpID, srv, cli,
-		seq, r.tcpAck.Load(), r.spi, r.tsNow(), r.echoTS(), flags, r.grePtype)
+		seq, r.tcpAck.Load(), r.spi, r.tsNow(), r.echoTS(), flags, r.grePtype, facadeNone)
 	r.writeOut(seg, to)
 }
 
@@ -421,7 +414,7 @@ func dialRawBase(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 	}
 	applyConnSockBuf(conn)
 	r := newRaw(conn, dev, obfs, psk, cipher, profile, rxProfile, true, facade)
-	r.proto, r.rxProto, r.port = proto, rxProto, rawFacadePort(profile, rxProfile, rawPort, facade)
+	r.proto, r.rxProto, r.port = proto, rxProto, rawPortFor(profile, rxProfile, rawPort)
 	if err := r.openSendSocket(); err != nil {
 		conn.Close()
 		return nil, err
@@ -453,7 +446,7 @@ func listenRawBase(listenIP string, dev *tun.Device, obfs bool, psk, cipher, pro
 		log.Printf("raw: WARNING IP_PKTINFO could not be enabled (%v) — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one", err)
 	}
 	r := newRaw(conn, dev, obfs, psk, cipher, profile, rxProfile, false, facade)
-	r.proto, r.rxProto, r.port = proto, rxProto, rawFacadePort(profile, rxProfile, rawPort, facade)
+	r.proto, r.rxProto, r.port = proto, rxProto, rawPortFor(profile, rxProfile, rawPort)
 	if err := r.openSendSocket(); err != nil {
 		conn.Close()
 		return nil, err
@@ -595,17 +588,11 @@ func (r *Raw) body(typ byte, payload []byte) ([]byte, error) {
 }
 
 func (r *Raw) dataOut(dst, payload []byte, to net.IP) ([]byte, error) {
-	f := 0
-	if r.txFacade != 0 {
-		f = facadePrefixLen(r.txFacade, r.isClient)
-	}
-	pkt, err := sealBody(dst, r.sealer(), r.obfs, r.hdr+f, typeData, payload)
+	pkt, err := sealBody(dst, r.sealer(), r.obfs, r.hdr+r.txShell, typeData, payload)
 	if err != nil {
 		return nil, err
 	}
-	if f != 0 {
-		writeFacade(pkt[r.hdr:r.hdr+f], r.txFacade, r.isClient, len(pkt)-r.hdr-f)
-	}
+	writeFacade(pkt[r.hdr:r.hdr+r.txShell], r.txFacade, r.isClient, len(pkt)-r.hdr-r.txShell)
 	seq, ack := r.nextSeq(len(pkt) - r.hdr)
 	srv, cli := r.wirePorts(r.cport())
 	rawFill(r.framing, pkt, r.hdr, r.srcIP(), to, r.isClient, r.icmpID, srv, cli,
@@ -623,23 +610,11 @@ func (r *Raw) nextSeq(n int) (seq, ack uint32) {
 	return r.seq.Add(1), 0
 }
 
-func (r *Raw) facadeTx(body []byte) []byte {
-	if r.txFacade == 0 || len(body) == 0 {
-		return body
-	}
-	f := facadePrefixLen(r.txFacade, r.isClient)
-	out := make([]byte, f+len(body))
-	writeFacade(out[:f], r.txFacade, r.isClient, len(body))
-	copy(out[f:], body)
-	return out
-}
-
 func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
-	body = r.facadeTx(body)
-	seq, ack := r.nextSeq(len(body))
+	seq, ack := r.nextSeq(r.txShell + len(body))
 	srv, cli := r.wirePorts(cport)
 	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, srv, cli,
-		seq, ack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck, r.grePtype)
+		seq, ack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck, r.grePtype, r.txFacade)
 }
 
 func (r *Raw) writeOut(pkt []byte, to *net.IPAddr) {
@@ -1156,13 +1131,10 @@ func (r *Raw) handleRaw(raw []byte, addr *net.IPAddr) {
 	if !ok {
 		return
 	}
-	if r.rxFacade != 0 {
-		strip := facadePrefixLen(r.rxFacade, !r.isClient)
-		if len(body) < strip {
-			return
-		}
-		body = body[strip:]
+	if len(body) < r.rxShell {
+		return
 	}
+	body = body[r.rxShell:]
 	if pts != 0 {
 		r.tsEcr.Store(pts)
 	}

@@ -388,7 +388,7 @@ func greWirePtype(ptype int) uint16 {
 	return uint16(ptype)
 }
 
-func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte, grePtype uint16) []byte {
+func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id, port, cport uint16, seq, ack, spi, tsval, tsecr uint32, flags byte, grePtype uint16, shell int) []byte {
 	framing := rawProfiles[profile]
 	if framing == protoBare {
 		return payload
@@ -397,8 +397,10 @@ func rawEncap(profile string, payload []byte, src, dst net.IP, isClient bool, id
 	if framing == protoTCP && flags&tcpSyn != 0 {
 		hl = 20 + len(tcpSynOptions(tsval, tsecr))
 	}
-	h := make([]byte, hl+len(payload))
-	copy(h[hl:], payload)
+	f := facadePrefixLen(shell, isClient)
+	h := make([]byte, hl+f+len(payload))
+	copy(h[hl+f:], payload)
+	writeFacade(h[hl:hl+f], shell, isClient, len(payload))
 	rawFill(framing, h, hl, src, dst, isClient, id, port, cport, seq, ack, spi, tsval, tsecr, flags, grePtype)
 	return h
 }
