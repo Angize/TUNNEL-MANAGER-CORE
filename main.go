@@ -81,7 +81,7 @@ func main() {
 		log.Print(note)
 	}
 
-	devs, gsoOn, err := openTUN(cfg.TunName, cfg.MTU, cfg.TunAddr, cfg.GSO, cfg.tunQueues())
+	devs, gsoOn, err := openTUN(cfg.TunName, cfg.tunMTU(), cfg.TunAddr, cfg.GSO, cfg.tunQueues())
 	if err != nil {
 		log.Fatalf("tnl-core: fatal: tun: %v", err)
 	}
@@ -109,7 +109,7 @@ func main() {
 		gsoTag = " gso"
 	}
 	log.Printf("tnl-core %s: tun=%s addr=%s mtu=%d cipher=%s role=%s%s",
-		version, dev.Name, cfg.TunAddr, cfg.MTU, cipherName, cfg.Role, gsoTag)
+		version, dev.Name, cfg.TunAddr, cfg.tunMTU(), cipherName, cfg.Role, gsoTag)
 
 	type carrier interface {
 		Run() error
@@ -141,12 +141,12 @@ func main() {
 	case "raw":
 		switch cfg.Role {
 		case "server":
-			b, err = packet.ListenRaw(cfg.Listen, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.RawProfileDown, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports}, cfg.rawSendPtype(), devs[1:]...)
+			b, err = packet.ListenRaw(cfg.Listen, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.RawProfileDown, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.rawPortWire(), cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports}, cfg.rawSendPtype(), cfg.RawFacade, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: listening (core/raw:%s%s%s) on %s", cfg.rawLabel(), obfsTag, fecTag, cfg.Listen)
 			}
 		case "client":
-			b, err = packet.DialRaw(cfg.Peer, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.RawProfileDown, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.RawPort, cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports}, cfg.rawSendPtype(), devs[1:]...)
+			b, err = packet.DialRaw(cfg.Peer, dev, cfg.Obfs, cfg.Crypto.PSK, cfg.Crypto.Cipher, cfg.RawProfile, cfg.RawProfileDown, cfg.Fec, cfg.FecData, cfg.FecParity, cfg.RawProto, cfg.rawPortWire(), cfg.RawSport, cfg.RawSportRandom, packet.SportRotation{Every: cfg.RawSportRotate, Dports: cfg.RawDports}, cfg.rawSendPtype(), cfg.RawFacade, devs[1:]...)
 			if err == nil {
 				log.Printf("tnl-core: dialing (core/raw:%s%s%s) %s", cfg.rawLabel(), obfsTag, fecTag, cfg.Peer)
 			}

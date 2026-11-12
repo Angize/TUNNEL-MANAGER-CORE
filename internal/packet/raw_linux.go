@@ -46,9 +46,12 @@ type Raw struct {
 	framing  int
 	hdr      int
 	grePtype uint16
+	txFacade int
+	txShell  int
 
 	rxProfile string
 	rxProto   int
+	rxShell   int
 	rxMove    bool
 
 	localIP      atomic.Pointer[net.IPAddr]
@@ -209,7 +212,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 		}
 		fsrv, fcli := r.wirePorts(r.cport())
 		body := rawEncap(r.profile, fakePayload(), src, dst, r.isClient, r.icmpID, fsrv, fcli,
-			dseq, dack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck, r.grePtype)
+			dseq, dack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck, r.grePtype, r.txFacade)
 		out := buildIP4Ext(src, dst, r.proto, sp.ttl, sp.badSum, body)
 		if sp.badSum {
 			if r.inj != nil {
@@ -228,7 +231,7 @@ func (r *Raw) sendFakes(to *net.IPAddr) {
 	}
 }
 
-func newRaw(conn *net.IPConn, dev *tun.Device, obfs bool, psk, cipher, profile, rxProfile string, isClient bool) *Raw {
+func newRaw(conn *net.IPConn, dev *tun.Device, obfs bool, psk, cipher, profile, rxProfile string, isClient, facade bool) *Raw {
 	var idb [18]byte
 	_, _ = rand.Read(idb[:])
 	spi := binary.BigEndian.Uint32(idb[10:14])
@@ -246,6 +249,11 @@ func newRaw(conn *net.IPConn, dev *tun.Device, obfs bool, psk, cipher, profile, 
 		psk: psk, cipher: cipher, profile: profile, rxProfile: rxProfile, isClient: isClient, fakeFd: -1,
 		framing: rawProfiles[profile], hdr: rawHeaderLen(profile),
 		icmpID: icmpID, closeCh: make(chan struct{}), wake: make(chan struct{}, 1), spi: spi,
+	}
+	if facade {
+		r.txFacade = facadeKindFor(profile)
+		r.txShell = facadePrefixLen(r.txFacade, isClient)
+		r.rxShell = facadePrefixLen(facadeKindFor(rxProfile), !isClient)
 	}
 	r.out, r.outBatch = conn, r.batch
 
@@ -325,7 +333,7 @@ func (r *Raw) sendTCPFlags(flags byte, to *net.IPAddr, cport uint16) {
 	}
 	srv, cli := r.wirePorts(cport)
 	seg := rawEncap(r.profile, nil, r.srcIP(), to.IP, r.isClient, r.icmpID, srv, cli,
-		seq, r.tcpAck.Load(), r.spi, r.tsNow(), r.echoTS(), flags, r.grePtype)
+		seq, r.tcpAck.Load(), r.spi, r.tsNow(), r.echoTS(), flags, r.grePtype, facadeNone)
 	r.writeOut(seg, to)
 }
 
@@ -391,7 +399,7 @@ func (r *Raw) echoTS() uint32 {
 	return r.tsPeer.Load() + uint32(time.Since(time.Unix(0, r.tsStart.Load()))/time.Millisecond)
 }
 
-func dialRawBase(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile, rxProfile string, rawProto, rawPort int) (*Raw, error) {
+func dialRawBase(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile, rxProfile string, rawProto, rawPort int, facade bool) (*Raw, error) {
 	proto, rxProto, err := rawProtos(profile, rxProfile, rawProto)
 	if err != nil {
 		return nil, err
@@ -405,7 +413,7 @@ func dialRawBase(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 		return nil, err
 	}
 	applyConnSockBuf(conn)
-	r := newRaw(conn, dev, obfs, psk, cipher, profile, rxProfile, true)
+	r := newRaw(conn, dev, obfs, psk, cipher, profile, rxProfile, true, facade)
 	r.proto, r.rxProto, r.port = proto, rxProto, rawPortFor(profile, rxProfile, rawPort)
 	if err := r.openSendSocket(); err != nil {
 		conn.Close()
@@ -418,7 +426,7 @@ func dialRawBase(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile
 	return r, nil
 }
 
-func listenRawBase(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile, rxProfile string, rawProto, rawPort int) (*Raw, error) {
+func listenRawBase(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile, rxProfile string, rawProto, rawPort int, facade bool) (*Raw, error) {
 	proto, rxProto, err := rawProtos(profile, rxProfile, rawProto)
 	if err != nil {
 		return nil, err
@@ -437,7 +445,7 @@ func listenRawBase(listenIP string, dev *tun.Device, obfs bool, psk, cipher, pro
 	if err := enablePktinfoDst(conn); err != nil {
 		log.Printf("raw: WARNING IP_PKTINFO could not be enabled (%v) — replies will leave from the kernel-default source; a destination-rotation pool will burn every IP except that one", err)
 	}
-	r := newRaw(conn, dev, obfs, psk, cipher, profile, rxProfile, false)
+	r := newRaw(conn, dev, obfs, psk, cipher, profile, rxProfile, false, facade)
 	r.proto, r.rxProto, r.port = proto, rxProto, rawPortFor(profile, rxProfile, rawPort)
 	if err := r.openSendSocket(); err != nil {
 		conn.Close()
@@ -446,8 +454,8 @@ func listenRawBase(listenIP string, dev *tun.Device, obfs bool, psk, cipher, pro
 	return r, nil
 }
 
-func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile, downProfile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, rot SportRotation, grePtype int, extraQ ...*tun.Device) (*Raw, error) {
-	r, err := dialRawBase(peerIP, dev, obfs, psk, cipher, profile, downProfile, rawProto, rawPort)
+func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile, downProfile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, rot SportRotation, grePtype int, facade bool, extraQ ...*tun.Device) (*Raw, error) {
+	r, err := dialRawBase(peerIP, dev, obfs, psk, cipher, profile, downProfile, rawProto, rawPort, facade)
 	if err != nil {
 		return nil, err
 	}
@@ -467,8 +475,8 @@ func DialRaw(peerIP string, dev *tun.Device, obfs bool, psk, cipher, profile, do
 	return r, nil
 }
 
-func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile, downProfile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, rot SportRotation, grePtype int, extraQ ...*tun.Device) (*Raw, error) {
-	r, err := listenRawBase(listenIP, dev, obfs, psk, cipher, downProfile, profile, rawProto, rawPort)
+func ListenRaw(listenIP string, dev *tun.Device, obfs bool, psk, cipher, profile, downProfile string, fec bool, fecData, fecParity, rawProto, rawPort, rawSport int, sportRandom bool, rot SportRotation, grePtype int, facade bool, extraQ ...*tun.Device) (*Raw, error) {
+	r, err := listenRawBase(listenIP, dev, obfs, psk, cipher, downProfile, profile, rawProto, rawPort, facade)
 	if err != nil {
 		return nil, err
 	}
@@ -580,10 +588,11 @@ func (r *Raw) body(typ byte, payload []byte) ([]byte, error) {
 }
 
 func (r *Raw) dataOut(dst, payload []byte, to net.IP) ([]byte, error) {
-	pkt, err := sealBody(dst, r.sealer(), r.obfs, r.hdr, typeData, payload)
+	pkt, err := sealBody(dst, r.sealer(), r.obfs, r.hdr+r.txShell, typeData, payload)
 	if err != nil {
 		return nil, err
 	}
+	writeFacade(pkt[r.hdr:r.hdr+r.txShell], r.txFacade, r.isClient, len(pkt)-r.hdr-r.txShell)
 	seq, ack := r.nextSeq(len(pkt) - r.hdr)
 	srv, cli := r.wirePorts(r.cport())
 	rawFill(r.framing, pkt, r.hdr, r.srcIP(), to, r.isClient, r.icmpID, srv, cli,
@@ -602,10 +611,10 @@ func (r *Raw) nextSeq(n int) (seq, ack uint32) {
 }
 
 func (r *Raw) wireTo(body []byte, dst net.IP, cport uint16) []byte {
-	seq, ack := r.nextSeq(len(body))
+	seq, ack := r.nextSeq(r.txShell + len(body))
 	srv, cli := r.wirePorts(cport)
 	return rawEncap(r.profile, body, r.srcIP(), dst, r.isClient, r.icmpID, srv, cli,
-		seq, ack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck, r.grePtype)
+		seq, ack, r.spi, r.tsNow(), r.echoTS(), tcpPshAck, r.grePtype, r.txFacade)
 }
 
 func (r *Raw) writeOut(pkt []byte, to *net.IPAddr) {
@@ -1122,6 +1131,10 @@ func (r *Raw) handleRaw(raw []byte, addr *net.IPAddr) {
 	if !ok {
 		return
 	}
+	if len(body) < r.rxShell {
+		return
+	}
+	body = body[r.rxShell:]
 	if pts != 0 {
 		r.tsEcr.Store(pts)
 	}
